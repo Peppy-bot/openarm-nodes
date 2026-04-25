@@ -38,12 +38,6 @@
       },
     ]
   },
-  execution: {
-    language: "rust",
-    container: {
-      def_file: "apptainer.def"
-    }
-  },
   // Non exhaustive list of interfaces
   interfaces: {
     topics: {
@@ -54,10 +48,7 @@
     },
     actions: {
       consumes: [
-        {
-          local_node_id: "openarm01_backbone",
-          name: "move_arm"
-        }
+        { local_node_id: "openarm01_backbone", name: "move_arm" }
       ]
     },
   }
