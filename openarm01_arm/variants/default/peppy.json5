@@ -1,15 +1,41 @@
 {
+  peppy_schema: "node_v1",
   execution: {
     language: "rust",
     container: {
       def_file: "apptainer.def"
     },
     parameters: {
-      // The arm_id at runtime
-      // Depending on the ID, either 0 (left) or 1 (right), the instance sends commands to the joints on either the right or left arm
-      // If more than one instance with the same arm_id is detected at runtime, the new instance with the taken ID must crash. There should not be more than a single instance with the same ID running.
-      // For the locking mechanism we could use https://app.plane.so/peppy/browse/PEPPYOS-75/, if it's not yet implemented simply use a temporary named file (it's hacky tho as it assumes all the nodes run on the same filesystem).
-      arm_id: "u8"
+      arm_id: "u8",
+      can_interface: "string",
+      // Hardware-loop rate (Hz).
+      control_rate_hz: { $type: "u32", $default: 100 },
+      // Per-cycle CAN read deadline (μs).
+      recv_timeout_us: { $type: "u32", $default: 1000 },
+      motion_timeout_s: { $type: "f64", $default: 30.0 },
+      // Per-joint peak velocity (rad/s) used to size the quintic trajectory duration.
+      max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.8 },
+      max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.8 },
+      max_joint_velocity_rad_s_3: { $type: "f64", $default: 5.4 },
+      max_joint_velocity_rad_s_4: { $type: "f64", $default: 5.4 },
+      max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.9 },
+      max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.9 },
+      max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.9 },
+      // MIT-control gains, one per joint (1-indexed).
+      kp1: { $type: "f64", $default: 70.0 },
+      kp2: { $type: "f64", $default: 70.0 },
+      kp3: { $type: "f64", $default: 70.0 },
+      kp4: { $type: "f64", $default: 60.0 },
+      kp5: { $type: "f64", $default: 10.0 },
+      kp6: { $type: "f64", $default: 10.0 },
+      kp7: { $type: "f64", $default: 10.0 },
+      kd1: { $type: "f64", $default: 2.75 },
+      kd2: { $type: "f64", $default: 2.5 },
+      kd3: { $type: "f64", $default: 2.0 },
+      kd4: { $type: "f64", $default: 2.0 },
+      kd5: { $type: "f64", $default: 0.7 },
+      kd6: { $type: "f64", $default: 0.6 },
+      kd7: { $type: "f64", $default: 0.5 }
     }
   }
 }
