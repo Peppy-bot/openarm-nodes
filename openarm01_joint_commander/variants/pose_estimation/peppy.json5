@@ -1,0 +1,10 @@
+{
+  // stub — to be implemented during pose estimation milestone
+  schema_version: 1,
+  execution: {
+    language: "python",
+    container: {
+      def_file: "apptainer.def"
+    }
+  }
+}

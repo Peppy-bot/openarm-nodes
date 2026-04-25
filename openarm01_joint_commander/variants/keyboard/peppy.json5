@@ -1,0 +1,14 @@
+{
+  schema_version: 1,
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    },
+    parameters: {
+      // Which arm this instance controls. 0 = right, 1 = left.
+      // Set at deploy time: peppy node start arm_id=0
+      arm_id: "u8"
+    }
+  }
+}
