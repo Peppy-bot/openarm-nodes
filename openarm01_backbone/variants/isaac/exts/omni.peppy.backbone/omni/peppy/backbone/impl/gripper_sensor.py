@@ -77,13 +77,10 @@ class IsaacGripperSensor:
             positions = [float(all_positions[i]) for i in self._finger_indices]
 
             try:
-                # Shape: (1, num_dof, 6) — [fx, fy, fz, tx, ty, tz]
-                all_forces = self._articulation.get_measured_joint_forces()[0]
-                import numpy as np  # pylint: disable=E0401
-
+                # Shape: (1, num_dof) — signed per-joint effort, matches MuJoCo actuator_force
+                all_efforts = self._articulation.get_measured_joint_efforts()[0]
                 applied_forces = [
-                    float(np.linalg.norm(all_forces[i][:3]))
-                    for i in self._finger_indices
+                    float(all_efforts[i]) for i in self._finger_indices
                 ]
             except Exception:
                 applied_forces = [0.0] * len(self._finger_indices)
