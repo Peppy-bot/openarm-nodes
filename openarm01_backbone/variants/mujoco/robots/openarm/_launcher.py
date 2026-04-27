@@ -11,8 +11,15 @@ logger = logging.getLogger(__name__)
 
 _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
 _EXT_ROOT_ENV = "PEPPY_MUJOCO_EXT_ROOT"
+_UVC_EXT_ROOT_ENV = "PEPPY_UVC_CAMERA_EXT_ROOT"
+
+_NODES_ROOT = Path(__file__).resolve().parents[5]
+
 _DEFAULT_EXT_ROOT = (
     Path(__file__).resolve().parents[3] / "exts" / "mujoco.peppy.backbone"
+)
+_DEFAULT_UVC_EXT_ROOT = (
+    _NODES_ROOT / "uvc_camera" / "variants" / "mujoco" / "exts" / "mujoco.peppy.uvc_camera"
 )
 
 
@@ -24,7 +31,7 @@ class SimLauncher:
         self._headless = os.environ.get(_HEADLESS_ENV, "0").strip() == "1"
 
     def run(self) -> None:
-        """Load model, init bridge, and drive the simulation loop."""
+        """Load model, init all extensions, and drive the simulation loop."""
         import mujoco  # pylint: disable=E0401
 
         if not self._xml_path.exists():
@@ -38,40 +45,47 @@ class SimLauncher:
         model = mujoco.MjModel.from_xml_path(str(self._xml_path))
         data = mujoco.MjData(model)
 
-        ext_root = Path(os.environ.get(_EXT_ROOT_ENV, str(_DEFAULT_EXT_ROOT)))
-        sys.path.insert(0, str(ext_root))
+        backbone_ext_root = Path(os.environ.get(_EXT_ROOT_ENV, str(_DEFAULT_EXT_ROOT)))
+        uvc_ext_root = Path(os.environ.get(_UVC_EXT_ROOT_ENV, str(_DEFAULT_UVC_EXT_ROOT)))
 
-        from peppy_mujoco.backbone.extension import (
-            MujocoBackboneExtension,
-        )  # pylint: disable=E0401
+        sys.path.insert(0, str(backbone_ext_root))
+        sys.path.insert(0, str(uvc_ext_root))
 
-        extension = MujocoBackboneExtension(model, data)
-        extension.startup()
+        from peppy_mujoco.backbone.extension import MujocoBackboneExtension  # pylint: disable=E0401
+        from peppy_mujoco.uvc_camera.extension import MujocoUvcCameraExtension  # pylint: disable=E0401
+
+        backbone = MujocoBackboneExtension(model, data)
+        uvc = MujocoUvcCameraExtension(model, data)
+
+        backbone.startup()
+        uvc.startup()
 
         logger.info("Simulation running — Press Ctrl-C to stop.")
-        logger.info("Publishing sensor topics: MuJoCo → openarm01_backbone")
+
+        extensions = [backbone, uvc]
 
         if self._headless:
-            self._run_headless(model, extension)
+            self._run_headless(model, backbone, extensions)
         else:
-            self._run_windowed(model, data, extension)
+            self._run_windowed(model, data, backbone, extensions)
 
-    def _run_headless(self, model, extension) -> None:
+    def _run_headless(self, model, backbone, extensions) -> None:
         """Drive simulation loop at fixed timestep without a viewer."""
         dt = model.opt.timestep
         try:
             while True:
                 t0 = time.perf_counter()
-                extension.step()
+                self._step(backbone, extensions)
                 remaining = dt - (time.perf_counter() - t0)
                 if remaining > 0:
                     time.sleep(remaining)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
-            extension.shutdown()
+            for ext in extensions:
+                ext.shutdown()
 
-    def _run_windowed(self, model, data, extension) -> None:
+    def _run_windowed(self, model, data, backbone, extensions) -> None:
         """Drive simulation loop at fixed timestep with the passive MuJoCo viewer."""
         import mujoco.viewer  # pylint: disable=E0401
 
@@ -80,7 +94,7 @@ class SimLauncher:
             with mujoco.viewer.launch_passive(model, data) as viewer:
                 while viewer.is_running():
                     t0 = time.perf_counter()
-                    extension.step()
+                    self._step(backbone, extensions)
                     viewer.sync()
                     remaining = dt - (time.perf_counter() - t0)
                     if remaining > 0:
@@ -88,4 +102,13 @@ class SimLauncher:
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
-            extension.shutdown()
+            for ext in extensions:
+                ext.shutdown()
+
+    @staticmethod
+    def _step(backbone, extensions) -> None:
+        """Advance physics via backbone, then drive all other extensions."""
+        backbone.step()
+        if not backbone.is_paused:
+            for ext in extensions[1:]:
+                ext.step()

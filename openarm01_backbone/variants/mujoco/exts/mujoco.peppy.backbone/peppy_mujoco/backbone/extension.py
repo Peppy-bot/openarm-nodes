@@ -103,6 +103,10 @@ class MujocoBackboneExtension:
                 continue
             plugin.on_step(self._step, self._io)
 
+    @property
+    def is_paused(self) -> bool:
+        return bool(self._sim_control and self._sim_control.is_paused)
+
     def shutdown(self) -> None:
         """Tear down plugins and stop I/O."""
         logger.info("mujoco.peppy.backbone shutting down.")
