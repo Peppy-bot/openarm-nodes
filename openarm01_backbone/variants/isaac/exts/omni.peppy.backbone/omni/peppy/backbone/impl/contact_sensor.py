@@ -74,7 +74,7 @@ class IsaacContactSensor:
         self._ready = False
 
     def get_contact_data(self) -> Optional[list[dict]]:
-        """Return list of active contacts, each with body1, body2, position, force."""
+        """Return list of active contacts, each with body1, body2, position, impulse."""
         if not self._ready or self._sensor is None:
             return None
 
@@ -92,10 +92,8 @@ class IsaacContactSensor:
                         "position": [
                             float(v) for v in entry.get("position", [0.0, 0.0, 0.0])
                         ],
-                        "force": [
-                            float(v) for v in entry.get(
-                                "force", entry.get("impulse", [0.0, 0.0, 0.0])
-                            )
+                        "impulse": [
+                            float(v) for v in entry.get("impulse", [0.0, 0.0, 0.0])
                         ],
                     }
                 )
