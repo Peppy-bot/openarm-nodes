@@ -41,25 +41,37 @@ pub async fn run_command_loop(
 }
 
 async fn send_move_arm(
-    _runner: &Arc<NodeRunner>,
+    runner: &Arc<NodeRunner>,
     config: &ArmConfig,
     target: CartesianTarget,
 ) {
+    use peppygen::consumed_actions::move_arm;
+
     let arm_id = config.arm.map(|a| a.id()).unwrap_or(0);
     let pos = target.as_array();
 
-    // TODO: replace with real peppygen action call once backbone variant is ready:
-    //
-    //   peppygen::consumed_actions::move_arm::send_goal(
-    //       _runner,
-    //       FEEDBACK_FREQUENCY,
-    //       pos,
-    //       FIXED_ORIENTATION,
-    //   ).await
-    //
-    // arm_id is resolved at startup via ArmConfig, not sent per-request.
-    // FEEDBACK_FREQUENCY controls how often backbone sends back EE position updates.
+    info!(arm_id, x = pos[0], y = pos[1], z = pos[2], "move_arm: sending goal");
 
-    info!(arm_id, x = pos[0], y = pos[1], z = pos[2], "stub: move_arm goal");
-    let _ = (FIXED_ORIENTATION, FEEDBACK_FREQUENCY);
+    let result = move_arm::send_goal(
+        runner,
+        move_arm::Goal {
+            feedback_frequency: FEEDBACK_FREQUENCY,
+            desired_position: pos,
+            desired_orientation: FIXED_ORIENTATION,
+        },
+        |fb: move_arm::Feedback| {
+            let ee = fb.data.current_ee_position;
+            info!(x = ee[0], y = ee[1], z = ee[2], t = fb.data.action_time, "move_arm: feedback");
+        },
+    )
+    .await;
+
+    match result {
+        Ok(r) => info!(
+            success = r.data.success,
+            action_time = r.data.action_time,
+            "move_arm: done"
+        ),
+        Err(e) => tracing::warn!("move_arm: failed — {e}"),
+    }
 }
