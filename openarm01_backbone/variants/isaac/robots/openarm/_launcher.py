@@ -54,7 +54,7 @@ class SimLauncher:
         omni.usd.get_context().open_stage(str(self._usd_path))
 
     def _warmup(self) -> None:
-        from omni.isaac.core import World  # pylint: disable=E0401
+        from isaacsim.core.api import World  # pylint: disable=E0401
 
         self._world = World()
         for _ in range(_WARMUP_STEPS):
