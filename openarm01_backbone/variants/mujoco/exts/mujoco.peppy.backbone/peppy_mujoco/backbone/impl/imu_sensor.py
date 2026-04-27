@@ -49,14 +49,23 @@ class MujocoImuSensor:
             return None
 
         try:
+            import numpy as np  # pylint: disable=E0401
+
             xquat = self._data.xquat[self._body_id]
+            # xmat is row-major 3x3 rotation matrix (world←body); transpose gives body←world
+            xmat = self._data.xmat[self._body_id].reshape(3, 3)
             cvel = self._data.cvel[self._body_id]
+            # cacc requires mj_rnePostConstraint to be populated — backbone must call it
+            # after mj_step if accurate linear acceleration is needed.
             cacc = self._data.cacc[self._body_id]
+
+            angular_velocity_body = xmat.T @ cvel[:3]
+            linear_acceleration_body = xmat.T @ cacc[3:]
 
             return {
                 "orientation": [float(xquat[i]) for i in range(4)],
-                "angular_velocity": [float(cvel[i]) for i in range(3)],
-                "linear_acceleration": [float(cacc[i + 3]) for i in range(3)],
+                "angular_velocity": [float(v) for v in angular_velocity_body],
+                "linear_acceleration": [float(v) for v in linear_acceleration_body],
             }
         except Exception as exc:
             logger.warning(f"Could not read IMU data: {exc}")

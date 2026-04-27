@@ -25,9 +25,4 @@ From: nvcr.io/nvidia/isaac-sim:5.1.0
         exit 1
     fi
     export PEPPY_BRIDGE_CONFIG_PATH="${_CONFIG}"
-    _ROBOT=$(./python.sh -c "
-import json, re, sys
-cfg = json.loads(re.sub(r'//[^\n]*', '', open(sys.argv[1]).read()))
-print(cfg['robot']['launch'].split('/')[-2])
-" "${_CONFIG}" 2>/dev/null) || _ROBOT=openarm
-    exec ./python.sh /opt/isaac_backbone/robots/openarm/${_ROBOT}/launch.py "$@"
+    exec ./python.sh /opt/isaac_backbone/robots/openarm/openarm/launch.py "$@"

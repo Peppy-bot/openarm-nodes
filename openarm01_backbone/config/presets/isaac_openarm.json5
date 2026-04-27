@@ -25,7 +25,8 @@
   "publishers": [
     { "type": "joint_states",    "topic": "joint_states",    "prim": "/openarm", "robot_name": "openarm" },
     { "type": "imu",             "topic": "imu",             "prim": "/openarm/base_link/imu_sensor", "robot_name": "openarm" },
-    { "type": "ee_pose",         "topic": "ee_pose",         "prim": "/openarm/openarm_right_link7", "robot_name": "openarm" },
+    { "type": "ee_pose",         "topic": "ee_pose_right",    "prim": "/openarm/openarm_right_link7", "robot_name": "openarm" },
+    { "type": "ee_pose",         "topic": "ee_pose_left",     "prim": "/openarm/openarm_left_link7",  "robot_name": "openarm" },
     { "type": "tf_tree",         "topic": "tf_tree",         "prim": "/openarm", "robot_name": "openarm" },
     { "type": "clock",           "topic": "clock",           "prim": "" },
     { "type": "odometry",        "topic": "odometry",        "prim": "/openarm/base_link", "robot_name": "openarm" },
