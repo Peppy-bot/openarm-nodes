@@ -71,11 +71,11 @@ class IsaacRgbCameraSensor:
         h_aperture_mm = self._pixel_size_mm * self._width
         v_aperture_mm = self._pixel_size_mm * self._height
         focal_length_mm = (self._fx + self._fy) * self._pixel_size_mm / 2.0
-        self._camera.set_focal_length(focal_length_mm / 10.0)
+        self._camera.set_focal_length(focal_length_mm / 1000.0)
         self._camera.set_focus_distance(self._focus_distance)
-        self._camera.set_lens_aperture(self._f_stop * 100.0)
-        self._camera.set_horizontal_aperture(h_aperture_mm / 10.0)
-        self._camera.set_vertical_aperture(v_aperture_mm / 10.0)
+        self._camera.set_lens_aperture(self._f_stop * 1000.0)
+        self._camera.set_horizontal_aperture(h_aperture_mm / 1000.0)
+        self._camera.set_vertical_aperture(v_aperture_mm / 1000.0)
         self._camera.set_clipping_range(self._clipping_near, self._clipping_far)
 
     def teardown(self) -> None:
