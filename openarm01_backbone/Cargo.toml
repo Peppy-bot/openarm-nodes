@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 peppygen        = { path = ".peppy/libs/peppygen" }
 peppylib        = { path = ".peppy/libs/peppylib" }
-sim_bridge_core = { path = "../../nodes_shared_code/sim_bridge_core" }
+sim_bridge_core = { git = "https://github.com/Peppy-bot/nodes_shared_code", package = "sim_bridge_core" }
 tokio           = { version = "1", features = ["full"] }
 serde_json      = "1"
 tracing         = "0.1"
