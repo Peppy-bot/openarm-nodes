@@ -1,14 +1,12 @@
 {
+  schema_version: 1,
   execution: {
-    language: "python",
+    language: "rust",
     container: {
       def_file: "apptainer.def"
     },
     parameters: {
-      // The gripper_id at runtime
-      // Depending on the ID, either 0 (left) or 1 (right), the instance sends commands to the axes on either the right or left gripper
-      // If more than one instance with the same gripper_id is detected at runtime, the new instance with the taken ID must crash. There should not be more than a single instance with the same ID running.
-      // For the locking mechanism we could use https://app.plane.so/peppy/browse/PEPPYOS-75/, if it's not yet implemented simply use a temporary named file (it's hacky tho as it assumes all the nodes run on the same filesystem).
+      // Which gripper this instance controls. 0 = right, 1 = left.
       gripper_id: "u8"
     }
   }
