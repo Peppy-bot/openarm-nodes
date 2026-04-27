@@ -12,11 +12,12 @@ class IsaacTransformTree:
     def __init__(self, prim_path: str) -> None:
         self._prim_path = prim_path
         self._articulation = None
-        self._body_parents: list[str] = []
+        self._body_prim_paths: dict[str, str] = {}
+        self._body_parents: dict[str, str] = {}
         self._ready: bool = False
 
     def setup(self) -> bool:
-        """Initialise articulation and build static parent name list from USD stage."""
+        """Initialise articulation and build body name → full prim path map via stage traversal."""
         if self._articulation is not None and self._ready:
             return True
         try:
@@ -27,14 +28,24 @@ class IsaacTransformTree:
             self._articulation.initialize()
 
             stage = omni.usd.get_context().get_stage()
-            self._body_parents = []
-            for name in self._articulation.body_names:
-                prim = stage.GetPrimAtPath(f"{self._prim_path}/{name}")
-                if prim.IsValid():
-                    parent_name = prim.GetParent().GetName()
-                else:
-                    parent_name = "world"
-                self._body_parents.append(parent_name)
+            body_names = set(self._articulation.body_names)
+
+            # Traverse the full stage to find each body prim regardless of nesting depth.
+            self._body_prim_paths = {}
+            self._body_parents = {}
+            for prim in stage.Traverse():
+                name = prim.GetName()
+                if name in body_names and name not in self._body_prim_paths:
+                    self._body_prim_paths[name] = str(prim.GetPath())
+                    parent = prim.GetParent()
+                    self._body_parents[name] = parent.GetName() if parent and parent.IsValid() else "world"
+
+            missing = body_names - set(self._body_prim_paths)
+            if missing:
+                logger.warning(
+                    f"IsaacTransformTree: could not find prims for bodies: {sorted(missing)}"
+                    " — they will be skipped in tf_tree output."
+                )
 
             self._ready = True
         except Exception as exc:
@@ -47,21 +58,21 @@ class IsaacTransformTree:
 
         logger.info(
             f"IsaacTransformTree ready — prim='{self._prim_path}'"
-            f" bodies={len(self._articulation.body_names)}"
+            f" bodies={len(self._body_prim_paths)}"
         )
         return True
 
     def teardown(self) -> None:
-        """Reset transform tree state."""
         self._articulation = None
-        self._body_parents = []
+        self._body_prim_paths = {}
+        self._body_parents = {}
         self._ready = False
 
     def _body_frame(self, stage, time_code, name: str, parent_name: str) -> dict:
-        """Return a single body's world-frame position and orientation dict."""
         from pxr import UsdGeom  # pylint: disable=E0401
 
-        prim = stage.GetPrimAtPath(f"{self._prim_path}/{name}")
+        prim_path = self._body_prim_paths[name]
+        prim = stage.GetPrimAtPath(prim_path)
         matrix = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time_code)
         translation = matrix.ExtractTranslation()
         rotation = matrix.ExtractRotationQuat()
@@ -85,12 +96,11 @@ class IsaacTransformTree:
             stage = omni.usd.get_context().get_stage()
             time_code = Usd.TimeCode.Default()
             frames = []
-            for i, name in enumerate(self._articulation.body_names):
-                prim = stage.GetPrimAtPath(f"{self._prim_path}/{name}")
-                if not prim.IsValid():
+            for name in self._articulation.body_names:
+                if name not in self._body_prim_paths:
                     continue
                 frames.append(
-                    self._body_frame(stage, time_code, name, self._body_parents[i])
+                    self._body_frame(stage, time_code, name, self._body_parents[name])
                 )
             return frames
         except Exception as exc:
@@ -99,5 +109,4 @@ class IsaacTransformTree:
 
     @property
     def is_ready(self) -> bool:
-        """True when the articulation has been initialised."""
         return self._ready
