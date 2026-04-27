@@ -1,0 +1,4 @@
+[package]
+name = "omni.peppy.gripper"
+version = "0.1.0"
+description = "Isaac Sim extension — applies gripper position commands to OpenArm01 finger DOFs."
