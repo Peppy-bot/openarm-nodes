@@ -81,11 +81,27 @@ class BackboneExtension(omni.ext.IExt):  # pylint: disable=E0611,I1101
         self._timeline = omni.timeline.get_timeline_interface()
 
         # SimControl is always present — not config-driven.
-        prim_path = self._config.publishers[0].prim if self._config.publishers else ""
-        self._sim_control_articulation = ArticulationBridge(prim_path)
+        # Use the joint_states publisher prim as the articulation root.
+        js_entry = next(
+            (e for e in self._config.publishers if e.type == "joint_states"), None
+        )
+        if js_entry is None or not js_entry.prim:
+            raise ValueError(
+                "omni.peppy.backbone: no 'joint_states' publisher with a valid prim "
+                "found in config — cannot initialise SimControl articulation."
+            )
+        self._sim_control_articulation = ArticulationBridge(js_entry.prim)
         sc = IsaacSimControl(self._sim_control_articulation, self._timeline)
         self._sc_bridge = SimControlBridge(sc, self._config)
         self._step = 0
+
+        # Register IO subscriptions once at startup — avoids duplicate registrations
+        # on repeated PLAY→STOP→PLAY cycles.
+        for plugin in [*self._plugins, self._sc_bridge]:
+            if plugin is None:
+                continue
+            for source_node, topic, qos in plugin.subscriptions():
+                self._io.register_subscription(source_node, topic, qos)
 
         app = omni.kit.app.get_app()
         self._app_update_sub = app.get_update_event_stream().create_subscription_to_pop(
@@ -127,11 +143,6 @@ class BackboneExtension(omni.ext.IExt):  # pylint: disable=E0611,I1101
     def _on_play(self) -> None:
         if self._physx_sub is not None:
             return
-        for plugin in [*self._plugins, self._sc_bridge]:
-            if plugin is None:
-                continue
-            for source_node, topic, qos in plugin.subscriptions():
-                self._io.register_subscription(source_node, topic, qos)
         self._step = 0
         self._physx_sub = self._physx.subscribe_physics_step_events(
             self._on_physics_step
