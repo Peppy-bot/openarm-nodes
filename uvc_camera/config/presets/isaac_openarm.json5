@@ -1,0 +1,27 @@
+// Isaac Sim preset for openarm uvc_camera.
+// Set PEPPY_BRIDGE_PRESET=isaac_openarm before launching the Rust binary.
+// The `prim` field is the USD prim path for the camera sensor.
+{
+  "sim_node": "sim",
+  // uvc_camera only READs from the sim — no subscribers.
+  "publishers": [
+    {
+      "type": "rgb_camera",
+      "topic": "video_stream",
+      "prim": "/openarm/camera_prim",
+      "params": {
+        "width": 640,
+        "height": 480,
+        "publish_every_n_steps": 2,
+        "fx": 617.0,
+        "fy": 617.0,
+        "pixel_size_mm": 0.003,
+        "focus_distance": 400.0,
+        "f_stop": 1.8,
+        "clipping_near": 1.0,
+        "clipping_far": 1000000.0
+      }
+    }
+  ],
+  "subscribers": []
+}

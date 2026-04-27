@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "openarm01_backbone",
+    "uvc_camera",
 ]
 resolver = "2"

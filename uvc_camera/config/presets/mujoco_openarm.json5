@@ -1,0 +1,20 @@
+// MuJoCo preset for openarm uvc_camera.
+// Set PEPPY_BRIDGE_PRESET=mujoco_openarm before launching the Python binary.
+// The `prim` field is the MuJoCo camera body name.
+{
+  "sim_node": "sim",
+  // uvc_camera only READs from the sim — no subscribers.
+  "publishers": [
+    {
+      "type": "rgb_camera",
+      "topic": "video_stream",
+      "prim": "camera",
+      "params": {
+        "width": 640,
+        "height": 480,
+        "publish_every_n_steps": 2
+      }
+    }
+  ],
+  "subscribers": []
+}

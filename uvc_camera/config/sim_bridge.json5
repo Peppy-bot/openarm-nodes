@@ -1,0 +1,7 @@
+// Default uvc_camera sim bridge config — used when PEPPY_BRIDGE_PRESET is not set.
+// Override by setting PEPPY_BRIDGE_PRESET=isaac_openarm or PEPPY_BRIDGE_PRESET=mujoco_openarm.
+{
+  "sim_node": "sim",
+  "publishers": [],
+  "subscribers": []
+}
