@@ -149,7 +149,7 @@ def _make_sensor(entry, model, data):  # pylint: disable=R0911
         return MujocoGripperSensor(
             model,
             data,
-            finger_joints=entry.params.get("finger_joints", []),
+            finger_joints=(entry.params or {}).get("finger_joints", []),
         )
     return MujocoArticulation(model, data)
 
