@@ -1,0 +1,7 @@
+[package]
+title = "Peppy UVC Camera"
+description = "Bridges Isaac Sim RGB camera frames to PeppyOS video_stream topic."
+version = "0.1.0"
+
+[[python.module]]
+name = "omni.peppy.uvc_camera"
