@@ -30,7 +30,7 @@ class IsaacSimControl:
 
     def reset(self) -> dict:
         try:
-            from omni.isaac.core import World  # pylint: disable=E0401
+            from isaacsim.core.api import World  # pylint: disable=E0401
 
             world = World.instance()
             if world is not None:
