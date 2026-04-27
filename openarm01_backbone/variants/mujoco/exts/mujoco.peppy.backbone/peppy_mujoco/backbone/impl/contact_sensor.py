@@ -76,8 +76,10 @@ class MujocoContactSensor:
 
                 force_contact = np.zeros(6)
                 mujoco.mj_contactForce(self._model, self._data, i, force_contact)
+                # contact.frame rows are contact basis axes — transpose to convert
+                # from contact frame to world frame.
                 frame = contact.frame.reshape(3, 3)
-                force_world = frame @ force_contact[:3]
+                force_world = frame.T @ force_contact[:3]
 
                 geom1_name = (
                     mujoco.mj_id2name(

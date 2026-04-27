@@ -93,7 +93,9 @@ class IsaacContactSensor:
                             float(v) for v in entry.get("position", [0.0, 0.0, 0.0])
                         ],
                         "force": [
-                            float(v) for v in entry.get("impulse", [0.0, 0.0, 0.0])
+                            float(v) for v in entry.get(
+                                "force", entry.get("impulse", [0.0, 0.0, 0.0])
+                            )
                         ],
                     }
                 )

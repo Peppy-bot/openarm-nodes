@@ -30,4 +30,4 @@ import json, re, sys
 cfg = json.loads(re.sub(r'//[^\n]*', '', open(sys.argv[1]).read()))
 print(cfg['robot']['launch'].split('/')[-2])
 " "${_CONFIG}" 2>/dev/null) || _ROBOT=openarm
-    exec ./python.sh /opt/isaac_backbone/robots/openarm/isaac/${_ROBOT}/launch.py "$@"
+    exec ./python.sh /opt/isaac_backbone/robots/openarm/${_ROBOT}/launch.py "$@"

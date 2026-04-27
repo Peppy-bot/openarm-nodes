@@ -41,9 +41,9 @@ From: python:3.11-slim
         exit 1
     fi
     export PEPPY_BRIDGE_CONFIG_PATH="${_CONFIG}"
-    _ROBOT=$(python3 -c "
+    _LAUNCH=$(python3 -c "
 import json, re, sys
 cfg = json.loads(re.sub(r'//[^\n]*', '', open(sys.argv[1]).read()))
-print(cfg['robot']['launch'].split('/')[-2])
-" "${_CONFIG}" 2>/dev/null) || _ROBOT=openarm
-    exec python3 /opt/mujoco_backbone/robots/openarm/mujoco/${_ROBOT}/launch.py "$@"
+print(cfg['robot']['launch'])
+" "${_CONFIG}" 2>/dev/null) || _LAUNCH="robots/openarm/openarm/launch.py"
+    exec python3 /opt/mujoco_backbone/${_LAUNCH} "$@"

@@ -32,17 +32,21 @@ fn main() -> Result<()> {
             "component IDs discovered"
         );
 
-        // ── move_arm orchestration ─────────────────────────────────────────────
+        // ── move_arm orchestration + sim bridge run concurrently ──────────────
         let orch_runner = runner.clone();
         let orch_token = token.clone();
-        tokio::spawn(async move {
-            orchestrator::run(orch_runner, orch_token, arm_id).await;
-        });
+        let bridge_token = token.clone();
 
-        // ── sim bridge: READ sensor pipelines (sim → PeppyOS) ─────────────────
-        bridge::build(runner, daemon, token, sim_node, &config)
-            .run()
-            .await;
+        tokio::select! {
+            _ = orchestrator::run(orch_runner, orch_token, arm_id) => {
+                tracing::info!("orchestrator exited — cancelling bridge");
+                token.cancel();
+            }
+            _ = bridge::build(runner, daemon, bridge_token, sim_node, &config).run() => {
+                tracing::info!("bridge exited — cancelling orchestrator");
+                token.cancel();
+            }
+        }
 
         Ok(())
     })
