@@ -1,0 +1,17 @@
+[core]
+reloadable = true
+order = 0
+
+[package]
+version = "0.1.0"
+category = "Simulation"
+title = "Peppy Arm"
+description = "Write-only joint command bridge from PeppyOS to Isaac Sim for openarm01_arm."
+authors = ["Peppy Robotics"]
+
+[dependencies]
+"omni.physx" = {}
+"omni.timeline" = {}
+
+[[python.module]]
+name = "omni.peppy.arm"
