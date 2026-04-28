@@ -1,0 +1,11 @@
+# TODO: populate when the pose_estimation milestone begins.
+Bootstrap: docker
+From: python:3.11-slim
+
+%labels
+    Name joint_commander_pose_estimation
+    Version 0.1.0
+
+%runscript
+    echo "pose_estimation variant is not yet implemented" >&2
+    exit 1
