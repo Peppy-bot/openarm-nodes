@@ -10,8 +10,8 @@ class IsaacGripperCommand:
     """Applies gripper position targets to an Isaac Sim articulation.
 
     finger_joints: ordered list of DOF names matching the desired_position array
-    from the move_gripper action goal. Names not found in the articulation are
-    skipped with a warning at setup time.
+    from the move_gripper action goal. Setup fails hard if any name cannot be
+    resolved to a DOF in the articulation — no partial configuration is accepted.
     """
 
     def __init__(self, prim_path: str, finger_joints: list[str]) -> None:
@@ -24,6 +24,14 @@ class IsaacGripperCommand:
     def setup(self) -> bool:
         if self._articulation is not None and self._ready:
             return True
+        seen: set[str] = set()
+        for name in self._finger_joints:
+            if name in seen:
+                logger.error(
+                    f"IsaacGripperCommand: duplicate finger joint '{name}' in configuration."
+                )
+                return False
+            seen.add(name)
         try:
             from isaacsim.core.prims import Articulation  # pylint: disable=E0401
 

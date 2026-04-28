@@ -35,6 +35,7 @@ class MujocoGripperExtension:
         self._gripper: Optional[MujocoGripperCommand] = None
         self._last_cmd_time: float = 0.0
         self._stale_warned: bool = False
+        self._gripper_setup_failed: bool = False
 
     def startup(self, finger_joints: list[str]) -> None:
         """Build the gripper command handler, register subscription, start I/O."""
@@ -55,8 +56,12 @@ class MujocoGripperExtension:
         if self._io is None or self._gripper is None:
             return
 
-        if not self._gripper.is_ready and not self._gripper.setup():
-            return
+        if not self._gripper.is_ready:
+            if self._gripper_setup_failed:
+                return
+            if not self._gripper.setup():
+                self._gripper_setup_failed = True
+                return
 
         raw = self._io.get_latest(self._config.sim_bridge_node, _COMMAND_TOPIC)
         if raw is None:
@@ -75,18 +80,21 @@ class MujocoGripperExtension:
 
         try:
             payload = json.loads(raw)
-            positions = payload.get("positions")
-            if isinstance(positions, list):
-                self._last_cmd_time = time.monotonic()
-                self._stale_warned = False
-                self._gripper.apply(positions)
-            else:
-                logger.warning(
-                    f"Gripper command missing or invalid positions"
-                    f" (got {type(positions).__name__}: {positions!r}) — dropped."
-                )
-        except Exception as exc:
-            logger.warning(f"Failed to apply gripper command: {exc}")
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Failed to decode gripper command JSON: {exc}")
+            return
+
+        positions = payload.get("positions")
+        if not isinstance(positions, list):
+            logger.warning(
+                f"Gripper command missing or invalid positions"
+                f" (got {type(positions).__name__}: {positions!r}) — dropped."
+            )
+            return
+
+        if self._gripper.apply(positions):
+            self._last_cmd_time = time.monotonic()
+            self._stale_warned = False
 
     def shutdown(self) -> None:
         """Tear down the gripper handler and stop I/O."""

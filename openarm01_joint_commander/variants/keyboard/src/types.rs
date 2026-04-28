@@ -53,7 +53,14 @@ impl fmt::Display for BridgeError {
     }
 }
 
-impl std::error::Error for BridgeError {}
+impl std::error::Error for BridgeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Config { source, .. } => Some(source),
+            Self::ConfigParse(_) => None,
+        }
+    }
+}
 
 pub type Result<T> = std::result::Result<T, BridgeError>;
 

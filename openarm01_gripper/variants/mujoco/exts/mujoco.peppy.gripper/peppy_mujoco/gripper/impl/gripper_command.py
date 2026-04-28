@@ -4,8 +4,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_JOINT_TRANSMISSION_TYPE = 0  # mjTRN_JOINT
-
 
 class MujocoGripperCommand:
     """Applies gripper position targets to MuJoCo finger actuators.
@@ -25,7 +23,11 @@ class MujocoGripperCommand:
     def setup(self) -> bool:
         try:
             import mujoco  # pylint: disable=E0401
+        except ImportError as exc:
+            logger.error(f"MujocoGripperCommand: mujoco package not available: {exc}")
+            return False
 
+        try:
             resolved: list[tuple[str, int]] = []
             for name in self._finger_joints:
                 jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, name)
@@ -36,7 +38,7 @@ class MujocoGripperCommand:
                 ctrl_adr = -1
                 for act_i in range(self._model.nu):
                     if (
-                        self._model.actuator_trntype[act_i] == _JOINT_TRANSMISSION_TYPE
+                        self._model.actuator_trntype[act_i] == mujoco.mjtTrn.mjTRN_JOINT
                         and self._model.actuator_trnid[act_i, 0] == jid
                     ):
                         ctrl_adr = act_i
@@ -63,7 +65,7 @@ class MujocoGripperCommand:
             logger.info(
                 f"MujocoGripperCommand ready — fingers={[n for n, _ in resolved]}"
             )
-        except Exception as exc:
+        except AttributeError as exc:
             logger.error(f"Failed to setup MujocoGripperCommand: {exc}")
             return False
 
@@ -84,13 +86,15 @@ class MujocoGripperCommand:
             )
             return False
 
-        try:
-            for ctrl_idx, pos in zip(self._ctrl_indices, positions):
+        for ctrl_idx, pos in zip(self._ctrl_indices, positions):
+            try:
                 self._data.ctrl[ctrl_idx] = pos
-            return True
-        except Exception as exc:
-            logger.warning(f"Could not apply gripper command: {exc}")
-            return False
+            except (IndexError, TypeError) as exc:
+                logger.warning(
+                    f"Could not apply gripper command at ctrl[{ctrl_idx}]={pos}: {exc}"
+                )
+                return False
+        return True
 
     @property
     def is_ready(self) -> bool:

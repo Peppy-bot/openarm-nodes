@@ -90,13 +90,21 @@ class IsaacGripperExtension:
 
         try:
             payload = json.loads(raw)
-            positions = payload.get("positions")
-            if isinstance(positions, list):
-                self._last_cmd_time = time.monotonic()
-                self._stale_warned = False
-                self._gripper.apply(positions)
-        except Exception as exc:
-            logger.warning(f"Failed to apply gripper command: {exc}")
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Failed to decode gripper command JSON: {exc}")
+            return
+
+        positions = payload.get("positions")
+        if not isinstance(positions, list):
+            logger.warning(
+                f"Gripper command missing or invalid positions"
+                f" (got {type(positions).__name__}: {positions!r}) — dropped."
+            )
+            return
+
+        if self._gripper.apply(positions):
+            self._last_cmd_time = time.monotonic()
+            self._stale_warned = False
 
     def on_shutdown(self) -> None:
         """Called by Omniverse Kit when the extension is unloaded."""
