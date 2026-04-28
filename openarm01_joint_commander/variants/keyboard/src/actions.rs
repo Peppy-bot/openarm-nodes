@@ -21,7 +21,7 @@ pub async fn run_command_loop(
 
     println!("arm: {}  |  step: {step:.4} m  |  type 'help' for commands", config.label);
 
-    while let Some(cmd) = rx.recv().await {
+    'outer: while let Some(cmd) = rx.recv().await {
         match cmd {
             Command::Help => { println!("{HELP_TEXT}"); continue; }
             Command::Quit => { info!("quit received"); break; }
@@ -33,6 +33,20 @@ pub async fn run_command_loop(
             Command::Nudge { axis, delta } => target.nudge(axis, delta.unwrap_or(step)),
             Command::Goto { x, y, z } => { target.x = x; target.y = y; target.z = z; }
             Command::Reset => target = CartesianTarget::zero(),
+        }
+
+        // Drain any commands that queued while the previous goal was in flight
+        // so we send only the latest target instead of replaying stale inputs.
+        loop {
+            match rx.try_recv() {
+                Ok(Command::Quit) => { info!("quit received"); break 'outer; }
+                Ok(Command::Help) => println!("{HELP_TEXT}"),
+                Ok(Command::SetStep(s)) => { step = s; }
+                Ok(Command::Nudge { axis, delta }) => target.nudge(axis, delta.unwrap_or(step)),
+                Ok(Command::Goto { x, y, z }) => { target.x = x; target.y = y; target.z = z; }
+                Ok(Command::Reset) => target = CartesianTarget::zero(),
+                Err(_) => break,
+            }
         }
 
         println!("target: x={:+.4}  y={:+.4}  z={:+.4}", target.x, target.y, target.z);
@@ -47,10 +61,9 @@ async fn send_move_arm(
 ) {
     use peppygen::consumed_actions::move_arm;
 
-    let arm_id = config.arm.map(|a| a.id()).unwrap_or(0);
     let pos = target.as_array();
 
-    info!(arm_id, x = pos[0], y = pos[1], z = pos[2], "move_arm: sending goal");
+    info!(arm = %config.label, x = pos[0], y = pos[1], z = pos[2], "move_arm: sending goal");
 
     let result = move_arm::send_goal(
         runner,
