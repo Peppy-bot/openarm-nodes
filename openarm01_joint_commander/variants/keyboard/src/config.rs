@@ -6,6 +6,7 @@ use serde::Deserialize;
 use crate::types::{BridgeError, Result};
 
 const CONFIG_DIR: &str = "config";
+const ENV_CONFIG_DIR: &str = "JOINT_COMMANDER_CONFIG_DIR";
 const DEFAULT_STEP_M: f64 = 0.01;
 const ENV_RUNTIME_CONFIG: &str = "PEPPY_RUNTIME_CONFIG";
 const ENV_ARM_ID: &str = "ARM_ID";
@@ -68,8 +69,12 @@ impl ArmConfig {
     }
 }
 
+fn config_base() -> PathBuf {
+    std::env::var(ENV_CONFIG_DIR).map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(CONFIG_DIR))
+}
+
 fn load_joints(config_name: &str) -> Result<Vec<String>> {
-    let path = PathBuf::from(CONFIG_DIR).join(format!("{config_name}.toml"));
+    let path = config_base().join(format!("{config_name}.toml"));
     let text = fs::read_to_string(&path).map_err(|source| BridgeError::Config {
         path: path.display().to_string(),
         source,
