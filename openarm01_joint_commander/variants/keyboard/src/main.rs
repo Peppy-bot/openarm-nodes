@@ -10,7 +10,7 @@ fn main() -> Result<()> {
     NodeBuilder::new().run(move |_args: Parameters, runner| async move {
         let cfg = Arc::new(
             config::ArmConfig::load(arm)
-                .unwrap_or_else(|e| { tracing::error!("config: {e}"); std::process::exit(1) }),
+                .inspect_err(|e| tracing::error!(%e, "config load failed"))?,
         );
 
         let (tx, rx) = mpsc::channel(32);
