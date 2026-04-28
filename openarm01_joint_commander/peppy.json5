@@ -40,12 +40,14 @@
   },
   // Non exhaustive list of interfaces
   interfaces: {
-    topics: {
-      consumes: [
-        { local_node_id: "openarm01_backbone", name: "joint_states" },
-        { local_node_id: "openarm01_backbone", name: "controller/status" },
-      ]
-    },
+    // topics.consumes for joint_states and controller/status are re-added once
+    // backbone explicitly exposes them in its manifest.
+    // topics: {
+    //   consumes: [
+    //     { local_node_id: "openarm01_backbone", name: "joint_states" },
+    //     { local_node_id: "openarm01_backbone", name: "controller/status" },
+    //   ]
+    // },
     actions: {
       consumes: [
         { local_node_id: "openarm01_backbone", name: "move_arm" }
