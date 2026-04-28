@@ -20,6 +20,9 @@
           goal_service: {
             request_message_format: {
               feedback_frequency: "u32",
+              // OpenArm01 gripper has 3 independently controllable finger DOFs.
+              // IsaacGripperCommand / MujocoGripperCommand must be configured with
+              // exactly 3 entries in finger_joints to match this contract.
               desired_position: {
                 $type: "array",
                 $items: "f64",

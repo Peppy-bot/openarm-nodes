@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 import time
 from typing import Optional
 
@@ -17,25 +18,40 @@ _DEFAULT_NODE_NAME = "openarm01_gripper"
 _COMMAND_TOPIC = "gripper_command"
 _QOS = "standard"
 _COMMAND_EXPIRY_S = 0.5
+_ENV_PRIM_PATH = "GRIPPER_PRIM_PATH"
+_ENV_FINGER_JOINTS = "GRIPPER_FINGER_JOINTS"  # comma-separated DOF names
 
 
 class IsaacGripperExtension:
     """Isaac Sim gripper extension — applies gripper position commands each physics step.
 
-    Instantiated by the Isaac extension system. Subscribes to 'gripper_command' from
-    the Rust sim_bridge via peppylib and drives finger DOFs via ArticulationView
-    each simulation step.
+    Loaded by Omniverse Kit via extension.toml. Configuration is read from environment
+    variables at on_startup time so the caller (Kit) does not need to pass arguments.
     """
 
-    def __init__(self) -> None:
+    def on_startup(self, ext_id: str) -> None:  # noqa: ARG002
+        """Called by Omniverse Kit when the extension is loaded."""
+        # omni.* imports are deferred to respect Isaac Sim load order.
         self._config: Optional[BridgeConfig] = None
         self._io: Optional[PeppylibIO] = None
         self._gripper: Optional[IsaacGripperCommand] = None
         self._last_cmd_time: float = 0.0
         self._stale_warned: bool = False
 
-    def startup(self, prim_path: str, finger_joints: list[str]) -> None:
-        """Build the gripper command handler, register subscription, start I/O."""
+        prim_path = os.environ.get(_ENV_PRIM_PATH, "")
+        finger_joints = [
+            j.strip()
+            for j in os.environ.get(_ENV_FINGER_JOINTS, "").split(",")
+            if j.strip()
+        ]
+
+        if not prim_path or not finger_joints:
+            logger.error(
+                f"omni.peppy.gripper: {_ENV_PRIM_PATH} and {_ENV_FINGER_JOINTS}"
+                " must be set before loading this extension."
+            )
+            return
+
         self._config = BridgeConfig.from_env(default_node_name=_DEFAULT_NODE_NAME)
         self._io = PeppylibIO(self._config)
         self._gripper = IsaacGripperCommand(prim_path, finger_joints)
@@ -82,8 +98,8 @@ class IsaacGripperExtension:
         except Exception as exc:
             logger.warning(f"Failed to apply gripper command: {exc}")
 
-    def shutdown(self) -> None:
-        """Tear down the gripper handler and stop I/O."""
+    def on_shutdown(self) -> None:
+        """Called by Omniverse Kit when the extension is unloaded."""
         logger.info("omni.peppy.gripper shutting down.")
         if self._gripper is not None:
             self._gripper.teardown()

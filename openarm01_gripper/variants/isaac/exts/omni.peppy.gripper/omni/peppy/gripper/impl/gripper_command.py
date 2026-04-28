@@ -31,10 +31,12 @@ class IsaacGripperCommand:
             self._articulation.initialize()
 
             dof_names = list(self._articulation.dof_names)
-            self._finger_indices = []
+            resolved_names: list[str] = []
+            resolved_indices: list[int] = []
             for name in self._finger_joints:
                 if name in dof_names:
-                    self._finger_indices.append(dof_names.index(name))
+                    resolved_names.append(name)
+                    resolved_indices.append(dof_names.index(name))
                 else:
                     logger.warning(
                         f"IsaacGripperCommand: DOF '{name}' not found"
@@ -42,10 +44,20 @@ class IsaacGripperCommand:
                         f" Available: {dof_names}"
                     )
 
+            if len(resolved_indices) != len(self._finger_joints):
+                logger.error(
+                    f"IsaacGripperCommand: {len(self._finger_joints) - len(resolved_indices)}"
+                    f" joint(s) failed to resolve — refusing to start with partial config."
+                )
+                self._articulation = None
+                self._ready = False
+                return False
+
+            self._finger_indices = resolved_indices
             self._ready = True
             logger.info(
                 f"IsaacGripperCommand ready — prim='{self._prim_path}'"
-                f" fingers={[self._finger_joints[i] for i in range(len(self._finger_indices))]}"
+                f" fingers={resolved_names}"
             )
         except Exception as exc:
             logger.error(

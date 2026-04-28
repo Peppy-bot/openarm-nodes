@@ -30,7 +30,7 @@ class MujocoGripperCommand:
             for name in self._finger_joints:
                 jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, name)
                 if jid < 0:
-                    logger.warning(f"MujocoGripperCommand: joint '{name}' not found — skipped.")
+                    logger.warning(f"MujocoGripperCommand: joint '{name}' not found.")
                     continue
 
                 ctrl_adr = -1
@@ -44,11 +44,19 @@ class MujocoGripperCommand:
 
                 if ctrl_adr < 0:
                     logger.warning(
-                        f"MujocoGripperCommand: no actuator drives '{name}' — skipped."
+                        f"MujocoGripperCommand: no actuator drives '{name}'."
                     )
                     continue
 
                 resolved.append((name, ctrl_adr))
+
+            if len(resolved) != len(self._finger_joints):
+                logger.error(
+                    f"MujocoGripperCommand: {len(self._finger_joints) - len(resolved)}"
+                    f" joint(s) failed to resolve — refusing to start with partial config."
+                )
+                self._ready = False
+                return False
 
             self._ctrl_indices = [ctrl for _, ctrl in resolved]
             self._ready = True
