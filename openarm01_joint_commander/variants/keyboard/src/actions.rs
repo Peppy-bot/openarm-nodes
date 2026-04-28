@@ -26,8 +26,12 @@ pub async fn run_command_loop(
             Command::Help => { println!("{HELP_TEXT}"); continue; }
             Command::Quit => { info!("quit received"); break; }
             Command::SetStep(s) => {
-                step = s;
-                println!("step → {step:.4} m");
+                if s.is_finite() && s > 0.0 {
+                    step = s;
+                    println!("step → {step:.4} m");
+                } else {
+                    println!("step: invalid value {s} — must be finite and positive");
+                }
                 continue;
             }
             Command::Nudge { axis, delta } => target.nudge(axis, delta.unwrap_or(step)),
@@ -41,7 +45,10 @@ pub async fn run_command_loop(
             match rx.try_recv() {
                 Ok(Command::Quit) => { info!("quit received"); break 'outer; }
                 Ok(Command::Help) => println!("{HELP_TEXT}"),
-                Ok(Command::SetStep(s)) => { step = s; }
+                Ok(Command::SetStep(s)) => {
+                    if s.is_finite() && s > 0.0 { step = s; }
+                    else { println!("step: invalid value {s} — must be finite and positive"); }
+                }
                 Ok(Command::Nudge { axis, delta }) => target.nudge(axis, delta.unwrap_or(step)),
                 Ok(Command::Goto { x, y, z }) => { target.x = x; target.y = y; target.z = z; }
                 Ok(Command::Reset) => target = CartesianTarget::zero(),

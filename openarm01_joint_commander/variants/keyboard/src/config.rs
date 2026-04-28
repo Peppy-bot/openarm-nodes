@@ -22,7 +22,9 @@ impl Arm {
         if let Ok(cfg) = std::env::var(ENV_RUNTIME_CONFIG) {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cfg) {
                 if let Some(id) = val.get("arm_id").and_then(|v| v.as_u64()) {
-                    return Self::from_id(id as u8);
+                    if let Ok(id) = u8::try_from(id) {
+                        return Self::from_id(id);
+                    }
                 }
             }
         }
