@@ -80,6 +80,11 @@ class MujocoGripperExtension:
                 self._last_cmd_time = time.monotonic()
                 self._stale_warned = False
                 self._gripper.apply(positions)
+            else:
+                logger.warning(
+                    f"Gripper command missing or invalid positions"
+                    f" (got {type(positions).__name__}: {positions!r}) — dropped."
+                )
         except Exception as exc:
             logger.warning(f"Failed to apply gripper command: {exc}")
 
