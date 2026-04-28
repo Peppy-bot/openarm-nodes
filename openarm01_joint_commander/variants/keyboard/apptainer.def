@@ -11,6 +11,7 @@ From: tuatini/peppy-rust-cargo-base:latest
 %files
     src /opt/joint_commander/src
     Cargo.toml /opt/joint_commander/Cargo.toml
+    Cargo.lock /opt/joint_commander/Cargo.lock
     config /opt/joint_commander/config
     .peppy /opt/joint_commander/.peppy
 
