@@ -2,6 +2,7 @@
 """MuJoCo launch script for the openarm backbone configuration."""
 
 # pylint: disable=C0413
+import asyncio
 import json
 import logging
 import os
@@ -21,8 +22,9 @@ sys.path.insert(0, str(_MUJOCO_DIR))
 from _launcher import SimLauncher
 
 
-def _run_sim(_params, _node_runner) -> None:
-    SimLauncher(_XML_PATH).run()
+async def _run_sim(_params, _node_runner) -> list:
+    loop = asyncio.get_running_loop()
+    return [loop.run_in_executor(None, SimLauncher(_XML_PATH).run)]
 
 
 try:
