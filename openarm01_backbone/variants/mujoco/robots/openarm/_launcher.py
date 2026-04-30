@@ -95,8 +95,11 @@ class SimLauncher:
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
-            for ext in extensions:
-                ext.shutdown()
+            for ext in reversed(extensions):
+                try:
+                    ext.shutdown()
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception("Error shutting down %s", ext)
 
     def _run_windowed(self, model, data, backbone, extensions) -> None:
         """Drive simulation loop at fixed timestep with the passive MuJoCo viewer."""
@@ -115,8 +118,11 @@ class SimLauncher:
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
-            for ext in extensions:
-                ext.shutdown()
+            for ext in reversed(extensions):
+                try:
+                    ext.shutdown()
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception("Error shutting down %s", ext)
 
     @staticmethod
     def _step(backbone, extensions) -> None:
