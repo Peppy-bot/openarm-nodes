@@ -1,0 +1,40 @@
+// MuJoCo preset for openarm bimanual robot.
+// Set PEPPY_BRIDGE_PRESET=mujoco_openarm before launching the Python binary.
+// The `prim` field is the MuJoCo body name (last path segment used by _make_sensor).
+{
+  "sim_node": "sim",
+  "robot": {
+    "launch": "robots/openarm/openarm/launch.py",
+    "joint_names": [
+      "openarm_left_joint1",        "openarm_left_joint2",        "openarm_left_joint3",
+      "openarm_left_joint4",        "openarm_left_joint5",        "openarm_left_joint6",
+      "openarm_left_joint7",        "openarm_left_finger_joint1", "openarm_left_finger_joint2",
+      "openarm_right_joint1",       "openarm_right_joint2",       "openarm_right_joint3",
+      "openarm_right_joint4",       "openarm_right_joint5",       "openarm_right_joint6",
+      "openarm_right_joint7",       "openarm_right_finger_joint1","openarm_right_finger_joint2"
+    ]
+  },
+  // Backbone only READs from the sim — no subscribers (joint commands go via openarm01_arm).
+  "publishers": [
+    { "type": "clock",          "topic": "clock",                  "prim": "" },
+    { "type": "joint_states",   "topic": "joint_states",           "prim": "/openarm",                            "robot_name": "openarm" },
+    { "type": "imu",            "topic": "imu_left",               "prim": "/openarm/openarm_left_link1",         "robot_name": "openarm" },
+    { "type": "imu",            "topic": "imu_right",              "prim": "/openarm/openarm_right_link1",        "robot_name": "openarm" },
+    { "type": "tf_tree",        "topic": "tf_tree",                "prim": "/openarm",                            "robot_name": "openarm" },
+    { "type": "ee_pose",        "topic": "ee_pose_left",           "prim": "openarm_left_hand_tcp",               "robot_name": "openarm" },
+    { "type": "ee_pose",        "topic": "ee_pose_right",          "prim": "openarm_right_hand_tcp",              "robot_name": "openarm" },
+    { "type": "odometry",       "topic": "odometry",               "prim": "/openarm/base_link",                  "robot_name": "openarm" },
+    { "type": "wrench",         "topic": "wrench",                 "prim": "/openarm/base_link",                  "robot_name": "openarm" },
+    { "type": "contact_forces", "topic": "contact_forces_left_finger1",  "prim": "openarm_left_right_finger",  "robot_name": "openarm" },
+    { "type": "contact_forces", "topic": "contact_forces_left_finger2",  "prim": "openarm_left_left_finger",   "robot_name": "openarm" },
+    { "type": "contact_forces", "topic": "contact_forces_right_finger1", "prim": "openarm_right_right_finger", "robot_name": "openarm" },
+    { "type": "contact_forces", "topic": "contact_forces_right_finger2", "prim": "openarm_right_left_finger",  "robot_name": "openarm" },
+    { "type": "gripper_state",  "topic": "gripper_state_left",    "prim": "/openarm",                            "robot_name": "openarm",
+      "params": { "finger_joints": ["openarm_left_finger_joint1",  "openarm_left_finger_joint2"]  }
+    },
+    { "type": "gripper_state",  "topic": "gripper_state_right",   "prim": "/openarm",                            "robot_name": "openarm",
+      "params": { "finger_joints": ["openarm_right_finger_joint1", "openarm_right_finger_joint2"] }
+    }
+  ],
+  "subscribers": []
+}
