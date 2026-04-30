@@ -12,6 +12,7 @@ from pathlib import Path
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
 )
+logger = logging.getLogger(__name__)
 
 _XML_PATH = Path(__file__).parent / "assets" / "openarm_bimanual.xml"
 _MUJOCO_DIR = Path(__file__).resolve().parents[1]
@@ -38,8 +39,8 @@ try:
         try:
             _state = json.loads(_state_file.read_text())
             _PORT = int(_state.get("messaging_port", _PORT))  # pylint: disable=C0103
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Unable to read daemon state from {_state_file}: {e}")
         builder = builder.standalone(
             StandaloneConfig()
             .with_messaging("localhost", _PORT)

@@ -2,9 +2,9 @@
 // Set PEPPY_BRIDGE_PRESET=isaac_openarm before launching the Rust binary.
 // The `prim` field is the USD prim path for the articulation root.
 {
-  "sim_node": "sim",
-  "robot": {
-    "joint_names": [
+  sim_node: "sim",
+  robot: {
+    joint_names: [
       "openarm_left_joint1",
       "openarm_left_joint2",
       "openarm_left_joint3",
@@ -22,19 +22,19 @@
     ]
   },
   // Backbone only READs from the sim — no subscribers (joint commands go via openarm01_arm).
-  "publishers": [
-    { "type": "joint_states",    "topic": "joint_states",    "prim": "/openarm", "robot_name": "openarm" },
-    { "type": "imu",             "topic": "imu",             "prim": "/openarm/base_link/imu_sensor", "robot_name": "openarm" },
-    { "type": "ee_pose",         "topic": "ee_pose_right",    "prim": "/openarm/openarm_right_link7", "robot_name": "openarm" },
-    { "type": "ee_pose",         "topic": "ee_pose_left",     "prim": "/openarm/openarm_left_link7",  "robot_name": "openarm" },
-    { "type": "tf_tree",         "topic": "tf_tree",         "prim": "/openarm", "robot_name": "openarm" },
-    { "type": "clock",           "topic": "clock",           "prim": "" },
-    { "type": "odometry",        "topic": "odometry",        "prim": "/openarm/base_link", "robot_name": "openarm" },
-    { "type": "wrench",          "topic": "wrench",          "prim": "/openarm", "robot_name": "openarm" },
-    { "type": "contact_forces",  "topic": "contact_forces",  "prim": "/openarm/openarm_right_link7/contact_sensor", "robot_name": "openarm" },
-    { "type": "gripper_state",   "topic": "gripper_state",   "prim": "/openarm", "robot_name": "openarm",
-      "params": {
-        "finger_joints": [
+  publishers: [
+    { type: "joint_states",    topic: "joint_states",    prim: "/openarm", robot_name: "openarm" },
+    { type: "imu",             topic: "imu",             prim: "/openarm/base_link/imu_sensor", robot_name: "openarm" },
+    { type: "ee_pose",         topic: "ee_pose_right",    prim: "/openarm/openarm_right_link7", robot_name: "openarm" },
+    { type: "ee_pose",         topic: "ee_pose_left",     prim: "/openarm/openarm_left_link7",  robot_name: "openarm" },
+    { type: "tf_tree",         topic: "tf_tree",         prim: "/openarm", robot_name: "openarm" },
+    { type: "clock",           topic: "clock",           prim: "" },
+    { type: "odometry",        topic: "odometry",        prim: "/openarm/base_link", robot_name: "openarm" },
+    { type: "wrench",          topic: "wrench",          prim: "/openarm", robot_name: "openarm" },
+    { type: "contact_forces",  topic: "contact_forces",  prim: "/openarm/openarm_right_link7/contact_sensor", robot_name: "openarm" },
+    { type: "gripper_state",   topic: "gripper_state",   prim: "/openarm", robot_name: "openarm",
+      params: {
+        finger_joints: [
           "openarm_left_finger_joint1",
           "openarm_left_finger_joint2",
           "openarm_right_finger_joint1",
@@ -43,5 +43,5 @@
       }
     }
   ],
-  "subscribers": []
+  subscribers: []
 }

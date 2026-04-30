@@ -9,7 +9,7 @@ PeppyOS nodes for OpenArm01
 
 Place the MJCF model and meshes in the assets directory before running:
 
-```
+```text
 openarm01_backbone/variants/mujoco/robots/openarm/openarm/assets/
   openarm_bimanual.xml
   meshes/

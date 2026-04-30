@@ -10,16 +10,6 @@ use sim_bridge_core::{
     },
 };
 
-const TOPIC_JOINT_STATES: &str = "joint_states";
-const TOPIC_IMU: &str = "imu";
-const TOPIC_EE_POSE: &str = "ee_pose";
-const TOPIC_TF_TREE: &str = "tf_tree";
-const TOPIC_CLOCK: &str = "clock";
-const TOPIC_ODOMETRY: &str = "odometry";
-const TOPIC_WRENCH: &str = "wrench";
-const TOPIC_CONTACT_FORCES: &str = "contact_forces";
-const TOPIC_GRIPPER_STATE: &str = "gripper_state";
-
 pub fn build(
     runner: Arc<NodeRunner>,
     daemon: DaemonState,
@@ -46,10 +36,10 @@ pub fn build(
 
     if enabled.joint_states {
         bridge = bridge.sim_to_os::<JointStatesMsg, _>(
-            Arc::from(TOPIC_JOINT_STATES),
+            Arc::from("joint_states"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::joint_states;
+                    use peppygen::emitted_topics::joint_states;
                     joint_states::emit(
                         &runner,
                         joint_states::Data {
@@ -69,10 +59,10 @@ pub fn build(
 
     if enabled.imu {
         bridge = bridge.sim_to_os::<ImuMsg, _>(
-            Arc::from(TOPIC_IMU),
+            Arc::from("imu"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::imu;
+                    use peppygen::emitted_topics::imu;
                     imu::emit(
                         &runner,
                         imu::Data {
@@ -93,10 +83,10 @@ pub fn build(
 
     if enabled.ee_pose {
         bridge = bridge.sim_to_os::<EePoseMsg, _>(
-            Arc::from(TOPIC_EE_POSE),
+            Arc::from("ee_pose"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::ee_pose;
+                    use peppygen::emitted_topics::ee_pose;
                     ee_pose::emit(
                         &runner,
                         ee_pose::Data {
@@ -116,10 +106,10 @@ pub fn build(
 
     if enabled.tf_tree {
         bridge = bridge.sim_to_os::<TfTreeMsg, _>(
-            Arc::from(TOPIC_TF_TREE),
+            Arc::from("tf_tree"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::tf_tree;
+                    use peppygen::emitted_topics::tf_tree;
                     tf_tree::emit(
                         &runner,
                         tf_tree::Data {
@@ -138,10 +128,10 @@ pub fn build(
 
     if enabled.clock {
         bridge = bridge.sim_to_os::<ClockMsg, _>(
-            Arc::from(TOPIC_CLOCK),
+            Arc::from("clock"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::clock;
+                    use peppygen::emitted_topics::clock;
                     clock::emit(
                         &runner,
                         clock::Data {
@@ -159,10 +149,10 @@ pub fn build(
 
     if enabled.odometry {
         bridge = bridge.sim_to_os::<OdometryMsg, _>(
-            Arc::from(TOPIC_ODOMETRY),
+            Arc::from("odometry"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::odometry;
+                    use peppygen::emitted_topics::odometry;
                     odometry::emit(
                         &runner,
                         odometry::Data {
@@ -184,10 +174,10 @@ pub fn build(
 
     if enabled.wrench {
         bridge = bridge.sim_to_os::<WrenchMsg, _>(
-            Arc::from(TOPIC_WRENCH),
+            Arc::from("wrench"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::wrench;
+                    use peppygen::emitted_topics::wrench;
                     wrench::emit(
                         &runner,
                         wrench::Data {
@@ -207,10 +197,10 @@ pub fn build(
 
     if enabled.contact_forces {
         bridge = bridge.sim_to_os::<ContactForcesMsg, _>(
-            Arc::from(TOPIC_CONTACT_FORCES),
+            Arc::from("contact_forces"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::contact_forces;
+                    use peppygen::emitted_topics::contact_forces;
                     contact_forces::emit(
                         &runner,
                         contact_forces::Data {
@@ -229,10 +219,10 @@ pub fn build(
 
     if enabled.gripper_state {
         bridge = bridge.sim_to_os::<GripperStateMsg, _>(
-            Arc::from(TOPIC_GRIPPER_STATE),
+            Arc::from("gripper_state"),
             |runner, msg| {
                 Box::pin(async move {
-                    use peppygen::exposed_topics::gripper_state;
+                    use peppygen::emitted_topics::gripper_state;
                     gripper_state::emit(
                         &runner,
                         gripper_state::Data {
@@ -283,15 +273,15 @@ impl EnabledTopics {
         };
         for pub_cfg in &config.publishers {
             match pub_cfg.type_name.as_str() {
-                TOPIC_JOINT_STATES => s.joint_states = true,
-                TOPIC_IMU => s.imu = true,
-                TOPIC_EE_POSE => s.ee_pose = true,
-                TOPIC_TF_TREE => s.tf_tree = true,
-                TOPIC_CLOCK => s.clock = true,
-                TOPIC_ODOMETRY => s.odometry = true,
-                TOPIC_WRENCH => s.wrench = true,
-                TOPIC_CONTACT_FORCES => s.contact_forces = true,
-                TOPIC_GRIPPER_STATE => s.gripper_state = true,
+                "joint_states" => s.joint_states = true,
+                "imu" => s.imu = true,
+                "ee_pose" => s.ee_pose = true,
+                "tf_tree" => s.tf_tree = true,
+                "clock" => s.clock = true,
+                "odometry" => s.odometry = true,
+                "wrench" => s.wrench = true,
+                "contact_forces" => s.contact_forces = true,
+                "gripper_state" => s.gripper_state = true,
                 unknown => tracing::warn!("unknown publisher type '{unknown}' in config — skipped"),
             }
         }
