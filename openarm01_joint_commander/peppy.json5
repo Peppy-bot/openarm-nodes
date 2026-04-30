@@ -49,7 +49,9 @@
     topics: {
       consumes: [
         { local_node_id: "openarm01_backbone", name: "joint_states" },
-        { local_node_id: "openarm01_backbone", name: "controller/status" },
+        // TODO: Uncomment when a producer for 'controller/status' is available. 
+        // Currently commented out to resolve a manifest mismatch error.
+        // { local_node_id: "openarm01_backbone", name: "controller/status" },
       ]
     },
     actions: {

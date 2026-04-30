@@ -97,6 +97,7 @@ class MujocoBackboneExtension:
         import mujoco  # pylint: disable=E0401
 
         mujoco.mj_step(self._model, self._data)
+        mujoco.mj_rnePostConstraint(self._model, self._data)
         self._step += 1
         for plugin in self._plugins:
             if not plugin.is_ready and not plugin.try_setup():

@@ -129,7 +129,8 @@ class BackboneExtension(omni.ext.IExt):  # pylint: disable=E0611,I1101
             self._sc_bridge.teardown()
         for plugin in self._plugins:
             plugin.teardown()
-        self._io.stop()
+        if getattr(self, "_io", None) is not None and hasattr(self._io, "stop"):
+            self._io.stop()
         gc.collect()
 
     def _on_timeline_event(self, event) -> None:

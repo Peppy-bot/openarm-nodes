@@ -30,7 +30,10 @@ async def _run_sim(_params, _node_runner) -> list:
 
 try:
     from peppylib.runtime import NodeBuilder, StandaloneConfig  # pylint: disable=E0401
-
+except ImportError:
+    # Fallback: run without peppy node lifecycle (no peppylib installed).
+    SimLauncher(_XML_PATH).run()
+else:
     builder = NodeBuilder()
     if not os.environ.get("PEPPY_RUNTIME_CONFIG"):
         # Local dev — build standalone config from daemon_state.json.
@@ -50,7 +53,3 @@ try:
         )
 
     builder.run(_run_sim)
-
-except ImportError:
-    # Fallback: run without peppy node lifecycle (no peppylib installed).
-    SimLauncher(_XML_PATH).run()

@@ -66,22 +66,13 @@ async fn handle_goal(
     let fb_tx_cb = fb_tx.clone();
 
     let fb_runner = runner.clone();
-    let fb_token = token.clone();
     let forwarder = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = fb_token.cancelled() => break,
-                maybe = fb_rx.recv() => match maybe {
-                    Some(fb) => {
-                        let _ = move_arm::send_feedback(&fb_runner, move_arm::Feedback {
-                            joint_positions: fb.data.joint_positions,
-                            current_ee_position: fb.data.current_ee_position,
-                            action_time: fb.data.action_time,
-                        }).await;
-                    }
-                    None => break,
-                }
-            }
+        while let Some(fb) = fb_rx.recv().await {
+            let _ = move_arm::send_feedback(&fb_runner, move_arm::Feedback {
+                joint_positions: fb.data.joint_positions,
+                current_ee_position: fb.data.current_ee_position,
+                action_time: fb.data.action_time,
+            }).await;
         }
     });
 
@@ -92,13 +83,15 @@ async fn handle_goal(
             // to ensure the physical arm stops when the token fires.
             drop(fb_tx);
             let _ = forwarder.await;
-            let _ = move_arm::send_result(&runner, move_arm::ActionResult {
+            if let Err(e) = move_arm::send_result(&runner, move_arm::ActionResult {
                 success: false,
                 message: "cancelled".into(),
                 final_joint_positions: vec![],
                 final_ee_position: [0.0; 3],
                 action_time: 0.0,
-            }).await;
+            }).await {
+                tracing::warn!("failed to publish cancelled move_arm result: {e}");
+            }
             return;
         }
         result = arm_action::send_goal(
@@ -127,25 +120,29 @@ async fn handle_goal(
                 action_time = result.data.action_time,
                 "move_arm completed"
             );
-            let _ = move_arm::send_result(&runner, move_arm::ActionResult {
+            if let Err(e) = move_arm::send_result(&runner, move_arm::ActionResult {
                 success: result.data.success,
                 message: result.data.message,
                 final_joint_positions: result.data.final_joint_positions,
                 final_ee_position: result.data.final_ee_position,
                 action_time: result.data.action_time,
             })
-            .await;
+            .await {
+                tracing::warn!("failed to publish move_arm result: {e}");
+            }
         }
         Err(e) => {
             tracing::warn!("arm move_arm failed: {e}");
-            let _ = move_arm::send_result(&runner, move_arm::ActionResult {
+            if let Err(e) = move_arm::send_result(&runner, move_arm::ActionResult {
                 success: false,
                 message: format!("arm action failed: {e}"),
                 final_joint_positions: vec![],
                 final_ee_position: [0.0; 3],
                 action_time: 0.0,
             })
-            .await;
+            .await {
+                tracing::warn!("failed to publish failed move_arm result: {e}");
+            }
         }
     }
 }

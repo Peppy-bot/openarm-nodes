@@ -44,8 +44,13 @@ class IsaacContactSensor:
             from isaacsim.sensors.physics import ContactSensor  # pylint: disable=E0401
 
             stage = omni.usd.get_context().get_stage()
-            if stage and stage.GetPrimAtPath(self._prim_path).IsValid():
-                stage.RemovePrim(self._prim_path)
+            if stage:
+                prim = stage.GetPrimAtPath(self._prim_path)
+                if prim and prim.IsValid():
+                    if "Sensor" in prim.GetTypeName():
+                        stage.RemovePrim(self._prim_path)
+                    else:
+                        logger.warning(f"Prim at {self._prim_path} exists but is not a Sensor (type: '{prim.GetTypeName()}'). Not removing.")
 
             self._sensor = ContactSensor(
                 prim_path=self._prim_path,

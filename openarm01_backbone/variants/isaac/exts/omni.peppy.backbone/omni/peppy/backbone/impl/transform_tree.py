@@ -30,15 +30,19 @@ class IsaacTransformTree:
             stage = omni.usd.get_context().get_stage()
             body_names = set(self._articulation.body_names)
 
-            # Traverse the full stage to find each body prim regardless of nesting depth.
+            # Traverse the articulation subtree to find each body prim regardless of nesting depth.
             self._body_prim_paths = {}
             self._body_parents = {}
-            for prim in stage.Traverse():
-                name = prim.GetName()
-                if name in body_names and name not in self._body_prim_paths:
-                    self._body_prim_paths[name] = str(prim.GetPath())
-                    parent = prim.GetParent()
-                    self._body_parents[name] = parent.GetName() if parent and parent.IsValid() else "world"
+            root_prim = stage.GetPrimAtPath(self._prim_path)
+            if root_prim and root_prim.IsValid():
+                for prim in root_prim.Traverse():
+                    name = prim.GetName()
+                    if name in body_names and name not in self._body_prim_paths:
+                        self._body_prim_paths[name] = str(prim.GetPath())
+                        parent = prim.GetParent()
+                        self._body_parents[name] = parent.GetName() if parent and parent.IsValid() else "world"
+            else:
+                logger.warning(f"IsaacTransformTree: Articulation root prim not found at {self._prim_path}")
 
             missing = body_names - set(self._body_prim_paths)
             if missing:
