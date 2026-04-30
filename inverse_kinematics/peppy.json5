@@ -1,3 +1,17 @@
+// Stub — inverse kinematics node (not yet implemented).
+// Name is "inverse_kinematic" (no 's') to match backbone depends_on declaration.
 {
   schema_version: 1,
+  manifest: {
+    name: "inverse_kinematic",
+    tag: "0.1.0",
+    variants: [
+      {
+        name: "default",
+        source: {
+          local: "./variants/default"
+        }
+      }
+    ]
+  },
 }

@@ -1,3 +1,16 @@
+// Stub — collision detection node (not yet implemented).
 {
   schema_version: 1,
+  manifest: {
+    name: "collisions_detection",
+    tag: "0.1.0",
+    variants: [
+      {
+        name: "default",
+        source: {
+          local: "./variants/default"
+        }
+      }
+    ]
+  },
 }

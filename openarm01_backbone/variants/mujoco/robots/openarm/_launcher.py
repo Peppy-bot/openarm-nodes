@@ -13,13 +13,16 @@ _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
 _EXT_ROOT_ENV = "PEPPY_MUJOCO_EXT_ROOT"
 _UVC_EXT_ROOT_ENV = "PEPPY_UVC_CAMERA_EXT_ROOT"
 
-_NODES_ROOT = Path(__file__).resolve().parents[5]
+_LAUNCHER_PARENTS = Path(__file__).resolve().parents
+_NODES_ROOT = _LAUNCHER_PARENTS[5] if len(_LAUNCHER_PARENTS) > 5 else None
 
 _DEFAULT_EXT_ROOT = (
     Path(__file__).resolve().parents[3] / "exts" / "mujoco.peppy.backbone"
 )
 _DEFAULT_UVC_EXT_ROOT = (
     _NODES_ROOT / "uvc_camera" / "variants" / "mujoco" / "exts" / "mujoco.peppy.uvc_camera"
+    if _NODES_ROOT is not None
+    else None
 )
 
 
@@ -46,23 +49,33 @@ class SimLauncher:
         data = mujoco.MjData(model)
 
         backbone_ext_root = Path(os.environ.get(_EXT_ROOT_ENV, str(_DEFAULT_EXT_ROOT)))
-        uvc_ext_root = Path(os.environ.get(_UVC_EXT_ROOT_ENV, str(_DEFAULT_UVC_EXT_ROOT)))
-
         sys.path.insert(0, str(backbone_ext_root))
-        sys.path.insert(0, str(uvc_ext_root))
 
         from peppy_mujoco.backbone.extension import MujocoBackboneExtension  # pylint: disable=E0401
-        from peppy_mujoco.uvc_camera.extension import MujocoUvcCameraExtension  # pylint: disable=E0401
 
         backbone = MujocoBackboneExtension(model, data)
-        uvc = MujocoUvcCameraExtension(model, data)
-
         backbone.startup()
-        uvc.startup()
+
+        extensions = [backbone]
+
+        _uvc_env = os.environ.get(_UVC_EXT_ROOT_ENV)
+        _uvc_root = (
+            Path(_uvc_env) if _uvc_env
+            else (_DEFAULT_UVC_EXT_ROOT if _DEFAULT_UVC_EXT_ROOT is not None else None)
+        )
+        if _uvc_root is not None and _uvc_root.is_dir():
+            sys.path.insert(0, str(_uvc_root))
+            try:
+                from peppy_mujoco.uvc_camera.extension import MujocoUvcCameraExtension  # pylint: disable=E0401
+                uvc = MujocoUvcCameraExtension(model, data)
+                uvc.startup()
+                extensions.append(uvc)
+            except ImportError:
+                logger.warning("uvc_camera extension not available — skipping.")
+        else:
+            logger.info("uvc_camera extension not found — skipping.")
 
         logger.info("Simulation running — Press Ctrl-C to stop.")
-
-        extensions = [backbone, uvc]
 
         if self._headless:
             self._run_headless(model, backbone, extensions)

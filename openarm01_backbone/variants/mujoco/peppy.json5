@@ -1,1 +1,25 @@
-{ schema_version: 1 }
+{
+  schema_version: 1,
+  manifest: {
+    name: "openarm01_backbone",
+    tag: "0.1.0",
+  },
+  execution: {
+    language: "python",
+    container: {
+      def_file: "apptainer.def",
+      mount_paths: [
+        // variant dir → /opt/mujoco_backbone (exts, robots, config, .peppy/libs)
+        "${parameters:node_root}:/opt/mujoco_backbone:ro",
+        // nodes_shared_code → /opt/nodes_shared_code (sim_ext_core)
+        "${parameters:nodes_shared_code}:/opt/nodes_shared_code:ro",
+      ]
+    },
+    parameters: {
+      // Absolute path to variants/mujoco/ of this node
+      node_root: "string",
+      // Absolute path to nodes_shared_code/ repo root
+      nodes_shared_code: "string",
+    }
+  }
+}
