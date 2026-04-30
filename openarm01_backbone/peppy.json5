@@ -9,7 +9,7 @@
     depends_on: {
       nodes: [
         {
-          name: "inverse_kinematic",
+          name: "inverse_kinematics",
           tag: "0.1.0",
           local_id: "ik"
         },
