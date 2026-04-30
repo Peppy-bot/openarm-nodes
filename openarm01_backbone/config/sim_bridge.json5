@@ -2,7 +2,7 @@
 // For sim variants set PEPPY_BRIDGE_PRESET=isaac_openarm or mujoco_openarm.
 // For the real (default) variant this file is unused.
 {
-  "sim_node": "sim",
-  "publishers": [],
-  "subscribers": []
+  sim_node: "sim",
+  publishers: [],
+  subscribers: []
 }
