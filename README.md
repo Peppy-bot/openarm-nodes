@@ -15,17 +15,29 @@ openarm01_backbone/variants/mujoco/robots/openarm/openarm/assets/
   meshes/
 ```
 
-Register, build, and run:
+Register all dependency nodes first (`peppy node sync` requires them in the stack).
+For each dependency, run `peppy node sync` then `peppy node add .` from its directory:
 
 ```bash
 # From openarm01_nodes/
-peppy node add openarm01_backbone --variant mujoco
-peppy node build openarm01_backbone --variant mujoco
+cd collisions_detection  && peppy node sync && peppy node add . && cd ..
+cd inverse_kinematics    && peppy node sync && peppy node add . && cd ..
+cd openarm01_arm         && peppy node sync && peppy node add . && cd ..
+cd openarm01_gripper     && peppy node sync && peppy node add . && cd ..
+```
 
-# Run (headless recommended for containers)
+Then register, sync, build, and run backbone:
+
+```bash
+cd openarm01_backbone
+peppy node sync
+peppy node add . --variant mujoco
+peppy node build openarm01_backbone:0.1.0
+
+# Run from anywhere (headless recommended for containers)
 PEPPY_BRIDGE_HEADLESS=1 peppy node run openarm01_backbone:0.1.0 \
-  node_root=<abs-path-to>/openarm01_backbone/variants/mujoco \
-  nodes_shared_code=<abs-path-to>/nodes_shared_code
+  node_root=/abs/path/to/openarm01_nodes/openarm01_backbone/variants/mujoco \
+  nodes_shared_code=/abs/path/to/nodes_shared_code
 ```
 
 ### Runtime parameters
@@ -41,3 +53,7 @@ PEPPY_BRIDGE_HEADLESS=1 peppy node run openarm01_backbone:0.1.0 \
 |------------------------|------------------|--------------------------------------|
 | `PEPPY_BRIDGE_HEADLESS`| `0`              | Set to `1` to run without a viewer   |
 | `PEPPY_BRIDGE_PRESET`  | `mujoco_openarm` | Preset config name under `config/presets/` |
+
+## Isaac Sim variant
+
+> **TODO:** The Isaac variant (`variants/isaac/`) has the extension scaffold in place. Update this section once the Isaac variant is validated.
