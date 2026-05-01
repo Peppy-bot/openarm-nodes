@@ -138,7 +138,7 @@
           }
         },
         {
-          name: "imu",
+          name: "imu_left",
           qos_profile: "sensor_data",
           message_format: {
             robot: "string",
@@ -150,7 +150,30 @@
           }
         },
         {
-          name: "ee_pose",
+          name: "imu_right",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            angular_velocity: { $type: "array", $items: "f64", $length: 3 },
+            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
+            stamp: "f64"
+          }
+        },
+        {
+          name: "ee_pose_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            position: { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            stamp: "f64"
+          }
+        },
+        {
+          name: "ee_pose_right",
           qos_profile: "sensor_data",
           message_format: {
             robot: "string",
@@ -212,7 +235,7 @@
           }
         },
         {
-          name: "contact_forces",
+          name: "contact_forces_left_finger1",
           qos_profile: "sensor_data",
           message_format: {
             robot: "string",
@@ -230,7 +253,73 @@
           }
         },
         {
-          name: "gripper_state",
+          name: "contact_forces_left_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                body1: "string",
+                body2: "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force: { $type: "array", $items: "f64", $length: 3 }
+              }
+            },
+            stamp: "f64"
+          }
+        },
+        {
+          name: "contact_forces_right_finger1",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                body1: "string",
+                body2: "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force: { $type: "array", $items: "f64", $length: 3 }
+              }
+            },
+            stamp: "f64"
+          }
+        },
+        {
+          name: "contact_forces_right_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                body1: "string",
+                body2: "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force: { $type: "array", $items: "f64", $length: 3 }
+              }
+            },
+            stamp: "f64"
+          }
+        },
+        {
+          name: "gripper_state_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            joint_names: { $type: "array", $items: "string" },
+            positions: { $type: "array", $items: "f64" },
+            applied_forces: { $type: "array", $items: "f64" },
+            stamp: "f64"
+          }
+        },
+        {
+          name: "gripper_state_right",
           qos_profile: "sensor_data",
           message_format: {
             robot: "string",
