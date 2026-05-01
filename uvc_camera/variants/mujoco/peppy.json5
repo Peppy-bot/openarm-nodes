@@ -1,0 +1,11 @@
+{
+  schema_version: 1,
+  // Stub — real implementation is on feat/aaqib/sim-uvc-camera.
+  // Minimal content so `peppy node add .` succeeds for dependency resolution.
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    }
+  }
+}

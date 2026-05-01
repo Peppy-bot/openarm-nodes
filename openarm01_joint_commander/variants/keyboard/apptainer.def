@@ -9,11 +9,7 @@ From: tuatini/peppy-rust-cargo-base:latest
     export PATH="/root/.cargo/bin:$PATH"
 
 %files
-    src /opt/joint_commander/src
-    Cargo.toml /opt/joint_commander/Cargo.toml
-    Cargo.lock /opt/joint_commander/Cargo.lock
-    config /opt/joint_commander/config
-    .peppy /opt/joint_commander/.peppy
+    . /opt/joint_commander
 
 %post
     set -eux

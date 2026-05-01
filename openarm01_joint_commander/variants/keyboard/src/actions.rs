@@ -66,32 +66,55 @@ async fn send_move_arm(
     config: &ArmConfig,
     target: CartesianTarget,
 ) {
-    use peppygen::consumed_actions::move_arm;
+    use peppygen::consumed_actions::openarm01_backbone_move_arm as move_arm;
+    use peppylib::config::QoSProfile;
+    use std::time::Duration;
 
     let pos = target.as_array();
 
     info!(arm = %config.label, x = pos[0], y = pos[1], z = pos[2], "move_arm: sending goal");
 
-    let result = move_arm::send_goal(
+    let mut handle = match move_arm::ActionHandle::fire_goal(
         runner,
-        move_arm::Goal {
+        Duration::from_secs(5),
+        None,
+        None,
+        move_arm::GoalRequest {
             feedback_frequency: FEEDBACK_FREQUENCY,
             desired_position: pos,
             desired_orientation: FIXED_ORIENTATION,
         },
-        |fb: move_arm::Feedback| {
-            let ee = fb.data.current_ee_position;
-            info!(x = ee[0], y = ee[1], z = ee[2], t = fb.data.action_time, "move_arm: feedback");
-        },
+        QoSProfile::SensorData,
     )
-    .await;
+    .await
+    {
+        Ok(h) if h.data.accepted => h,
+        Ok(_) => {
+            tracing::warn!("move_arm: goal rejected by backbone");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("move_arm: fire_goal failed — {e}");
+            return;
+        }
+    };
 
-    match result {
+    loop {
+        match handle.on_next_feedback_message().await {
+            Ok(fb) => {
+                let ee = fb.current_ee_position;
+                info!(x = ee[0], y = ee[1], z = ee[2], t = fb.action_time, "move_arm: feedback");
+            }
+            Err(_) => break,
+        }
+    }
+
+    match handle.get_result(Duration::from_secs(30)).await {
         Ok(r) => info!(
             success = r.data.success,
             action_time = r.data.action_time,
             "move_arm: done"
         ),
-        Err(e) => tracing::warn!("move_arm: failed — {e}"),
+        Err(e) => tracing::warn!("move_arm: get_result failed — {e}"),
     }
 }
