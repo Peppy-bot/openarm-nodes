@@ -30,6 +30,7 @@ From: nvcr.io/nvidia/isaac-sim:5.1.0
     && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         rclone \
     && rm -rf /var/lib/apt/lists/*
+    /isaac-sim/python.sh -m pip install --no-cache-dir pyjson5
 
 %runscript
     cd /isaac-sim

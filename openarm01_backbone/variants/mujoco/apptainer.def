@@ -49,7 +49,8 @@ From: python:3.11-slim
     pip install --no-cache-dir \
         mujoco \
         numpy \
-        pycapnp
+        pycapnp \
+        pyjson5
 
 %runscript
     cd /opt/mujoco_backbone
@@ -61,9 +62,5 @@ From: python:3.11-slim
         exit 1
     fi
     export PEPPY_BRIDGE_CONFIG_PATH="${_CONFIG}"
-    _LAUNCH=$(python3 -c "
-import json, re, sys
-cfg = json.loads(re.sub(r'//[^\n]*', '', open(sys.argv[1]).read()))
-print(cfg['robot']['launch'])
-" "${_CONFIG}" 2>/dev/null) || _LAUNCH="robots/openarm/openarm/launch.py"
+    _LAUNCH=$(python3 -c "import pyjson5, sys; cfg = pyjson5.load(open(sys.argv[1])); print(cfg['robot']['launch'])" "${_CONFIG}" 2>/dev/null) || _LAUNCH="robots/openarm/openarm/launch.py"
     exec python3 /opt/mujoco_backbone/${_LAUNCH} "$@"

@@ -91,4 +91,4 @@ peppy node run openarm01_backbone:0.1.0 \
 |---------------------------|---------------------------------------|----------------------------------------------------|
 | `PEPPY_BRIDGE_HEADLESS`   | `0`                                   | Set to `1` to run without a viewer                 |
 | `PEPPY_BRIDGE_PRESET`     | `isaac_openarm`                       | Preset config name under `config/presets/`         |
-| `PEPPY_ROBOT_ASSETS_DIR`  | `/opt/robot_assets/openarm/isaac`     | Path to the directory containing the USD and config|
+| `PEPPY_ROBOT_ASSETS_DIR`  | `/opt/robot_assets/openarm/isaac`     | Path to the directory containing the USD and config|n
