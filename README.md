@@ -34,9 +34,14 @@ peppy node sync
 peppy node add . --variant mujoco
 peppy node build openarm01_backbone:0.1.0
 
-# Run from anywhere (headless recommended for containers)
+# GUI
+peppy node run openarm01_backbone:0.1.0 \
+  node_root=/abs/path/to/openarm01_backbone/variants/mujoco \
+  nodes_shared_code=/abs/path/to/nodes_shared_code
+
+# Headless
 PEPPY_BRIDGE_HEADLESS=1 peppy node run openarm01_backbone:0.1.0 \
-  node_root=/abs/path/to/openarm01_nodes/openarm01_backbone/variants/mujoco \
+  node_root=/abs/path/to/openarm01_backbone/variants/mujoco \
   nodes_shared_code=/abs/path/to/nodes_shared_code
 ```
 

@@ -10,6 +10,8 @@ From: python:3.11-slim
     export PYTHONPATH="/opt/peppy_python:/opt/mujoco_backbone/exts/mujoco.peppy.backbone:/opt/nodes_shared_code:/opt/mujoco_backbone/.peppy/libs/peppygen:$HOME/.peppy/libs/python:$PYTHONPATH"
     export PEPPY_BRIDGE_HEADLESS=${PEPPY_BRIDGE_HEADLESS:-0}
     export PEPPY_BRIDGE_NODE_NAME=sim
+    export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+    export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 
 # All assets (exts, robots, config, peppy.json5) are bind-mounted
 # at runtime via mount_paths in peppy.json5 — nothing to copy at build time.
@@ -25,6 +27,12 @@ From: python:3.11-slim
         libglib2.0-0 \
         libgomp1 \
         libosmesa6 \
+        libwayland-client0 \
+        libwayland-cursor0 \
+        libwayland-egl1 \
+        libxkbcommon0 \
+        libegl1 \
+        libegl-mesa0 \
         ca-certificates
     rm -rf /var/lib/apt/lists/*
     pip install --no-cache-dir \

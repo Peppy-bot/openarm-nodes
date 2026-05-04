@@ -3,7 +3,25 @@
   execution: {
     language: "python",
     container: {
-      def_file: "apptainer.def"
+      def_file: "apptainer.def",
+      apptainer_run_extra_args: ["--nv"],
+      mount_paths: [
+        "${parameters:node_root}:/opt/isaac_backbone:ro",
+        "${parameters:nodes_shared_code}:/opt/nodes_shared_code:ro",
+        "/run/user:/run/user:ro",
+        "/isaac-sim/kit/cache:/isaac-sim/kit/cache:rw",
+        "${parameters:home_dir}/.cache/ov:${parameters:home_dir}/.cache/ov:rw",
+        "${parameters:home_dir}/.cache/pip:${parameters:home_dir}/.cache/pip:rw",
+        "${parameters:home_dir}/.cache/nvidia:${parameters:home_dir}/.cache/nvidia:rw",
+        "${parameters:home_dir}/.nv:${parameters:home_dir}/.nv:rw",
+        "${parameters:home_dir}/.nvidia-omniverse:${parameters:home_dir}/.nvidia-omniverse:rw",
+        "${parameters:home_dir}/.local/share/ov:${parameters:home_dir}/.local/share/ov:rw",
+      ]
+    },
+    parameters: {
+      node_root: "string",
+      nodes_shared_code: "string",
+      home_dir: "string",
     }
   }
 }

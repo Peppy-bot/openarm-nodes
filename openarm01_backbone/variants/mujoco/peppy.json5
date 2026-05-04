@@ -13,6 +13,8 @@
         "${parameters:node_root}:/opt/mujoco_backbone:ro",
         // nodes_shared_code → /opt/nodes_shared_code (sim_ext_core)
         "${parameters:nodes_shared_code}:/opt/nodes_shared_code:ro",
+        // user runtime dir — covers Wayland socket for any user (GUI mode)
+        "/run/user:/run/user:ro",
       ]
     },
     parameters: {
