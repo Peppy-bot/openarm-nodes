@@ -11,9 +11,27 @@ From: nvcr.io/nvidia/isaac-sim:5.1.0
     export PEPPY_BRIDGE_HEADLESS=${PEPPY_BRIDGE_HEADLESS:-0}
     export PEPPY_BRIDGE_NODE_NAME=sim
     export DISPLAY=${DISPLAY:-:1}
+    export PEPPY_ROBOT_ASSETS_DIR=/opt/robot_assets/openarm/isaac
 
-# Shared assets are bind-mounted at runtime via mount_paths in peppy.json5.
 %files
+
+%post
+    set -eux
+    apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
+        rclone \
+    && rm -rf /var/lib/apt/lists/*
+    mkdir -p /opt/robot_assets/openarm/isaac
+    if [ -n "${RCLONE_S3_ACCESS_KEY_ID:-}" ] && [ -n "${RCLONE_S3_SECRET_ACCESS_KEY:-}" ]; then
+        RCLONE_CONFIG_R2_TYPE=s3 \
+        RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
+        RCLONE_CONFIG_R2_ACCESS_KEY_ID="${RCLONE_S3_ACCESS_KEY_ID}" \
+        RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY}" \
+        RCLONE_CONFIG_R2_ENDPOINT="https://b9abcee11c090aef5279f874ff078826.r2.cloudflarestorage.com" \
+        rclone copy r2:peppy-data01/openarm01/isaac/assets/ /opt/robot_assets/openarm/isaac/ --progress
+    else
+        echo "WARNING: R2 credentials not set — assets not baked into SIF; set PEPPY_ROBOT_ASSETS_DIR at runtime" >&2
+    fi
 
 %runscript
     cd /isaac-sim

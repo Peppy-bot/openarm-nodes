@@ -12,7 +12,8 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
 )
 
-_USD_PATH = Path(__file__).parent / "assets" / "openarm_bimanual.usd"
+_ASSETS_DIR = Path(os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets")))
+_USD_PATH = _ASSETS_DIR / "openarm_bimanual.usd"
 _EXT_ROOT = Path(__file__).resolve().parents[3] / "exts"
 _ROBOTS_DIR = Path(__file__).resolve().parents[2]
 

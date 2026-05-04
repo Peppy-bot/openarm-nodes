@@ -14,7 +14,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_XML_PATH = Path(__file__).parent / "assets" / "openarm_bimanual.xml"
+_ASSETS_DIR = Path(os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets")))
+_XML_PATH = _ASSETS_DIR / "openarm_bimanual.xml"
 _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 
 os.environ["PEPPY_BRIDGE_NODE_NAME"] = "sim"
