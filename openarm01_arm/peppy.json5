@@ -2,7 +2,7 @@
 // This is a root component node — openarm01_backbone depends on it, not the other way around.
 // It is a "stupid" node that relays safe joint position commands from openarm01_backbone to either the real robot or the sims.
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_arm",
     tag: "0.1.0",

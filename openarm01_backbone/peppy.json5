@@ -1,6 +1,6 @@
 // This node will expose actions to move the arms from openarm01_joint_commander and will ensure the arms do not collide with the `collisions_detection` node before transmiting them to either the isaac/mujoco variants or the real robot
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_backbone",
     tag: "0.1.0",

@@ -1,7 +1,7 @@
 // This node sends controls for each arm of the OpenArm01 robot, those controls can emanate from the TUI or from a pose estimation algorithm
 // Since the controls are specific to the openarm01 robot, we prefix the node with `openarm01_*`
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_joint_commander",
     tag: "0.1.0",
@@ -48,8 +48,14 @@
   interfaces: {
     topics: {
       consumes: [
-        { local_node_id: "openarm01_backbone", name: "joint_states" },
-        { local_node_id: "openarm01_backbone", name: "controller/status" },
+        {
+          local_node_id: "openarm01_backbone",
+          name: "joint_states"
+        },
+        {
+          local_node_id: "openarm01_backbone",
+          name: "controller/status"
+        },
       ]
     },
     actions: {
