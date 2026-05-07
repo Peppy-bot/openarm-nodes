@@ -1,0 +1,65 @@
+// ROOT node — owns sim/real abstraction for the gripper
+// 2 instances at runtime: left_gripper, right_gripper
+// gripper_id in execution.parameters tells backbone which side this is
+{
+  schema_version: 1,
+  manifest: {
+    name: "openarm01_gripper",
+    tag: "0.1.0",
+    // NO depends_on — pure ROOT
+    variants: [
+      { name: "default", source: { local: "./variants/real"   } },
+      { name: "isaac",   source: { local: "./variants/isaac"  } },
+      { name: "mujoco",  source: { local: "./variants/mujoco" } },
+    ],
+  },
+  interfaces: {
+    services: {
+      exposes: [
+        {
+          name: "get_gripper_id",
+          response_message_format: {
+            gripper_id: "u8",
+          },
+        },
+      ],
+    },
+    actions: {
+      exposes: [
+        {
+          name: "move_gripper",
+          goal_service: {
+            request_message_format: {
+              feedback_frequency: "u32",
+              desired_position:   { $type: "array", $items: "f64", $length: 3 },
+            },
+            response_message_format: {
+              accepted: "bool",
+            },
+          },
+          feedback_topic: {
+            qos_profile: "sensor_data",
+            message_format: {
+              joint_positions: { $type: "array", $items: "f64" },
+              action_time:     "f64",
+            },
+          },
+          result_service: {
+            response_message_format: {
+              success:               "bool",
+              message:               "string",
+              final_joint_positions: { $type: "array", $items: "f64" },
+              action_time:           "f64",
+            },
+          },
+        },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    parameters: {
+      gripper_id: "u8", // 0 = left, 1 = right
+    },
+  },
+}

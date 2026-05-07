@@ -1,0 +1,104 @@
+// ORCHESTRATOR node — sim/real AGNOSTIC, NO variants
+// Responsibilities:
+//   1. Poll robot_initializer.is_ready at startup and wait
+//   2. Discover arm/gripper IDs via get_arm_id / get_gripper_id
+//   3. Receive move_arm action from joint_commander
+//   4. Call IK → call collision check → forward safe joint cmd to arm via move_arm action
+//   5. Re-emit arm feedback topics to joint_commander (consumed via local_node_id)
+//
+// This node NEVER touches sim code. It doesn't know if isaac, mujoco, or real is running.
+{
+  schema_version: 1,
+  manifest: {
+    name: "openarm01_backbone",
+    tag: "0.1.0",
+    // NO variants — sim/real agnostic
+    depends_on: {
+      nodes: [
+        { name: "openarm01_robot_initializer", tag: "0.1.0", local_id: "robot_initializer"   },
+        { name: "inverse_kinematics",          tag: "0.1.0", local_id: "inverse_kinematics"  },
+        { name: "collisions_detection",        tag: "0.1.0", local_id: "collisions_detection" },
+        { name: "openarm01_arm",               tag: "0.1.0", local_id: "openarm01_arm"        },
+        { name: "openarm01_gripper",           tag: "0.1.0", local_id: "openarm01_gripper"    },
+      ],
+    },
+  },
+  interfaces: {
+    services: {
+      consumes: [
+        // --- Startup handshake ---
+        { local_node_id: "robot_initializer",   name: "is_ready"           },
+        // --- Discover arm/gripper side ---
+        { local_node_id: "openarm01_arm",       name: "get_arm_id"         },
+        { local_node_id: "openarm01_gripper",   name: "get_gripper_id"     },
+        // --- Safety pipeline ---
+        { local_node_id: "inverse_kinematics",  name: "solve_ik"           },
+        { local_node_id: "collisions_detection", name: "check_collisions"  },
+      ],
+    },
+    actions: {
+      exposes: [
+        // Exposed upward to joint_commander — same signature as arm's move_arm
+        {
+          name: "move_arm",
+          goal_service: {
+            request_message_format: {
+              feedback_frequency:  "u32",
+              desired_position:    { $type: "array", $items: "f64", $length: 3 },
+              desired_orientation: { $type: "array", $items: "f64", $length: 4 },
+            },
+            response_message_format: { accepted: "bool" },
+          },
+          feedback_topic: {
+            qos_profile: "sensor_data",
+            message_format: {
+              joint_positions:     { $type: "array", $items: "f64" },
+              current_ee_position: { $type: "array", $items: "f64", $length: 3 },
+              action_time:         "f64",
+            },
+          },
+          result_service: {
+            response_message_format: {
+              success:               "bool",
+              message:               "string",
+              final_joint_positions: { $type: "array", $items: "f64" },
+              final_ee_position:     { $type: "array", $items: "f64", $length: 3 },
+              action_time:           "f64",
+            },
+          },
+        },
+      ],
+      consumes: [
+        // Fires move_arm down to each arm instance
+        { local_node_id: "openarm01_arm",     name: "move_arm"     },
+        // Fires move_gripper down to each gripper instance
+        { local_node_id: "openarm01_gripper", name: "move_gripper" },
+      ],
+    },
+    topics: {
+      consumes: [
+        // Arm feedback — consumed by backbone so it can relay to joint_commander and track state
+        { local_node_id: "openarm01_arm", name: "joint_states"               },
+        { local_node_id: "openarm01_arm", name: "imu_left"                   },
+        { local_node_id: "openarm01_arm", name: "imu_right"                  },
+        { local_node_id: "openarm01_arm", name: "ee_pose_left"               },
+        { local_node_id: "openarm01_arm", name: "ee_pose_right"              },
+        { local_node_id: "openarm01_arm", name: "tf_tree"                    },
+        { local_node_id: "openarm01_arm", name: "clock"                      },
+        { local_node_id: "openarm01_arm", name: "odometry"                   },
+        { local_node_id: "openarm01_arm", name: "wrench"                     },
+        { local_node_id: "openarm01_arm", name: "contact_forces_left_finger1" },
+        { local_node_id: "openarm01_arm", name: "contact_forces_left_finger2" },
+        { local_node_id: "openarm01_arm", name: "contact_forces_right_finger1" },
+        { local_node_id: "openarm01_arm", name: "contact_forces_right_finger2" },
+        { local_node_id: "openarm01_arm", name: "gripper_state_left"          },
+        { local_node_id: "openarm01_arm", name: "gripper_state_right"         },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    build_cmd: ["cargo", "build", "--release"],
+    run_cmd:   ["./target/release/openarm01_backbone"],
+  },
+}

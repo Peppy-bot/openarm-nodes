@@ -1,0 +1,81 @@
+// REAL ROBOT launcher
+// openarm01_robot_initializer default variant = no-op, is_ready always returns true
+// All component nodes use default (real hardware) variants
+// peppy_schema: "launcher_v1" — requires peppy v0.9.0+
+{
+  peppy_schema: "launcher_v1",
+  deployments: [
+    // ── Safety / IK (always same, no variants) ─────────────────────────────
+    {
+      source: { name: "collisions_detection:0.1.0" },
+      instances: [
+        { instance_id: "collisions", arguments: {} }
+      ],
+    },
+    {
+      source: { name: "inverse_kinematics:0.1.0" },
+      instances: [
+        { instance_id: "ik", arguments: {} }
+      ],
+    },
+
+    // ── Robot initializer — default (no-op), is_ready always true ──────────
+    {
+      source: {
+        name: "openarm01_robot_initializer:0.1.0",
+        variant: { name: "default" }    // no-op: does health checks, returns ready: true
+      },
+      instances: [
+        { instance_id: "robot_init", arguments: {} }
+      ],
+    },
+
+    // ── Depth cameras — realsense_d435 (torso), realsense_d405 (wrists) ────
+    // NOTE: PEPPYOS-83 — two different variants of same node in one launcher
+    //       is currently forbidden. Tracked at plane.so/peppy/browse/PEPPYOS-83
+    //       For now using d435 for torso only. d405 wrist cams added once fixed.
+    {
+      source: {
+        name: "depth_camera:0.1.0",
+        variant: { name: "realsense_d435" }
+      },
+      instances: [
+        { instance_id: "torso_front_camera", arguments: { device_path: "/dev/video0" } }
+      ],
+    },
+
+    // ── Arms — default variant = real hardware driver ───────────────────────
+    {
+      source: { name: "openarm01_arm:0.1.0" }, // default = real
+      instances: [
+        { instance_id: "left_arm",  arguments: { arm_id: 0 } },
+        { instance_id: "right_arm", arguments: { arm_id: 1 } },
+      ],
+    },
+
+    // ── Grippers — default variant = real hardware driver ──────────────────
+    {
+      source: { name: "openarm01_gripper:0.1.0" }, // default = real
+      instances: [
+        { instance_id: "left_gripper",  arguments: { gripper_id: 0 } },
+        { instance_id: "right_gripper", arguments: { gripper_id: 1 } },
+      ],
+    },
+
+    // ── Backbone — no variants, always same ────────────────────────────────
+    {
+      source: { name: "openarm01_backbone:0.1.0" },
+      instances: [
+        { instance_id: "backbone", arguments: {} }
+      ],
+    },
+
+    // ── Joint commander ────────────────────────────────────────────────────
+    {
+      source: { name: "openarm01_joint_commander:0.1.0" },
+      instances: [
+        { instance_id: "commander", arguments: {} }
+      ],
+    },
+  ],
+}

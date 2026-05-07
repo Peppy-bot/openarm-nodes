@@ -1,0 +1,38 @@
+// ROOT node — stateless IK solver
+// backbone calls solve_ik with target EE pose + arm_id, gets back safe joint positions
+{
+  schema_version: 1,
+  manifest: {
+    name: "inverse_kinematics",
+    tag: "0.1.0",
+    // NO depends_on — pure ROOT
+  },
+  interfaces: {
+    services: {
+      exposes: [
+        {
+          name: "solve_ik",
+          request_message_format: {
+            arm_id:             "u8",
+            target_position:    { $type: "array", $items: "f64", $length: 3 },
+            target_orientation: { $type: "array", $items: "f64", $length: 4 },
+            current_joints:     { $type: "array", $items: "f64" }, // seed for IK solver
+          },
+          response_message_format: {
+            success:         "bool",
+            joint_positions: { $type: "array", $items: "f64" },
+            error_msg: {
+              $type:     "string",
+              $optional: true,
+            },
+          },
+        },
+      ],
+    },
+  },
+  execution: {
+    language: "python",
+    build_cmd: ["uv", "sync"],
+    run_cmd:   [".venv/bin/python", "-m", "inverse_kinematics"],
+  },
+}

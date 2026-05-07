@@ -1,0 +1,51 @@
+// TOP-LEVEL node — sends cartesian move_arm goals to backbone
+// keyboard variant: TUI input
+// pose_estimation variant: reads depth_camera video_stream, computes pose → fires move_arm
+//
+// joint_commander gets joint_states from arm via EXTERNAL consumed topic
+// (no depends_on on arm — arm is not in joint_commander's dep graph, only backbone is)
+{
+  schema_version: 1,
+  manifest: {
+    name: "openarm01_joint_commander",
+    tag: "0.1.0",
+    depends_on: {
+      nodes: [
+        { name: "openarm01_backbone", tag: "0.1.0", local_id: "openarm01_backbone" },
+        { name: "depth_camera",       tag: "0.1.0", local_id: "depth_camera"       },
+      ],
+    },
+    variants: [
+      { name: "default",          source: { local: "./variants/keyboard"        } }, // TUI keyboard
+      { name: "pose_estimation",  source: { local: "./variants/pose_estimation" } }, // vision-based
+    ],
+  },
+  interfaces: {
+    actions: {
+      consumes: [
+        // Fires move_arm goals to backbone
+        { local_node_id: "openarm01_backbone", name: "move_arm" },
+      ],
+    },
+    topics: {
+      consumes: [
+        // --- From backbone (linked) ---
+        // joint_states for TUI display — backbone consumes arm's joint_states so this works
+        // NOTE: backbone doesn't re-emit joint_states as a topic.
+        // joint_commander reads it as external consumed topic directly from arm.
+
+        // --- From depth_camera (linked) ---
+        // pose_estimation variant only — keyboard variant ignores this
+        { local_node_id: "depth_camera", name: "video_stream" },
+      ],
+      // External consumed topic — joint_commander reads arm's joint_states without depending on arm
+      // (arm is a ROOT, no circular dep risk — this avoids backbone having to re-emit the topic)
+      // defined inline because there's no local_node_id
+    },
+  },
+  execution: {
+    language: "rust",
+    build_cmd: ["cargo", "build", "--release"],
+    run_cmd:   ["./target/release/openarm01_joint_commander"],
+  },
+}

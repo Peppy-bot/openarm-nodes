@@ -1,0 +1,171 @@
+digraph openarm01 {
+  rankdir=TB;
+  nodesep=0.7;
+  ranksep=1.0;
+  fontname="Helvetica";
+  fontsize=14;
+  bgcolor="#F8F9FA";
+  splines=polyline;
+
+  node [fontname="Helvetica", fontsize=12, style="filled,rounded",
+        shape=box, margin="0.4,0.25", penwidth=2];
+  edge [fontname="Helvetica", fontsize=10, penwidth=1.8];
+
+  // ════════════════════════════════════════════════════════════════
+  // ROW 0 — LAUNCHERS  (top because they have no incoming edges)
+  // ════════════════════════════════════════════════════════════════
+  subgraph cluster_launchers {
+    label="Launchers";
+    fontname="Helvetica Bold"; fontsize=13; fontcolor="#1A1A1A";
+    style=filled; fillcolor="#EAF0FB"; color="#2471A3"; penwidth=2.5; margin=18;
+
+    launcher_real [
+      label="REAL ROBOT\nopenarm01_teleop.json5\n─────────────────────────────\nrobot_initializer   variant: default (no-op)     ×1\ndepth_camera        variant: realsense_d435       ×1\narm                 variant: default (real hw)    ×2\ngripper             variant: default (real hw)    ×2\nbackbone            (no variant)                  ×1\njoint_commander     variant: keyboard             ×1\nik + collisions     (no variant)                 ×1 each",
+      fillcolor="#D6EAF8", color="#1A5276", penwidth=2.5
+    ];
+
+    launcher_isaac [
+      label="ISAAC SIM\nopenarm01_teleop_isaac.json5\n─────────────────────────────\nrobot_initializer   variant: isaac               ×1\n                    spawns Isaac Sim, polls ready\ndepth_camera        variant: isaac               ×3\n                    torso · left_arm · right_arm\narm                 variant: isaac               ×2\ngripper             variant: isaac               ×2\nbackbone            (no variant)                 ×1\njoint_commander     variant: keyboard            ×1\nik + collisions     (no variant)                ×1 each",
+      fillcolor="#D5F5E3", color="#1E8449", penwidth=2.5
+    ];
+
+    launcher_mujoco [
+      label="MUJOCO SIM\nopenarm01_teleop_mujoco.json5\n─────────────────────────────\nrobot_initializer   variant: mujoco              ×1\n                    spawns MuJoCo, polls ready\ndepth_camera        variant: mujoco              ×3\n                    torso · left_arm · right_arm\narm                 variant: mujoco              ×2\ngripper             variant: mujoco              ×2\nbackbone            (no variant)                 ×1\njoint_commander     variant: keyboard            ×1\nik + collisions     (no variant)                ×1 each",
+      fillcolor="#FDECEA", color="#922B21", penwidth=2.5
+    ];
+
+    legend [
+      shape=box, style="filled,rounded",
+      fillcolor="#FFFFFF", color="#BDC3C7", penwidth=1.5, fontsize=11,
+      label="LEGEND\n─────────────────\n── depends_on\n┄┄ service call (dotted blue)\n━━ action (thick purple)\n╌╌ topic (dashed green)\n╌╌ EXT topic (no depends_on)"
+    ];
+    { rank=same; launcher_real; launcher_isaac; launcher_mujoco; legend; }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // ROW 1 — TOP-LEVEL CONTROLLER
+  // ════════════════════════════════════════════════════════════════
+  subgraph cluster_jc {
+    label="Command Interface";
+    fontname="Helvetica Bold"; fontsize=13; fontcolor="#7B241C";
+    style=filled; fillcolor="#FEF6F5"; color="#C0392B"; penwidth=2.5; margin=18;
+
+    joint_commander [
+      label="openarm01_joint_commander\n─────────────────────────────\nVariants:\n  keyboard (default)  TUI input → user types target pose\n  pose_estimation     reads video_stream from depth_camera,\n                      AprilTag/ArUco detection (OpenCV)\n                      publishes teleop/marker_pose (6DoF)\n                      + teleop/hand_pose (gripper signal)\nInstances: ×1  (commander)\n─────────────────────────────\nCONSUMES:\n  ACTION  move_arm       ← backbone\n  TOPIC   video_stream   ← depth_camera\n  TOPIC   joint_states   ← arm  [EXT — no depends_on on arm]",
+      fillcolor="#FADADD", color="#922B21", penwidth=3
+    ];
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // ROW 2 — ORCHESTRATION + VISION
+  // ════════════════════════════════════════════════════════════════
+  subgraph cluster_tier1 {
+    label="Backbone + Vision";
+    fontname="Helvetica Bold"; fontsize=13; fontcolor="#4A235A";
+    style=filled; fillcolor="#FAF5FF"; color="#7D3C98"; penwidth=2.5; margin=18;
+
+    backbone [
+      label="openarm01_backbone\n─────────────────────────────\nNO VARIANTS — sim/real agnostic   ×1  (backbone)\n─────────────────────────────\nEXPOSES:\n  ACTION  move_arm           → joint_commander\nCONSUMES:\n  ACTION  move_arm           → arm\n  ACTION  move_gripper       → gripper\n  SVC     is_ready           ← robot_initializer\n  SVC     get_arm_id         ← arm\n  SVC     get_gripper_id     ← gripper\n  SVC     solve_ik           ← inverse_kinematics\n  SVC     check_collisions   ← collisions_detection\n  TOPICS  (15)               ← arm",
+      fillcolor="#FEF9E7", color="#9A7D0A", penwidth=3
+    ];
+
+    depth_camera [
+      label="depth_camera\n─────────────────────────────\nVariants:\n  realsense_d435  |  realsense_d405\n  isaac  |  mujoco\nInstances: ×3  (torso_front · left_arm · right_arm)\n─────────────────────────────\nEMITS:\n  TOPIC  video_stream  (RGBA, sensor_data)\nEXPOSES:\n  SVC  video_stream_info\n  SVC  set_exposure · set_white_balance\n       set_gain · set_brightness · set_contrast",
+      fillcolor="#F5EEF8", color="#6C3483", penwidth=2
+    ];
+
+
+    { rank=same; backbone; depth_camera; }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // ROW 3 — HARDWARE ROOT NODES
+  // ════════════════════════════════════════════════════════════════
+  subgraph cluster_hw {
+    label="Component Nodes  —  no depends_on, each owns its own sim/real abstraction";
+    fontname="Helvetica Bold"; fontsize=13; fontcolor="#1A5276";
+    style=filled; fillcolor="#EAF4FB"; color="#2E86C1"; penwidth=2.5; margin=18;
+
+    robot_initializer [
+      label="openarm01_robot_initializer\n─────────────────────────────\nVariants: default  |  isaac  |  mujoco\nInstances: ×1  (robot_init)\n─────────────────────────────\ndefault → no-op, is_ready always true\nisaac   → spawns Isaac Sim, polls until loaded\nmujoco  → spawns MuJoCo,    polls until loaded\n─────────────────────────────\nEXPOSES:\n  SVC  is_ready  →  { ready: bool }",
+      fillcolor="#AED6F1", color="#1A5276"
+    ];
+
+    arm [
+      label="openarm01_arm\n─────────────────────────────\nVariants: real (default)  |  isaac  |  mujoco\nInstances: ×2  (left_arm · right_arm)\n─────────────────────────────\nEXPOSES:\n  SVC    get_arm_id  →  { arm_id: u8 }\n  ACTION move_arm\nEMITS  (15 topics):\n  joint_states · imu_left · imu_right\n  ee_pose_left · ee_pose_right · tf_tree\n  clock · odometry · wrench\n  contact_forces ×4 · gripper_state ×2",
+      fillcolor="#A9DFBF", color="#1E8449"
+    ];
+
+    gripper [
+      label="openarm01_gripper\n─────────────────────────────\nVariants: real (default)  |  isaac  |  mujoco\nInstances: ×2  (left_gripper · right_gripper)\n─────────────────────────────\nEXPOSES:\n  SVC    get_gripper_id  →  { gripper_id: u8 }\n  ACTION move_gripper",
+      fillcolor="#A9DFBF", color="#1E8449"
+    ];
+
+    { rank=same; robot_initializer; arm; gripper; }
+  }
+
+  // ════════════════════════════════════════════════════════════════
+  // ROW 4 — SAFETY ROOT NODES
+  // ════════════════════════════════════════════════════════════════
+  subgraph cluster_safety {
+    label="Safety & Kinematics Root Nodes  —  no depends_on";
+    fontname="Helvetica Bold"; fontsize=13; fontcolor="#784212";
+    style=filled; fillcolor="#FEF5E7"; color="#E67E22"; penwidth=2.5; margin=18;
+
+    ik [
+      label="inverse_kinematics\n─────────────────────────────\nNO VARIANTS   ×1  (ik)\n─────────────────────────────\nEXPOSES:\n  SVC  solve_ik\n    in:  arm_id · target_position[3]\n         target_orientation[4] · current_joints[]\n    out: success · joint_positions[]",
+      fillcolor="#FAD7A0", color="#A04000"
+    ];
+
+    collisions [
+      label="collisions_detection\n─────────────────────────────\nNO VARIANTS   ×1  (collisions)\n─────────────────────────────\nEXPOSES:\n  SVC  check_collisions\n    in:  arm_id · joint_positions[]\n    out: safe: bool",
+      fillcolor="#FAD7A0", color="#A04000"
+    ];
+
+    { rank=same; ik; collisions; }
+  }
+
+  // anchor launchers above joint_commander
+  launcher_real   -> joint_commander [style=invis];
+  launcher_isaac  -> joint_commander [style=invis];
+  launcher_mujoco -> joint_commander [style=invis];
+
+  // push safety below hardware
+  robot_initializer -> ik        [style=invis];
+  gripper           -> collisions [style=invis];
+
+  // ════════════════════════════════════════════════════════════════
+  // EDGES
+  // ════════════════════════════════════════════════════════════════
+
+  // depends_on (solid dark)
+  joint_commander -> backbone          [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+  joint_commander -> depth_camera      [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+  backbone        -> robot_initializer [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+  backbone        -> arm               [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+  backbone        -> gripper           [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+  backbone        -> ik                [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+  backbone        -> collisions        [style=solid, color="#2C3E50", label="depends_on", fontcolor="#2C3E50"];
+
+  // service calls (dotted blue)
+  backbone -> robot_initializer [style=dotted, color="#2471A3", label="svc: is_ready",         fontcolor="#2471A3", constraint=false];
+  backbone -> arm               [style=dotted, color="#2471A3", label="svc: get_arm_id",       fontcolor="#2471A3", constraint=false];
+  backbone -> gripper           [style=dotted, color="#2471A3", label="svc: get_gripper_id",   fontcolor="#2471A3", constraint=false];
+  backbone -> ik                [style=dotted, color="#2471A3", label="svc: solve_ik",         fontcolor="#2471A3", constraint=false];
+  backbone -> collisions        [style=dotted, color="#2471A3", label="svc: check_collisions", fontcolor="#2471A3", constraint=false];
+
+  // actions (thick purple)
+  joint_commander -> backbone [style=bold, color="#7D3C98", penwidth=4, label="action: move_arm",     fontcolor="#7D3C98", constraint=false];
+  backbone        -> arm      [style=bold, color="#7D3C98", penwidth=4, label="action: move_arm",     fontcolor="#7D3C98", constraint=false];
+  backbone        -> gripper  [style=bold, color="#7D3C98", penwidth=4, label="action: move_gripper", fontcolor="#7D3C98", constraint=false];
+
+  // topics (dashed green)
+  arm          -> backbone        [style=dashed, color="#1E8449", penwidth=2,
+    label="15 topics: joint_states · imu ×2\nee_pose ×2 · tf_tree · clock\nodometry · wrench · contact_forces ×4\ngripper_state ×2",
+    fontcolor="#1E8449", constraint=false];
+  arm          -> joint_commander [style=dashed, color="#1E8449",
+    label="EXT: joint_states\n(no depends_on)", fontcolor="#1E8449", constraint=false];
+  depth_camera -> joint_commander [style=dashed, color="#6C3483", penwidth=2,
+    label="video_stream\n(pose_estimation)", fontcolor="#6C3483", constraint=false];
+
+}
