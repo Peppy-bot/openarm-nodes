@@ -1,0 +1,31 @@
+// ROOT node — owns the sim process lifecycle
+// backbone polls is_ready before doing anything
+// default variant = no-op (real robot), always returns ready: true
+// isaac / mujoco variants = starts the sim process, returns ready: true only when sim is loaded
+{
+  schema_version: 1,
+  manifest: {
+    name: "openarm01_robot_initializer",
+    tag: "0.1.0",
+    // NO depends_on — pure ROOT
+    variants: [
+      { name: "default", source: { local: "./variants/default" } }, // no-op for real robot
+      { name: "isaac",   source: { local: "./variants/isaac"   } },
+      { name: "mujoco",  source: { local: "./variants/mujoco"  } },
+    ],
+  },
+  interfaces: {
+    services: {
+      exposes: [
+        {
+          name: "is_ready",
+          // no request body — backbone just pings it
+          response_message_format: {
+            ready: "bool",
+          },
+        },
+      ],
+    },
+  },
+  // execution lives in each variant's peppy.json5
+}

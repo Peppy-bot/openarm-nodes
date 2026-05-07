@@ -1,0 +1,52 @@
+// ROOT node — depth camera (RGB-D)
+// 3 instances at runtime: torso_front_camera, left_arm, right_arm
+// real variants: realsense_d435 (torso), realsense_d405 (wrist mounts)
+// sim variants: isaac, mujoco
+// NOTE: PEPPYOS-83 — two different real variants in same launcher currently forbidden
+//       (node stack identifies by name:tag, not name:tag@variant). Fix pending in peppy.
+{
+  schema_version: 1,
+  manifest: {
+    name: "depth_camera",
+    tag: "0.1.0",
+    // NO depends_on — pure ROOT
+    variants: [
+      { name: "default", source: { local: "./variants/default" } },
+      { name: "realsense_d435", source: { local: "./variants/realsense_d435" } }, // default — torso mount
+      { name: "realsense_d405", source: { local: "./variants/realsense_d405" } }, // wrist mounts
+      { name: "isaac",          source: { local: "./variants/isaac"          } },
+      { name: "mujoco",         source: { local: "./variants/mujoco"         } },
+    ],
+  },
+  interfaces: {
+    topics: {
+      emits: [
+        {
+          name: "video_stream",
+          qos_profile: "sensor_data",
+          message_format: {
+            header: {
+              stamp:    "time",
+              frame_id: "u32",
+            },
+            encoding: "string",   // e.g. "rgba8"
+            width:    "u32",
+            height:   "u32",
+            frame:    { $type: "array", $items: "u8" }, // RGBA — 4 channels (vs uvc_camera's RGB 3)
+          },
+        },
+      ],
+    },
+    services: {
+      exposes: [
+        { name: "video_stream_info",  response_message_format: { width: "u32", height: "u32", fps: "u8", encoding: "string" } },
+        { name: "set_exposure",       request_message_format: { value: "u32" }, response_message_format: { ok: "bool" } },
+        { name: "set_white_balance",  request_message_format: { value: "u32" }, response_message_format: { ok: "bool" } },
+        { name: "set_gain",           request_message_format: { value: "u32" }, response_message_format: { ok: "bool" } },
+        { name: "set_brightness",     request_message_format: { value: "u32" }, response_message_format: { ok: "bool" } },
+        { name: "set_contrast",       request_message_format: { value: "u32" }, response_message_format: { ok: "bool" } },
+      ],
+    },
+  },
+
+}

@@ -1,0 +1,1 @@
+{ schema_version: 1, execution: { language: "rust", container: { def_file: "apptainer.def" } } }
