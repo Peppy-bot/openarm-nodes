@@ -1,26 +1,43 @@
 // ROOT node — stateless collision checker (Coal library)
-// backbone calls check_collisions before issuing joint commands to arm
+// backbone fires move_joints action at start of each arm movement
+// CD monitors joint trajectory throughout and streams should_stop feedback
+// covers full motion, not a point-in-time snapshot
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "collisions_detection",
     tag: "0.1.0",
     // NO depends_on — pure ROOT
   },
   interfaces: {
-    services: {
+    actions: {
       exposes: [
         {
-          name: "check_collisions",
-          request_message_format: {
-            arm_id:          "u8",
-            joint_positions: { $type: "array", $items: "f64" }, // proposed joint positions to check
+          name: "move_joints",
+          goal_service: {
+            request_message_format: {
+              arm_id:             "u8",
+              feedback_frequency: "u32",
+              joint_positions:    { $type: "array", $items: "f64" }, // target joint positions to validate
+            },
+            response_message_format: {
+              accepted: "bool",
+            },
           },
-          response_message_format: {
-            safe:      "bool",
-            error_msg: {
-              $type:     "string",
-              $optional: true,
+          feedback_topic: {
+            qos_profile: "sensor_data",
+            message_format: {
+              joint_positions: { $type: "array", $items: "f64" },
+              action_time:     "f64",
+              should_stop:     "bool", // true → backbone must halt arm immediately
+            },
+          },
+          result_service: {
+            response_message_format: {
+              success:               "bool",
+              message:               "string",
+              final_joint_positions: { $type: "array", $items: "f64" },
+              action_time:           "f64",
             },
           },
         },

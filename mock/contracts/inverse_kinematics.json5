@@ -1,29 +1,45 @@
 // ROOT node — stateless IK solver
-// backbone calls solve_ik with target EE pose + arm_id, gets back safe joint positions
+// backbone fires solve_ik action with target EE pose + arm_id
+// IK streams convergence feedback and returns joint_positions on result
+// action (not service) because IK is iterative and can take variable time
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "inverse_kinematics",
     tag: "0.1.0",
     // NO depends_on — pure ROOT
   },
   interfaces: {
-    services: {
+    actions: {
       exposes: [
         {
           name: "solve_ik",
-          request_message_format: {
-            arm_id:             "u8",
-            target_position:    { $type: "array", $items: "f64", $length: 3 },
-            target_orientation: { $type: "array", $items: "f64", $length: 4 },
-            current_joints:     { $type: "array", $items: "f64" }, // seed for IK solver
+          goal_service: {
+            request_message_format: {
+              arm_id:             "u8",
+              target_position:    { $type: "array", $items: "f64", $length: 3 }, // cartesian XYZ
+              target_orientation: { $type: "array", $items: "f64", $length: 4 }, // quaternion XYZW
+              current_joints:     { $type: "array", $items: "f64" },             // seed for solver
+            },
+            response_message_format: {
+              accepted: "bool",
+            },
           },
-          response_message_format: {
-            success:         "bool",
-            joint_positions: { $type: "array", $items: "f64" },
-            error_msg: {
-              $type:     "string",
-              $optional: true,
+          feedback_topic: {
+            qos_profile: "sensor_data",
+            message_format: {
+              joint_positions: { $type: "array", $items: "f64" }, // current best solution
+              iteration:       "u32",
+            },
+          },
+          result_service: {
+            response_message_format: {
+              success:         "bool",
+              joint_positions: { $type: "array", $items: "f64" },
+              error_msg: {
+                $type:     "string",
+                $optional: true,
+              },
             },
           },
         },
