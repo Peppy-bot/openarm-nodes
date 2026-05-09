@@ -2,10 +2,9 @@
 // 3 instances at runtime: torso_front_camera, left_arm, right_arm
 // real variants: realsense_d435 (torso), realsense_d405 (wrist mounts)
 // sim variants: isaac, mujoco
-// NOTE: PEPPYOS-83 — two different real variants in same launcher currently forbidden
-//       (node stack identifies by name:tag, not name:tag@variant). Fix pending in peppy.
+// NOTE: only realsense_d435 can run currently — multi-variant support is pending in peppy
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "depth_camera",
     tag: "0.1.0",

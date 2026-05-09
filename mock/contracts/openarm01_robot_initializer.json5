@@ -3,7 +3,7 @@
 // default variant = no-op (real robot), always returns ready: true
 // isaac / mujoco variants = starts the sim process, returns ready: true only when sim is loaded
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_robot_initializer",
     tag: "0.1.0",

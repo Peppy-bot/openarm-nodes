@@ -1,11 +1,11 @@
 // TOP-LEVEL node — sends cartesian move_arm goals to backbone
-// keyboard variant: TUI input
+// keyboard variant: TUI input, shows live joint_states
 // pose_estimation variant: reads depth_camera video_stream, computes pose → fires move_arm
 //
-// joint_commander gets joint_states from arm via EXTERNAL consumed topic
-// (no depends_on on arm — arm is not in joint_commander's dep graph, only backbone is)
+// joint_commander consumes arm/joint_states as EXTERNAL topic (no depends_on on arm)
+// backbone does not re-emit it — joint_commander subscribes to the source directly
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_joint_commander",
     tag: "0.1.0",
@@ -16,31 +16,60 @@
       ],
     },
     variants: [
-      { name: "default",          source: { local: "./variants/keyboard"        } }, // TUI keyboard
-      { name: "pose_estimation",  source: { local: "./variants/pose_estimation" } }, // vision-based
+      { name: "default",         source: { local: "./variants/keyboard"        } }, // TUI keyboard
+      { name: "pose_estimation", source: { local: "./variants/pose_estimation" } }, // vision-based
     ],
   },
   interfaces: {
     actions: {
       consumes: [
-        // Fires move_arm goals to backbone
-        { local_node_id: "openarm01_backbone", name: "move_arm" },
+        { local_node_id: "openarm01_backbone", name: "move_arm"     },
+        { local_node_id: "openarm01_backbone", name: "move_gripper" },
       ],
     },
     topics: {
       consumes: [
-        // --- From backbone (linked) ---
-        // joint_states for TUI display — backbone consumes arm's joint_states so this works
-        // NOTE: backbone doesn't re-emit joint_states as a topic.
-        // joint_commander reads it as external consumed topic directly from arm.
-
-        // --- From depth_camera (linked) ---
+        // --- External topic: arm/joint_states ---
+        // No local_node_id — consumed directly from arm without depends_on on arm.
+        // keyboard variant: displays live joint positions in TUI
+        // pose_estimation variant: uses current pose as IK seed reference
+        {
+          name: "joint_states",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:      "string",
+            step:       "u64",
+            positions:  { $type: "array", $items: "f64" },
+            velocities: { $type: "array", $items: "f64" },
+            stamp:      "f64",
+          },
+        },
+        // --- From depth_camera (linked via depends_on) ---
         // pose_estimation variant only — keyboard variant ignores this
         { local_node_id: "depth_camera", name: "video_stream" },
       ],
-      // External consumed topic — joint_commander reads arm's joint_states without depending on arm
-      // (arm is a ROOT, no circular dep risk — this avoids backbone having to re-emit the topic)
-      // defined inline because there's no local_node_id
+      emits: [
+        // pose_estimation variant only
+        {
+          name: "teleop/marker_pose",
+          qos_profile: "sensor_data",
+          message_format: {
+            position:    { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            timestamp:   "f64",
+            confidence:  "f64",
+          },
+        },
+        {
+          name: "teleop/hand_pose",
+          qos_profile: "sensor_data",
+          message_format: {
+            open_fraction: "f64",
+            timestamp:     "f64",
+            confidence:    "f64",
+          },
+        },
+      ],
     },
   },
   execution: {
