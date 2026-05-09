@@ -1,10 +1,11 @@
 // ROOT node — owns sim/real abstraction for the arm
-// 2 instances at runtime: left_arm, right_arm
+// 2 instances at runtime: left_arm (arm_id=0), right_arm (arm_id=1)
 // arm_id in execution.parameters tells backbone which side this is
-// Emits ALL feedback topics — works for both sim and real variants
-// The sim process is started by openarm01_robot_initializer, not here
+// Sim process is started by openarm01_robot_initializer, not here
+//
+// Emits arm-level telemetry only (4 topics): joint_states, imu_left, imu_right, tf_tree
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_arm",
     tag: "0.1.0",
@@ -33,9 +34,8 @@
           name: "move_arm",
           goal_service: {
             request_message_format: {
-              feedback_frequency: "u32",                                          // Hz — caller controls feedback rate
-              desired_position:    { $type: "array", $items: "f64", $length: 3 }, // cartesian XYZ
-              desired_orientation: { $type: "array", $items: "f64", $length: 4 }, // quaternion XYZW
+              feedback_frequency: "u32",
+              joint_positions:    { $type: "array", $items: "f64" }, // IK-solved joints from backbone
             },
             response_message_format: {
               accepted: "bool",
@@ -44,18 +44,16 @@
           feedback_topic: {
             qos_profile: "sensor_data",
             message_format: {
-              joint_positions:     { $type: "array", $items: "f64" },
-              current_ee_position: { $type: "array", $items: "f64", $length: 3 },
-              action_time:         "f64",
+              joint_positions: { $type: "array", $items: "f64" },
+              action_time:     "f64",
             },
           },
           result_service: {
             response_message_format: {
-              success:              "bool",
-              message:              "string",
+              success:               "bool",
+              message:               "string",
               final_joint_positions: { $type: "array", $items: "f64" },
-              final_ee_position:    { $type: "array", $items: "f64", $length: 3 },
-              action_time:          "f64",
+              action_time:           "f64",
             },
           },
         },
@@ -80,43 +78,24 @@
           name: "imu_left",
           qos_profile: "sensor_data",
           message_format: {
-            robot: "string", step: "u64",
-            orientation:          { $type: "array", $items: "f64", $length: 4 },
-            angular_velocity:     { $type: "array", $items: "f64", $length: 3 },
-            linear_acceleration:  { $type: "array", $items: "f64", $length: 3 },
-            stamp: "f64",
+            robot:               "string",
+            step:                "u64",
+            orientation:         { $type: "array", $items: "f64", $length: 4 },
+            angular_velocity:    { $type: "array", $items: "f64", $length: 3 },
+            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
+            stamp:               "f64",
           },
         },
         {
           name: "imu_right",
           qos_profile: "sensor_data",
           message_format: {
-            robot: "string", step: "u64",
-            orientation:          { $type: "array", $items: "f64", $length: 4 },
-            angular_velocity:     { $type: "array", $items: "f64", $length: 3 },
-            linear_acceleration:  { $type: "array", $items: "f64", $length: 3 },
-            stamp: "f64",
-          },
-        },
-        // --- End-effector pose ---
-        {
-          name: "ee_pose_left",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            position:    { $type: "array", $items: "f64", $length: 3 },
-            orientation: { $type: "array", $items: "f64", $length: 4 },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "ee_pose_right",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            position:    { $type: "array", $items: "f64", $length: 3 },
-            orientation: { $type: "array", $items: "f64", $length: 4 },
-            stamp: "f64",
+            robot:               "string",
+            step:                "u64",
+            orientation:         { $type: "array", $items: "f64", $length: 4 },
+            angular_velocity:    { $type: "array", $items: "f64", $length: 3 },
+            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
+            stamp:               "f64",
           },
         },
         // --- TF tree ---
@@ -124,11 +103,12 @@
           name: "tf_tree",
           qos_profile: "sensor_data",
           message_format: {
-            robot: "string", step: "u64",
+            robot: "string",
+            step:  "u64",
             frames: {
               $type: "array",
               $items: {
-                $type: "object",
+                $type:       "object",
                 name:        "string",
                 parent:      "string",
                 position:    { $type: "array", $items: "f64", $length: 3 },
@@ -136,138 +116,6 @@
               },
             },
             stamp: "f64",
-          },
-        },
-        // --- Sim clock (sim_time only; action_time is separate) ---
-        {
-          name: "clock",
-          qos_profile: "sensor_data",
-          message_format: {
-            step:     "u64",
-            sim_time: "f64",
-            stamp:    "f64",
-          },
-        },
-        // --- Odometry ---
-        {
-          name: "odometry",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            position:         { $type: "array", $items: "f64", $length: 3 },
-            orientation:      { $type: "array", $items: "f64", $length: 4 },
-            linear_velocity:  { $type: "array", $items: "f64", $length: 3 },
-            angular_velocity: { $type: "array", $items: "f64", $length: 3 },
-            stamp: "f64",
-          },
-        },
-        // --- Wrench ---
-        {
-          name: "wrench",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            force:  { $type: "array", $items: "f64", $length: 3 },
-            torque: { $type: "array", $items: "f64", $length: 3 },
-            stamp: "f64",
-          },
-        },
-        // --- Contact forces (4 topics: left/right × finger1/finger2) ---
-        {
-          name: "contact_forces_left_finger1",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            contacts: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                body1:    "string",
-                body2:    "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                force:    { $type: "array", $items: "f64", $length: 3 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "contact_forces_left_finger2",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            contacts: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                body1:    "string",
-                body2:    "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                force:    { $type: "array", $items: "f64", $length: 3 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "contact_forces_right_finger1",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            contacts: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                body1:    "string",
-                body2:    "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                force:    { $type: "array", $items: "f64", $length: 3 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "contact_forces_right_finger2",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string", step: "u64",
-            contacts: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                body1:    "string",
-                body2:    "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                force:    { $type: "array", $items: "f64", $length: 3 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-        // --- Gripper state (arm emits this because gripper is part of arm assembly) ---
-        {
-          name: "gripper_state_left",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot:          "string",
-            step:           "u64",
-            joint_names:    { $type: "array", $items: "string" },
-            positions:      { $type: "array", $items: "f64" },
-            applied_forces: { $type: "array", $items: "f64" },
-            stamp:          "f64",
-          },
-        },
-        {
-          name: "gripper_state_right",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot:          "string",
-            step:           "u64",
-            joint_names:    { $type: "array", $items: "string" },
-            positions:      { $type: "array", $items: "f64" },
-            applied_forces: { $type: "array", $items: "f64" },
-            stamp:          "f64",
           },
         },
       ],
