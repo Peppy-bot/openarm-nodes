@@ -2,8 +2,8 @@
   peppy_schema: "node_v1",
   execution: {
     language: "rust",
-    build_cmd: ["cargo", "build", "--release"],
-    run_cmd: ["./target/release/openarm01_robot_initializer"],
-    // TODO(@jarednm): add apptainer if real robot needs a containerised env
+    container: {
+      def_file: "apptainer.def",
+    },
   },
 }
