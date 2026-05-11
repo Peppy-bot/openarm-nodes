@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MuJoCo launch script for openarm01_robot_initializer."""
 
-# pylint: disable=C0413
+# pylint: disable=C0413,E1120
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +17,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_ASSETS_DIR = Path(os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets")))
+_ASSETS_DIR = Path(
+    os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets"))
+)
 _XML_PATH = _ASSETS_DIR / "openarm_bimanual.xml"
 _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 
@@ -54,15 +56,15 @@ else:
     builder = NodeBuilder()
     if not os.environ.get("PEPPY_RUNTIME_CONFIG"):
         _state_file = Path.home() / ".peppy" / "daemon_state.json"
-        _PORT = 7448  # pylint: disable=C0103
+        _port = 7448  # pylint: disable=C0103
         try:
             _state = json.loads(_state_file.read_text())
-            _PORT = int(_state.get("messaging_port", _PORT))  # pylint: disable=C0103
+            _port = int(_state.get("messaging_port", _port))  # pylint: disable=C0103
         except Exception as e:
             logger.warning(f"Unable to read daemon state from {_state_file}: {e}")
         builder = builder.standalone(
             StandaloneConfig()
-            .with_messaging("localhost", _PORT)
+            .with_messaging("localhost", _port)
             .with_instance_id("sim")
             .with_node_name("sim")
             .with_parameters({})

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """MuJoCo SimLauncher for openarm01_robot_initializer."""
 
+# pylint: disable=R0903
 from __future__ import annotations
 
 import logging
