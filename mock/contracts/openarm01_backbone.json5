@@ -4,7 +4,7 @@
 //   2. Discover arm/gripper IDs via get_arm_id / get_gripper_id
 //   3. Receive move_arm action from joint_commander
 //   4. Fire solve_ik ACTION on IK → get joint_positions
-//   5. Fire move_joints ACTION on collisions_detection → monitor should_stop throughout motion
+//   5. Fire move_joints ACTION on collisions_detection → monitor must_stop throughout motion
 //   6. Fire move_arm ACTION to arm instance if CD clears it
 //
 // Backbone does NOT re-emit arm topics.
@@ -98,7 +98,7 @@
       consumes: [
         // --- Safety pipeline (both are ACTIONS, not services) ---
         { local_node_id: "inverse_kinematics",  name: "solve_ik"     }, // fire → get joint_positions
-        { local_node_id: "collisions_detection", name: "move_joints" }, // fire → stream should_stop feedback
+        { local_node_id: "collisions_detection", name: "move_joints" }, // fire → stream must_stop feedback
         // --- Execute on arm/gripper ---
         { local_node_id: "openarm01_arm",       name: "move_arm"     },
         { local_node_id: "openarm01_gripper",   name: "move_gripper" },
