@@ -1,0 +1,35 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/isaac-sim:5.1.0
+
+%labels
+    Name openarm01-robot-initializer-isaac
+    Version 0.1.0
+
+%environment
+    export PYTHONPATH="/opt/isaac_robot_initializer/.peppy/libs/peppygen:$HOME/.peppy/libs/python:$PYTHONPATH"
+    export PEPPY_BRIDGE_NODE_NAME=sim
+    export DISPLAY=${DISPLAY:-:1}
+    export PEPPY_ROBOT_ASSETS_DIR=${PEPPY_ROBOT_ASSETS_DIR:-/opt/robot_assets/openarm/isaac}
+
+%setup
+    mkdir -p "${APPTAINER_ROOTFS}/opt/robot_assets/openarm/isaac"
+    if [ -d /tmp/.peppy_robot_initializer_isaac ] && [ -n "$(ls -A /tmp/.peppy_robot_initializer_isaac 2>/dev/null)" ]; then
+        cp -r /tmp/.peppy_robot_initializer_isaac/. "${APPTAINER_ROOTFS}/opt/robot_assets/openarm/isaac/"
+        echo "INFO: Baked Isaac assets into SIF from /tmp/.peppy_robot_initializer_isaac"
+    else
+        echo "WARNING: /tmp/.peppy_robot_initializer_isaac not found or empty — run scripts/download_assets.sh first" >&2
+    fi
+
+%files
+
+%post
+    set -eux
+    apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+    /isaac-sim/python.sh -m pip install --no-cache-dir pycapnp
+
+%runscript
+    cd /isaac-sim
+    exec ./python.sh /opt/isaac_robot_initializer/robots/openarm/openarm/launch.py "$@"
