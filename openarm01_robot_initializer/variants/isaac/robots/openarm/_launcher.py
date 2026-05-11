@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Isaac Sim SimLauncher for openarm01_robot_initializer."""
 
-# pylint: disable=E0401
+# pylint: disable=E0401,R0903
 from __future__ import annotations
 
 import logging

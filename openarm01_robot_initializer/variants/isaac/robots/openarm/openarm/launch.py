@@ -18,7 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-_ASSETS_DIR = Path(os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets")))
+_ASSETS_DIR = Path(
+    os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets"))
+)
 _USD_PATH = _ASSETS_DIR / "openarm_bimanual.usd"
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
 _NODE_ROOT = Path("/opt/isaac_robot_initializer")
@@ -66,15 +68,15 @@ def _start_peppylib() -> None:
     builder = NodeBuilder()
     if not os.environ.get("PEPPY_RUNTIME_CONFIG"):
         _state_file = Path.home() / ".peppy" / "daemon_state.json"
-        _PORT = 7448
+        _port = 7448
         try:
             _state = json.loads(_state_file.read_text())
-            _PORT = int(_state.get("messaging_port", _PORT))
+            _port = int(_state.get("messaging_port", _port))
         except Exception as e:
             logger.warning(f"Unable to read daemon state from {_state_file}: {e}")
         builder = builder.standalone(
             StandaloneConfig()
-            .with_messaging("localhost", _PORT)
+            .with_messaging("localhost", _port)
             .with_instance_id("sim")
             .with_node_name("sim")
             .with_parameters({})
