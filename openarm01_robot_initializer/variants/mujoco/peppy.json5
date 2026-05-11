@@ -1,0 +1,21 @@
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_robot_initializer",
+    tag: "0.1.0",
+  },
+  execution: {
+    language: "python",
+    container: {
+      def_file: "apptainer.def",
+      apptainer_run_extra_args: ["--nv"],
+      mount_paths: [
+        "${parameters:node_root}:/opt/mujoco_robot_initializer:ro",
+        "/run/user:/run/user:ro",
+      ],
+    },
+    parameters: {
+      node_root: "string",
+    },
+  },
+}
