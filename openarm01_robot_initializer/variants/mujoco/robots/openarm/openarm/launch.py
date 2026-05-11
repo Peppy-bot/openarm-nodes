@@ -26,13 +26,13 @@ _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 os.environ["PEPPY_BRIDGE_NODE_NAME"] = "sim"
 
 sys.path.insert(0, str(_MUJOCO_DIR))
-from _launcher import SimLauncher  # pylint: disable=E0401
+from _launcher import SimLauncher
 
 _ready = threading.Event()
 
 
 async def _run_sim(_params, node_runner) -> list:
-    from peppygen.exposed_services import is_ready  # pylint: disable=E0401
+    from peppygen.exposed_services import is_ready
 
     async def _is_ready_loop() -> None:
         while True:
@@ -41,33 +41,41 @@ async def _run_sim(_params, node_runner) -> list:
                 lambda _req: is_ready.Response(ready=_ready.is_set()),
             )
 
-    loop = asyncio.get_running_loop()
+    async def _run_sim_task() -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready).run)
+        except Exception:
+            os._exit(1)
+
     return [
-        loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready).run),
+        asyncio.create_task(_run_sim_task()),
         asyncio.create_task(_is_ready_loop()),
     ]
 
 
 try:
-    from peppylib.runtime import NodeBuilder, StandaloneConfig  # pylint: disable=E0401
-except ImportError:
-    SimLauncher(_XML_PATH, _ready).run()
-else:
-    builder = NodeBuilder()
-    if not os.environ.get("PEPPY_RUNTIME_CONFIG"):
-        _state_file = Path.home() / ".peppy" / "daemon_state.json"
-        _port = 7448  # pylint: disable=C0103
-        try:
-            _state = json.loads(_state_file.read_text())
-            _port = int(_state.get("messaging_port", _port))  # pylint: disable=C0103
-        except Exception as e:
-            logger.warning(f"Unable to read daemon state from {_state_file}: {e}")
-        builder = builder.standalone(
-            StandaloneConfig()
-            .with_messaging("localhost", _port)
-            .with_instance_id("sim")
-            .with_node_name("sim")
-            .with_parameters({})
-        )
+    from peppylib.runtime import NodeBuilder, StandaloneConfig
+except ImportError as exc:
+    raise RuntimeError(
+        "peppylib unavailable — is_ready service cannot be served"
+    ) from exc
 
-    builder.run(_run_sim)
+builder = NodeBuilder()
+if not os.environ.get("PEPPY_RUNTIME_CONFIG"):
+    _state_file = Path.home() / ".peppy" / "daemon_state.json"
+    _port = 7448  # pylint: disable=C0103
+    try:
+        _state = json.loads(_state_file.read_text())
+        _port = int(_state.get("messaging_port", _port))  # pylint: disable=C0103
+    except Exception as e:
+        logger.warning(f"Unable to read daemon state from {_state_file}: {e}")
+    builder = builder.standalone(
+        StandaloneConfig()
+        .with_messaging("localhost", _port)
+        .with_instance_id("sim")
+        .with_node_name("sim")
+        .with_parameters({})
+    )
+
+builder.run(_run_sim)

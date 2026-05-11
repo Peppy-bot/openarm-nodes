@@ -13,8 +13,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
-_ASSETS_ENV = "PEPPY_ROBOT_ASSETS_DIR"
-_DEFAULT_ASSETS = Path(__file__).resolve().parents[1] / "openarm" / "assets"
 
 
 class SimLauncher:
@@ -24,13 +22,14 @@ class SimLauncher:
         self._headless = os.environ.get(_HEADLESS_ENV, "1").strip() == "1"
 
     def run(self) -> None:
-        import mujoco  # pylint: disable=E0401
+        import mujoco
 
         if not self._xml_path.exists():
-            raise FileNotFoundError(
-                f"MJCF not found at {self._xml_path} — "
-                "run scripts/download_assets.sh to fetch assets"
+            logger.error(
+                "MJCF not found at %s — run scripts/download_assets.sh to fetch assets",
+                self._xml_path,
             )
+            raise FileNotFoundError(self._xml_path)
 
         logger.info(f"Loading model: {self._xml_path}")
         model = mujoco.MjModel.from_xml_path(str(self._xml_path))
@@ -40,25 +39,39 @@ class SimLauncher:
         logger.info("Scene loaded — is_ready: true")
 
         if self._headless:
-            self._run_headless(model)
+            self._run_headless(model, data)
         else:
             self._run_windowed(model, data)
 
-    def _run_headless(self, model) -> None:
+    def _run_headless(self, model, data) -> None:
+        import mujoco
+
         dt = model.opt.timestep
         try:
             while True:
-                time.sleep(dt)
+                step_start = time.monotonic()
+                mujoco.mj_step(model, data)
+                elapsed = time.monotonic() - step_start
+                remaining = dt - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
 
     def _run_windowed(self, model, data) -> None:
-        import mujoco.viewer  # pylint: disable=E0401
+        import mujoco
+        import mujoco.viewer
 
         dt = model.opt.timestep
         try:
             with mujoco.viewer.launch_passive(model, data) as viewer:
                 while viewer.is_running():
-                    time.sleep(dt)
+                    step_start = time.monotonic()
+                    mujoco.mj_step(model, data)
+                    viewer.sync()
+                    elapsed = time.monotonic() - step_start
+                    remaining = dt - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
