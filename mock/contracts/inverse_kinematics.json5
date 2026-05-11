@@ -1,7 +1,7 @@
-// ROOT node — stateless IK solver
-// backbone fires solve_ik action with target EE pose + arm_id
+// ROOT node — stateless IK solver, ×2 instances one per arm
+// backbone discovers instances at runtime via peppylib::stack_list and fires in parallel
+// runs on every step of arm movement, not a one-shot pre-check
 // IK streams convergence feedback and returns joint_positions on result
-// action (not service) because IK is iterative and can take variable time
 {
   peppy_schema: "node_v1",
   manifest: {
