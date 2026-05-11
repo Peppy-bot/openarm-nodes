@@ -1,11 +1,12 @@
 // ORCHESTRATOR node — sim/real AGNOSTIC, NO variants
 // Responsibilities:
 //   1. Poll robot_initializer.is_ready at startup and wait
-//   2. Discover arm/gripper IDs via get_arm_id / get_gripper_id
-//   3. Receive move_arm action from joint_commander
-//   4. Fire solve_ik ACTION on IK → get joint_positions
-//   5. Fire move_joints ACTION on collisions_detection → monitor must_stop throughout motion
-//   6. Fire move_arm ACTION to arm instance if CD clears it
+//   2. Discover IK instances via peppylib::stack_list, map to left/right arm at runtime
+//   3. Discover arm/gripper IDs via get_arm_id / get_gripper_id
+//   4. Receive move_arm action from joint_commander
+//   5. Fire solve_ik ACTION on both IK instances in parallel → get joint_positions per arm
+//   6. Fire move_joints ACTION on collisions_detection → monitor must_stop throughout motion
+//   7. Fire move_arm ACTION to arm instance if CD clears it
 //
 // Backbone does NOT re-emit arm topics.
 // joint_commander consumes arm/joint_states directly as external topic
