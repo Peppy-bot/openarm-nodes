@@ -1,8 +1,7 @@
 // ROOT node — stateless collision checker (Coal library)
-// backbone fires move_joints action at start of each arm movement
-// CD monitors joint trajectory throughout and streams must_stop + stop_type feedback
-// covers full motion, not a point-in-time snapshot
-// CONFIRMED (Tuatini 2026-05-11): must_stop goes to backbone, backbone cancels arm/gripper — CD never talks to arm/gripper directly
+// backbone fires move_joints action, CD monitors throughout and streams must_stop + stop_type feedback
+// must_stop goes to backbone — backbone cancels arm/gripper action, CD never talks to arm/gripper directly
+// continuously consumes left/right arm joint_states + depth_camera feeds for real-time monitoring
 {
   peppy_schema: "node_v1",
   manifest: {
@@ -43,6 +42,17 @@
             },
           },
         },
+      ],
+    },
+    topics: {
+      consumes: [
+        // real-time self collision + inter-arm collision monitoring
+        { name: "joint_states", local_node_id: "left_arm"  },
+        { name: "joint_states", local_node_id: "right_arm" },
+        // real-time environment collision monitoring
+        { name: "video_stream", local_node_id: "torso_front_camera" },
+        { name: "video_stream", local_node_id: "left_arm_camera"    },
+        { name: "video_stream", local_node_id: "right_arm_camera"   },
       ],
     },
   },
