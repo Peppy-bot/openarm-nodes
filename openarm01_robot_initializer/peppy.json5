@@ -1,0 +1,24 @@
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_robot_initializer",
+    tag: "0.1.0",
+    variants: [
+      { name: "default", source: { local: "./variants/default" } },
+      { name: "isaac",   source: { local: "./variants/isaac"   } },
+      { name: "mujoco",  source: { local: "./variants/mujoco"  } },
+    ],
+  },
+  interfaces: {
+    services: {
+      exposes: [
+        {
+          name: "is_ready",
+          response_message_format: {
+            ready: "bool",
+          },
+        },
+      ],
+    },
+  },
+}
