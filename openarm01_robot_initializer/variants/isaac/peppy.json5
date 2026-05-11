@@ -12,6 +12,7 @@
       mount_paths: [
         "${parameters:node_root}:/opt/isaac_robot_initializer:ro",
         "/run/user:/run/user:ro",
+        "/tmp/.X11-unix:/tmp/.X11-unix:rw",
         "${parameters:home_dir}/.cache/isaac-sim/kit/cache:/isaac-sim/kit/cache:rw",
         "${parameters:home_dir}/.cache/ov:${parameters:home_dir}/.cache/ov:rw",
         "${parameters:home_dir}/.cache/pip:${parameters:home_dir}/.cache/pip:rw",

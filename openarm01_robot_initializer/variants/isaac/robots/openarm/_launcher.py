@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Isaac Sim SimLauncher for openarm01_robot_initializer."""
 
-# pylint: disable=E0401,R0903
+# pylint: disable=R0903
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 
@@ -28,7 +29,7 @@ class SimLauncher:
         except FileNotFoundError as exc:
             logger.error(str(exc))
             self._sim_app.close()
-            return
+            os._exit(1)  # pylint: disable=W0212
 
         self._ready.set()
         logger.info("Scene loaded — is_ready: true")

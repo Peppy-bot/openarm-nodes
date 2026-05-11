@@ -2,7 +2,6 @@
 """Isaac Sim launch script for openarm01_robot_initializer."""
 
 # pylint: disable=C0413
-# pylint: disable=E0401
 from __future__ import annotations
 
 import asyncio
@@ -32,8 +31,8 @@ from isaacsim import SimulationApp
 
 simulation_app = SimulationApp(
     {
-        "headless": os.environ.get("PEPPY_BRIDGE_HEADLESS", "0") == "1",
-        "renderer": "RayTracedLighting",
+        "headless": os.environ.get("PEPPY_BRIDGE_HEADLESS", "1") == "1",
+        "renderer": os.environ.get("PEPPY_ISAAC_RENDERER", "RayTracedLighting"),
     }
 )
 
@@ -48,7 +47,7 @@ def _start_peppylib() -> None:
     os.chdir(str(_NODE_ROOT))
 
     async def _run_sim(_params, node_runner) -> list:
-        from peppygen.exposed_services import is_ready  # pylint: disable=E0401
+        from peppygen.exposed_services import is_ready
 
         async def _is_ready_loop() -> None:
             while True:
@@ -62,8 +61,8 @@ def _start_peppylib() -> None:
     try:
         from peppylib.runtime import NodeBuilder, StandaloneConfig
     except ImportError:
-        logger.warning("peppylib not available — skipping NodeBuilder")
-        return
+        logger.error("peppylib unavailable — is_ready service cannot be served")
+        os._exit(1)
 
     builder = NodeBuilder()
     if not os.environ.get("PEPPY_RUNTIME_CONFIG"):
