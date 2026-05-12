@@ -4,7 +4,7 @@ mod trajectory;
 use openarm_can::{ArmCan, CallbackMode, v10};
 use control::{ControlConfig, run_move_arm_joints};
 use peppygen::exposed_actions::move_arm;
-use peppygen::exposed_services::get_arm_id;
+use peppygen::exposed_services::{get_arm_id, get_joint_positions};
 use peppygen::{NodeBuilder, Parameters, Result};
 
 use std::sync::{Arc, Mutex};
@@ -75,6 +75,9 @@ fn main() -> Result<()> {
         tokio::time::sleep(POST_ENABLE_SLEEP).await;
         arm.recv_all(BRINGUP_RECV_US);
         arm.set_callback_mode(CallbackMode::State);
+        // recv_all in State mode populates initial joint state. ROS2 gets this implicitly
+        // via the recv inside return_to_zero(); without it get_state() returns all zeros.
+        arm.recv_all(BRINGUP_RECV_US);
         info!("arm ready");
 
         let arm = Arc::new(Mutex::new(arm));
@@ -114,6 +117,24 @@ fn main() -> Result<()> {
                     .await
                     {
                         error!("get_arm_id: {e}");
+                    }
+                }
+            });
+        }
+
+        // get_joint_positions service.
+        {
+            let runner = node_runner.clone();
+            let arm = arm.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = get_joint_positions::handle_next_request(&runner, |_req| {
+                        let a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                        Ok(get_joint_positions::Response::new(a.get_state().positions))
+                    })
+                    .await
+                    {
+                        error!("get_joint_positions: {e}");
                     }
                 }
             });
