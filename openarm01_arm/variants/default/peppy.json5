@@ -3,7 +3,8 @@
   execution: {
     language: "rust",
     container: {
-      def_file: "apptainer.def"
+      def_file: "apptainer.def",
+      apptainer_build_extra_args: ["--bind", "/home/jared/.local/bin/sccache:/tmp/sccache"]
     },
     parameters: {
       arm_id: "u8",
