@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::exposed_actions::move_arm_joints;
-use tracing::error;
+use tracing::{error, info};
 
 use openarm_can::{ArmCan, v10};
 use crate::trajectory::Trajectory;
@@ -21,6 +21,7 @@ pub struct ControlConfig {
     pub recv_timeout_us: i32,
     pub motion_timeout: Duration,
     pub max_joint_velocity_rad_s: v10::JointVec,
+    pub min_motion_time_s: f64,
 }
 
 struct MotionResult {
@@ -131,6 +132,11 @@ pub async fn run_move_arm_joints(
     }
 }
 
+fn fmt_joints(v: &v10::JointVec) -> String {
+    let parts: Vec<String> = v.iter().map(|x| format!("{:.3}", x)).collect();
+    format!("[{}]", parts.join(", "))
+}
+
 async fn run_control_loop(
     arm: &Arc<Mutex<ArmCan>>,
     handle: &move_arm_joints::ActionHandle,
@@ -145,7 +151,12 @@ async fn run_control_loop(
         a.get_state().positions
     };
 
-    let trajectory = Trajectory::new(q_start, goal.target, cfg.max_joint_velocity_rad_s);
+    info!(
+        "move_arm_joints: start={} target={}",
+        fmt_joints(&q_start),
+        fmt_joints(&goal.target),
+    );
+    let trajectory = Trajectory::new(q_start, goal.target, cfg.max_joint_velocity_rad_s, cfg.min_motion_time_s);
     let start = trajectory.motion_start;
     let mut last_feedback = Instant::now();
     let feedback_period = Duration::from_micros((1_000_000 / goal.feedback_frequency as u64).max(1));

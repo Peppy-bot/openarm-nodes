@@ -20,18 +20,19 @@ impl Trajectory {
         start: v10::JointVec,
         end: v10::JointVec,
         max_velocity_rad_s: v10::JointVec,
+        min_duration_secs: f64,
     ) -> Self {
         // For each joint, peak velocity = 1.875 * |Δq_i| / T, so the smallest T that
         // respects joint i's limit is T_i = 1.875 * |Δq_i| / v_max_i. The trajectory
-        // duration is max over joints (the slowest joint relative to its limit wins).
-        // Floor at 100 ms so a zero-displacement goal still has a sane duration.
-        // Mirrors ROS2 TOTG behaviour against per-joint URDF velocity limits.
+        // duration is max over joints (the slowest joint relative to its limit wins),
+        // then floored at min_duration_secs. Mirrors ROS2 TOTG behaviour against
+        // per-joint URDF velocity limits.
         let secs = start
             .iter()
             .zip(end.iter())
             .zip(max_velocity_rad_s.iter())
             .map(|((s, e), v)| 1.875 * (e - s).abs() / v)
-            .fold(0.1_f64, f64::max);
+            .fold(min_duration_secs, f64::max);
         Self {
             start,
             end,
@@ -45,6 +46,10 @@ impl Trajectory {
     /// "hold the final setpoint" once the trajectory plays out.
     pub fn sample(&self, now: Instant) -> (v10::JointVec, v10::JointVec) {
         let t_total = self.duration.as_secs_f64();
+        // Degenerate trajectory (start == end and min_duration_secs == 0): hold at end.
+        if t_total == 0.0 {
+            return (self.end, [0.0_f64; v10::ARM_DOF]);
+        }
         let elapsed = now.duration_since(self.motion_start).as_secs_f64();
         let tau = (elapsed / t_total).clamp(0.0, 1.0);
         // s(τ) = 6τ⁵ − 15τ⁴ + 10τ³
@@ -82,12 +87,20 @@ mod tests {
     }
 
     #[test]
-    fn duration_floors_at_100ms() {
+    fn duration_floors_at_min() {
         let start = [0.0; v10::ARM_DOF];
         let mut end = [0.0; v10::ARM_DOF];
-        end[0] = 0.01; // T_i = 1.875 * 0.01 = 0.01875 s, well below the 100 ms floor
-        let traj = Trajectory::new(start, end, V_MAX);
+        end[0] = 0.01; // T_i = 1.875 * 0.01 = 0.01875 s, below the 100 ms floor
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         assert_eq!(traj.duration, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn duration_respects_larger_min() {
+        let start = [0.0; v10::ARM_DOF];
+        let end = [0.1; v10::ARM_DOF]; // would be ~0.1875 s at v_max=1
+        let traj = Trajectory::new(start, end, V_MAX, 5.0);
+        assert!(approx_eq(traj.duration.as_secs_f64(), 5.0));
     }
 
     #[test]
@@ -96,7 +109,7 @@ mod tests {
         let mut end = [0.0; v10::ARM_DOF];
         end[0] = 1.0; // T_0 = 1.875
         end[3] = 0.5; // T_3 = 0.9375 — slowest-relative joint wins
-        let traj = Trajectory::new(start, end, V_MAX);
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         assert!(approx_eq(traj.duration.as_secs_f64(), 1.875));
     }
 
@@ -104,7 +117,7 @@ mod tests {
     fn boundary_at_tau_zero() {
         let start = [0.1; v10::ARM_DOF];
         let end = [0.5; v10::ARM_DOF];
-        let traj = Trajectory::new(start, end, V_MAX);
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         let (q, dq) = traj.sample(traj.motion_start);
         assert!(vec_approx_eq(&q, &start));
         assert!(dq.iter().all(|v| v.abs() < EPS));
@@ -114,7 +127,7 @@ mod tests {
     fn boundary_at_tau_one() {
         let start = [0.0; v10::ARM_DOF];
         let end = [0.5; v10::ARM_DOF];
-        let traj = Trajectory::new(start, end, V_MAX);
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         let (q, dq) = traj.sample(traj.motion_start + traj.duration);
         assert!(vec_approx_eq(&q, &end));
         assert!(dq.iter().all(|v| v.abs() < EPS));
@@ -124,7 +137,7 @@ mod tests {
     fn holds_at_end_past_duration() {
         let start = [0.0; v10::ARM_DOF];
         let end = [1.0; v10::ARM_DOF];
-        let traj = Trajectory::new(start, end, V_MAX);
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         let (q, dq) = traj.sample(traj.motion_start + traj.duration + Duration::from_secs(5));
         assert!(vec_approx_eq(&q, &end));
         assert!(dq.iter().all(|v| v.abs() < EPS));
@@ -135,7 +148,7 @@ mod tests {
         // s(0.5) = 6·(1/32) − 15·(1/16) + 10·(1/8) = 0.5
         let start = [0.0; v10::ARM_DOF];
         let end = [1.0; v10::ARM_DOF];
-        let traj = Trajectory::new(start, end, V_MAX);
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         let half = Duration::from_secs_f64(traj.duration.as_secs_f64() / 2.0);
         let (q, _) = traj.sample(traj.motion_start + half);
         assert!(q.iter().all(|v| approx_eq(*v, 0.5)));
@@ -147,7 +160,7 @@ mod tests {
         // dq/dt = 1.875 · Δq / T
         let start = [0.0; v10::ARM_DOF];
         let end = [1.0; v10::ARM_DOF];
-        let traj = Trajectory::new(start, end, V_MAX);
+        let traj = Trajectory::new(start, end, V_MAX, 0.1);
         let half = Duration::from_secs_f64(traj.duration.as_secs_f64() / 2.0);
         let (_, dq) = traj.sample(traj.motion_start + half);
         let expected = 1.875 / traj.duration.as_secs_f64();
@@ -157,7 +170,7 @@ mod tests {
     #[test]
     fn is_complete_only_after_duration() {
         let q = [0.0; v10::ARM_DOF];
-        let traj = Trajectory::new(q, q, V_MAX);
+        let traj = Trajectory::new(q, q, V_MAX, 0.1);
         assert!(!traj.is_complete(traj.motion_start));
         assert!(traj.is_complete(traj.motion_start + traj.duration));
         assert!(traj.is_complete(traj.motion_start + traj.duration + Duration::from_millis(1)));

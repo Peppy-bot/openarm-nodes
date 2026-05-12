@@ -39,6 +39,7 @@ fn main() -> Result<()> {
             max_joint_velocity_rad_s.iter().all(|v| *v > 0.0),
             "all max_joint_velocity_rad_s_N must be > 0"
         );
+        assert!(params.min_motion_time_s >= 0.0, "min_motion_time_s must be >= 0");
 
         let cfg = ControlConfig {
             kp: [
@@ -54,6 +55,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             max_joint_velocity_rad_s,
+            min_motion_time_s: params.min_motion_time_s,
         };
 
         // Instance lock — check if another instance with the same arm_id is running.
