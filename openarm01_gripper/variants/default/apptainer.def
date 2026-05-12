@@ -1,0 +1,24 @@
+Bootstrap: docker
+From: tuatini/peppy-rust-cargo-base
+
+%files
+    . /opt/openarm01_gripper
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update -y
+    apt-get install -y --no-install-recommends software-properties-common
+    add-apt-repository -y ppa:openarm/main
+    apt-get update -y
+    apt-get install -y --no-install-recommends libclang-dev libopenarm-can-dev=1.2.8-1.ubuntu24.04.1
+
+    cd /opt/openarm01_gripper
+    cargo build --release
+
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+%runscript
+    cd /opt/openarm01_gripper
+    exec ./target/release/openarm01_gripper "$@"
