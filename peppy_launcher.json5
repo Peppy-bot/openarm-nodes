@@ -1,0 +1,64 @@
+
+{
+  peppy_schema: "launcher_v1",
+  deployments: [
+    {
+      source: { local: "./openarm01_arm" },
+      instances: [
+        {
+          instance_id: "arm_0",
+          arguments: {
+            arm_id: 0,
+            can_interface: "left_follower",
+            // Conservative floor for testing — each trajectory takes at least 5 s.
+            // Lower toward 0.1 once the arm is verified near zero.
+            min_motion_time_s: 5.0,
+            // Relaxed tolerance for initial testing; tighten once gains are tuned.
+            position_tolerance_rad: 0.1
+          }
+        }
+      ]
+    },
+    {
+      source: { local: "./openarm01_arm_test" },
+      instances: [
+        {
+          instance_id: "arm_test_0",
+          arguments: {
+            // Set motion_enabled=true and enable individual joints to cycle them.
+            motion_enabled: true,
+
+            // Enable joints one at a time. Disabled joints hold their startup position.
+            joint_1_enabled: false,
+            joint_2_enabled: false,
+            joint_3_enabled: false,
+            joint_4_enabled: true,
+            joint_5_enabled: true,
+            joint_6_enabled: true,
+            joint_7_enabled: true,
+
+            // small motion near the arm's hanging/zeroed position.
+            // Anatomy: J1-J3 shoulder, J4 elbow, J5-J7 wrist.
+            joint_1_limit_1: -0.15,
+            joint_1_limit_2:  0.15,
+            joint_2_limit_1: -0.15,
+            joint_2_limit_2:  0.15,
+            joint_3_limit_1: -0.15,
+            joint_3_limit_2:  0.15,
+            joint_4_limit_1:  0.0,
+            joint_4_limit_2:  0.2,
+            joint_5_limit_1: -0.2,
+            joint_5_limit_2:  0.2,
+            joint_6_limit_1: -0.2,
+            joint_6_limit_2:  0.2,
+            joint_7_limit_1: -0.2,
+            joint_7_limit_2:  0.2,
+
+            // Pause at each limit before moving to the other (s).
+            dwell_s: 5.0
+          }
+        }
+      ]
+    }
+  ]
+}

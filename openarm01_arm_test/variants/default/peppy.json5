@@ -1,0 +1,43 @@
+{
+  peppy_schema: "node_v1",
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    },
+    parameters: {
+      // Set to true to cycle enabled joints between their two limits.
+      // Leave false to just verify connectivity and log current joint positions.
+      motion_enabled: { $type: "bool", $default: false },
+      // Per-joint enable. Disabled joints hold their startup position throughout.
+      joint_1_enabled: { $type: "bool", $default: false },
+      joint_2_enabled: { $type: "bool", $default: false },
+      joint_3_enabled: { $type: "bool", $default: false },
+      joint_4_enabled: { $type: "bool", $default: false },
+      joint_5_enabled: { $type: "bool", $default: false },
+      joint_6_enabled: { $type: "bool", $default: false },
+      joint_7_enabled: { $type: "bool", $default: false },
+      // Per-joint cycle limits (rad). Only used when joint_N_enabled=true.
+      joint_1_limit_1: { $type: "f64", $default: 0.0 },
+      joint_1_limit_2: { $type: "f64", $default: 0.0 },
+      joint_2_limit_1: { $type: "f64", $default: 0.0 },
+      joint_2_limit_2: { $type: "f64", $default: 0.0 },
+      joint_3_limit_1: { $type: "f64", $default: 0.0 },
+      joint_3_limit_2: { $type: "f64", $default: 0.0 },
+      joint_4_limit_1: { $type: "f64", $default: 0.0 },
+      joint_4_limit_2: { $type: "f64", $default: 0.0 },
+      joint_5_limit_1: { $type: "f64", $default: 0.0 },
+      joint_5_limit_2: { $type: "f64", $default: 0.0 },
+      joint_6_limit_1: { $type: "f64", $default: 0.0 },
+      joint_6_limit_2: { $type: "f64", $default: 0.0 },
+      joint_7_limit_1: { $type: "f64", $default: 0.0 },
+      joint_7_limit_2: { $type: "f64", $default: 0.0 },
+      // Pause at each limit before moving to the other (s).
+      dwell_s: { $type: "f64", $default: 5.0 },
+      feedback_frequency: { $type: "u32", $default: 10 },
+      goal_timeout_s: { $type: "f64", $default: 10.0 },
+      // Allow generous time — raise arm's min_motion_time_s for slow testing.
+      result_timeout_s: { $type: "f64", $default: 120.0 }
+    }
+  }
+}

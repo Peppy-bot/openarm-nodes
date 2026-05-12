@@ -1,0 +1,48 @@
+// DNC test harness — calls openarm01_arm's get_arm_id service, then optionally
+// drives move_arm_joints to zero and logs starting and final joint positions.
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_arm_test",
+    tag: "0.1.0",
+    depends_on: {
+      nodes: [
+        {
+          name: "openarm01_arm",
+          tag: "0.1.0",
+          local_id: "arm"
+        }
+      ]
+    },
+    variants: [
+      {
+        name: "default",
+        source: {
+          local: "./variants/default"
+        }
+      }
+    ]
+  },
+  interfaces: {
+    services: {
+      consumes: [
+        {
+          local_node_id: "arm",
+          name: "get_arm_id"
+        },
+        {
+          local_node_id: "arm",
+          name: "get_joint_positions"
+        }
+      ]
+    },
+    actions: {
+      consumes: [
+        {
+          local_node_id: "arm",
+          name: "move_arm_joints"
+        }
+      ]
+    }
+  }
+}
