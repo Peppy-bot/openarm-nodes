@@ -1,15 +1,7 @@
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "inverse_kinematics",
-    tag: "0.1.0",
-    variants: [
-      {
-        name: "default",
-        source: {
-          local: "./variants/default"
-        }
-      }
-    ]
+    tag: "0.1.0"
   },
 }

@@ -2,7 +2,7 @@
 // collision detection, routes commands to openarm01_arm/openarm01_gripper, and
 // re-publishes raw peppylib sensor data from the sim as typed peppygen topics.
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_backbone",
     tag: "0.1.0",

@@ -2,7 +2,7 @@
 // This is a root component node — openarm01_backbone depends on it, not the other way around.
 // It is a "stupid" node that relays gripper commands from openarm01_backbone to either the real robot or the sims.
 {
-  schema_version: 1,
+  peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_gripper",
     tag: "0.1.0",
@@ -40,12 +40,8 @@
             request_message_format: {
               // The frequency in hertz at which the feedback is being sent
               feedback_frequency: "u32",
-              // x, y, z
-              desired_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              }
+              // Target gripper opening in meters (0.0 = closed, 0.044 = fully open on V10).
+              position: "f64"
             },
             response_message_format: {
               accepted: "bool"
