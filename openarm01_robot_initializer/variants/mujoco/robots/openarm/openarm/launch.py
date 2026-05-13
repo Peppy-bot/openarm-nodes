@@ -43,13 +43,7 @@ async def _run_sim(_params, node_runner) -> list:
 
     async def _run_sim_task() -> None:
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready).run)
-        except Exception:
-            _ready.clear()
-            os._exit(1)
-        _ready.clear()
-        os._exit(0)
+        await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready).run)
 
     return [
         asyncio.create_task(_run_sim_task()),
@@ -57,4 +51,9 @@ async def _run_sim(_params, node_runner) -> list:
     ]
 
 
-NodeBuilder().run(_run_sim)
+def main() -> None:
+    NodeBuilder().run(_run_sim)
+
+
+if __name__ == "__main__":
+    main()
