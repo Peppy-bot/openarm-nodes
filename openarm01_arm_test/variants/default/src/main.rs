@@ -41,6 +41,10 @@ async fn run(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<()> {
     .await?;
     info!("joint_positions: {:.4?}", joints.data.joint_positions);
 
+    let instance_id = id_response.instance_id.clone();
+    info!("moving to zero");
+    move_arm(&node_runner, &instance_id, &params, vec![0.0; 7]).await?;
+
     if !params.motion_enabled {
         info!("motion_enabled=false — connectivity confirmed; set motion_enabled=true to cycle joints");
         return Ok(());
@@ -82,7 +86,6 @@ async fn run(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<()> {
     info!("cycling {n_enabled} joint(s): enabled={enabled:?}");
 
     let startup = joints.data.joint_positions;
-    let instance_id = id_response.instance_id.clone();
 
     loop {
         for (label, limits) in [("limit_1", &limits_1), ("limit_2", &limits_2)] {
