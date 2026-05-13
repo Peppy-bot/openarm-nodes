@@ -11,13 +11,7 @@
       {
         name: "default",
         source: {
-          local: "./variants/realsense_d435"
-        }
-      },
-      {
-        name: "realsense_d405",
-        source: {
-          local: "./variants/realsense_d405"
+          local: "./variants/linux"
         }
       },
       {
@@ -46,7 +40,7 @@
     topics: {
       emits: [
         {
-          name: "video_stream",
+          name: "depth_stream",
           qos_profile: "sensor_data",
           message_format: {
             header: {
@@ -60,13 +54,15 @@
             frame: {
               $type: "array",
               $items: "u8",
-              $length: 4
             },
           },
         }
       ],
     },
     services: {
+      // Z16 depth subdev exposes only the gain control on V4L2; color-only
+      // knobs (brightness/contrast/exposure/white_balance) live on the
+      // separate color subdev and are surfaced by uvc_camera.
       exposes: [
         {
           name: "video_stream_info",
@@ -78,53 +74,7 @@
           }
         },
         {
-          name: "set_exposure",
-          request_message_format: {
-            mode: "string",
-            value: "i32",
-          },
-          response_message_format: {
-            success: "bool",
-            message: "string",
-            current_value: "i32",
-          },
-        },
-        {
-          name: "set_white_balance",
-          request_message_format: {
-            mode: "string",
-            temperature: "i32",
-          },
-          response_message_format: {
-            success: "bool",
-            message: "string",
-            current_temperature: "i32",
-          },
-        },
-        {
           name: "set_gain",
-          request_message_format: {
-            value: "i32",
-          },
-          response_message_format: {
-            success: "bool",
-            message: "string",
-            current_value: "i32",
-          },
-        },
-        {
-          name: "set_brightness",
-          request_message_format: {
-            value: "i32",
-          },
-          response_message_format: {
-            success: "bool",
-            message: "string",
-            current_value: "i32",
-          },
-        },
-        {
-          name: "set_contrast",
           request_message_format: {
             value: "i32",
           },
