@@ -66,7 +66,6 @@
             frame: {
               $type: "array",
               $items: "u8",
-              $length: 3
             },
           },
         }

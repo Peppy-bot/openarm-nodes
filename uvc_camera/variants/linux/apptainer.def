@@ -1,0 +1,20 @@
+Bootstrap: docker
+From: tuatini/peppy-rust-cargo-base
+
+%files
+    . /opt/uvc_camera
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update -y
+    apt-get install -y --no-install-recommends libclang-dev
+
+    cd /opt/uvc_camera
+    cargo build --release
+
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+%runscript
+    cd /opt/uvc_camera
+    exec ./target/release/uvc_camera "$@"
