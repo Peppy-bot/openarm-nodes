@@ -5,7 +5,7 @@ use peppygen::NodeRunner;
 use peppygen::exposed_actions::move_arm_joints;
 use tracing::{error, info};
 
-use openarm_can::{ArmCan, v10};
+use openarm_can::v10;
 use crate::trajectory::Trajectory;
 
 struct AcceptedGoal {
@@ -14,6 +14,7 @@ struct AcceptedGoal {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)] // kp/kd/recv_timeout_us go unused while CAN is stubbed.
 pub struct ControlConfig {
     pub kp: v10::JointVec,
     pub kd: v10::JointVec,
@@ -68,7 +69,7 @@ impl Default for MotionResult {
 /// after each completed (or rejected) goal.
 pub async fn run_move_arm_joints(
     runner: Arc<NodeRunner>,
-    arm: Arc<Mutex<ArmCan>>,
+    state: Arc<Mutex<v10::JointVec>>,
     cfg: ControlConfig,
 ) {
     let mut handle = move_arm_joints::ActionHandle::expose(&runner)
@@ -107,7 +108,7 @@ pub async fn run_move_arm_joints(
         // 2. If accepted, run the control loop here.
         let goal = pending.lock().unwrap().take();
         let result = match goal {
-            Some(g) => run_control_loop(&arm, &handle, &cfg, g).await,
+            Some(g) => run_control_loop(&state, &handle, &cfg, g).await,
             None => continue, // goal was rejected
         };
 
@@ -137,18 +138,13 @@ fn fmt_joints(v: &v10::JointVec) -> String {
 }
 
 async fn run_control_loop(
-    arm: &Arc<Mutex<ArmCan>>,
+    state: &Arc<Mutex<v10::JointVec>>,
     handle: &move_arm_joints::ActionHandle,
     cfg: &ControlConfig,
     goal: AcceptedGoal,
 ) -> MotionResult {
-    // Anchor the trajectory at the current joint positions.
-    let q_start = {
-        let mut a = arm.lock().unwrap();
-        a.refresh_all();
-        a.recv_all(cfg.recv_timeout_us);
-        a.get_state().positions
-    };
+    // Anchor the trajectory at the current (simulated) joint positions.
+    let q_start = *state.lock().unwrap();
 
     info!(
         "move_arm_joints: start={} target={}",
@@ -159,24 +155,16 @@ async fn run_control_loop(
     let start = trajectory.motion_start;
     let mut last_feedback = Instant::now();
     let feedback_period = Duration::from_micros(1_000_000 / goal.feedback_frequency as u64);
-    // tau (feedforward torque) is zero. The default ROS2 control path also leaves
-    // tau_commands_ at zero — JointTrajectoryController populates pos/vel command
-    // interfaces only, and v10_simple_hardware just forwards what's there. Adding
-    // gravity compensation would require an inverse-dynamics model (URDF + a solver
-    // like pinocchio or KDL) and would populate this slot with g(q).
-    let zero_tau = [0.0f64; v10::ARM_DOF];
 
     loop {
         let cycle_start = Instant::now();
-        let (q_des, dq_des) = trajectory.sample(cycle_start);
+        let (q_des, _dq_des) = trajectory.sample(cycle_start);
 
+        // CAN stubbed: pretend the joints instantly track the commanded position.
         let positions = {
-            let mut a = arm.lock().unwrap();
-            a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &zero_tau);
-            a.refresh_all();
-            a.recv_all(cfg.recv_timeout_us);
-            let p = a.get_state().positions;
-            p
+            let mut s = state.lock().unwrap();
+            *s = q_des;
+            *s
         };
 
         let elapsed = start.elapsed();
