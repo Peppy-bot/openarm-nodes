@@ -1,15 +1,20 @@
 {
+  peppy_schema: "node_v1",
   execution: {
-    language: "python",
+    language: "rust",
     container: {
       def_file: "apptainer.def"
     },
     parameters: {
-      // The gripper_id at runtime
-      // Depending on the ID, either 0 (left) or 1 (right), the instance sends commands to the axes on either the right or left gripper
-      // If more than one instance with the same gripper_id is detected at runtime, the new instance with the taken ID must crash. There should not be more than a single instance with the same ID running.
-      // For the locking mechanism we could use https://app.plane.so/peppy/browse/PEPPYOS-75/, if it's not yet implemented simply use a temporary named file (it's hacky tho as it assumes all the nodes run on the same filesystem).
-      gripper_id: "u8"
+      gripper_id: "u8",
+      can_interface: "string",
+      // Hardware-loop rate (Hz).
+      control_rate_hz: { $type: "u32", $default: 100 },
+      // Per-cycle CAN read deadline (μs).
+      recv_timeout_us: { $type: "u32", $default: 1000 },
+      // Error threshold (m) for goal completion.
+      position_tolerance: { $type: "f64", $default: 0.001 },
+      motion_timeout_s: { $type: "f64", $default: 10.0 },
     }
   }
 }
