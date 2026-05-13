@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Download robot assets from R2 into staging dirs that apptainer.def %setup copies into the SIF.
-# Run once before `peppy node build` whenever assets change.
-#
-# Usage:
-#   RCLONE_S3_ACCESS_KEY_ID=<key> RCLONE_S3_SECRET_ACCESS_KEY=<secret> bash scripts/download_assets.sh
+# Download robot assets from R2 into /tmp staging dirs.
+# Called by Dockerfile.isaac and Dockerfile.mujoco during base image builds — not for contributors.
+# To rebuild base images: RCLONE_S3_ACCESS_KEY_ID=<key> RCLONE_S3_SECRET_ACCESS_KEY=<secret> bash scripts/build_base_images.sh
 set -euo pipefail
 
 KEY_ID="${RCLONE_S3_ACCESS_KEY_ID:?RCLONE_S3_ACCESS_KEY_ID must be set}"
@@ -35,4 +33,4 @@ rm -rf /tmp/.peppy_robot_initializer_isaac
 mkdir -p /tmp/.peppy_robot_initializer_isaac
 _rclone copy "r2:${BUCKET}/openarm01/isaac/assets/" /tmp/.peppy_robot_initializer_isaac/ --progress
 
-echo "==> Done. Now run: peppy node build openarm01_robot_initializer:0.1.0"
+echo "==> Done."

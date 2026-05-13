@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: python:3.11-slim
+From: aaqibmahamood/openarm01-mujoco-sim:0.1.0
 
 %labels
     Name openarm01-robot-initializer-mujoco
@@ -14,40 +14,7 @@ From: python:3.11-slim
     export DISPLAY=
     export PEPPY_ROBOT_ASSETS_DIR=${PEPPY_ROBOT_ASSETS_DIR:-/opt/robot_assets/openarm/mujoco}
 
-%setup
-    mkdir -p "${APPTAINER_ROOTFS}/opt/robot_assets/openarm/mujoco"
-    if [ -d /tmp/.peppy_robot_initializer_mujoco ] && [ -n "$(ls -A /tmp/.peppy_robot_initializer_mujoco 2>/dev/null)" ]; then
-        cp -r /tmp/.peppy_robot_initializer_mujoco/. "${APPTAINER_ROOTFS}/opt/robot_assets/openarm/mujoco/"
-        echo "INFO: Baked MuJoCo assets into SIF from /tmp/.peppy_robot_initializer_mujoco"
-    else
-        echo "WARNING: /tmp/.peppy_robot_initializer_mujoco not found or empty — run scripts/download_assets.sh first" >&2
-    fi
-
 %files
-
-%post
-    set -eux
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
-    && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
-        libgl1 \
-        libgl1-mesa-dri \
-        libglib2.0-0 \
-        libgomp1 \
-        libosmesa6 \
-        libwayland-client0 \
-        libwayland-cursor0 \
-        libwayland-egl1 \
-        libxkbcommon0 \
-        libegl1 \
-        libegl-mesa0 \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-    pip install --no-cache-dir \
-        mujoco \
-        numpy \
-        pycapnp \
-        pyjson5
 
 %runscript
     cd /opt/mujoco_robot_initializer
