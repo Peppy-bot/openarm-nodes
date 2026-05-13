@@ -41,8 +41,7 @@ class SimLauncher:
 
         if not self._usd_path.exists():
             raise FileNotFoundError(
-                f"USD not found at {self._usd_path} — "
-                "run scripts/download_assets.sh to fetch assets"
+                f"USD not found at {self._usd_path} — assets should be baked into the container image"
             )
         logger.info(f"Loading stage: {self._usd_path}")
         omni.usd.get_context().open_stage(str(self._usd_path))
@@ -64,6 +63,7 @@ class SimLauncher:
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
+            self._ready.clear()
             if self._timeline is not None:
                 self._timeline.stop()
             self._sim_app.close()

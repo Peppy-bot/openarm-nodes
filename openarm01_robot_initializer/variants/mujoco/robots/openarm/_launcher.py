@@ -26,7 +26,7 @@ class SimLauncher:
 
         if not self._xml_path.exists():
             logger.error(
-                "MJCF not found at %s — run scripts/download_assets.sh to fetch assets",
+                "MJCF not found at %s — assets should be baked into the container image",
                 self._xml_path,
             )
             raise FileNotFoundError(self._xml_path)
@@ -57,6 +57,8 @@ class SimLauncher:
                     time.sleep(remaining)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
+        finally:
+            self._ready.clear()
 
     def _run_windowed(self, model, data) -> None:
         import mujoco
@@ -75,3 +77,5 @@ class SimLauncher:
                         time.sleep(remaining)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
+        finally:
+            self._ready.clear()

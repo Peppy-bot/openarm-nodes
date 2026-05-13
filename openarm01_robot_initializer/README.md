@@ -14,7 +14,7 @@ Manages the simulation process lifecycle for the OpenArm01 bimanual robot. Expos
 
 **Exposed service: `is_ready`**
 
-```
+```yaml
 response: { ready: bool }
 ```
 
@@ -33,13 +33,13 @@ peppy node run openarm01_robot_initializer:0.1.0
 
 ```bash
 peppy node add . --variant mujoco -sb
-peppy node run openarm01_robot_initializer:0.1.0 node_root=<abs_path_to_variants/mujoco>
+peppy node run openarm01_robot_initializer:0.1.0 node_root=$(pwd)/variants/mujoco
 ```
 
 Runs headless by default. To open the viewer GUI:
 
 ```bash
-PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0 node_root=<abs_path_to_variants/mujoco>
+PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0 node_root=$(pwd)/variants/mujoco
 ```
 
 ### Isaac Sim
@@ -47,32 +47,32 @@ PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0 node_ro
 ```bash
 peppy node add . --variant isaac -sb
 peppy node run openarm01_robot_initializer:0.1.0 \
-  node_root=<abs_path_to_variants/isaac> \
-  home_dir=<home_dir>
+  node_root=$(pwd)/variants/isaac \
+  home_dir=$HOME
 ```
 
 Runs headless by default. Requires NVIDIA GPU. To open the GUI:
 
 ```bash
 PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0 \
-  node_root=<abs_path_to_variants/isaac> \
-  home_dir=<home_dir>
+  node_root=$(pwd)/variants/isaac \
+  home_dir=$HOME
 ```
 
 ## Assets
 
-Robot assets (USD, MJCF, meshes) are not committed to the repository. Fetch them before building:
+Robot assets (USD, MJCF, meshes) are baked into the container images at `aaqibmahamood/openarm01-isaac-sim:5.1.0` and `aaqibmahamood/openarm01-mujoco-sim:0.1.0`. Contributors do not need to fetch assets — `peppy node build` pulls the pre-built images from Docker Hub.
+
+To rebuild the base images (maintainers only, requires R2 credentials):
 
 ```bash
 RCLONE_S3_ACCESS_KEY_ID=<key> RCLONE_S3_SECRET_ACCESS_KEY=<secret> \
-  bash scripts/download_assets.sh
+  bash scripts/build_base_images.sh
 ```
-
-Assets are baked into the SIF image at build time. Re-run `download_assets.sh` and rebuild whenever assets change.
 
 ## Project structure
 
-```
+```text
 openarm01_robot_initializer/
   peppy.json5                          # root manifest + is_ready service interface
   scripts/
