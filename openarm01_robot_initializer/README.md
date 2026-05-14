@@ -36,7 +36,9 @@ peppy node add . --variant mujoco -sb
 peppy node run openarm01_robot_initializer:0.1.0
 ```
 
-Runs headless by default. To open the viewer GUI:
+Runs headless by default. Open `http://<host>:8080` in any browser to view the simulation via [mjviser](https://github.com/mujocolab/mjviser) — no GPU or display required on the client.
+
+To open the native MuJoCo viewer window on the same machine instead:
 
 ```bash
 PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0
@@ -49,7 +51,9 @@ peppy node add . --variant isaac -sb
 peppy node run openarm01_robot_initializer:0.1.0
 ```
 
-Runs headless by default. Requires NVIDIA GPU. To open the GUI:
+Runs headless with WebRTC streaming by default. Connect via the [Isaac Sim Livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). Requires NVIDIA GPU.
+
+To open the Isaac Sim window on the same machine instead:
 
 ```bash
 PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0
@@ -57,7 +61,7 @@ PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0
 
 ## Assets
 
-Robot assets (USD, MJCF, meshes) are baked into the container images at `aaqibmahamood/openarm01-isaac-sim:5.1.0` and `aaqibmahamood/openarm01-mujoco-sim:0.1.0`. Contributors do not need to fetch assets — `peppy node build` pulls the pre-built images from Docker Hub.
+Robot assets (USD, MJCF, meshes) are baked into the container images at `aaqibmahamood/openarm01-isaac-sim:5.1.0` and `aaqibmahamood/openarm01-mujoco-sim:3.8.1`. Contributors do not need to fetch assets — `peppy node build` pulls the pre-built images from Docker Hub.
 
 To rebuild the base images (maintainers only, requires R2 credentials):
 
