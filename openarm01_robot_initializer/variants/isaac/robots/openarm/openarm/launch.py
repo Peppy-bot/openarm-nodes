@@ -24,19 +24,24 @@ _ASSETS_DIR = Path(
 )
 _USD_PATH = _ASSETS_DIR / "openarm_bimanual.usd"
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
-_NODE_ROOT = Path(__file__).resolve().parents[3]
 
 # Must be set before SimulationApp initialises.
 os.environ["PEPPY_BRIDGE_NODE_NAME"] = "sim"
 
 from isaacsim import SimulationApp
 
-simulation_app = SimulationApp(
-    {
-        "headless": os.environ.get("PEPPY_BRIDGE_HEADLESS", "1") == "1",
-        "renderer": os.environ.get("PEPPY_ISAAC_RENDERER", "RayTracedLighting"),
-    }
-)
+_headless = os.environ.get("PEPPY_BRIDGE_HEADLESS", "1") == "1"
+_launch_config = {
+    "headless": _headless,
+    "renderer": os.environ.get("PEPPY_ISAAC_RENDERER", "RayTracedLighting"),
+}
+if _headless:
+    simulation_app = SimulationApp(
+        _launch_config,
+        experience="/isaac-sim/apps/isaacsim.exp.full.streaming.kit",
+    )
+else:
+    simulation_app = SimulationApp(_launch_config)
 
 sys.path.insert(0, str(_ROBOTS_DIR))
 from _launcher import SimLauncher
@@ -56,7 +61,6 @@ async def setup(_params, node_runner) -> list:
 
 
 def main() -> None:
-    os.chdir(str(_NODE_ROOT))
     threading.Thread(
         target=lambda: NodeBuilder().run(setup),
         daemon=True,

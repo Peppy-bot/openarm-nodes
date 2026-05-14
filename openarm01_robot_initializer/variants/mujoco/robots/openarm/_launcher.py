@@ -39,22 +39,21 @@ class SimLauncher:
         logger.info("Scene loaded — is_ready: true")
 
         if self._headless:
-            self._run_headless(model, data)
+            self._run_streamed(model, data)
         else:
             self._run_windowed(model, data)
 
-    def _run_headless(self, model, data) -> None:
-        import mujoco
+    def _run_streamed(self, model, data) -> None:
+        import viser
+        import mjviser
 
-        dt = model.opt.timestep
         try:
-            while True:
-                step_start = time.monotonic()
-                mujoco.mj_step(model, data)
-                elapsed = time.monotonic() - step_start
-                remaining = dt - elapsed
-                if remaining > 0:
-                    time.sleep(remaining)
+            server = viser.ViserServer(host="0.0.0.0", port=8080)
+            viewer = mjviser.Viewer(model, data, server=server)
+            logger.info(
+                "MuJoCo viewer available — open http://<host>:8080 in a browser"
+            )
+            viewer.run()
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:

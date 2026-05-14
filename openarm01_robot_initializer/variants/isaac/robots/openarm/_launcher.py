@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from pathlib import Path
 
@@ -26,22 +25,20 @@ class SimLauncher:
             self._load_stage()
             self._warmup()
             self._start_timeline()
+            self._ready.set()
+            logger.info("Scene loaded — is_ready: true")
+            self._run_loop()
         except FileNotFoundError as exc:
             logger.error(str(exc))
             self._sim_app.close()
-            os._exit(1)  # pylint: disable=W0212
-
-        self._ready.set()
-        logger.info("Scene loaded — is_ready: true")
-
-        self._run_loop()
 
     def _load_stage(self) -> None:
         import omni.usd
 
         if not self._usd_path.exists():
             raise FileNotFoundError(
-                f"USD not found at {self._usd_path} — assets should be baked into the container image"
+                f"USD not found at {self._usd_path}"
+                " — assets should be baked into the container image"
             )
         logger.info(f"Loading stage: {self._usd_path}")
         omni.usd.get_context().open_stage(str(self._usd_path))
@@ -67,3 +64,4 @@ class SimLauncher:
             if self._timeline is not None:
                 self._timeline.stop()
             self._sim_app.close()
+            logger.info("Isaac Sim closed.")
