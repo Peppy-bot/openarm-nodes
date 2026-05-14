@@ -15,6 +15,8 @@ From: aaqibmahamood/openarm01-mujoco-sim:0.1.0
     export PEPPY_ROBOT_ASSETS_DIR=${PEPPY_ROBOT_ASSETS_DIR:-/opt/robot_assets/openarm/mujoco}
 
 %files
+    robots /opt/mujoco_robot_initializer/robots
+    .peppy/libs/peppygen /opt/mujoco_robot_initializer/.peppy/libs/peppygen
 
 %runscript
     cd /opt/mujoco_robot_initializer

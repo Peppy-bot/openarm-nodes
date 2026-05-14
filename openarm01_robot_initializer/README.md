@@ -33,30 +33,26 @@ peppy node run openarm01_robot_initializer:0.1.0
 
 ```bash
 peppy node add . --variant mujoco -sb
-peppy node run openarm01_robot_initializer:0.1.0 node_root=$(pwd)/variants/mujoco
+peppy node run openarm01_robot_initializer:0.1.0
 ```
 
 Runs headless by default. To open the viewer GUI:
 
 ```bash
-PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0 node_root=$(pwd)/variants/mujoco
+PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0
 ```
 
 ### Isaac Sim
 
 ```bash
 peppy node add . --variant isaac -sb
-peppy node run openarm01_robot_initializer:0.1.0 \
-  node_root=$(pwd)/variants/isaac \
-  home_dir=$HOME
+peppy node run openarm01_robot_initializer:0.1.0
 ```
 
 Runs headless by default. Requires NVIDIA GPU. To open the GUI:
 
 ```bash
-PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0 \
-  node_root=$(pwd)/variants/isaac \
-  home_dir=$HOME
+PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer:0.1.0
 ```
 
 ## Assets

@@ -14,6 +14,8 @@ From: aaqibmahamood/openarm01-isaac-sim:5.1.0
     export PEPPY_ROBOT_ASSETS_DIR=${PEPPY_ROBOT_ASSETS_DIR:-/opt/robot_assets/openarm/isaac}
 
 %files
+    robots /opt/isaac_robot_initializer/robots
+    .peppy/libs/peppygen /opt/isaac_robot_initializer/.peppy/libs/peppygen
 
 %runscript
     cd /isaac-sim
