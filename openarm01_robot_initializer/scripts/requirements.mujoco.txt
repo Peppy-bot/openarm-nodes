@@ -1,0 +1,6 @@
+mujoco==3.8.1
+mjviser
+numpy==2.4.4
+pycapnp==2.2.2
+pyjson5==2.0.0
+viser==1.0.27

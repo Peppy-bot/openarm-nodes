@@ -17,11 +17,8 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
         libegl-mesa0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
-        mujoco \
-        numpy \
-        pycapnp \
-        pyjson5
+COPY scripts/requirements.mujoco.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY scripts/download_assets.sh /tmp/download_assets.sh
 RUN --mount=type=secret,id=rclone_key \
