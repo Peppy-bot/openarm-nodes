@@ -34,6 +34,7 @@ class SimLauncher:
         logger.info(f"Loading model: {self._xml_path}")
         model = mujoco.MjModel.from_xml_path(str(self._xml_path))
         data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
 
         self._ready.set()
         logger.info("Scene loaded — is_ready: true")
