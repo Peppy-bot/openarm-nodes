@@ -1,4 +1,5 @@
 {
+  peppy_schema: "node_v1",
   execution: {
     language: "python",
     container: {

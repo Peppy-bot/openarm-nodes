@@ -89,6 +89,46 @@
               action_time: "f64"
             }
           }
+        },
+        // Joint-space motion: backbone calls this after IK resolves joint angles.
+        {
+          name: "move_arm_joints",
+          goal_service: {
+            request_message_format: {
+              feedback_frequency: "u32",
+              joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              }
+            },
+            response_message_format: {
+              accepted: "bool"
+            }
+          },
+          feedback_topic: {
+            qos_profile: "standard",
+            message_format: {
+              joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              },
+              action_time: "f64"
+            }
+          },
+          result_service: {
+            response_message_format: {
+              success: "bool",
+              message: "string",
+              final_joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              },
+              action_time: "f64"
+            }
+          }
         }
       ]
     },
@@ -99,6 +139,16 @@
           name: "get_arm_id",
           response_message_format: {
             arm_id: "u8"
+          }
+        },
+        {
+          name: "get_joint_positions",
+          response_message_format: {
+            joint_positions: {
+              $type: "array",
+              $items: "f64",
+              $length: 7
+            }
           }
         }
       ]

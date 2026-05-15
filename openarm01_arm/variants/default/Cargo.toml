@@ -1,0 +1,12 @@
+[package]
+name = "openarm01_arm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+openarm_can = { git = "https://github.com/Peppy-bot/nodes_shared_code", branch = "main", package = "openarm_can" }
+peppygen = { path = ".peppy/libs/peppygen" }
+peppylib = { path = ".peppy/libs/peppylib" }
