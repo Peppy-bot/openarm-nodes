@@ -51,6 +51,14 @@ class SimLauncher:
         try:
             server = viser.ViserServer(host="0.0.0.0", port=8080)
             viewer = mjviser.Viewer(model, data, server=server)
+
+            # viser sends batched position updates as delta messages only —
+            # new/refreshing clients receive initial zero positions unless we
+            # explicitly push current state on each connection.
+            @server.on_client_connect
+            def _(client) -> None:
+                viewer._refresh_scene_from_gui()
+
             logger.info(
                 "MuJoCo viewer available — open http://<host>:8080 in a browser"
             )
