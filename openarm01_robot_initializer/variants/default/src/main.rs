@@ -5,6 +5,7 @@ use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
 mod service;
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt().init();
     NodeBuilder::new().run(|_args: Parameters, runner: Arc<NodeRunner>| async move {
         let token = runner.cancellation_token().clone();
         tokio::spawn(async move {
