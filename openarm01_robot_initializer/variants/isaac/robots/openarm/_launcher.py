@@ -10,7 +10,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_WARMUP_STEPS = 10
+_WARMUP_STEPS = 100
 
 
 class SimLauncher:
@@ -19,10 +19,12 @@ class SimLauncher:
         self._usd_path = usd_path
         self._ready = ready
         self._timeline = None
+        self._world = None
 
     def run(self) -> None:
         try:
             self._load_stage()
+            self._setup_lighting()
             self._warmup()
             self._start_timeline()
             self._ready.set()
@@ -43,7 +45,19 @@ class SimLauncher:
         logger.info(f"Loading stage: {self._usd_path}")
         omni.usd.get_context().open_stage(str(self._usd_path))
 
+    def _setup_lighting(self) -> None:
+        import omni.usd
+        from pxr import Sdf, UsdLux
+
+        stage = omni.usd.get_context().get_stage()
+        light = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/defaultDomeLight"))
+        light.CreateIntensityAttr(1000)
+        logger.info("Default dome light added to stage")
+
     def _warmup(self) -> None:
+        from omni.isaac.core import World  # pylint: disable=E0401
+
+        self._world = World()
         for _ in range(_WARMUP_STEPS):
             self._sim_app.update()
 
