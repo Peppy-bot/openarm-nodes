@@ -16,7 +16,7 @@ RUN --mount=type=secret,id=rclone_key \
     --mount=type=secret,id=rclone_secret \
     RCLONE_S3_ACCESS_KEY_ID="$(cat /run/secrets/rclone_key)" \
     RCLONE_S3_SECRET_ACCESS_KEY="$(cat /run/secrets/rclone_secret)" \
-    bash /tmp/download_assets.sh \
+    bash /tmp/download_assets.sh --variant isaac \
     && mkdir -p /opt/robot_assets/openarm/isaac \
     && cp -r /tmp/.peppy_robot_initializer_isaac/. /opt/robot_assets/openarm/isaac/ \
-    && rm -rf /tmp/.peppy_robot_initializer_isaac /tmp/.peppy_robot_initializer_mujoco
+    && rm -rf /tmp/.peppy_robot_initializer_isaac
