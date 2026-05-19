@@ -1,0 +1,11 @@
+{
+  peppy_schema: "node_v1",
+  execution: {
+    language: "python",
+    container: {
+      def_file: "apptainer.def",
+      apptainer_run_extra_args: ["--nv"],
+      mount_paths: ["/run/user"],
+    },
+  },
+}

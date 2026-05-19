@@ -1,0 +1,9 @@
+{
+  peppy_schema: "node_v1",
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
+    },
+  },
+}
