@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
 _BUS_DIR_ENV = "PEPPY_MJDATA_BUS_DIR"
-_DEFAULT_BUS_DIR = "/var/run/peppy/sim"
+_DEFAULT_BUS_DIR = f"/run/user/{os.getuid()}/peppy/sim"
 
 
 class SimLauncher:

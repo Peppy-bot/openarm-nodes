@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 _WARMUP_STEPS = 100
 _EXTS_DIR_ENV = "PEPPY_ISAAC_EXTS_DIR"
-_DEFAULT_EXTS_DIR = "/var/run/peppy/sim/exts"
+_DEFAULT_EXTS_DIR = f"/run/user/{os.getuid()}/peppy/sim/exts"
 
 
 class SimLauncher:
