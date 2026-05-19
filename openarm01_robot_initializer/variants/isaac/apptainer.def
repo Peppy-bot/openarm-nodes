@@ -12,6 +12,10 @@ From: aaqibmahamood/openarm01-isaac-sim:5.1.0
     export PEPPY_BRIDGE_HEADLESS=${PEPPY_BRIDGE_HEADLESS:-1}
     export PEPPY_ISAAC_RENDERER=${PEPPY_ISAAC_RENDERER:-RayTracedLighting}
     export PEPPY_ROBOT_ASSETS_DIR=${PEPPY_ROBOT_ASSETS_DIR:-/opt/robot_assets/openarm/isaac}
+    # Per-stack Isaac extension discovery dir. Component variants
+    # (gripper/arm/depth_camera) drop their omni.peppy.<node> driver extension
+    # here; Isaac's ExtensionManager autoloads them.
+    export PEPPY_ISAAC_EXTS_DIR=${PEPPY_ISAAC_EXTS_DIR:-/var/run/peppy/sim/exts}
 
 %files
     peppy.json5 /opt/isaac_robot_initializer/peppy.json5
@@ -20,4 +24,5 @@ From: aaqibmahamood/openarm01-isaac-sim:5.1.0
 
 %runscript
     cd /opt/isaac_robot_initializer
+    mkdir -p "$PEPPY_ISAAC_EXTS_DIR"
     exec /isaac-sim/python.sh /opt/isaac_robot_initializer/robots/openarm/openarm/launch.py "$@"

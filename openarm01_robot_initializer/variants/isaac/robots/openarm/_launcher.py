@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _WARMUP_STEPS = 100
+_EXTS_DIR_ENV = "PEPPY_ISAAC_EXTS_DIR"
+_DEFAULT_EXTS_DIR = "/var/run/peppy/sim/exts"
 
 
 class SimLauncher:
@@ -20,9 +23,11 @@ class SimLauncher:
         self._ready = ready
         self._timeline = None
         self._world = None
+        self._exts_dir = Path(os.environ.get(_EXTS_DIR_ENV, _DEFAULT_EXTS_DIR))
 
     def run(self) -> None:
         try:
+            self._register_ext_path()
             self._load_stage()
             self._setup_lighting()
             self._warmup()
@@ -33,6 +38,20 @@ class SimLauncher:
         except FileNotFoundError as exc:
             logger.error(str(exc))
             self._sim_app.close()
+
+    def _register_ext_path(self) -> None:
+        # Make the per-stack extension dir discoverable by Isaac's native
+        # ExtensionManager. Component-variant containers (gripper, arm, ...)
+        # drop their `omni.peppy.<node>` driver extensions here; Isaac then
+        # autoloads them when extension.toml declares autoload=true. We do NOT
+        # enable specific extensions by name — that knowledge belongs to each
+        # component, not robot_initializer.
+        import omni.kit.app  # pylint: disable=C0415,E0401
+
+        self._exts_dir.mkdir(parents=True, exist_ok=True)
+        ext_manager = omni.kit.app.get_app().get_extension_manager()
+        ext_manager.add_path(str(self._exts_dir))
+        logger.info(f"Isaac extension path added: {self._exts_dir}")
 
     def _load_stage(self) -> None:
         import omni.usd
