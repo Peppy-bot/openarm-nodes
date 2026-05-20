@@ -87,7 +87,6 @@
             step:           "u64",
             joint_names:    { $type: "array", $items: "string" },
             positions:      { $type: "array", $items: "f64" },
-            applied_forces: { $type: "array", $items: "f64" },
             stamp:          "f64",
           },
         },
@@ -99,10 +98,14 @@
             step:           "u64",
             joint_names:    { $type: "array", $items: "string" },
             positions:      { $type: "array", $items: "f64" },
-            applied_forces: { $type: "array", $items: "f64" },
             stamp:          "f64",
           },
         },
+        // Convention for the four contact_forces_*_finger{1,2} topics:
+        //   finger1 = right-side finger geom of the gripper (in the gripper's own frame).
+        //   finger2 = left-side  finger geom of the gripper.
+        // Stable across both grippers - i.e. contact_forces_left_finger1 carries
+        // contacts on the right finger of the LEFT gripper.
         {
           name: "contact_forces_left_finger1",
           qos_profile: "sensor_data",

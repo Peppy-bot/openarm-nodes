@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{Ordering, fence};
 
 use memmap2::{MmapMut, MmapOptions};
 use serde::Deserialize;
@@ -123,6 +124,7 @@ struct Offsets {
     xquat: usize,
     ncon: usize,
     contacts: usize,
+    total_size: usize,
 }
 
 impl Offsets {
@@ -135,7 +137,8 @@ impl Offsets {
         let sensordata = xquat + 8 * d.nbody * 4;
         let ncon = sensordata + 8 * d.nsensordata;
         let contacts = ncon + 8; // u32 ncon + 4-byte pad
-        Self { qpos, qvel, ctrl, xpos, xquat, ncon, contacts }
+        let total_size = contacts + CONTACT_SIZE * d.max_contacts;
+        Self { qpos, qvel, ctrl, xpos, xquat, ncon, contacts, total_size }
     }
 }
 
@@ -204,7 +207,36 @@ impl MjDataBus {
             return Err(BusError::SchemaMismatch { found: schema, expected: SCHEMA_VERSION });
         }
 
+        // Cross-check binary header vs meta.json. Catches drift if
+        // robot_initializer rewrites one without the other (the bus is a
+        // shared-memory contract — silent mismatch corrupts every snapshot).
+        let read_u32 = |off: usize| -> usize {
+            u32::from_le_bytes(mmap[off..off + 4].try_into().unwrap()) as usize
+        };
+        let header_dims = [
+            ("nq",          read_u32(OFF_NQ),          meta.dimensions.nq),
+            ("nv",          read_u32(OFF_NV),          meta.dimensions.nv),
+            ("nu",          read_u32(OFF_NU),          meta.dimensions.nu),
+            ("nbody",       read_u32(OFF_NBODY),       meta.dimensions.nbody),
+            ("nsensordata", read_u32(OFF_NSENSORDATA), meta.dimensions.nsensordata),
+            ("max_contacts",read_u32(OFF_MAX_CONTACTS),meta.dimensions.max_contacts),
+        ];
+        for (name, header, meta_val) in header_dims {
+            if header != meta_val {
+                tracing::error!(
+                    "mjdata header/meta mismatch: {name} header={header} meta={meta_val}"
+                );
+                return Err(BusError::Inconsistent);
+            }
+        }
+
         let offsets = Offsets::from_dims(&meta.dimensions, meta.header_size);
+        // Catch the case where meta.json declares more space than mjdata.bin
+        // actually has — otherwise the first snapshot() panics deep inside a
+        // worker task with an opaque OOB.
+        if mmap.len() < offsets.total_size {
+            return Err(BusError::Inconsistent);
+        }
         let max_contacts = meta.dimensions.max_contacts;
         Ok(Self { meta, mmap: Mutex::new(mmap), offsets, max_contacts })
     }
@@ -251,6 +283,11 @@ impl MjDataBus {
             let step_pre = u64::from_le_bytes(
                 m[OFF_STEP_COUNTER..OFF_STEP_COUNTER + 8].try_into().unwrap(),
             );
+            // Seqlock read pattern: Acquire fences pin payload reads inside the
+            // window bounded by step_pre/step_post. Without these, the compiler
+            // or CPU is free to reorder payload reads outside the window
+            // (happens to work on x86_64; not portable to ARM).
+            fence(Ordering::Acquire);
 
             let sim_time = f64::from_le_bytes(
                 m[OFF_SIM_TIME..OFF_SIM_TIME + 8].try_into().unwrap(),
@@ -307,6 +344,7 @@ impl MjDataBus {
                 });
             }
 
+            fence(Ordering::Acquire);
             let step_post = u64::from_le_bytes(
                 m[OFF_STEP_COUNTER..OFF_STEP_COUNTER + 8].try_into().unwrap(),
             );
@@ -328,5 +366,8 @@ impl MjDataBus {
             let off = self.offsets.ctrl + 8 * ctrl_id;
             m[off..off + 8].copy_from_slice(&value.to_le_bytes());
         }
+        // Release fence ensures all ctrl writes above happen-before any later
+        // observation by another thread/process via the same mmap region.
+        fence(Ordering::Release);
     }
 }

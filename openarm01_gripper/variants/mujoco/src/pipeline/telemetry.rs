@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,9 +45,9 @@ pub async fn run(
         );
 
         if gripper_id.0 == 0 {
-            emit_left(&runner, step, stamp, &snap, side.joint_names.clone(), &f1, &f2).await;
+            emit_left(&runner, step, stamp, &snap, side.joint_names.clone(), &side.body_names, &f1, &f2).await;
         } else {
-            emit_right(&runner, step, stamp, &snap, side.joint_names.clone(), &f1, &f2).await;
+            emit_right(&runner, step, stamp, &snap, side.joint_names.clone(), &side.body_names, &f1, &f2).await;
         }
 
         step += 1;
@@ -78,6 +79,7 @@ async fn emit_left(
     stamp: f64,
     snap: &crate::drivers::mjdata_bus::Snapshot,
     joint_names: Vec<String>,
+    body_names: &HashMap<usize, String>,
     f1: &[ContactSnap],
     f2: &[ContactSnap],
 ) {
@@ -87,20 +89,19 @@ async fn emit_left(
         warn!("ee_pose_left: {e}");
     }
     let positions = snap.qpos.clone();
-    let applied_forces = vec![0.0_f64; positions.len()];
     if let Err(e) = gripper_state_left::emit(
         runner, ROBOT_NAME.into(), step, joint_names,
-        positions, applied_forces, stamp,
+        positions, stamp,
     ).await {
         warn!("gripper_state_left: {e}");
     }
     if let Err(e) = contact_forces_left_finger1::emit(
-        runner, ROBOT_NAME.into(), step, to_left_f1(f1), stamp,
+        runner, ROBOT_NAME.into(), step, to_left_f1(f1, body_names), stamp,
     ).await {
         warn!("contact_forces_left_finger1: {e}");
     }
     if let Err(e) = contact_forces_left_finger2::emit(
-        runner, ROBOT_NAME.into(), step, to_left_f2(f2), stamp,
+        runner, ROBOT_NAME.into(), step, to_left_f2(f2, body_names), stamp,
     ).await {
         warn!("contact_forces_left_finger2: {e}");
     }
@@ -112,6 +113,7 @@ async fn emit_right(
     stamp: f64,
     snap: &crate::drivers::mjdata_bus::Snapshot,
     joint_names: Vec<String>,
+    body_names: &HashMap<usize, String>,
     f1: &[ContactSnap],
     f2: &[ContactSnap],
 ) {
@@ -121,58 +123,79 @@ async fn emit_right(
         warn!("ee_pose_right: {e}");
     }
     let positions = snap.qpos.clone();
-    let applied_forces = vec![0.0_f64; positions.len()];
     if let Err(e) = gripper_state_right::emit(
         runner, ROBOT_NAME.into(), step, joint_names,
-        positions, applied_forces, stamp,
+        positions, stamp,
     ).await {
         warn!("gripper_state_right: {e}");
     }
     if let Err(e) = contact_forces_right_finger1::emit(
-        runner, ROBOT_NAME.into(), step, to_right_f1(f1), stamp,
+        runner, ROBOT_NAME.into(), step, to_right_f1(f1, body_names), stamp,
     ).await {
         warn!("contact_forces_right_finger1: {e}");
     }
     if let Err(e) = contact_forces_right_finger2::emit(
-        runner, ROBOT_NAME.into(), step, to_right_f2(f2), stamp,
+        runner, ROBOT_NAME.into(), step, to_right_f2(f2, body_names), stamp,
     ).await {
         warn!("contact_forces_right_finger2: {e}");
     }
 }
 
+// Resolve body_id → name; fall back to the stringified id if the body isn't in
+// the meta map (shouldn't happen — meta declares every body — but a stringified
+// id beats an "unknown" sentinel for forensics).
+fn body_name(body_names: &HashMap<usize, String>, id: u32) -> String {
+    body_names
+        .get(&(id as usize))
+        .cloned()
+        .unwrap_or_else(|| id.to_string())
+}
+
 // MessageContactsItem is a per-topic type; struct literal keeps us robust to
 // peppygen field-order regeneration across versions.
-fn to_left_f1(snaps: &[ContactSnap]) -> Vec<contact_forces_left_finger1::MessageContactsItem> {
+fn to_left_f1(
+    snaps: &[ContactSnap],
+    body_names: &HashMap<usize, String>,
+) -> Vec<contact_forces_left_finger1::MessageContactsItem> {
     snaps.iter().map(|c| contact_forces_left_finger1::MessageContactsItem {
-        body1: c.body1_id.to_string(),
-        body2: c.body2_id.to_string(),
+        body1: body_name(body_names, c.body1_id),
+        body2: body_name(body_names, c.body2_id),
         position: c.pos,
         force: c.force,
     }).collect()
 }
 
-fn to_left_f2(snaps: &[ContactSnap]) -> Vec<contact_forces_left_finger2::MessageContactsItem> {
+fn to_left_f2(
+    snaps: &[ContactSnap],
+    body_names: &HashMap<usize, String>,
+) -> Vec<contact_forces_left_finger2::MessageContactsItem> {
     snaps.iter().map(|c| contact_forces_left_finger2::MessageContactsItem {
-        body1: c.body1_id.to_string(),
-        body2: c.body2_id.to_string(),
+        body1: body_name(body_names, c.body1_id),
+        body2: body_name(body_names, c.body2_id),
         position: c.pos,
         force: c.force,
     }).collect()
 }
 
-fn to_right_f1(snaps: &[ContactSnap]) -> Vec<contact_forces_right_finger1::MessageContactsItem> {
+fn to_right_f1(
+    snaps: &[ContactSnap],
+    body_names: &HashMap<usize, String>,
+) -> Vec<contact_forces_right_finger1::MessageContactsItem> {
     snaps.iter().map(|c| contact_forces_right_finger1::MessageContactsItem {
-        body1: c.body1_id.to_string(),
-        body2: c.body2_id.to_string(),
+        body1: body_name(body_names, c.body1_id),
+        body2: body_name(body_names, c.body2_id),
         position: c.pos,
         force: c.force,
     }).collect()
 }
 
-fn to_right_f2(snaps: &[ContactSnap]) -> Vec<contact_forces_right_finger2::MessageContactsItem> {
+fn to_right_f2(
+    snaps: &[ContactSnap],
+    body_names: &HashMap<usize, String>,
+) -> Vec<contact_forces_right_finger2::MessageContactsItem> {
     snaps.iter().map(|c| contact_forces_right_finger2::MessageContactsItem {
-        body1: c.body1_id.to_string(),
-        body2: c.body2_id.to_string(),
+        body1: body_name(body_names, c.body1_id),
+        body2: body_name(body_names, c.body2_id),
         position: c.pos,
         force: c.force,
     }).collect()

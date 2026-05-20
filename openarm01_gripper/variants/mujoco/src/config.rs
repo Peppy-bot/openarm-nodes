@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::drivers::mjdata_bus::MjDataBus;
 use crate::error::{Error, Result};
 
@@ -33,6 +35,7 @@ pub struct ResolvedSide {
     pub finger1_geom_ids: Vec<u32>,     // collision geoms for "finger1"
     pub finger2_geom_ids: Vec<u32>,     // collision geoms for "finger2"
     pub joint_names: Vec<String>,       // for gripper_state.joint_names
+    pub body_names: HashMap<usize, String>, // body_id → name, for contact telemetry
 }
 
 impl ResolvedSide {
@@ -64,8 +67,10 @@ impl ResolvedSide {
             .map_err(Error::from)?;
 
         // Finger geoms: scan meta for geom names beginning with the side prefix.
-        // f1 = right_finger geoms (matches contact_forces_*_finger1 topic);
-        // f2 = left_finger geoms.
+        // Topic convention (see root peppy.json5): finger1 = right-side finger of
+        // the gripper, finger2 = left-side finger of the gripper. This mapping
+        // holds for both left and right grippers — e.g. on the left gripper,
+        // `openarm_left_right_finger*` geoms produce contact_forces_left_finger1.
         let f1_prefix = format!("openarm_{side}_right_finger");
         let f2_prefix = format!("openarm_{side}_left_finger");
         let mut finger1_geom_ids = Vec::new();
@@ -81,6 +86,9 @@ impl ResolvedSide {
             }
         }
 
+        let body_names: HashMap<usize, String> =
+            bus.meta.bodies.iter().map(|(name, b)| (b.id, name.clone())).collect();
+
         Ok(Self {
             finger_qpos_addrs,
             finger_ctrl_ids,
@@ -88,6 +96,7 @@ impl ResolvedSide {
             finger1_geom_ids,
             finger2_geom_ids,
             joint_names,
+            body_names,
         })
     }
 
