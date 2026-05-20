@@ -1,36 +1,18 @@
-// This node represents a single gripper in the openarm01 robot, the user will instanciate two different gripper, each with a different `gripper_id` input parameter.
-// This is a root component node — openarm01_backbone depends on it, not the other way around.
-// It is a "stupid" node that relays gripper commands from openarm01_backbone to either the real robot or the sims.
+// ROOT node — owns sim/real abstraction for the gripper.
+// 2 instances at runtime: left_gripper (gripper_id=0), right_gripper (gripper_id=1).
+// gripper_id lives in execution.parameters — set per instance in the launcher.
+// Owns end-effector telemetry: ee_pose, gripper_state, contact_forces.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_gripper",
     tag: "0.1.0",
     variants: [
-      // The real thing
-      {
-        name: "default",
-        source: {
-          local: "./variants/default"
-        }
-      },
-      // The isaac sim variant
-      {
-        name: "isaac",
-        source: {
-          local: "./variants/isaac"
-        }
-      },
-      // The mujoco variant
-      {
-        name: "mujoco",
-        source: {
-          local: "./variants/mujoco"
-        }
-      },
-    ]
+      { name: "default", source: { local: "./variants/default" } },
+      { name: "isaac",   source: { local: "./variants/isaac"   } },
+      { name: "mujoco",  source: { local: "./variants/mujoco"  } },
+    ],
   },
-  // Non exhaustive list of interfaces
   interfaces: {
     actions: {
       exposes: [
@@ -38,50 +20,166 @@
           name: "move_gripper",
           goal_service: {
             request_message_format: {
-              // The frequency in hertz at which the feedback is being sent
               feedback_frequency: "u32",
-              // Target gripper opening in meters (0.0 = closed, 0.044 = fully open on V10).
-              position: "f64"
+              desired_position:   "f64",  // meters — 0.0 closed, 0.044 fully open (V10)
             },
             response_message_format: {
-              accepted: "bool"
-            }
+              accepted: "bool",
+            },
           },
-          // Streamed as the gripper moves toward the goal
           feedback_topic: {
-            qos_profile: "standard",
+            qos_profile: "sensor_data",
             message_format: {
-              joint_positions: {
-                $type: "array",
-                $items: "f64"
-              },
-              action_time: "f64"
-            }
+              joint_positions: { $type: "array", $items: "f64" },
+              action_time:     "f64",
+            },
           },
           result_service: {
             response_message_format: {
-              success: "bool",
-              message: "string",
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64"
-              },
-              action_time: "f64"
-            }
-          }
-        }
-      ]
+              success:               "bool",
+              message:               "string",
+              final_joint_positions: { $type: "array", $items: "f64" },
+              action_time:           "f64",
+            },
+          },
+        },
+      ],
     },
     services: {
       exposes: [
         {
-          // Returns the runtime gripper_id set in `execution.parameters` (allows `openarm01_backbone` to differentiate between the grippers)
           name: "get_gripper_id",
           response_message_format: {
-            gripper_id: "u8"
-          }
-        }
-      ]
-    }
+            gripper_id: "u8",
+          },
+        },
+      ],
+    },
+    topics: {
+      emits: [
+        {
+          name: "ee_pose_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:       "string",
+            step:        "u64",
+            position:    { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            stamp:       "f64",
+          },
+        },
+        {
+          name: "ee_pose_right",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:       "string",
+            step:        "u64",
+            position:    { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            stamp:       "f64",
+          },
+        },
+        {
+          name: "gripper_state_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:          "string",
+            step:           "u64",
+            joint_names:    { $type: "array", $items: "string" },
+            positions:      { $type: "array", $items: "f64" },
+            applied_forces: { $type: "array", $items: "f64" },
+            stamp:          "f64",
+          },
+        },
+        {
+          name: "gripper_state_right",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:          "string",
+            step:           "u64",
+            joint_names:    { $type: "array", $items: "string" },
+            positions:      { $type: "array", $items: "f64" },
+            applied_forces: { $type: "array", $items: "f64" },
+            stamp:          "f64",
+          },
+        },
+        {
+          name: "contact_forces_left_finger1",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_left_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_right_finger1",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_right_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+      ],
+    },
   },
 }

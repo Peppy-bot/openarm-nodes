@@ -1,12 +1,16 @@
 {
   peppy_schema: "node_v1",
   execution: {
-    language: "python",
+    language: "rust",
     container: {
-      def_file: "apptainer.def"
+      def_file: "apptainer.def",
+      // Bind /run/user so the gripper container can mmap the mjdata bus
+      // published by robot_initializer's mujoco variant at
+      // $XDG_RUNTIME_DIR/peppy/sim/mjdata.{bin,meta.json}.
+      mount_paths: ["/run/user"],
     },
     parameters: {
-      // The gripper_id at runtime
+      // The gripper_id at runtime (0 = left, 1 = right).
       gripper_id: "u8"
     }
   }
