@@ -108,7 +108,7 @@ fn encode_goal(feedback_hz: u32, position_m: f64) -> Vec<u8> {
     {
         let mut root = msg.init_root::<move_gripper_goal_message::Builder>();
         root.set_feedback_frequency(feedback_hz);
-        root.set_desired_position(position_m);
+        root.set_position(position_m);
     }
     let mut buf = Vec::new();
     capnp::serialize::write_message(&mut buf, &msg).expect("encode goal");
@@ -146,7 +146,7 @@ async fn fire_one(
     position: f64,
     feedback_hz: u32,
 ) -> bool {
-    info!("[{side}] sending move_gripper desired_position={position} feedback_hz={feedback_hz}");
+    info!("[{side}] sending move_gripper position={position} feedback_hz={feedback_hz}");
     let payload = Payload::from(encode_goal(feedback_hz, position));
     let mut handle = match ActionMessenger::send_goal(
         runner.messenger(),

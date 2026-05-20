@@ -8,7 +8,7 @@ use tracing::{error, warn};
 use crate::config::ResolvedSide;
 use crate::drivers::mjdata_bus::MjDataBus;
 
-// Per-finger tolerance (meters) for "reached target". `desired_position` is the
+// Per-finger tolerance (meters) for "reached target". `position` is the
 // per-finger displacement (0 closed → ~0.044 fully open in the openarm MJCF);
 // each finger is independently driven to that value.
 const POSITION_TOLERANCE_M: f64 = 0.002;
@@ -66,7 +66,7 @@ pub async fn run(
         let pending_for_handler = pending.clone();
         if let Err(e) = handle
             .handle_goal_next_request(move |req| {
-                let pos_m = req.data.desired_position;
+                let pos_m = req.data.position;
                 if !(0.0..=0.044).contains(&pos_m) {
                     return Ok(move_gripper::GoalResponse::new(false));
                 }

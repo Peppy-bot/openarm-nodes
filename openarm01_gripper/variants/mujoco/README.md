@@ -101,7 +101,7 @@ via the `required-features = ["test-tools"]` declaration in `Cargo.toml`.
   contain no MuJoCo-specific code — they call the driver via `bus.snapshot()`
   / `bus.write_ctrl()`. Swapping in a different driver (real hardware, Isaac)
   changes only that file.
-- **Two-finger semantics**: `desired_position` is per-finger. Each finger's
+- **Two-finger semantics**: `position` is per-finger. Each finger's
   qpos ranges 0 (closed) → ~0.044 (fully open) in the openarm MJCF. Convergence
   uses worst-finger error; stall detection uses sum motion across a 500ms
   window so a hard contact (e.g., fingers pressed together at full close) is
