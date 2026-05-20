@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use peppygen::{NodeBuilder, Parameters, Result};
+use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 
 use crate::config::{GripperId, ResolvedSide};
@@ -34,7 +35,7 @@ fn main() -> Result<()> {
         // The bus is published by robot_initializer's mujoco variant; if we're
         // started before robot_initializer is ready, retry a few times before
         // giving up. Bounded — surfacing failure beats hanging forever.
-        let bus = open_bus_with_retry(&bus_path).expect("open mjdata bus");
+        let bus = open_bus_with_retry(&bus_path).await.expect("open mjdata bus");
         let bus = Arc::new(bus);
         info!(
             "bus open: nq={} nv={} nu={} nbody={}",
@@ -49,6 +50,32 @@ fn main() -> Result<()> {
             side.ee_body_id, side.finger1_geom_ids, side.finger2_geom_ids
         );
         let side = Arc::new(side);
+
+        // Shutdown task: zero this gripper's ctrl[] on SIGINT/SIGTERM so the sim
+        // doesn't keep driving the actuators to the last commanded position after
+        // the container goes down. Mirrors the default variant's signal handler.
+        {
+            let bus = bus.clone();
+            let side = side.clone();
+            tokio::spawn(async move {
+                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
+                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
+                tokio::select! {
+                    _ = sigint.recv() => {},
+                    _ = sigterm.recv() => {},
+                }
+                info!("shutdown: zeroing ctrl for this gripper");
+                let zeros: Vec<(usize, f64)> = side
+                    .finger_ctrl_ids
+                    .iter()
+                    .map(|&id| (id, 0.0))
+                    .collect();
+                bus.write_ctrl(&zeros);
+                // peppylib runtime has no clean shutdown path; ctrl is zeroed above
+                // so leaving the bus mmap to OS cleanup is safe.
+                std::process::exit(0);
+            });
+        }
 
         // get_gripper_id service.
         tokio::spawn(services::get_gripper_id::run(node_runner.clone(), gripper_id));
@@ -67,14 +94,14 @@ fn main() -> Result<()> {
     })
 }
 
-fn open_bus_with_retry(bus_dir: &std::path::Path) -> Option<MjDataBus> {
+async fn open_bus_with_retry(bus_dir: &std::path::Path) -> Option<MjDataBus> {
     const MAX_ATTEMPTS: u32 = 30;
     for attempt in 1..=MAX_ATTEMPTS {
         match MjDataBus::open(bus_dir) {
             Ok(b) => return Some(b),
             Err(e) => {
                 warn!("bus open attempt {attempt}/{MAX_ATTEMPTS} failed: {e}");
-                std::thread::sleep(std::time::Duration::from_secs(1));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
     }
