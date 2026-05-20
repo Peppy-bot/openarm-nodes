@@ -8,8 +8,6 @@ import threading
 import time
 from pathlib import Path
 
-from mjdata_bus import MjDataBus
-
 logger = logging.getLogger(__name__)
 
 _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
@@ -26,6 +24,7 @@ class SimLauncher:
 
     def run(self) -> None:
         import mujoco  # pylint: disable=C0415
+        from mjdata_bus import MjDataBus  # pylint: disable=C0415
 
         if not self._xml_path.exists():
             logger.error(
