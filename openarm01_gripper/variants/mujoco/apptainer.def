@@ -1,0 +1,28 @@
+Bootstrap: docker
+From: tuatini/peppy-rust-cargo-base:latest
+
+%labels
+    Name openarm01-gripper-mujoco
+    Version 0.1.0
+
+%files
+    . /opt/openarm01_gripper_mujoco
+
+%environment
+    export PEPPY_BRIDGE_NODE_NAME=gripper
+    # Mjdata bus directory published by robot_initializer's mujoco variant.
+    # Uses $XDG_RUNTIME_DIR (/run/user/$UID), which peppy already bind-mounts;
+    # per-user isolation, not per-stack — pending peppy stack-manager tmpfs
+    # support. Both nodes must point at the same path.
+    export PEPPY_MJDATA_BUS_DIR=${PEPPY_MJDATA_BUS_DIR:-/run/user/$(id -u)/peppy/sim}
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    cd /opt/openarm01_gripper_mujoco
+    cargo build --release
+
+%runscript
+    cd /opt/openarm01_gripper_mujoco
+    exec ./target/release/openarm01_gripper "$@"
