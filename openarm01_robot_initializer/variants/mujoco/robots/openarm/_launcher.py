@@ -40,13 +40,13 @@ class SimLauncher:
         mujoco.mj_forward(model, data)
 
         bus = MjDataBus(self._bus_dir, model)
-        bus.open()
-        bus.copy_state_from(data, 0)
-
-        self._ready.set()
-        logger.info("Scene loaded — is_ready: true")
-
         try:
+            bus.open()
+            bus.copy_state_from(data, 0)
+
+            self._ready.set()
+            logger.info("Scene loaded — is_ready: true")
+
             if self._headless:
                 self._run_streamed(model, data, bus)
             else:

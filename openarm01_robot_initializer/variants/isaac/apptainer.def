@@ -26,5 +26,8 @@ From: aaqibmahamood/openarm01-isaac-sim:5.1.0
 
 %runscript
     cd /opt/isaac_robot_initializer
-    mkdir -p "$PEPPY_ISAAC_EXTS_DIR"
+    mkdir -p "$PEPPY_ISAAC_EXTS_DIR" || {
+        echo "Failed to create PEPPY_ISAAC_EXTS_DIR: $PEPPY_ISAAC_EXTS_DIR" >&2
+        exit 1
+    }
     exec /isaac-sim/python.sh /opt/isaac_robot_initializer/robots/openarm/openarm/launch.py "$@"

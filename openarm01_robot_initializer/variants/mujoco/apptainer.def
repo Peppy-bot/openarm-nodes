@@ -28,5 +28,8 @@ From: aaqibmahamood/openarm01-mujoco-sim:3.8.1
 
 %runscript
     cd /opt/mujoco_robot_initializer
-    mkdir -p "$PEPPY_MJDATA_BUS_DIR"
+    mkdir -p "$PEPPY_MJDATA_BUS_DIR" || {
+        echo "Failed to create PEPPY_MJDATA_BUS_DIR: $PEPPY_MJDATA_BUS_DIR" >&2
+        exit 1
+    }
     exec python3 /opt/mujoco_robot_initializer/robots/openarm/openarm/launch.py "$@"
