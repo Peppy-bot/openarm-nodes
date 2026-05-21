@@ -15,6 +15,7 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let gripper_id = GripperId(params.gripper_id);
+        let token = node_runner.cancellation_token().clone();
         info!(
             "starting openarm01_gripper:mujoco instance={} gripper_id={}",
             gripper_id.instance_id(), gripper_id.0
@@ -26,18 +27,21 @@ fn main() -> Result<()> {
         let shared = state::new_shared();
 
         // get_gripper_id service.
-        tokio::spawn(services::get_gripper_id::run(node_runner.clone(), gripper_id));
+        tokio::spawn(services::get_gripper_id::run(
+            node_runner.clone(), gripper_id, token.clone(),
+        ));
 
         // Telemetry pipelines: subscribe to raw peppylib from robot_initializer,
-        // re-emit as typed peppygen, update shared state. Wired via SimBridge.
+        // re-emit as typed peppygen, update shared state. Wired via SimBridge
+        // — which gets its own cancel token from node_runner internally.
         tokio::spawn(pipeline::telemetry::run(
             node_runner.clone(), gripper_id, shared.clone(),
         ));
 
-        // move_gripper action: publishes set_ctrl_gripper_<side> raw peppylib
-        // each tick, reads latest gripper_state_<side> from shared cache.
+        // move_gripper action: publishes set_ctrl_gripper_<side> raw peppylib,
+        // reads latest gripper_state_<side> from shared cache for feedback.
         tokio::spawn(actions::move_gripper::run(
-            node_runner.clone(), gripper_id, shared.clone(),
+            node_runner.clone(), gripper_id, shared.clone(), token.clone(),
         ));
 
         Ok(())

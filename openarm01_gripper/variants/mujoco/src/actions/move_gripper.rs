@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use peppygen::NodeRunner;
 use peppygen::exposed_actions::move_gripper;
 use peppylib::config::QoSProfile;
+use peppylib::runtime::CancellationToken;
 use peppylib::{MessengerHandle, Payload, TopicMessenger};
 use serde::Serialize;
 use sim_bridge_core::DaemonState;
@@ -83,6 +84,7 @@ pub async fn run(
     runner: Arc<NodeRunner>,
     gripper_id: GripperId,
     state: Arc<SharedState>,
+    token: CancellationToken,
 ) {
     let side = gripper_id.side_word();
     let actuator_names = [
@@ -121,26 +123,29 @@ pub async fn run(
 
     loop {
         let pending_for_handler = pending.clone();
-        if let Err(e) = action_handle
-            .handle_goal_next_request(move |req| {
-                let pos_m = req.data.position;
-                if !(0.0..=0.044).contains(&pos_m) {
-                    return Ok(move_gripper::GoalResponse::new(false));
+        let goal_request = action_handle.handle_goal_next_request(move |req| {
+            let pos_m = req.data.position;
+            if !(0.0..=0.044).contains(&pos_m) {
+                return Ok(move_gripper::GoalResponse::new(false));
+            }
+            let mut slot = pending_for_handler.lock().unwrap();
+            if slot.is_some() {
+                return Ok(move_gripper::GoalResponse::new(false));
+            }
+            *slot = Some(AcceptedGoal {
+                target_position_m: pos_m,
+                feedback_period: feedback_period(req.data.feedback_frequency),
+            });
+            Ok(move_gripper::GoalResponse::new(true))
+        });
+        tokio::select! {
+            _ = token.cancelled() => break,
+            result = goal_request => {
+                if let Err(e) = result {
+                    error!("move_gripper goal: {e}");
+                    continue;
                 }
-                let mut slot = pending_for_handler.lock().unwrap();
-                if slot.is_some() {
-                    return Ok(move_gripper::GoalResponse::new(false));
-                }
-                *slot = Some(AcceptedGoal {
-                    target_position_m: pos_m,
-                    feedback_period: feedback_period(req.data.feedback_frequency),
-                });
-                Ok(move_gripper::GoalResponse::new(true))
-            })
-            .await
-        {
-            error!("move_gripper goal: {e}");
-            continue;
+            }
         }
 
         let goal = pending.lock().unwrap().take();
@@ -149,7 +154,7 @@ pub async fn run(
                 run_control_loop(
                     &handle, &daemon, &state,
                     &set_ctrl_topic, &instance_id, &actuator_names,
-                    &action_handle, g,
+                    &action_handle, &token, g,
                 ).await
             }
             None => continue,
@@ -157,19 +162,22 @@ pub async fn run(
 
         let stash: Arc<StdMutex<Option<MotionResult>>> = Arc::new(StdMutex::new(Some(result)));
         let stash_for_handler = stash.clone();
-        if let Err(e) = action_handle
-            .handle_result_next_request(move |_req| {
-                let r = stash_for_handler.lock().unwrap().take().unwrap_or_default();
-                Ok(move_gripper::ResultResponse {
-                    success: r.success,
-                    message: r.message,
-                    final_joint_positions: r.final_positions,
-                    action_time: r.action_time,
-                })
+        let result_request = action_handle.handle_result_next_request(move |_req| {
+            let r = stash_for_handler.lock().unwrap().take().unwrap_or_default();
+            Ok(move_gripper::ResultResponse {
+                success: r.success,
+                message: r.message,
+                final_joint_positions: r.final_positions,
+                action_time: r.action_time,
             })
-            .await
-        {
-            error!("move_gripper result: {e}");
+        });
+        tokio::select! {
+            _ = token.cancelled() => break,
+            result = result_request => {
+                if let Err(e) = result {
+                    error!("move_gripper result: {e}");
+                }
+            }
         }
     }
 }
@@ -183,14 +191,16 @@ async fn run_control_loop(
     instance_id: &str,
     actuator_names: &[String; 2],
     action_handle: &move_gripper::ActionHandle,
+    token: &CancellationToken,
     goal: AcceptedGoal,
 ) -> MotionResult {
     // Publish the ctrl target once. The bridge extension's
     // ActuatorCtrlBridge holds the latest value and applies it on every
     // mj_step until the next publish — matches the actuator-latch behaviour
     // of the bus-era write_ctrl.
+    let per_finger = goal.target_position_m / 2.0;
     if let Err(e) = publish_set_ctrl(
-        handle, daemon, set_ctrl_topic, instance_id, actuator_names, goal.target_position_m,
+        handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
     ).await {
         warn!("set_ctrl publish: {e}");
     }
@@ -218,8 +228,10 @@ async fn run_control_loop(
                         action_time: elapsed_secs,
                     };
                 }
-                tokio::time::sleep(FEEDBACK_LOOP_TICK).await;
-                continue;
+                tokio::select! {
+                    _ = token.cancelled() => return cancelled(elapsed_secs, vec![]),
+                    _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => continue,
+                }
             }
         };
 
@@ -277,7 +289,19 @@ async fn run_control_loop(
             };
         }
 
-        tokio::time::sleep(FEEDBACK_LOOP_TICK).await;
+        tokio::select! {
+            _ = token.cancelled() => return cancelled(elapsed_secs, snap.positions),
+            _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => {}
+        }
+    }
+}
+
+fn cancelled(action_time: f64, final_positions: Vec<f64>) -> MotionResult {
+    MotionResult {
+        success: false,
+        message: "cancelled".into(),
+        final_positions,
+        action_time,
     }
 }
 
@@ -289,12 +313,9 @@ async fn publish_set_ctrl(
     actuator_names: &[String; 2],
     value: f64,
 ) -> std::result::Result<(), String> {
-    // `value` is the total aperture target per the V10 contract (0.0 closed,
-    // 0.044 fully open). Each finger contributes half — drive both to value/2.
-    let per_finger = value / 2.0;
     let mut values: HashMap<&str, f64> = HashMap::new();
-    values.insert(actuator_names[0].as_str(), per_finger);
-    values.insert(actuator_names[1].as_str(), per_finger);
+    values.insert(actuator_names[0].as_str(), value);
+    values.insert(actuator_names[1].as_str(), value);
     let payload = SetCtrlPayload { actuator_values: values };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
