@@ -29,8 +29,13 @@ use peppygen::NodeRunner;
 use tracing::info;
 
 use crate::config::GripperId;
+use crate::state::SharedState;
 
-pub async fn run(_runner: Arc<NodeRunner>, gripper_id: GripperId) {
+pub async fn run(
+    _runner: Arc<NodeRunner>,
+    gripper_id: GripperId,
+    _state: Arc<SharedState>,
+) {
     info!(
         "move_gripper: scaffold only — handler pending sim_bridge_core wiring (gripper_id={})",
         gripper_id.0,
