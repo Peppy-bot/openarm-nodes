@@ -1,0 +1,36 @@
+[package]
+name = "openarm01_gripper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+peppygen = { path = ".peppy/libs/peppygen" }
+peppylib = { path = ".peppy/libs/peppylib" }
+capnp    = "0.25"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Shared lib: subscribe-then-emit pipelines, daemon discovery, backoff/cancel.
+# Path dep while engine-wrappers branch is in review; switch to git dep after
+# nodes_shared_code/main lands the engine-wrappers PR.
+sim_bridge_core = { path = "../../../../nodes_shared_code/sim_bridge_core" }
+# Needed only for the standalone test harness (src/bin/test_move_gripper.rs)
+# which uses #[derive(JsonSchema)] for its empty params struct.
+schemars = "1.2"
+
+[features]
+# Builds the standalone test harness `test_move_gripper`. Gated off by default
+# so the apptainer build (plain `cargo build --release`) ships only the node
+# binary and not dev tooling.
+test-tools = []
+
+[[bin]]
+name = "openarm01_gripper"
+path = "src/main.rs"
+
+[[bin]]
+name = "test_move_gripper"
+path = "src/bin/test_move_gripper.rs"
+required-features = ["test-tools"]
