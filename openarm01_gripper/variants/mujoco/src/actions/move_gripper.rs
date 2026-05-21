@@ -1,11 +1,11 @@
 // move_gripper action handler — peppylib-mediated control direction.
 //
 // Each goal:
-//   1. Publishes raw set_ctrl_gripper_<side> once via peppylib (the bridge
-//      extension on robot_initializer:mujoco subscribes and applies before
-//      the next mj_step). Both fingers driven to the same target.
-//   2. Enters a feedback loop reading the latest gripper_state from the
+//   1. Enters a feedback loop reading the latest gripper_state from the
 //      shared cache (populated by pipeline::telemetry).
+//   2. Re-publishes raw set_ctrl_gripper_<side> on every tick. peppylib
+//      QoSProfile::Standard is best-effort; a single dropped message would
+//      otherwise stall the gripper. The publish is idempotent.
 //   3. Streams typed feedback at the requested rate; detects convergence
 //      (worst-finger error < POSITION_TOLERANCE_M) or stall (sum-of-motion
 //      across a ~500ms window < STALL_EPSILON_M).
@@ -26,7 +26,8 @@ use peppylib::runtime::CancellationToken;
 use peppylib::{MessengerHandle, Payload, TopicMessenger};
 use serde::Serialize;
 use sim_bridge_core::DaemonState;
-use tracing::{error, warn};
+use tokio::signal::unix::{SignalKind, signal};
+use tracing::{error, info, warn};
 
 use crate::config::GripperId;
 use crate::state::SharedState;
@@ -85,6 +86,8 @@ pub async fn run(
     gripper_id: GripperId,
     state: Arc<SharedState>,
     token: CancellationToken,
+    handle: Arc<MessengerHandle>,
+    daemon: DaemonState,
 ) {
     let side = gripper_id.side_word();
     let actuator_names = [
@@ -95,25 +98,6 @@ pub async fn run(
     // Unique instance_id per gripper side so concurrent left+right grippers
     // don't collide on the peppylib publisher registry.
     let instance_id = format!("openarm01_gripper_{side}_setctrl_pub");
-
-    let daemon = match peppylib::info(&runner, None).await {
-        Ok(info) => DaemonState {
-            core_node_name: info.core_node_name,
-            messaging_port: info.messaging_port,
-        },
-        Err(e) => {
-            error!("move_gripper: peppylib::info failed: {e}");
-            return;
-        }
-    };
-
-    let handle = match MessengerHandle::from_host_port("localhost", daemon.messaging_port).await {
-        Ok(h) => h,
-        Err(e) => {
-            error!("move_gripper: peppylib connect failed: {e}");
-            return;
-        }
-    };
 
     let mut action_handle = move_gripper::ActionHandle::expose(&runner)
         .await
@@ -194,16 +178,8 @@ async fn run_control_loop(
     token: &CancellationToken,
     goal: AcceptedGoal,
 ) -> MotionResult {
-    // Publish the ctrl target once. The bridge extension's
-    // ActuatorCtrlBridge holds the latest value and applies it on every
-    // mj_step until the next publish — matches the actuator-latch behaviour
-    // of the bus-era write_ctrl.
+    // goal.target_position_m is total aperture; each finger holds half.
     let per_finger = goal.target_position_m / 2.0;
-    if let Err(e) = publish_set_ctrl(
-        handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
-    ).await {
-        warn!("set_ctrl publish: {e}");
-    }
 
     let start = Instant::now();
     let mut last_feedback = Instant::now();
@@ -211,6 +187,15 @@ async fn run_control_loop(
     let mut iter: u32 = 0;
 
     loop {
+        // Re-publish ctrl every tick. peppylib Standard QoS is best-effort,
+        // so a single dropped message would otherwise stall the gripper;
+        // republishing makes the path self-healing. Idempotent.
+        if let Err(e) = publish_set_ctrl(
+            handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
+        ).await {
+            warn!("set_ctrl publish: {e}");
+        }
+
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
 
@@ -235,11 +220,8 @@ async fn run_control_loop(
             }
         };
 
-        // goal.target_position_m is total aperture; each finger holds half.
-        // Compare per-finger qpos against the per-finger target.
-        let per_finger_target = goal.target_position_m / 2.0;
         let worst_err = snap.positions.iter()
-            .map(|&q| (q - per_finger_target).abs())
+            .map(|&q| (q - per_finger).abs())
             .fold(0.0_f64, f64::max);
         let within_tolerance = worst_err < POSITION_TOLERANCE_M;
         let motion_metric: f64 = snap.positions.iter().sum();
@@ -330,4 +312,35 @@ async fn publish_set_ctrl(
     )
     .await
     .map_err(|e| e.to_string())
+}
+
+/// SIGINT/SIGTERM handler — publishes ctrl=0.0 then exits. Prevents the
+/// bridge extension from holding the gripper's last commanded position
+/// indefinitely after the node process dies.
+pub async fn shutdown_handler(
+    handle: Arc<MessengerHandle>,
+    daemon: DaemonState,
+    gripper_id: GripperId,
+) {
+    let side = gripper_id.side_word();
+    let actuator_names = [
+        format!("{side}_finger1_ctrl"),
+        format!("{side}_finger2_ctrl"),
+    ];
+    let set_ctrl_topic = format!("set_ctrl_gripper_{side}");
+    let instance_id = format!("openarm01_gripper_{side}_shutdown_pub");
+
+    let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
+    let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
+    tokio::select! {
+        _ = sigint.recv() => {},
+        _ = sigterm.recv() => {},
+    }
+    info!("shutdown: zeroing ctrl for gripper_id={}", gripper_id.0);
+    if let Err(e) = publish_set_ctrl(
+        &handle, &daemon, &set_ctrl_topic, &instance_id, &actuator_names, 0.0,
+    ).await {
+        warn!("shutdown publish: {e}");
+    }
+    std::process::exit(0);
 }

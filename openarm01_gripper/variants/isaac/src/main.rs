@@ -5,7 +5,11 @@ mod pipeline;
 mod services;
 mod state;
 
+use std::sync::Arc;
+
 use peppygen::{NodeBuilder, Parameters, Result};
+use peppylib::MessengerHandle;
+use sim_bridge_core::DaemonState;
 use tracing::info;
 
 use crate::config::GripperId;
@@ -21,27 +25,42 @@ fn main() -> Result<()> {
             gripper_id.instance_id(), gripper_id.0
         );
 
+        // peppylib daemon + messenger handle shared between the action
+        // handler (per-tick set_ctrl publish) and the shutdown handler
+        // (ctrl=0.0 on SIGINT/SIGTERM).
+        let daemon_info = peppylib::info(&node_runner, None).await
+            .expect("peppylib::info");
+        let daemon = DaemonState {
+            core_node_name: daemon_info.core_node_name,
+            messaging_port: daemon_info.messaging_port,
+        };
+        let handle = Arc::new(
+            MessengerHandle::from_host_port("localhost", daemon.messaging_port).await
+                .expect("peppylib connect")
+        );
+
         // Shared latest-gripper-state cache. Written by the telemetry pipeline
         // on each incoming raw gripper_state_<side>; read by move_gripper on
         // each feedback tick for convergence + stall detection.
         let shared = state::new_shared();
 
-        // get_gripper_id service.
         tokio::spawn(services::get_gripper_id::run(
             node_runner.clone(), gripper_id, token.clone(),
         ));
 
-        // Telemetry pipelines: subscribe to raw peppylib from robot_initializer,
-        // re-emit as typed peppygen, update shared state. Wired via SimBridge
-        // — which gets its own cancel token from node_runner internally.
+        // Telemetry pipelines — SimBridge gets its own cancel token from
+        // node_runner internally.
         tokio::spawn(pipeline::telemetry::run(
             node_runner.clone(), gripper_id, shared.clone(),
         ));
 
-        // move_gripper action: publishes set_ctrl_gripper_<side> raw peppylib,
-        // reads latest gripper_state_<side> from shared cache for feedback.
         tokio::spawn(actions::move_gripper::run(
             node_runner.clone(), gripper_id, shared.clone(), token.clone(),
+            handle.clone(), daemon.clone(),
+        ));
+
+        tokio::spawn(actions::move_gripper::shutdown_handler(
+            handle.clone(), daemon.clone(), gripper_id,
         ));
 
         Ok(())
