@@ -207,8 +207,8 @@ async fn fire_one(
             Err(e) => warn!("[{side}] decode feedback failed: {e:?}"),
         }
         count += 1;
-        if count > 200 {
-            warn!("[{side}] exceeded 200 feedbacks — bailing");
+        if count > 1000 {
+            warn!("[{side}] exceeded 1000 feedbacks — bailing");
             break;
         }
     }
