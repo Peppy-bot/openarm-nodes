@@ -1,0 +1,66 @@
+// Bridge plugin config for the openarm bimanual Isaac scene.
+// Loaded by bridge_extension.py at startup. Each `publishers` entry becomes a
+// per-step bridge that emits raw peppylib JSON to consumers; each `subscribers`
+// entry becomes a per-step plugin that pulls the latest message and applies
+// it to the sim (today: actuator_ctrl writes via ArticulationView).
+//
+// `prim` fields must match the actual USD prim paths in openarm_bimanual.usd.
+// Verify against the stage on first build — paths below are reasonable
+// defaults but may need adjustment.
+{
+  // ------------------------------------------------------------------------
+  // PUBLISHERS — robot_initializer emits these raw peppylib topics each step.
+  // ------------------------------------------------------------------------
+  publishers: [
+    // Per-side gripper finger joints (positions + measured forces).
+    {
+      type: "gripper_state", prim: "/World/openarm/left_gripper",
+      topic: "gripper_state_left", robot_name: "openarm",
+      params: { finger_joints: ["left_finger_joint1", "left_finger_joint2"] },
+    },
+    {
+      type: "gripper_state", prim: "/World/openarm/right_gripper",
+      topic: "gripper_state_right", robot_name: "openarm",
+      params: { finger_joints: ["right_finger_joint1", "right_finger_joint2"] },
+    },
+
+    // Per-side end-effector pose (TCP body).
+    { type: "ee_pose", prim: "/World/openarm/left_hand_tcp",  topic: "ee_pose_left",  robot_name: "openarm" },
+    { type: "ee_pose", prim: "/World/openarm/right_hand_tcp", topic: "ee_pose_right", robot_name: "openarm" },
+
+    // Whole-world TF tree.
+    { type: "tf_tree", topic: "tf_tree", robot_name: "openarm" },
+
+    // Whole-world contacts (consumers filter on their side).
+    { type: "contact_forces", topic: "contact_forces", robot_name: "openarm" },
+
+    // IMU publishers: uncomment once IMU prims are placed in the USD.
+    // { type: "imu", prim: "/World/openarm/left_imu",  topic: "imu_left",  robot_name: "openarm" },
+    // { type: "imu", prim: "/World/openarm/right_imu", topic: "imu_right", robot_name: "openarm" },
+  ],
+
+  // ------------------------------------------------------------------------
+  // SUBSCRIBERS — robot_initializer pulls these and applies via ArticulationView.
+  // Topic convention: set_ctrl_<component>_<side> with
+  // payload { actuator_values: { <joint_name>: <value>, ... } }.
+  // ------------------------------------------------------------------------
+  subscribers: [
+    {
+      type: "actuator_ctrl", prim: "/World/openarm/left_gripper",
+      topic: "set_ctrl_gripper_left", source_node: "openarm01_gripper",
+      params: { joint_names: ["left_finger_joint1", "left_finger_joint2"] },
+    },
+    {
+      type: "actuator_ctrl", prim: "/World/openarm/right_gripper",
+      topic: "set_ctrl_gripper_right", source_node: "openarm01_gripper",
+      params: { joint_names: ["right_finger_joint1", "right_finger_joint2"] },
+    },
+
+    // Arm subscribers — add once openarm01_arm:isaac is rebuilt under the pivot.
+    // {
+    //   type: "actuator_ctrl", prim: "/World/openarm/left_arm",
+    //   topic: "set_ctrl_arm_left", source_node: "openarm01_arm",
+    //   params: { joint_names: ["left_joint1", "left_joint2", ...] },
+    // },
+  ],
+}

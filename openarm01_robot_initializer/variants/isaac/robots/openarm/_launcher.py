@@ -7,6 +7,9 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
+from typing import Optional
+
+from bridge_extension import IsaacBridgeExtension
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,7 @@ class SimLauncher:
         self._ready = ready
         self._timeline = None
         self._world = None
+        self._extension: Optional[IsaacBridgeExtension] = None
 
     def run(self) -> None:
         try:
@@ -27,12 +31,23 @@ class SimLauncher:
             self._setup_lighting()
             self._warmup()
             self._start_timeline()
+            self._extension = IsaacBridgeExtension()
+            try:
+                self._extension.startup()
+            except Exception:
+                # Otherwise the exception is captured by the thread and the
+                # process exits silently with the sim still running.
+                logger.exception("IsaacBridgeExtension startup failed")
+                raise
             self._ready.set()
             logger.info("Scene loaded — is_ready: true")
             self._run_loop()
         except FileNotFoundError as exc:
             logger.error(str(exc))
             self._sim_app.close()
+        except Exception:
+            logger.exception("SimLauncher.run failed")
+            raise
 
     def _load_stage(self) -> None:
         import omni.usd
@@ -70,11 +85,18 @@ class SimLauncher:
     def _run_loop(self) -> None:
         try:
             while self._sim_app.is_running():
+                # Isaac advances physics inside update(); we then drive the
+                # bridge plugin loop on the same thread (Articulation reads
+                # require Isaac's main thread).
                 self._sim_app.update()
+                if self._extension is not None:
+                    self._extension.step()
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:
             self._ready.clear()
+            if self._extension is not None:
+                self._extension.shutdown()
             if self._timeline is not None:
                 self._timeline.stop()
             self._sim_app.close()
