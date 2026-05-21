@@ -82,6 +82,135 @@
           }
         }
       ]
-    }
+    },
+    topics: {
+      emits: [
+        {
+          name: "gripper_state_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:       "string",
+            step:        "u64",
+            joint_names: { $type: "array", $items: "string" },
+            positions:   { $type: "array", $items: "f64" },
+            stamp:       "f64",
+          },
+        },
+        {
+          name: "gripper_state_right",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:       "string",
+            step:        "u64",
+            joint_names: { $type: "array", $items: "string" },
+            positions:   { $type: "array", $items: "f64" },
+            stamp:       "f64",
+          },
+        },
+        {
+          name: "ee_pose_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:       "string",
+            step:        "u64",
+            position:    { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            stamp:       "f64",
+          },
+        },
+        {
+          name: "ee_pose_right",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:       "string",
+            step:        "u64",
+            position:    { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            stamp:       "f64",
+          },
+        },
+        // Convention for the four contact_forces_*_finger{1,2} topics:
+        //   finger1 = right-side finger geom of the gripper (in its own frame).
+        //   finger2 = left-side  finger geom of the gripper.
+        // Stable across both grippers — contact_forces_left_finger1 carries
+        // contacts on the right finger of the LEFT gripper.
+        {
+          name: "contact_forces_left_finger1",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_left_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_right_finger1",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_right_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type:    "object",
+                body1:    "string",
+                body2:    "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force:    { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+      ],
+    },
   },
 }
