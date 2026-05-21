@@ -164,12 +164,8 @@ def _make_sensor(entry, model, data):  # pylint: disable=R0911
 
 
 def _build_plugins(config: BridgeConfig, model, data) -> list:
-    plugins = [ClockBridge(MujocoClockSensor(model, data), config, None)]
-    logger.info("Registered publisher: clock → topic='clock' (always-on)")
-
+    plugins: list = []
     for entry in config.publishers:
-        if entry.type == "clock":
-            continue
         cls = _PLUGIN_REGISTRY[entry.type]
         sensor = _make_sensor(entry, model, data)
         plugins.append(cls(sensor, config, entry))
