@@ -1,0 +1,58 @@
+// Bridge plugin config for the openarm bimanual MuJoCo scene.
+// Loaded by bridge_extension.py at startup. Each `publishers` entry becomes a
+// per-step bridge that emits raw peppylib JSON to consumers; each `subscribers`
+// entry becomes a per-step plugin that pulls the latest message and applies it
+// to the sim (today: actuator_ctrl writes to data.ctrl before mj_step).
+//
+// Naming convention for per-side topics: `<topic>_left` / `<topic>_right`
+// matches the typed peppygen topic names emitted by the gripper/arm Rust nodes
+// that consume from here. Keeps the raw → typed mapping mechanical.
+{
+  // ------------------------------------------------------------------------
+  // PUBLISHERS — robot_initializer emits these raw peppylib topics each step.
+  // ------------------------------------------------------------------------
+  publishers: [
+    // Whole-robot joint state. Consumers slice by joint name on their side.
+    { type: "joint_states", topic: "joint_states", robot_name: "openarm" },
+
+    // Whole-world TF tree. Consumers walk frames they care about.
+    { type: "tf_tree", topic: "tf_tree", robot_name: "openarm" },
+
+    // Whole-world contacts. Consumers filter by their own geom IDs.
+    { type: "contact_forces", topic: "contact_forces", robot_name: "openarm" },
+
+    // Per-side gripper finger joints (positions + measured actuator forces).
+    {
+      type: "gripper_state", topic: "gripper_state_left", robot_name: "openarm",
+      params: { finger_joints: ["openarm_left_finger_joint1", "openarm_left_finger_joint2"] },
+    },
+    {
+      type: "gripper_state", topic: "gripper_state_right", robot_name: "openarm",
+      params: { finger_joints: ["openarm_right_finger_joint1", "openarm_right_finger_joint2"] },
+    },
+
+    // Per-side end-effector pose (TCP body).
+    { type: "ee_pose", prim: "openarm_left_hand_tcp",  topic: "ee_pose_left",  robot_name: "openarm" },
+    { type: "ee_pose", prim: "openarm_right_hand_tcp", topic: "ee_pose_right", robot_name: "openarm" },
+
+    // IMU publishers: uncomment once the MJCF declares the IMU bodies.
+    // { type: "imu", prim: "openarm_left_imu",  topic: "imu_left",  robot_name: "openarm" },
+    // { type: "imu", prim: "openarm_right_imu", topic: "imu_right", robot_name: "openarm" },
+
+    // clock is auto-registered by bridge_extension — do not add here.
+  ],
+
+  // ------------------------------------------------------------------------
+  // SUBSCRIBERS — robot_initializer pulls these and applies before mj_step.
+  // Topic convention: set_ctrl_<component>_<side> with
+  // payload { actuator_values: { <actuator_name>: <value>, ... } }.
+  // ------------------------------------------------------------------------
+  subscribers: [
+    { type: "actuator_ctrl", topic: "set_ctrl_gripper_left",  source_node: "openarm01_gripper" },
+    { type: "actuator_ctrl", topic: "set_ctrl_gripper_right", source_node: "openarm01_gripper" },
+
+    // Arm subscribers — add once openarm01_arm:mujoco is rebuilt under the pivot.
+    // { type: "actuator_ctrl", topic: "set_ctrl_arm_left",  source_node: "openarm01_arm" },
+    // { type: "actuator_ctrl", topic: "set_ctrl_arm_right", source_node: "openarm01_arm" },
+  ],
+}

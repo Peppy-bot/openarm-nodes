@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+from bridge_extension import MujocoBridgeExtension
+
 logger = logging.getLogger(__name__)
 
 _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
@@ -36,21 +38,32 @@ class SimLauncher:
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
-        self._ready.set()
-        logger.info("Scene loaded — is_ready: true")
+        extension = MujocoBridgeExtension(model, data)
+        try:
+            extension.startup()
+            self._ready.set()
+            logger.info("Scene loaded — is_ready: true")
 
-        if self._headless:
-            self._run_streamed(model, data)
-        else:
-            self._run_windowed(model, data)
+            if self._headless:
+                self._run_streamed(model, data, extension)
+            else:
+                self._run_windowed(model, data, extension)
+        finally:
+            extension.shutdown()
+            self._ready.clear()
 
-    def _run_streamed(self, model, data) -> None:
+    def _run_streamed(self, model, data, extension: MujocoBridgeExtension) -> None:
         import viser
         import mjviser
 
+        # Hand mjviser the bridge extension's step() — it owns mj_step plus the
+        # plugin loop, so this single callback is the entire per-tick work.
+        def _step_fn(_m, _d) -> None:
+            extension.step()
+
         try:
             server = viser.ViserServer(host="0.0.0.0", port=8080)
-            viewer = mjviser.Viewer(model, data, server=server)
+            viewer = mjviser.Viewer(model, data, server=server, step_fn=_step_fn)
 
             # viser sends batched position updates as delta messages only —
             # new/refreshing clients receive initial zero positions unless we
@@ -65,10 +78,8 @@ class SimLauncher:
             viewer.run()
         except KeyboardInterrupt:
             logger.info("Shutting down.")
-        finally:
-            self._ready.clear()
 
-    def _run_windowed(self, model, data) -> None:
+    def _run_windowed(self, model, data, extension: MujocoBridgeExtension) -> None:
         import mujoco
         import mujoco.viewer
 
@@ -77,7 +88,7 @@ class SimLauncher:
             with mujoco.viewer.launch_passive(model, data) as viewer:
                 while viewer.is_running():
                     step_start = time.monotonic()
-                    mujoco.mj_step(model, data)
+                    extension.step()
                     viewer.sync()
                     elapsed = time.monotonic() - step_start
                     remaining = dt - elapsed
@@ -85,5 +96,3 @@ class SimLauncher:
                         time.sleep(remaining)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
-        finally:
-            self._ready.clear()
