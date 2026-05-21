@@ -48,11 +48,17 @@ class SimLauncher:
                 self._run_streamed(model, data, extension)
             else:
                 self._run_windowed(model, data, extension)
+        except Exception:
+            # Otherwise asyncio.run_in_executor captures the traceback in a
+            # Future that may never be awaited — the process exits silently.
+            logger.exception("SimLauncher.run failed")
+            raise
         finally:
             extension.shutdown()
             self._ready.clear()
 
     def _run_streamed(self, model, data, extension: MujocoBridgeExtension) -> None:
+        import mujoco as _mujoco
         import viser
         import mjviser
 
@@ -70,12 +76,38 @@ class SimLauncher:
             # explicitly push current state on each connection.
             @server.on_client_connect
             def _(client) -> None:
-                viewer._refresh_scene_from_gui()
+                viewer._refresh_scene_from_gui()  # pylint: disable=W0212
+
+            # viewer.run() installs a SIGINT handler which only works on the
+            # main thread; we run inside run_in_executor, so drive the internals
+            # by hand instead.
+            viewer._setup_gui()  # pylint: disable=W0212
+            _mujoco.mj_forward(model, data)
+            viewer._render()  # pylint: disable=W0212
 
             logger.info(
                 "MuJoCo viewer available — open http://<host>:8080 in a browser"
             )
-            viewer.run()
+            _render_period = 1.0 / 60.0
+            _dt = model.opt.timestep
+            _last_render = 0.0
+            _last_phys_wall = time.monotonic()
+            while True:
+                now = time.monotonic()
+                # Step physics at real time, decoupled from render rate.
+                n = int((now - _last_phys_wall) / _dt)
+                if n > 0:
+                    # Cap prevents spiral-of-death after stalls. Trade-off: on
+                    # stall recovery the sim falls behind real time
+                    # permanently rather than catching up.
+                    n = min(n, 200)
+                    for _ in range(n):
+                        viewer._tick()  # pylint: disable=W0212
+                    _last_phys_wall += n * _dt
+                if now - _last_render >= _render_period:
+                    viewer._render()  # pylint: disable=W0212
+                    _last_render = now
+                time.sleep(0.001)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
 
