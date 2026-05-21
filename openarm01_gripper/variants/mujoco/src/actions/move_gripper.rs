@@ -223,8 +223,11 @@ async fn run_control_loop(
             }
         };
 
+        // goal.target_position_m is total aperture; each finger holds half.
+        // Compare per-finger qpos against the per-finger target.
+        let per_finger_target = goal.target_position_m / 2.0;
         let worst_err = snap.positions.iter()
-            .map(|&q| (q - goal.target_position_m).abs())
+            .map(|&q| (q - per_finger_target).abs())
             .fold(0.0_f64, f64::max);
         let within_tolerance = worst_err < POSITION_TOLERANCE_M;
         let motion_metric: f64 = snap.positions.iter().sum();
@@ -286,9 +289,12 @@ async fn publish_set_ctrl(
     actuator_names: &[String; 2],
     value: f64,
 ) -> std::result::Result<(), String> {
+    // `value` is the total aperture target per the V10 contract (0.0 closed,
+    // 0.044 fully open). Each finger contributes half — drive both to value/2.
+    let per_finger = value / 2.0;
     let mut values: HashMap<&str, f64> = HashMap::new();
-    values.insert(actuator_names[0].as_str(), value);
-    values.insert(actuator_names[1].as_str(), value);
+    values.insert(actuator_names[0].as_str(), per_finger);
+    values.insert(actuator_names[1].as_str(), per_finger);
     let payload = SetCtrlPayload { actuator_values: values };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
