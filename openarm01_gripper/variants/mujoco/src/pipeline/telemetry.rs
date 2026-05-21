@@ -109,8 +109,8 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
     // topics. Matches the openarm MJCF naming: openarm_<side>_right_finger*
     // bodies belong to finger1, openarm_<side>_left_finger* to finger2.
     // Convention documented in the root peppy.json5 contract.
-    let finger1_prefix = Arc::from(format!("openarm_{side}_right_finger"));
-    let finger2_prefix = Arc::from(format!("openarm_{side}_left_finger"));
+    let finger1_prefix: Arc<str> = Arc::from(format!("openarm_{side}_right_finger").as_str());
+    let finger2_prefix: Arc<str> = Arc::from(format!("openarm_{side}_left_finger").as_str());
 
     let state_for_gs = state.clone();
 
