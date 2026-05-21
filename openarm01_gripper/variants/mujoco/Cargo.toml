@@ -12,10 +12,7 @@ peppylib = { path = ".peppy/libs/peppylib" }
 capnp    = "0.25"
 serde     = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Shared lib: subscribe-then-emit pipelines, daemon discovery, backoff/cancel.
-# Path dep while engine-wrappers branch is in review; switch to git dep after
-# nodes_shared_code/main lands the engine-wrappers PR.
-sim_bridge_core = { path = "../../../../nodes_shared_code/sim_bridge_core" }
+sim_bridge_core = { path = "./sim_bridge_core" }
 # Needed only for the standalone test harness (src/bin/test_move_gripper.rs)
 # which uses #[derive(JsonSchema)] for its empty params struct.
 schemars = "1.2"
@@ -34,3 +31,8 @@ path = "src/main.rs"
 name = "test_move_gripper"
 path = "src/bin/test_move_gripper.rs"
 required-features = ["test-tools"]
+
+# Redirect sim_bridge_core's `peppylib = "0.0.1"` crates.io ref to the local
+# generated copy (peppylib is not published to crates.io).
+[patch.crates-io]
+peppylib = { path = ".peppy/libs/peppylib" }
