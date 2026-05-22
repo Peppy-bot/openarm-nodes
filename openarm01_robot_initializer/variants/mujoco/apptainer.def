@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: aaqibmahamood/openarm01-mujoco-sim:3.8.1
+From: aaqibmahamood/openarm01-mujoco-sim:3.8.1-1
 
 %labels
     Name openarm01-robot-initializer-mujoco

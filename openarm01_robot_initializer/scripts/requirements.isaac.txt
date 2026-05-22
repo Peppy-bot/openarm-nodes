@@ -1,1 +1,2 @@
 pycapnp==2.2.2
+sim_ext_core @ git+https://github.com/Peppy-bot/nodes_shared_code.git@6f8b012c359692b41d3e67bf53aa8d444174772d#subdirectory=sim_ext_core
