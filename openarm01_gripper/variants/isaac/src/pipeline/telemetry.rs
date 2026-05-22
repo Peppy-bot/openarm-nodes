@@ -1,5 +1,5 @@
 // Telemetry pipelines: subscribe to raw peppylib telemetry from
-// robot_initializer:mujoco's bridge extension, re-emit as typed peppygen on
+// robot_initializer:isaac's bridge extension, re-emit as typed peppygen on
 // the gripper's contract topics, and update the shared state that the
 // move_gripper action handler reads for feedback.
 //
@@ -97,7 +97,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
     };
 
     // sim_node = the publisher node name configured in
-    // robot_initializer:mujoco's bridge_extension (defaults to "sim").
+    // robot_initializer:isaac's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
     let token = runner.cancellation_token().clone();
 

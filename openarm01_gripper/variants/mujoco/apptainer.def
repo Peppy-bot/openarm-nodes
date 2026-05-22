@@ -8,9 +8,6 @@ From: tuatini/peppy-rust-cargo-base:latest
 %files
     . /opt/openarm01_gripper_mujoco
 
-%environment
-    export PEPPY_BRIDGE_NODE_NAME=gripper
-
 %post
     set -eux
     export DEBIAN_FRONTEND=noninteractive

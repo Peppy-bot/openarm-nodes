@@ -2,7 +2,7 @@
 // prints feedback + result. Rust port of test_move_gripper.py — uses the same
 // raw peppylib ActionMessenger path so no Python peppygen / venv is needed.
 //
-// Run from variants/mujoco/:
+// Run from variants/isaac/:
 //     cargo run --release --bin test_move_gripper -- \
 //         [--side left|right|both] [--position 0..=0.044] [--feedback-hz N]
 use std::sync::Arc;
@@ -240,7 +240,7 @@ fn main() -> peppylib::PeppyResult<()> {
         .init();
     let args = parse_args();
 
-    // Standalone runtime loads variants/mujoco/peppy.json5 for param validation
+    // Standalone runtime loads variants/isaac/peppy.json5 for param validation
     // and the manifest declares gripper_id as required. We're not actually a
     // gripper instance, but passing a dummy 0 satisfies the validator. The
     // test code below ignores `_params`.
@@ -260,6 +260,9 @@ fn main() -> peppylib::PeppyResult<()> {
                 all_ok = all_ok && ok;
             }
             info!("OVERALL: {}", if all_ok { "PASS" } else { "FAIL" });
+            if !all_ok {
+                std::process::exit(1);
+            }
             Ok(())
         })
 }

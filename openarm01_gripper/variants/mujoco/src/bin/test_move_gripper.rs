@@ -260,6 +260,9 @@ fn main() -> peppylib::PeppyResult<()> {
                 all_ok = all_ok && ok;
             }
             info!("OVERALL: {}", if all_ok { "PASS" } else { "FAIL" });
+            if !all_ok {
+                std::process::exit(1);
+            }
             Ok(())
         })
 }

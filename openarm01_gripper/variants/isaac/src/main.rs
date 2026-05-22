@@ -1,6 +1,5 @@
 mod actions;
 mod config;
-mod error;
 mod pipeline;
 mod services;
 mod state;
@@ -18,10 +17,11 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
-        let gripper_id = GripperId(params.gripper_id);
+        let gripper_id = GripperId::new(params.gripper_id)
+            .expect("gripper_id must be 0 (left) or 1 (right)");
         let token = node_runner.cancellation_token().clone();
         info!(
-            "starting openarm01_gripper:mujoco instance={} gripper_id={}",
+            "starting openarm01_gripper:isaac instance={} gripper_id={}",
             gripper_id.instance_id(), gripper_id.0
         );
 
