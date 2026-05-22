@@ -3346,6 +3346,7 @@ dependencies = [
 [[package]]
 name = "sim_bridge_core"
 version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/nodes_shared_code?rev=6f8b012c359692b41d3e67bf53aa8d444174772d#6f8b012c359692b41d3e67bf53aa8d444174772d"
 dependencies = [
  "peppylib",
  "serde",

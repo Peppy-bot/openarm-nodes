@@ -12,7 +12,7 @@ peppylib = { path = ".peppy/libs/peppylib" }
 capnp    = "0.25"
 serde     = { version = "1", features = ["derive"] }
 serde_json = "1"
-sim_bridge_core = { path = "./sim_bridge_core" }
+sim_bridge_core = { git = "https://github.com/Peppy-bot/nodes_shared_code", rev = "6f8b012c359692b41d3e67bf53aa8d444174772d" }
 # Needed only for the standalone test harness (src/bin/test_move_gripper.rs)
 # which uses #[derive(JsonSchema)] for its empty params struct.
 schemars = "1.2"
