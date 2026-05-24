@@ -47,6 +47,11 @@ const STALL_LOOKBACK_ITERS: u32 = 100;
 const STALL_EPSILON_M: f64 = 5e-4;
 const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
 
+// If set_ctrl publishing fails for this many consecutive ticks (one full stall
+// window, ~500ms), the gripper isn't being commanded at all — fail the motion
+// instead of letting the stall detector report a false "physical limit".
+const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = STALL_LOOKBACK_ITERS;
+
 const GRIPPER_NODE_NAME: &str = "openarm01_gripper";
 
 #[derive(Serialize)]
@@ -185,15 +190,30 @@ async fn run_control_loop(
     let mut last_feedback = Instant::now();
     let mut window_anchor: Option<f64> = None;
     let mut iter: u32 = 0;
+    let mut consecutive_publish_failures: u32 = 0;
 
     loop {
-        // Re-publish ctrl every tick. peppylib Standard QoS is best-effort,
-        // so a single dropped message would otherwise stall the gripper;
-        // republishing makes the path self-healing. Idempotent.
-        if let Err(e) = publish_set_ctrl(
+        // Re-publish ctrl every tick. peppylib Standard QoS is best-effort, so
+        // a single dropped message would otherwise stall the gripper;
+        // republishing makes the path self-healing. Idempotent. But if the
+        // publish keeps failing, the gripper is not being commanded — bail
+        // rather than let convergence/stall logic report a false success.
+        match publish_set_ctrl(
             handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
         ).await {
-            warn!("set_ctrl publish: {e}");
+            Ok(()) => consecutive_publish_failures = 0,
+            Err(e) => {
+                consecutive_publish_failures += 1;
+                warn!("set_ctrl publish failed ({consecutive_publish_failures}): {e}");
+                if consecutive_publish_failures >= MAX_CONSECUTIVE_PUBLISH_FAILURES {
+                    return MotionResult {
+                        success: false,
+                        message: "set_ctrl publish failing — gripper not commandable".into(),
+                        final_positions: vec![],
+                        action_time: start.elapsed().as_secs_f64(),
+                    };
+                }
+            }
         }
 
         let elapsed = start.elapsed();
@@ -201,14 +221,17 @@ async fn run_control_loop(
 
         let latest = { state.gripper_state.lock().await.clone() };
         let snap = match latest {
-            Some(s) => s,
-            None => {
-                // No telemetry yet — wait, but honour timeout so we don't
-                // hang indefinitely if robot_initializer never publishes.
+            Some(s) if !s.positions.is_empty() => s,
+            _ => {
+                // No usable telemetry yet (no message, or one with empty joint
+                // positions) — wait, but honour timeout so we don't hang
+                // indefinitely. Empty positions must not reach the convergence
+                // math below, where worst_err would fold to 0.0 and falsely
+                // report "reached".
                 if elapsed > MOTION_TIMEOUT {
                     return MotionResult {
                         success: false,
-                        message: "no telemetry from robot_initializer".into(),
+                        message: "no usable telemetry from robot_initializer".into(),
                         final_positions: vec![],
                         action_time: elapsed_secs,
                     };
