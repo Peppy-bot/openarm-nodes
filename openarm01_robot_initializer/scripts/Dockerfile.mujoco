@@ -3,6 +3,7 @@ FROM python:3.11-slim
 RUN apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
     && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         ca-certificates \
+        git \
         rclone \
         libgl1 \
         libgl1-mesa-dri \
