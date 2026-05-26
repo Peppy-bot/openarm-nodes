@@ -117,7 +117,7 @@ pub async fn run(
 ) {
     let side = arm_id.side_word();
     let actuator_names: [String; DOF] = std::array::from_fn(|i| {
-        format!("openarm_{side}_joint{}_ctrl", i + 1)
+        format!("{side}_joint{}_ctrl", i + 1)
     });
     let set_ctrl_topic = format!("set_ctrl_arm_{side}");
     // Unique instance_id per arm side so concurrent left+right arms don't
