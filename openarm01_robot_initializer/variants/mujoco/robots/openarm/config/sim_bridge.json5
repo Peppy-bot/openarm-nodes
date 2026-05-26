@@ -38,8 +38,6 @@
     // IMU publishers: uncomment once the MJCF declares the IMU bodies.
     // { type: "imu", prim: "openarm_left_imu",  topic: "imu_left",  robot_name: "openarm" },
     // { type: "imu", prim: "openarm_right_imu", topic: "imu_right", robot_name: "openarm" },
-
-    // clock is auto-registered by bridge_extension — do not add here.
   ],
 
   // ------------------------------------------------------------------------
