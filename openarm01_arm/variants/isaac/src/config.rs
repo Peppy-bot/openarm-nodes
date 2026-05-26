@@ -24,7 +24,7 @@ impl ArmId {
         match self.0 {
             0 => "left",
             1 => "right",
-            _ => "unknown",
+            _ => unreachable!("ArmId({}) bypassed new()", self.0),
         }
     }
 
@@ -32,7 +32,7 @@ impl ArmId {
         match self.0 {
             0 => "left_arm",
             1 => "right_arm",
-            _ => "unknown",
+            _ => unreachable!("ArmId({}) bypassed new()", self.0),
         }
     }
 }
