@@ -96,8 +96,8 @@ pub async fn run(
 ) {
     let side = gripper_id.side_word();
     let actuator_names = [
-        format!("{side}_finger1_ctrl"),
-        format!("{side}_finger2_ctrl"),
+        format!("openarm_{side}_finger_joint1"),
+        format!("openarm_{side}_finger_joint2"),
     ];
     let set_ctrl_topic = format!("set_ctrl_gripper_{side}");
     // Unique instance_id per gripper side so concurrent left+right grippers
@@ -347,8 +347,8 @@ pub async fn shutdown_handler(
 ) {
     let side = gripper_id.side_word();
     let actuator_names = [
-        format!("{side}_finger1_ctrl"),
-        format!("{side}_finger2_ctrl"),
+        format!("openarm_{side}_finger_joint1"),
+        format!("openarm_{side}_finger_joint2"),
     ];
     let set_ctrl_topic = format!("set_ctrl_gripper_{side}");
     let instance_id = format!("openarm01_gripper_{side}_shutdown_pub");
