@@ -152,6 +152,69 @@
           }
         }
       ]
+    },
+    topics: {
+      emits: [
+        // Joint state (whole-arm: 7 positions + 7 velocities, plus robot, step, stamp).
+        // sim variants emit this on each physics step from MJCF/USD joint readings;
+        // default (real) variant TODO once the CAN-bus driver is updated.
+        {
+          name: "joint_states",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:      "string",
+            step:       "u64",
+            positions:  { $type: "array", $items: "f64" },
+            velocities: { $type: "array", $items: "f64" },
+            stamp:      "f64"
+          }
+        },
+        // Per-side IMU. Body-mounted sensor reading on this arm.
+        {
+          name: "imu_left",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:               "string",
+            step:                "u64",
+            orientation:         { $type: "array", $items: "f64", $length: 4 },
+            angular_velocity:    { $type: "array", $items: "f64", $length: 3 },
+            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
+            stamp:               "f64"
+          }
+        },
+        {
+          name: "imu_right",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot:               "string",
+            step:                "u64",
+            orientation:         { $type: "array", $items: "f64", $length: 4 },
+            angular_velocity:    { $type: "array", $items: "f64", $length: 3 },
+            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
+            stamp:               "f64"
+          }
+        },
+        // TF tree (arm-link frames with parent + 6DoF pose).
+        {
+          name: "tf_tree",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step:  "u64",
+            frames: {
+              $type: "array",
+              $items: {
+                $type:       "object",
+                name:        "string",
+                parent:      "string",
+                position:    { $type: "array", $items: "f64", $length: 3 },
+                orientation: { $type: "array", $items: "f64", $length: 4 }
+              }
+            },
+            stamp: "f64"
+          }
+        }
+      ]
     }
-  },
+  }
 }
