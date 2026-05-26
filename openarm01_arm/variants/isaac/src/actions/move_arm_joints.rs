@@ -121,7 +121,9 @@ pub async fn run(
     });
     let set_ctrl_topic = format!("set_ctrl_arm_{side}");
     // Unique instance_id per arm side so concurrent left+right arms don't
-    // collide on the peppylib publisher registry.
+    // collide on the peppylib publisher registry. peppylib scopes by
+    // (node_name, instance_id, topic); if it ever changes to (node_name, topic)
+    // the second instance's emit would silently shadow the first.
     let instance_id = format!("openarm01_arm_{side}_setctrl_pub");
 
     let mut action_handle = move_arm_joints::ActionHandle::expose(&runner)
@@ -215,9 +217,10 @@ async fn run_control_loop(
     let mut iter: u32 = 0;
 
     loop {
-        // Re-publish ctrl every tick. peppylib Standard QoS is best-effort,
-        // so a single dropped message would otherwise stall the arm;
-        // republishing makes the path self-healing. Idempotent.
+        // Re-publish ctrl every tick (5ms = 200 Hz per arm side during active
+        // motion). peppylib Standard QoS is best-effort, so a single dropped
+        // message would otherwise stall the arm; republishing makes the path
+        // self-healing. Idempotent.
         if let Err(e) = publish_set_ctrl(
             handle, daemon, set_ctrl_topic, instance_id, actuator_names,
             &goal.target_positions,
