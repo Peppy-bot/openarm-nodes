@@ -4,4 +4,4 @@ numpy==2.4.4
 pycapnp==2.2.2
 pyjson5==2.0.0
 viser==1.0.27
-sim_ext_core @ git+https://github.com/Peppy-bot/nodes_shared_code.git@c21b4f7#subdirectory=sim_ext_core
+sim_ext_core @ git+https://github.com/Peppy-bot/nodes_shared_code.git@d4b936f#subdirectory=sim_ext_core
