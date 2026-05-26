@@ -163,7 +163,7 @@ def _make_sensor(entry):  # pylint: disable=R0911
     if entry.type == "imu":
         return IsaacImuSensor(prim)
     if entry.type == "tf_tree":
-        return IsaacTransformTree()
+        return IsaacTransformTree(prim)
     if entry.type == "clock":
         return IsaacClockSensor()
     if entry.type == "ee_pose":
