@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_NODE_NAME = "sim"
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
+_ROOT_ARTICULATION_PRIM = "/World/openarm"
 
 _PLUGIN_REGISTRY: dict = {
     "joint_states":   JointStatesBridge,
@@ -65,6 +66,7 @@ class IsaacBridgeExtension:
         self._config: Optional[BridgeConfig] = None
         self._io: Optional[PeppylibIO] = None
         self._plugins: list = []
+        self._sim_articulation: Optional[IsaacArticulation] = None
         self._sim_control: Optional[IsaacSimControl] = None
         self._step: int = 0
 
@@ -78,7 +80,20 @@ class IsaacBridgeExtension:
         self._plugins = _build_plugins(self._config)
 
         # SimControl is always present — not config-driven.
-        self._sim_control = IsaacSimControl()
+        # IsaacSimControl needs (articulation, timeline): articulation wraps
+        # the openarm root prim for set_joint_positions; timeline is Isaac's
+        # global play/pause/reset interface. Articulation is left unset-up —
+        # IsaacSimControl.set_joint_positions calls articulation.setup() lazily
+        # on first use, once the USD stage is fully loaded (legacy peppy-isaac
+        # pattern; eager setup at startup races the stage load).
+        # omni.timeline imported lazily — top-level omni.* breaks before
+        # SimulationApp init (common-pitfalls.md #9).
+        import omni.timeline  # pylint: disable=E0401,C0415
+        self._sim_articulation = IsaacArticulation(_ROOT_ARTICULATION_PRIM)
+        self._sim_control = IsaacSimControl(
+            articulation=self._sim_articulation,
+            timeline=omni.timeline.get_timeline_interface(),
+        )
         self._plugins.append(SimControlBridge(self._sim_control, self._config))
 
         for plugin in self._plugins:
@@ -115,6 +130,8 @@ class IsaacBridgeExtension:
         logger.info("IsaacBridgeExtension shutting down.")
         for plugin in self._plugins:
             plugin.teardown()
+        if self._sim_articulation is not None:
+            self._sim_articulation.teardown()
         if self._io is not None:
             self._io.stop()
         gc.collect()
