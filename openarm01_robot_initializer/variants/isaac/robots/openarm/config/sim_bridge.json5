@@ -12,6 +12,10 @@
   // PUBLISHERS — robot_initializer emits these raw peppylib topics each step.
   // ------------------------------------------------------------------------
   publishers: [
+    // Whole-robot joint state. Arm Rust runtime subscribes and filters by
+    // joint_names prefix (`openarm_<side>_joint`) to slice its 7-DOF set.
+    { type: "joint_states", prim: "/World/openarm", topic: "joint_states", robot_name: "openarm" },
+
     // Per-side gripper finger joints (positions + measured forces).
     {
       type: "gripper_state", prim: "/World/openarm/left_gripper",
