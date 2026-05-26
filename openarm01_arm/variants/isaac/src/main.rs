@@ -14,7 +14,9 @@ use tracing::info;
 use crate::config::ArmId;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let arm_id = ArmId::new(params.arm_id)
@@ -24,6 +26,12 @@ fn main() -> Result<()> {
             "starting openarm01_arm:isaac instance={} arm_id={}",
             arm_id.instance_id(), arm_id.0
         );
+
+        // Initialise peppygen clock so emit-side stamps come from peppy's
+        // wall/sim clock (governed by launcher's framework.use_sim_time)
+        // rather than the monolith's wall-clock time.time() forwarded in
+        // raw payloads.
+        peppygen::clock::init(&node_runner).await.expect("peppygen::clock::init");
 
         // peppylib daemon + messenger handle shared with the action handler
         // for per-tick set_ctrl publishes. No shutdown handler — unlike the
