@@ -68,13 +68,19 @@ pub async fn run_move_arm_joints(
     // Single-flight gate: reject a new goal while one is still executing. The
     // motion runs in a spawned task so the loop keeps listening (and rejecting)
     // rather than silently queueing a goal that would run stale once the
-    // current one finishes. joint_positions is a fixed [f64; ARM_DOF] array, so
-    // the request is otherwise always structurally valid.
+    // current one finishes.
     let busy = Arc::new(AtomicBool::new(false));
 
     loop {
         let ctx = match handle
-            .handle_goal_next_request(|_req| {
+            .handle_goal_next_request(|req| {
+                // Reject targets outside the arm's joint limits (also rejects
+                // NaN/inf, which Limit::contains treats as out of range).
+                if !target_in_limits(&req.data.joint_positions) {
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "target joint positions out of range",
+                    ));
+                }
                 // Atomically claim the slot; reject if a motion already holds it.
                 if busy
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -199,6 +205,15 @@ async fn run_control_loop(
     }
 }
 
+/// True if every joint target lies within its V10 position limit. Non-finite
+/// values (NaN/inf) fall outside any range, so they are rejected too.
+fn target_in_limits(target: &v10::JointVec) -> bool {
+    v10::ARM_JOINT_LIMITS
+        .iter()
+        .zip(target)
+        .all(|(limit, &q)| limit.contains(q))
+}
+
 /// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
 fn feedback_period(freq_hz: u32) -> Duration {
     Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
@@ -216,5 +231,24 @@ mod tests {
     #[test]
     fn feedback_period_floors_zero_freq() {
         assert_eq!(feedback_period(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn target_in_limits_accepts_home_and_rejects_out_of_range() {
+        // Home pose (all zeros) is inside every joint limit.
+        assert!(target_in_limits(&[0.0; v10::ARM_DOF]));
+
+        // A single joint past its upper bound fails the whole target.
+        let mut over = [0.0; v10::ARM_DOF];
+        over[3] = v10::ARM_JOINT_LIMITS[3].upper + 0.1;
+        assert!(!target_in_limits(&over));
+
+        // Non-finite values are rejected.
+        let mut nan = [0.0; v10::ARM_DOF];
+        nan[0] = f64::NAN;
+        assert!(!target_in_limits(&nan));
+        let mut inf = [0.0; v10::ARM_DOF];
+        inf[0] = f64::INFINITY;
+        assert!(!target_in_limits(&inf));
     }
 }

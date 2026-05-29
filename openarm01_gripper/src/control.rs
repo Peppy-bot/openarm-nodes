@@ -63,8 +63,9 @@ pub async fn run_move_gripper(
     loop {
         let ctx = match handle
             .handle_goal_next_request(|req| {
-                // Reject targets outside the gripper's physical travel.
-                if !position_in_range(req.data.position) {
+                // Reject targets outside the gripper's physical travel (also
+                // rejects NaN/inf, which Limit::contains treats as out of range).
+                if !v10::GRIPPER_LIMITS_M.contains(req.data.position) {
                     return Ok(move_gripper::GoalResponse::reject("target position out of range"));
                 }
                 // Atomically claim the slot; reject if a motion already holds it.
@@ -187,11 +188,6 @@ fn motor_rad_to_meters(motor_rad: f64) -> f64 {
     (motor_rad / v10::GRIPPER_OPEN_RAD) * v10::GRIPPER_OPEN_M
 }
 
-/// True if `pos_m` is within the gripper's physical travel range.
-fn position_in_range(pos_m: f64) -> bool {
-    (0.0..=v10::GRIPPER_OPEN_M).contains(&pos_m)
-}
-
 /// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
 fn feedback_period(freq_hz: u32) -> Duration {
     Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
@@ -218,14 +214,6 @@ mod tests {
             let back = motor_rad_to_meters(meters_to_motor_rad(pos_m));
             assert!((back - pos_m).abs() < 1e-12, "round-trip failed for {pos_m}");
         }
-    }
-
-    #[test]
-    fn position_in_range_is_inclusive_at_both_ends() {
-        assert!(position_in_range(0.0));
-        assert!(position_in_range(v10::GRIPPER_OPEN_M));
-        assert!(!position_in_range(-1e-9));
-        assert!(!position_in_range(v10::GRIPPER_OPEN_M + 1e-9));
     }
 
     #[test]
