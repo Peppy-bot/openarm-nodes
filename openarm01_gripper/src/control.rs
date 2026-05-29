@@ -1,8 +1,9 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::move_gripper;
+use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
 use tracing::{error, warn};
 
 use openarm_can::{GripperCan, v10};
@@ -10,26 +11,6 @@ use openarm_can::{GripperCan, v10};
 // V10 gripper gains — hardcoded, not configurable in ROS2 reference either.
 pub const KP: f64 = 5.0;
 pub const KD: f64 = 0.1;
-
-/// Linear joint-meter → motor-radian mapping. Closed=0m↔0rad, open=GRIPPER_OPEN_M↔GRIPPER_OPEN_RAD.
-fn meters_to_motor_rad(pos_m: f64) -> f64 {
-    (pos_m / v10::GRIPPER_OPEN_M) * v10::GRIPPER_OPEN_RAD
-}
-
-/// Inverse of `meters_to_motor_rad`: motor angle back to user-facing joint position in meters.
-fn motor_rad_to_meters(motor_rad: f64) -> f64 {
-    (motor_rad / v10::GRIPPER_OPEN_RAD) * v10::GRIPPER_OPEN_M
-}
-
-/// True if `pos_m` is within the gripper's physical travel range.
-fn position_in_range(pos_m: f64) -> bool {
-    (0.0..=v10::GRIPPER_OPEN_M).contains(&pos_m)
-}
-
-/// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
-fn feedback_period(freq_hz: u32) -> Duration {
-    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
-}
 
 struct AcceptedGoal {
     target_position_m: f64,
@@ -61,14 +42,9 @@ impl MotionResult {
     }
 }
 
-impl Default for MotionResult {
-    fn default() -> Self {
-        Self { success: false, message: "no result".into(), final_position_m: 0.0, action_time: 0.0 }
-    }
-}
-
 /// Spawn-and-loop entry for the move_gripper action. Mirrors the pattern in the arm node:
-/// accept goal → run control loop → return result. Re-enters after each completed goal.
+/// accept goal → run control loop → complete the goal. Re-enters afterwards. A goal arriving
+/// mid-motion is rejected (single-flight); the file lock in main.rs enforces single-instance.
 pub async fn run_move_gripper(
     runner: Arc<NodeRunner>,
     gripper: Arc<Mutex<GripperCan>>,
@@ -78,64 +54,70 @@ pub async fn run_move_gripper(
         .await
         .expect("expose move_gripper");
 
-    let pending: Arc<Mutex<Option<AcceptedGoal>>> = Arc::new(Mutex::new(None));
+    // Single-flight gate: reject a new goal while one is still executing. The
+    // motion runs in a spawned task so the loop keeps listening (and rejecting)
+    // rather than silently queueing a goal that would run stale once the
+    // current one finishes.
+    let busy = Arc::new(AtomicBool::new(false));
 
     loop {
-        // 1. Wait for a goal request.
-        let pending_for_handler = pending.clone();
-        if let Err(e) = handle
-            .handle_goal_next_request(move |req| {
-                let pos_m = req.data.position;
-                if !position_in_range(pos_m) {
-                    return Ok(move_gripper::GoalResponse::new(false));
+        let ctx = match handle
+            .handle_goal_next_request(|req| {
+                // Reject targets outside the gripper's physical travel.
+                if !position_in_range(req.data.position) {
+                    return Ok(move_gripper::GoalResponse::reject("target position out of range"));
                 }
-                // Reject if a motion is already in progress.
-                let mut slot = pending_for_handler.lock().unwrap();
-                if slot.is_some() {
-                    return Ok(move_gripper::GoalResponse::new(false));
+                // Atomically claim the slot; reject if a motion already holds it.
+                if busy
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    Ok(move_gripper::GoalResponse::reject(
+                        "gripper is already executing a motion",
+                    ))
+                } else {
+                    Ok(move_gripper::GoalResponse::accept())
                 }
-                *slot = Some(AcceptedGoal {
-                    target_position_m: pos_m,
-                    feedback_period: feedback_period(req.data.feedback_frequency),
-                });
-                Ok(move_gripper::GoalResponse::new(true))
             })
             .await
         {
-            error!("move_gripper goal: {e}");
-            continue;
-        }
-
-        // 2. If accepted, run the control loop.
-        let goal = pending.lock().unwrap().take();
-        let result = match goal {
-            Some(g) => run_control_loop(&gripper, &handle, &cfg, g).await,
-            None => continue, // goal was rejected
+            Ok(Some(ctx)) => ctx,
+            Ok(None) => break, // action closed (node shutting down)
+            Err(e) => {
+                error!("move_gripper goal: {e}");
+                continue;
+            }
         };
 
-        // 3. Return the result.
-        let stash: Arc<Mutex<Option<MotionResult>>> = Arc::new(Mutex::new(Some(result)));
-        let stash_for_handler = stash.clone();
-        if let Err(e) = handle
-            .handle_result_next_request(move |_req| {
-                let r = stash_for_handler.lock().unwrap().take().unwrap_or_default();
-                Ok(move_gripper::ResultResponse::new(
-                    r.action_time,
-                    vec![r.final_position_m],
-                    r.message,
-                    r.success,
-                ))
-            })
-            .await
-        {
-            error!("move_gripper result: {e}");
-        }
+        let goal = AcceptedGoal {
+            target_position_m: ctx.request().data.position,
+            feedback_period: feedback_period(ctx.request().data.feedback_frequency),
+        };
+
+        let gripper = Arc::clone(&gripper);
+        let cfg = cfg.clone();
+        let busy = Arc::clone(&busy);
+        tokio::spawn(async move {
+            let result = run_control_loop(&gripper, &ctx, &cfg, goal).await;
+            if let Err(e) = ctx
+                .complete(
+                    result.success,
+                    result.message,
+                    vec![result.final_position_m],
+                    result.action_time,
+                )
+                .await
+            {
+                error!("move_gripper complete: {e}");
+            }
+            busy.store(false, Ordering::Release);
+        });
     }
 }
 
 async fn run_control_loop(
     gripper: &Arc<Mutex<GripperCan>>,
-    handle: &move_gripper::ActionHandle,
+    ctx: &move_gripper::GoalContext,
     cfg: &ControlConfig,
     goal: AcceptedGoal,
 ) -> MotionResult {
@@ -145,12 +127,13 @@ async fn run_control_loop(
     let target_motor_rad = meters_to_motor_rad(goal.target_position_m);
     let start = Instant::now();
     let mut last_feedback = Instant::now();
+    let mut feedback_failures: u32 = 0;
 
     loop {
         let cycle_start = Instant::now();
 
         let motor_rad = {
-            let mut g = gripper.lock().unwrap();
+            let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
             g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0);
             g.refresh_all();
             g.recv_all(cfg.recv_timeout_us);
@@ -163,8 +146,13 @@ async fn run_control_loop(
         let done = (position_m - goal.target_position_m).abs() < cfg.position_tolerance_m;
 
         if last_feedback.elapsed() >= goal.feedback_period {
-            if let Err(e) = handle.emit_feedback(elapsed_secs, vec![position_m]).await {
-                warn!("feedback: {e}");
+            // Feedback is best-effort (QoS Standard); a drop must not stall the
+            // loop. Warn once per motion if it starts failing, then stay quiet.
+            if let Err(e) = ctx.publish_feedback(vec![position_m], elapsed_secs).await {
+                feedback_failures += 1;
+                if feedback_failures == 1 {
+                    warn!("move_gripper feedback publish failing, suppressing repeats: {e}");
+                }
             }
             last_feedback = Instant::now();
         }
@@ -187,6 +175,26 @@ async fn run_control_loop(
             );
         }
     }
+}
+
+/// Linear joint-meter → motor-radian mapping. Closed=0m↔0rad, open=GRIPPER_OPEN_M↔GRIPPER_OPEN_RAD.
+fn meters_to_motor_rad(pos_m: f64) -> f64 {
+    (pos_m / v10::GRIPPER_OPEN_M) * v10::GRIPPER_OPEN_RAD
+}
+
+/// Inverse of `meters_to_motor_rad`: motor angle back to user-facing joint position in meters.
+fn motor_rad_to_meters(motor_rad: f64) -> f64 {
+    (motor_rad / v10::GRIPPER_OPEN_RAD) * v10::GRIPPER_OPEN_M
+}
+
+/// True if `pos_m` is within the gripper's physical travel range.
+fn position_in_range(pos_m: f64) -> bool {
+    (0.0..=v10::GRIPPER_OPEN_M).contains(&pos_m)
+}
+
+/// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
+fn feedback_period(freq_hz: u32) -> Duration {
+    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
 }
 
 #[cfg(test)]
