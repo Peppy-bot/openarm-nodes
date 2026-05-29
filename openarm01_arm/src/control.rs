@@ -1,8 +1,9 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::move_arm_joints;
+use peppygen::exposed_actions::openarm01_arm::v1::move_arm_joints;
 use tracing::{error, info};
 
 use openarm_can::{ArmCan, v10};
@@ -10,7 +11,7 @@ use crate::trajectory::Trajectory;
 
 struct AcceptedGoal {
     target: v10::JointVec,
-    feedback_frequency: u32,
+    feedback_period: Duration,
 }
 
 #[derive(Clone)]
@@ -51,20 +52,10 @@ impl MotionResult {
     }
 }
 
-impl Default for MotionResult {
-    fn default() -> Self {
-        Self {
-            success: false,
-            message: "no result".into(),
-            final_joint_positions: [0.0; v10::ARM_DOF],
-            action_time: 0.0,
-        }
-    }
-}
-
 /// Spawn-and-loop entry for the move_arm_joints action: accept a goal, run the
-/// trajectory-tracking control loop, return the result. Re-enters the goal loop
-/// after each completed (or rejected) goal.
+/// trajectory-tracking control loop, complete the goal with its result. Re-enters
+/// the goal loop afterwards. A goal arriving mid-motion is rejected (single-flight);
+/// the file lock in main.rs guarantees single-instance.
 pub async fn run_move_arm_joints(
     runner: Arc<NodeRunner>,
     arm: Arc<Mutex<ArmCan>>,
@@ -74,78 +65,73 @@ pub async fn run_move_arm_joints(
         .await
         .expect("expose move_arm_joints");
 
-    // In-process only; relies on the file lock in main.rs for single-instance.
-    // Revisit once PEPPYOS-75 replaces the file lock.
-    let pending: Arc<Mutex<Option<AcceptedGoal>>> = Arc::new(Mutex::new(None));
+    // Single-flight gate: reject a new goal while one is still executing. The
+    // motion runs in a spawned task so the loop keeps listening (and rejecting)
+    // rather than silently queueing a goal that would run stale once the
+    // current one finishes. joint_positions is a fixed [f64; ARM_DOF] array, so
+    // the request is otherwise always structurally valid.
+    let busy = Arc::new(AtomicBool::new(false));
 
     loop {
-        // 1. Wait for a goal request.
-        let pending_for_handler = pending.clone();
-        if let Err(e) = handle
-            .handle_goal_next_request(move |req| {
-                if req.data.joint_positions.len() != v10::ARM_DOF {
-                    return Ok(move_arm_joints::GoalResponse::new(false));
+        let ctx = match handle
+            .handle_goal_next_request(|_req| {
+                // Atomically claim the slot; reject if a motion already holds it.
+                if busy
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    Ok(move_arm_joints::GoalResponse::reject(
+                        "arm is already executing a motion",
+                    ))
+                } else {
+                    Ok(move_arm_joints::GoalResponse::accept())
                 }
-                // Reject if a motion is already pending pickup.
-                let mut slot = pending_for_handler.lock().unwrap();
-                if slot.is_some() {
-                    return Ok(move_arm_joints::GoalResponse::new(false));
-                }
-                // Already validated the slice is of the right length.
-                let target = req.data.joint_positions.as_slice().try_into().unwrap();
-                *slot = Some(AcceptedGoal {
-                    target,
-                    feedback_frequency: req.data.feedback_frequency.clamp(1, 1000),
-                });
-                Ok(move_arm_joints::GoalResponse::new(true))
             })
             .await
         {
-            error!("move_arm_joints goal: {e}");
-            continue;
-        }
-
-        // 2. If accepted, run the control loop here.
-        let goal = pending.lock().unwrap().take();
-        let result = match goal {
-            Some(g) => run_control_loop(&arm, &handle, &cfg, g).await,
-            None => continue, // goal was rejected
+            Ok(Some(ctx)) => ctx,
+            Ok(None) => break, // action closed (node shutting down)
+            Err(e) => {
+                error!("move_arm_joints goal: {e}");
+                continue;
+            }
         };
 
-        // 3. Wait for the matching result request and return the result.
-        let stash: Arc<Mutex<Option<MotionResult>>> = Arc::new(Mutex::new(Some(result)));
-        let stash_for_handler = stash.clone();
-        if let Err(e) = handle
-            .handle_result_next_request(move |_req| {
-                let r = stash_for_handler.lock().unwrap().take().unwrap_or_default();
-                Ok(move_arm_joints::ResultResponse {
-                    success: r.success,
-                    message: r.message,
-                    final_joint_positions: r.final_joint_positions,
-                    action_time: r.action_time,
-                })
-            })
-            .await
-        {
-            error!("move_arm_joints result: {e}");
-        }
-    }
-}
+        let goal = AcceptedGoal {
+            target: ctx.request().data.joint_positions,
+            feedback_period: feedback_period(ctx.request().data.feedback_frequency),
+        };
 
-fn fmt_joints(v: &v10::JointVec) -> String {
-    let parts: Vec<String> = v.iter().map(|x| format!("{:.3}", x)).collect();
-    format!("[{}]", parts.join(", "))
+        let arm = Arc::clone(&arm);
+        let cfg = cfg.clone();
+        let busy = Arc::clone(&busy);
+        tokio::spawn(async move {
+            let result = run_control_loop(&arm, &ctx, &cfg, goal).await;
+            if let Err(e) = ctx
+                .complete(
+                    result.success,
+                    result.message,
+                    result.final_joint_positions,
+                    result.action_time,
+                )
+                .await
+            {
+                error!("move_arm_joints complete: {e}");
+            }
+            busy.store(false, Ordering::Release);
+        });
+    }
 }
 
 async fn run_control_loop(
     arm: &Arc<Mutex<ArmCan>>,
-    handle: &move_arm_joints::ActionHandle,
+    ctx: &move_arm_joints::GoalContext,
     cfg: &ControlConfig,
     goal: AcceptedGoal,
 ) -> MotionResult {
     // Anchor the trajectory at the current joint positions.
     let q_start = {
-        let mut a = arm.lock().unwrap();
+        let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
         a.refresh_all();
         a.recv_all(cfg.recv_timeout_us);
         a.get_state().positions
@@ -159,7 +145,7 @@ async fn run_control_loop(
     let trajectory = Trajectory::new(q_start, goal.target, cfg.max_joint_velocity_rad_s, cfg.min_motion_time_s);
     let start = trajectory.motion_start;
     let mut last_feedback = Instant::now();
-    let feedback_period = Duration::from_micros((1_000_000 / goal.feedback_frequency as u64).max(1));
+    let mut feedback_failures: u32 = 0;
     // tau (feedforward torque) is zero. The default ROS2 control path also leaves
     // tau_commands_ at zero — JointTrajectoryController populates pos/vel command
     // interfaces only, and v10_simple_hardware just forwards what's there. Adding
@@ -172,7 +158,7 @@ async fn run_control_loop(
         let (q_des, dq_des) = trajectory.sample(cycle_start);
 
         let positions = {
-            let mut a = arm.lock().unwrap();
+            let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
             a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &zero_tau);
             a.refresh_all();
             a.recv_all(cfg.recv_timeout_us);
@@ -182,8 +168,14 @@ async fn run_control_loop(
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
 
-        if last_feedback.elapsed() >= feedback_period {
-            let _ = handle.emit_feedback(positions, elapsed_secs).await;
+        if last_feedback.elapsed() >= goal.feedback_period {
+            // Warn once per motion if it starts failing, then stay quiet.
+            if let Err(e) = ctx.publish_feedback(positions, elapsed_secs).await {
+                feedback_failures += 1;
+                if feedback_failures == 1 {
+                    tracing::warn!("move_arm_joints feedback publish failing, suppressing repeats: {e}");
+                }
+            }
             last_feedback = Instant::now();
         }
 
@@ -204,5 +196,25 @@ async fn run_control_loop(
                 cfg.cycle_period.as_secs_f64() * 1000.0,
             );
         }
+    }
+}
+
+/// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
+fn feedback_period(freq_hz: u32) -> Duration {
+    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
+}
+
+fn fmt_joints(v: &v10::JointVec) -> String {
+    let parts: Vec<String> = v.iter().map(|x| format!("{:.3}", x)).collect();
+    format!("[{}]", parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feedback_period_floors_zero_freq() {
+        assert_eq!(feedback_period(0), Duration::from_secs(1));
     }
 }
