@@ -1,24 +1,23 @@
+// Real-hardware implementation of robot_initializer. No-op health check: is_ready
+// returns true immediately because real robots don't need a "scene loaded" gate.
+// Conforms to openarm01_robot_initializer:v1; together with the _mujoco / _isaac
+// sibling nodes (which return ready:true only once their engine is up), this lets
+// backbone poll is_ready regardless of which implementation is bound at launch.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_robot_initializer",
-    tag: "0.1.0",
-    variants: [
-      { name: "default", source: { local: "./variants/default" } },
-      { name: "isaac",   source: { local: "./variants/isaac"   } },
-      { name: "mujoco",  source: { local: "./variants/mujoco"  } },
-    ],
+    tag: "v1",
   },
   interfaces: {
-    services: {
-      exposes: [
-        {
-          name: "is_ready",
-          response_message_format: {
-            ready: "bool",
-          },
-        },
-      ],
+    conforms_to: [
+      { name: "openarm01_robot_initializer", tag: "v1" },
+    ],
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
     },
   },
 }

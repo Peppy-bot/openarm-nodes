@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::exposed_services::is_ready;
+use peppygen::exposed_services::openarm01_robot_initializer::v1::is_ready;
 use peppylib::runtime::CancellationToken;
 
 pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) {
