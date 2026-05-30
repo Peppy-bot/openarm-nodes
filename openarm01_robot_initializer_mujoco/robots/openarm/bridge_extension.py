@@ -68,6 +68,8 @@ class MujocoBridgeExtension:
         self._config: Optional[BridgeConfig] = None
         self._io: Optional[PeppylibIO] = None
         self._plugins: list = []
+        self._writers: list = []
+        self._readers: list = []
         self._sim_control: Optional[MujocoSimControl] = None
         self._step: int = 0
 
@@ -88,6 +90,14 @@ class MujocoBridgeExtension:
             for source_node, topic, qos in plugin.subscriptions():
                 self._io.register_subscription(source_node, topic, qos)
 
+        # Split plugins by direction so the step loop can run subscribers
+        # (which write ctrl[] / qpos) before mj_step and publishers (which
+        # read post-step state) after. SimControlBridge has subscriptions
+        # so it lands on the writer side — its set_joint_positions dispatch
+        # writes qpos and must precede the physics step.
+        self._writers = [p for p in self._plugins if p.subscriptions()]
+        self._readers = [p for p in self._plugins if not p.subscriptions()]
+
         self._io.start()
         self._step = 0
         logger.info(
@@ -96,7 +106,7 @@ class MujocoBridgeExtension:
         )
 
     def step(self) -> None:
-        """Advance physics one step and drive all plugins.
+        """Drive subscriber plugins, advance physics, drive publisher plugins.
 
         When paused, only SimControlBridge runs so unpause/step/reset
         requests can still be processed.
@@ -109,9 +119,20 @@ class MujocoBridgeExtension:
 
         import mujoco  # pylint: disable=C0415
 
+        # Writers (subscribers) first: actuator_ctrl writes ctrl[] and
+        # sim_control's set_joint_positions writes qpos before mj_step
+        # consumes them — otherwise the values land one tick late.
+        for plugin in self._writers:
+            if not plugin.is_ready and not plugin.try_setup():
+                continue
+            plugin.on_step(self._step, self._io)
+
         mujoco.mj_step(self._model, self._data)
         self._step += 1
-        for plugin in self._plugins:
+
+        # Readers (publishers) after mj_step: state-emitting plugins read
+        # the post-step world.
+        for plugin in self._readers:
             if not plugin.is_ready and not plugin.try_setup():
                 continue
             plugin.on_step(self._step, self._io)
