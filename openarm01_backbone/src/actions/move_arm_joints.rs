@@ -1,20 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
-use peppygen::consumed_actions::arm_move_arm_joints;
-use peppygen::exposed_actions::move_arm_joints::{
-    ActionHandle, GoalRequest, GoalRequestData, GoalResponse, ResultResponse,
-};
+use peppygen::consumed_actions::{left_arm_move_arm_joints, right_arm_move_arm_joints};
+use peppygen::exposed_actions::move_arm_joints::{ActionHandle, GoalContext, GoalRequest, GoalResponse};
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
-use crate::startup::Routing;
-
 const GOAL_TIMEOUT: Duration = Duration::from_secs(5);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
-
 const ARM_DOF: usize = 7;
 
 struct Outcome {
@@ -22,6 +17,7 @@ struct Outcome {
     message: String,
     final_joint_positions: [f64; ARM_DOF],
     action_time: f64,
+    is_cancelled: bool,
 }
 
 impl Outcome {
@@ -31,115 +27,176 @@ impl Outcome {
             message: message.into(),
             final_joint_positions: [0.0; ARM_DOF],
             action_time: 0.0,
+            is_cancelled: false,
+        }
+    }
+
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            final_joint_positions: [0.0; ARM_DOF],
+            action_time: 0.0,
+            is_cancelled: true,
         }
     }
 }
 
-// Expose move_arm_joints, and for each accepted goal forward it to the arm instance the goal's
-// arm_id resolves to, relaying the arm's feedback and result back to the caller.
-pub async fn run(
-    runner: Arc<NodeRunner>,
-    routing: Arc<Routing>,
-    token: CancellationToken,
-) -> peppygen::Result<()> {
+// Expose move_arm_joints. For each accepted goal, dispatch on arm_id to the
+// left or right consumed action, relay feedback upward, propagate cancel
+// downward, and answer the caller with either complete or complete_cancelled.
+pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen::Result<()> {
     let mut handle = ActionHandle::expose(&runner).await?;
-    let pending: Arc<Mutex<Option<GoalRequestData>>> = Arc::new(Mutex::new(None));
 
     loop {
-        // 1. Accept a goal only if its arm_id maps to a known arm instance.
-        let pending_for_handler = pending.clone();
-        let routing_for_handler = routing.clone();
-        let goal_handled = tokio::select! {
+        let goal_ctx = tokio::select! {
             _ = token.cancelled() => break,
-            result = handle.handle_goal_next_request(move |req: GoalRequest| {
-                let arm_id = req.data.arm_id;
-                if routing_for_handler.arm_instance(arm_id).is_none() {
-                    warn!(arm_id, "move_arm_joints: no arm instance for arm_id; rejecting");
-                    return Ok(GoalResponse::new(false));
+            result = handle.handle_goal_next_request(|req: &GoalRequest| {
+                match req.data.arm_id {
+                    0 | 1 => Ok(GoalResponse::accept()),
+                    other => Ok(GoalResponse::reject(format!(
+                        "invalid arm_id {other} (expected 0 for left, 1 for right)"
+                    ))),
                 }
-                *pending_for_handler.lock().unwrap() = Some(req.data);
-                Ok(GoalResponse::new(true))
-            }) => result,
+            }) => match result {
+                Ok(Some(ctx)) => ctx,
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(error = %e, "move_arm_joints: goal handling failed");
+                    continue;
+                }
+            },
         };
-        if let Err(e) = goal_handled {
-            warn!(error = %e, "move_arm_joints: goal handling failed");
-            continue;
-        }
 
-        // 2. Forward the accepted goal; rejected goals leave the slot empty.
-        let goal = match pending.lock().unwrap().take() {
-            Some(goal) => goal,
-            None => continue,
-        };
-        let outcome = forward(&runner, &routing, goal, &handle, &token).await;
+        let outcome = forward(&runner, &goal_ctx, &token).await;
 
-        // 3. Answer the caller's result request (cancel-aware so shutdown can't wedge here).
-        let stash = Arc::new(Mutex::new(Some(outcome)));
-        let stash_for_handler = stash.clone();
-        tokio::select! {
-            _ = token.cancelled() => break,
-            result = handle.handle_result_next_request(move |_req| {
-                let outcome = stash_for_handler
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .unwrap_or_else(|| Outcome::failed("backbone produced no result"));
-                Ok(ResultResponse::new(
+        let reply = if outcome.is_cancelled {
+            goal_ctx
+                .complete_cancelled(
                     outcome.success,
                     outcome.message,
                     outcome.final_joint_positions,
                     outcome.action_time,
-                ))
-            }) => {
-                if let Err(e) = result {
-                    warn!(error = %e, "move_arm_joints: result handling failed");
-                }
-            }
+                )
+                .await
+        } else {
+            goal_ctx
+                .complete(
+                    outcome.success,
+                    outcome.message,
+                    outcome.final_joint_positions,
+                    outcome.action_time,
+                )
+                .await
+        };
+        if let Err(e) = reply {
+            warn!(error = %e, "move_arm_joints: complete failed");
         }
     }
     Ok(())
 }
 
-async fn forward(
+async fn forward(runner: &NodeRunner, goal_ctx: &GoalContext, token: &CancellationToken) -> Outcome {
+    let req_data = goal_ctx.request().data.clone();
+    match req_data.arm_id {
+        0 => dispatch_left(runner, &req_data, goal_ctx, token).await,
+        1 => dispatch_right(runner, &req_data, goal_ctx, token).await,
+        // Unreachable: handle_goal_next_request rejects anything outside [0, 1].
+        _ => Outcome::failed("arm_id out of range"),
+    }
+}
+
+async fn dispatch_left(
     runner: &NodeRunner,
-    routing: &Routing,
-    goal: GoalRequestData,
-    handle: &ActionHandle,
+    req: &peppygen::exposed_actions::move_arm_joints::GoalRequestData,
+    goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
-    // Presence was checked at goal acceptance; re-resolve to own the instance id locally.
-    let instance_id = match routing.arm_instance(goal.arm_id) {
-        Some(instance_id) => instance_id.to_string(),
-        None => return Outcome::failed("arm_id no longer routable"),
-    };
-
-    let mut downstream = match arm_move_arm_joints::ActionHandle::fire_goal(
+    let mut downstream = match left_arm_move_arm_joints::ActionHandle::fire_goal(
         runner,
         GOAL_TIMEOUT,
-        None,
-        Some(&instance_id),
-        arm_move_arm_joints::GoalRequest {
-            feedback_frequency: goal.feedback_frequency,
-            joint_positions: goal.joint_positions,
+        left_arm_move_arm_joints::GoalRequest {
+            feedback_frequency: req.feedback_frequency,
+            joint_positions: req.joint_positions,
         },
         QoSProfile::SensorData,
     )
     .await
     {
         Ok(handle) if handle.data.accepted => handle,
-        Ok(_) => return Outcome::failed("arm rejected the goal"),
-        Err(e) => return Outcome::failed(format!("fire_goal to arm failed: {e}")),
+        Ok(handle) => {
+            return Outcome::failed(format!(
+                "left arm rejected goal: {}",
+                handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+            ));
+        }
+        Err(e) => return Outcome::failed(format!("fire_goal to left arm failed: {e}")),
     };
+    info!("move_arm_joints: forwarded to left arm");
 
-    info!(arm_id = goal.arm_id, instance = %instance_id, "move_arm_joints: forwarded to arm");
+    relay_left(&mut downstream, goal_ctx, token).await
+}
 
-    // Relay the arm's feedback upward until its stream ends (Err = no more feedback).
+async fn dispatch_right(
+    runner: &NodeRunner,
+    req: &peppygen::exposed_actions::move_arm_joints::GoalRequestData,
+    goal_ctx: &GoalContext,
+    token: &CancellationToken,
+) -> Outcome {
+    let mut downstream = match right_arm_move_arm_joints::ActionHandle::fire_goal(
+        runner,
+        GOAL_TIMEOUT,
+        right_arm_move_arm_joints::GoalRequest {
+            feedback_frequency: req.feedback_frequency,
+            joint_positions: req.joint_positions,
+        },
+        QoSProfile::SensorData,
+    )
+    .await
+    {
+        Ok(handle) if handle.data.accepted => handle,
+        Ok(handle) => {
+            return Outcome::failed(format!(
+                "right arm rejected goal: {}",
+                handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+            ));
+        }
+        Err(e) => return Outcome::failed(format!("fire_goal to right arm failed: {e}")),
+    };
+    info!("move_arm_joints: forwarded to right arm");
+
+    relay_right(&mut downstream, goal_ctx, token).await
+}
+
+// The two relay_* helpers below are byte-equivalent except for the consumed-action
+// module path. Macros would deduplicate but obscure the call sites; two short
+// functions are clearer at the cost of mild repetition.
+async fn relay_left(
+    downstream: &mut left_arm_move_arm_joints::ActionHandle,
+    goal_ctx: &GoalContext,
+    token: &CancellationToken,
+) -> Outcome {
+    let mut upstream_cancelled = false;
+
     loop {
         tokio::select! {
             _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+            _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(error = %e, "move_arm_joints: left cancel propagation failed");
+                }
+                upstream_cancelled = true;
+            }
             feedback = downstream.on_next_feedback_message() => match feedback {
                 Ok(f) => {
-                    let _ = handle.emit_feedback(f.joint_positions, f.action_time).await;
+                    let action_time = f.action_time;
+                    if let Err(e) = goal_ctx.publish_feedback(f.joint_positions, action_time).await {
+                        warn!(
+                            error = %e,
+                            action_time,
+                            "move_arm_joints: upstream publish_feedback failed; continuing"
+                        );
+                    }
                 }
                 Err(_) => break,
             }
@@ -147,12 +204,91 @@ async fn forward(
     }
 
     match downstream.get_result(RESULT_TIMEOUT).await {
-        Ok(result) => Outcome {
-            success: result.data.success,
-            message: result.data.message,
-            final_joint_positions: result.data.final_joint_positions,
-            action_time: result.data.action_time,
+        Ok(result) => match result.outcome {
+            left_arm_move_arm_joints::ResultOutcome::Completed(data) => Outcome {
+                success: data.success,
+                message: data.message,
+                final_joint_positions: data.final_joint_positions,
+                action_time: data.action_time,
+                is_cancelled: false,
+            },
+            left_arm_move_arm_joints::ResultOutcome::Cancelled(data) => Outcome {
+                success: data.success,
+                message: data.message,
+                final_joint_positions: data.final_joint_positions,
+                action_time: data.action_time,
+                is_cancelled: true,
+            },
+            left_arm_move_arm_joints::ResultOutcome::Abandoned => Outcome::failed("left arm abandoned"),
+            left_arm_move_arm_joints::ResultOutcome::Expired => Outcome::failed("left arm result expired"),
         },
-        Err(e) => Outcome::failed(format!("get_result from arm failed: {e}")),
+        Err(e) => {
+            if upstream_cancelled {
+                Outcome::cancelled(format!("left arm cancellation, get_result: {e}"))
+            } else {
+                Outcome::failed(format!("get_result from left arm failed: {e}"))
+            }
+        }
+    }
+}
+
+async fn relay_right(
+    downstream: &mut right_arm_move_arm_joints::ActionHandle,
+    goal_ctx: &GoalContext,
+    token: &CancellationToken,
+) -> Outcome {
+    let mut upstream_cancelled = false;
+
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+            _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(error = %e, "move_arm_joints: right cancel propagation failed");
+                }
+                upstream_cancelled = true;
+            }
+            feedback = downstream.on_next_feedback_message() => match feedback {
+                Ok(f) => {
+                    let action_time = f.action_time;
+                    if let Err(e) = goal_ctx.publish_feedback(f.joint_positions, action_time).await {
+                        warn!(
+                            error = %e,
+                            action_time,
+                            "move_arm_joints: upstream publish_feedback failed; continuing"
+                        );
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    match downstream.get_result(RESULT_TIMEOUT).await {
+        Ok(result) => match result.outcome {
+            right_arm_move_arm_joints::ResultOutcome::Completed(data) => Outcome {
+                success: data.success,
+                message: data.message,
+                final_joint_positions: data.final_joint_positions,
+                action_time: data.action_time,
+                is_cancelled: false,
+            },
+            right_arm_move_arm_joints::ResultOutcome::Cancelled(data) => Outcome {
+                success: data.success,
+                message: data.message,
+                final_joint_positions: data.final_joint_positions,
+                action_time: data.action_time,
+                is_cancelled: true,
+            },
+            right_arm_move_arm_joints::ResultOutcome::Abandoned => Outcome::failed("right arm abandoned"),
+            right_arm_move_arm_joints::ResultOutcome::Expired => Outcome::failed("right arm result expired"),
+        },
+        Err(e) => {
+            if upstream_cancelled {
+                Outcome::cancelled(format!("right arm cancellation, get_result: {e}"))
+            } else {
+                Outcome::failed(format!("get_result from right arm failed: {e}"))
+            }
+        }
     }
 }
