@@ -1,35 +1,27 @@
 // openarm01_joint_commander — operator entry point. Reads keyboard input,
 // shows arm + gripper state in a TUI, and fires move_arm_joints / move_gripper
 // goals at openarm01_backbone. Backbone routes each goal to the correct
-// arm / gripper instance.
+// arm / gripper instance via launcher-bound interface link_ids.
 //
-// MVP scope: keyboard variant only, joint-space. Cartesian + pose_estimation
-// variant are post-MVP and not declared here yet.
+// MVP scope: keyboard-driven joint-space only. A future pose_estimation
+// implementation will land as a separate sibling node
+// (openarm01_joint_commander_pose_estimation), not as a variant.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_joint_commander",
-    tag: "0.1.0",
+    tag: "v1",
     depends_on: {
+      // backbone has no variants and is not a conforming impl of any interface,
+      // so the dep is by node identity, not by interface.
       nodes: [
         {
           name: "openarm01_backbone",
-          tag: "0.1.0",
-          local_id: "backbone"
+          tag: "v1",
+          link_id: "backbone"
         }
       ]
-    },
-    variants: [
-      // Default variant is the keyboard TUI. Operator steps joints, then
-      // hits Enter to fire a goal at backbone. pose_estimation variant
-      // comes post-MVP.
-      {
-        name: "default",
-        source: {
-          local: "./variants/keyboard"
-        }
-      }
-    ]
+    }
   },
   interfaces: {
     actions: {
@@ -37,14 +29,20 @@
       // arm / gripper instance whose id matches arm_id / gripper_id.
       consumes: [
         {
-          local_node_id: "backbone",
+          link_id: "backbone",
           name: "move_arm_joints"
         },
         {
-          local_node_id: "backbone",
+          link_id: "backbone",
           name: "move_gripper"
         }
       ]
+    }
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
     }
   }
 }

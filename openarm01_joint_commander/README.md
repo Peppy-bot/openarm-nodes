@@ -1,30 +1,30 @@
-# openarm01_joint_commander — keyboard variant
+# openarm01_joint_commander
 
 Rust TUI that drives the bimanual openarm01 in joint space. Reads stepping
 input from the keyboard, fires `move_arm_joints` and `move_gripper` actions at
 `openarm01_backbone`, and shows in-flight feedback in a ratatui interface.
 
 MVP scope: joint-space only. Cartesian operator input (and the upstream IK +
-collision-detection pipeline) is post-MVP; this variant goes through
-`backbone`'s `move_arm_joints` action which arm executes directly.
+collision-detection pipeline) is post-MVP; the node goes through `backbone`'s
+`move_arm_joints` action which arm executes directly. A future pose-estimation
+variant will land as a separate sibling node, not as a variant of this one.
 
 ---
 
 ## Dependency
 
-`openarm01_backbone:0.1.0` must be in the stack (backbone forwards goals to
-arm / gripper instances). Backbone in turn depends on `openarm01_robot_initializer`,
-`openarm01_arm`, `openarm01_gripper`.
+`openarm01_backbone:v1` must be in the stack (backbone forwards goals to
+arm / gripper instances). Backbone in turn depends on `openarm01_robot_initializer:v1`,
+`openarm01_arm:v1`, `openarm01_gripper:v1` via interface conformance — the
+launcher binds concrete impls (real / mujoco / isaac) at startup.
 
 ---
 
 ## Build
 
 ```bash
-# From the variant directory (variants/keyboard/)
-peppy node sync ../..              # regenerate peppygen
-peppy node add . --variant keyboard
-peppy node build openarm01_joint_commander:0.1.0
+peppy node sync .              # regenerate peppygen
+peppy node add . -sb           # add + sync + build
 ```
 
 Apptainer pulls `tuatini/peppy-rust-cargo-base` and runs `cargo build --release`.
@@ -34,7 +34,7 @@ Apptainer pulls `tuatini/peppy-rust-cargo-base` and runs `cargo build --release`
 ## Run
 
 ```bash
-peppy node run openarm01_joint_commander:0.1.0
+peppy node run openarm01_joint_commander:v1
 ```
 
 Single instance. The TUI takes over the terminal; press `q` to quit cleanly.
