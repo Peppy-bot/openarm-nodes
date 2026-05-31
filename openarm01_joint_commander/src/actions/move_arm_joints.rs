@@ -9,6 +9,7 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::backbone_move_arm_joints;
+use peppygen::consumed_actions::backbone_move_arm_joints::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
@@ -47,11 +48,11 @@ async fn run(
         joint_positions,
     };
 
+    // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
+    // targeting moved from call-site args to launcher-pinned link_id bindings.
     let mut downstream = match backbone_move_arm_joints::ActionHandle::fire_goal(
         &runner,
         GOAL_TIMEOUT,
-        None,
-        None,
         goal,
         QoSProfile::SensorData,
     )
@@ -85,19 +86,36 @@ async fn run(
         }
     }
 
+    // v0.10 peppylib: ResultResponse.outcome is a typed enum
+    // (Completed/Cancelled/Abandoned/Expired). Completed and Cancelled carry the
+    // payload; the latter two are terminal-without-data.
     let outcome = downstream.get_result(RESULT_TIMEOUT).await;
     let (success, summary) = match outcome {
-        Ok(r) => {
-            let msg = if r.data.success {
-                format!(
-                    "move_arm_joints ({}): success in {:.2}s",
-                    label, r.data.action_time
-                )
-            } else {
-                format!("move_arm_joints ({}) failed: {}", label, r.data.message)
-            };
-            (r.data.success, msg)
-        }
+        Ok(r) => match r.outcome {
+            ResultOutcome::Completed(data) => {
+                let msg = if data.success {
+                    format!(
+                        "move_arm_joints ({}): success in {:.2}s",
+                        label, data.action_time
+                    )
+                } else {
+                    format!("move_arm_joints ({}) failed: {}", label, data.message)
+                };
+                (data.success, msg)
+            }
+            ResultOutcome::Cancelled(data) => (
+                false,
+                format!("move_arm_joints ({label}) cancelled: {}", data.message),
+            ),
+            ResultOutcome::Abandoned => (
+                false,
+                format!("move_arm_joints ({label}) abandoned by backbone"),
+            ),
+            ResultOutcome::Expired => (
+                false,
+                format!("move_arm_joints ({label}) result expired"),
+            ),
+        },
         Err(e) => (false, format!("move_arm_joints ({label}) result error: {e}")),
     };
     finalize(&state, side, success, summary).await;

@@ -7,6 +7,7 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::backbone_move_gripper;
+use peppygen::consumed_actions::backbone_move_gripper::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
@@ -45,11 +46,11 @@ async fn run(
         position: position_m,
     };
 
+    // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
+    // targeting moved from call-site args to launcher-pinned link_id bindings.
     let mut downstream = match backbone_move_gripper::ActionHandle::fire_goal(
         &runner,
         GOAL_TIMEOUT,
-        None,
-        None,
         goal,
         QoSProfile::SensorData,
     )
@@ -82,19 +83,36 @@ async fn run(
         }
     }
 
+    // v0.10 peppylib: ResultResponse.outcome is a typed enum
+    // (Completed/Cancelled/Abandoned/Expired). Completed and Cancelled carry the
+    // payload; the latter two are terminal-without-data.
     let outcome = downstream.get_result(RESULT_TIMEOUT).await;
     let (success, summary) = match outcome {
-        Ok(r) => {
-            let msg = if r.data.success {
-                format!(
-                    "move_gripper ({}): success in {:.2}s",
-                    label, r.data.action_time
-                )
-            } else {
-                format!("move_gripper ({}) failed: {}", label, r.data.message)
-            };
-            (r.data.success, msg)
-        }
+        Ok(r) => match r.outcome {
+            ResultOutcome::Completed(data) => {
+                let msg = if data.success {
+                    format!(
+                        "move_gripper ({}): success in {:.2}s",
+                        label, data.action_time
+                    )
+                } else {
+                    format!("move_gripper ({}) failed: {}", label, data.message)
+                };
+                (data.success, msg)
+            }
+            ResultOutcome::Cancelled(data) => (
+                false,
+                format!("move_gripper ({label}) cancelled: {}", data.message),
+            ),
+            ResultOutcome::Abandoned => (
+                false,
+                format!("move_gripper ({label}) abandoned by backbone"),
+            ),
+            ResultOutcome::Expired => (
+                false,
+                format!("move_gripper ({label}) result expired"),
+            ),
+        },
         Err(e) => (false, format!("move_gripper ({label}) result error: {e}")),
     };
     finalize(&state, side, success, summary).await;
