@@ -14,10 +14,22 @@ fn main() -> Result<()> {
         // Gate on the world being ready, then learn which instance serves each arm/gripper side.
         let routing = std::sync::Arc::new(startup::run(&node_runner, &token).await);
 
-        tokio::try_join!(
-            actions::move_arm_joints::run(node_runner.clone(), routing.clone(), token.clone()),
-            actions::move_gripper::run(node_runner.clone(), routing.clone(), token.clone()),
-        )?;
+        // Spawn action handlers as background tasks and return Ok so NodeBuilder
+        // can finish bringing up framework services (notably node_health).
+        // Awaiting via try_join! here would hold the closure open forever
+        // (loops never complete) and starve framework finalisation, which
+        // causes peppy's health probe to time out.
+        tokio::spawn(actions::move_arm_joints::run(
+            node_runner.clone(),
+            routing.clone(),
+            token.clone(),
+        ));
+        tokio::spawn(actions::move_gripper::run(
+            node_runner.clone(),
+            routing.clone(),
+            token.clone(),
+        ));
+
         Ok(())
     })
 }
