@@ -1,5 +1,5 @@
 [package]
-name = "openarm01_gripper"
+name = "openarm01_gripper_isaac"
 version = "0.1.0"
 edition = "2024"
 
@@ -24,7 +24,7 @@ schemars = "1.2"
 test-tools = []
 
 [[bin]]
-name = "openarm01_gripper"
+name = "openarm01_gripper_isaac"
 path = "src/main.rs"
 
 [[bin]]
