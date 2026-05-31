@@ -1,13 +1,34 @@
+// Mujoco sim implementation of openarm01_gripper. Rust node that talks to a
+// running MuJoCo sim via the raw peppylib JSON channel published by
+// openarm01_robot_initializer_mujoco — engine-internal coupling, not part of
+// the openarm01_gripper:v1 interface contract. The gripper:v1 surface
+// (move_gripper action, get_gripper_id service, telemetry topics) is fully
+// declared via conforms_to.
 {
   peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_gripper_mujoco",
+    tag: "v1",
+    depends_on: {
+      nodes: [
+        { name: "openarm01_robot_initializer_mujoco", tag: "v1", link_id: "sim" },
+      ],
+    },
+  },
+  interfaces: {
+    conforms_to: [
+      { name: "openarm01_gripper", tag: "v1" },
+    ],
+  },
   execution: {
     language: "rust",
     container: {
-      def_file: "apptainer.def"
+      def_file: "apptainer.def",
     },
     parameters: {
-      // The gripper_id at runtime
-      gripper_id: "u8"
-    }
-  }
+      // The gripper_id at runtime (0 = left, 1 = right). Two instances are
+      // expected; the bin's file-lock + gripper_id guard rejects collisions.
+      gripper_id: "u8",
+    },
+  },
 }
