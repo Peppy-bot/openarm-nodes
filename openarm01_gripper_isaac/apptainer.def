@@ -17,4 +17,4 @@ From: tuatini/peppy-rust-cargo-base:latest
 
 %runscript
     cd /opt/openarm01_gripper_isaac
-    exec ./target/release/openarm01_gripper "$@"
+    exec ./target/release/openarm01_gripper_isaac "$@"
