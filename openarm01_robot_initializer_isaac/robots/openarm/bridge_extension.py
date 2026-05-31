@@ -47,7 +47,12 @@ _DEFAULT_NODE_NAME = "sim"
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
 _ROOT_ARTICULATION_PRIM = "/World/openarm"
 
-_PLUGIN_REGISTRY: dict = {
+# Split by direction so a sim_bridge.json5 entry in the wrong section fails
+# validation. With a single registry, e.g. type:"joint_states" in subscribers
+# instantiated JointStatesBridge as a "subscriber" — its on_step then published
+# the topic from the subscribers section while the user thought they were
+# subscribing. Per direction now: publishers only, subscribers only.
+_PUBLISHER_REGISTRY: dict = {
     "joint_states":   JointStatesBridge,
     "imu":            ImuBridge,
     "tf_tree":        TfTreeBridge,
@@ -56,6 +61,8 @@ _PLUGIN_REGISTRY: dict = {
     "wrench":         WrenchBridge,
     "contact_forces": ContactForcesBridge,
     "gripper_state":  GripperStateBridge,
+}
+_SUBSCRIBER_REGISTRY: dict = {
     "actuator_ctrl":  ActuatorCtrlBridge,
 }
 
@@ -75,7 +82,7 @@ class IsaacBridgeExtension:
         self._config = BridgeConfig.from_file(
             path=_DEFAULT_CONFIG_PATH, default_node_name=_DEFAULT_NODE_NAME,
         )
-        _validate_config(self._config, _PLUGIN_REGISTRY)
+        _validate_config(self._config)
         self._io = PeppylibIO(self._config)
         self._plugins = _build_plugins(self._config)
 
@@ -137,19 +144,18 @@ class IsaacBridgeExtension:
         gc.collect()
 
 
-def _validate_config(config: BridgeConfig, registry: dict) -> None:
-    known = sorted(registry)
+def _validate_config(config: BridgeConfig) -> None:
     for entry in config.publishers:
-        if entry.type not in registry:
+        if entry.type not in _PUBLISHER_REGISTRY:
             raise ValueError(
                 f"Unknown publisher type '{entry.type}' in sim_bridge.json5. "
-                f"Supported: {known}"
+                f"Supported publishers: {sorted(_PUBLISHER_REGISTRY)}"
             )
     for entry in config.subscribers:
-        if entry.type not in registry:
+        if entry.type not in _SUBSCRIBER_REGISTRY:
             raise ValueError(
                 f"Unknown subscriber type '{entry.type}' in sim_bridge.json5. "
-                f"Supported: {known}"
+                f"Supported subscribers: {sorted(_SUBSCRIBER_REGISTRY)}"
             )
 
 
@@ -184,7 +190,7 @@ def _make_sensor(entry):  # pylint: disable=R0911
 def _build_plugins(config: BridgeConfig) -> list:
     plugins: list = []
     for entry in config.publishers:
-        cls = _PLUGIN_REGISTRY[entry.type]
+        cls = _PUBLISHER_REGISTRY[entry.type]
         sensor = _make_sensor(entry)
         plugins.append(cls(sensor, config, entry))
         logger.info(f"Registered publisher: {entry.type} → topic='{entry.topic}'")
@@ -198,7 +204,7 @@ def _build_plugins(config: BridgeConfig) -> list:
             )
             continue
         seen_subscribers.add(key)
-        cls = _PLUGIN_REGISTRY[entry.type]
+        cls = _SUBSCRIBER_REGISTRY[entry.type]
         sensor = _make_sensor(entry)
         plugins.append(cls(sensor, config, entry))
         logger.info(f"Registered subscriber: {entry.type} → topic='{entry.topic}'")
