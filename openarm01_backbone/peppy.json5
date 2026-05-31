@@ -6,24 +6,37 @@
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_backbone",
-    tag: "0.1.0",
+    tag: "v1",
     depends_on: {
-      // Startup ordering only. Backbone polls is_ready, then discovers arm/gripper instances.
-      nodes: [
+      // Engine-agnostic via interface conformance: backbone names the contracts, the launcher
+      // picks the concrete impl per slot at startup (real / mujoco / isaac). Splitting arm and
+      // gripper into per-side link_ids makes left/right dispatch a compile-time choice — no
+      // runtime get_arm_id/get_gripper_id discovery, no stack_list scan.
+      interfaces: [
         {
           name: "openarm01_robot_initializer",
-          tag: "0.1.0",
-          local_id: "robot_init"
+          tag: "v1",
+          link_id: "robot_init"
         },
         {
           name: "openarm01_arm",
-          tag: "0.1.0",
-          local_id: "arm"
+          tag: "v1",
+          link_id: "left_arm"
+        },
+        {
+          name: "openarm01_arm",
+          tag: "v1",
+          link_id: "right_arm"
         },
         {
           name: "openarm01_gripper",
-          tag: "0.1.0",
-          local_id: "gripper"
+          tag: "v1",
+          link_id: "left_gripper"
+        },
+        {
+          name: "openarm01_gripper",
+          tag: "v1",
+          link_id: "right_gripper"
         }
       ]
     }
@@ -111,32 +124,34 @@
           }
         }
       ],
-      // Downstream actions backbone fires after selecting the target instance.
+      // Downstream actions backbone fires. Per-side link_ids: dispatch on goal.arm_id /
+      // goal.gripper_id selects the consumed module at compile time.
       consumes: [
         {
-          local_node_id: "arm",
+          link_id: "left_arm",
           name: "move_arm_joints"
         },
         {
-          local_node_id: "gripper",
+          link_id: "right_arm",
+          name: "move_arm_joints"
+        },
+        {
+          link_id: "left_gripper",
+          name: "move_gripper"
+        },
+        {
+          link_id: "right_gripper",
           name: "move_gripper"
         }
       ]
     },
     services: {
-      // is_ready gates startup; get_arm_id/get_gripper_id map each running instance to its side.
+      // is_ready gates startup. get_arm_id / get_gripper_id are gone — left/right identity
+      // is launcher-pinned via the link_ids above, so there is no runtime discovery to do.
       consumes: [
         {
-          local_node_id: "robot_init",
+          link_id: "robot_init",
           name: "is_ready"
-        },
-        {
-          local_node_id: "arm",
-          name: "get_arm_id"
-        },
-        {
-          local_node_id: "gripper",
-          name: "get_gripper_id"
         }
       ]
     }
