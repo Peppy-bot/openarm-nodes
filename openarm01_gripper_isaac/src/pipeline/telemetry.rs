@@ -1,25 +1,26 @@
 // Telemetry pipelines: subscribe to raw peppylib telemetry from
-// robot_initializer:isaac's bridge extension, re-emit as typed peppygen on
-// the gripper's contract topics, and update the shared state that the
-// move_gripper action handler reads for feedback.
+// robot_initializer:mujoco's bridge extension, re-emit as typed peppygen on
+// the gripper instance's contract topics, and update the shared state that
+// the move_gripper action handler reads for feedback.
 //
 // One SimBridge per gripper instance (left or right). Each builds three
 // sim_to_os pipelines:
 //
-//   raw gripper_state_<side>   →  typed gripper_state_<side>  (+ shared state)
-//   raw ee_pose_<side>         →  typed ee_pose_<side>
-//   raw contact_forces (world) →  typed contact_forces_<side>_finger1
-//                              +  typed contact_forces_<side>_finger2
+//   raw gripper_state_<side>   →  typed gripper_state   (+ shared state)
+//   raw ee_pose_<side>         →  typed ee_pose
+//   raw contact_forces (world) →  typed contact_forces_finger1
+//                              +  typed contact_forces_finger2
 //                              (filtered by body-name prefix on this side)
+//
+// Topic names on the peppygen side are flat (un-suffixed): each gripper node
+// instance owns one side, selected by the gripper_id execution parameter. The
+// _left / _right suffix lives on the raw peppylib channel from the sim only.
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::{
-    contact_forces_left_finger1, contact_forces_left_finger2,
-    contact_forces_right_finger1, contact_forces_right_finger2,
-    ee_pose_left, ee_pose_right,
-    gripper_state_left, gripper_state_right,
+    contact_forces_finger1, contact_forces_finger2, ee_pose, gripper_state,
 };
 use serde::Deserialize;
 use sim_bridge_core::{BoxFuture, DaemonState, SimBridge};
@@ -97,7 +98,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
     };
 
     // sim_node = the publisher node name configured in
-    // robot_initializer:isaac's bridge_extension (defaults to "sim").
+    // robot_initializer:mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
     let token = runner.cancellation_token().clone();
 
@@ -108,7 +109,6 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
     // Body-name prefixes used to split world-wide contacts into per-finger
     // topics. Matches the openarm MJCF naming: openarm_<side>_right_finger*
     // bodies belong to finger1, openarm_<side>_left_finger* to finger2.
-    // Convention documented in the root peppy.json5 contract.
     let finger1_prefix: Arc<str> = Arc::from(format!("openarm_{side}_right_finger").as_str());
     let finger2_prefix: Arc<str> = Arc::from(format!("openarm_{side}_left_finger").as_str());
 
@@ -129,20 +129,20 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
                         stamp: msg.stamp,
                     });
                 }
-                emit_gripper_state(&runner, side, &msg).await
+                emit_gripper_state(&runner, &msg).await
             })
         })
         .sim_to_os(ee_pose_topic, move |runner, msg: EePoseRaw|
             -> BoxFuture<std::result::Result<(), String>>
         {
-            Box::pin(async move { emit_ee_pose(&runner, side, &msg).await })
+            Box::pin(async move { emit_ee_pose(&runner, &msg).await })
         })
         .sim_to_os(contact_topic, move |runner, msg: ContactForcesRaw|
             -> BoxFuture<std::result::Result<(), String>>
         {
             let f1 = finger1_prefix.clone();
             let f2 = finger2_prefix.clone();
-            Box::pin(async move { emit_contact_forces(&runner, side, &msg, &f1, &f2).await })
+            Box::pin(async move { emit_contact_forces(&runner, &msg, &f1, &f2).await })
         });
 
     bridge.run().await;
@@ -155,64 +155,62 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
 
 async fn emit_gripper_state(
     runner: &Arc<NodeRunner>,
-    side: &str,
     msg: &GripperStateRaw,
 ) -> std::result::Result<(), String> {
-    let positions = msg.positions.clone();
-    let joint_names = msg.joint_names.clone();
-    let result = if side == "left" {
-        gripper_state_left::emit(
-            runner, ROBOT_NAME.into(), msg.step, joint_names, positions, msg.stamp,
-        ).await
-    } else {
-        gripper_state_right::emit(
-            runner, ROBOT_NAME.into(), msg.step, joint_names, positions, msg.stamp,
-        ).await
-    };
-    result.map_err(|e| e.to_string())
+    gripper_state::emit(
+        runner,
+        ROBOT_NAME.into(),
+        msg.step,
+        msg.joint_names.clone(),
+        msg.positions.clone(),
+        msg.stamp,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 async fn emit_ee_pose(
     runner: &Arc<NodeRunner>,
-    side: &str,
     msg: &EePoseRaw,
 ) -> std::result::Result<(), String> {
-    let result = if side == "left" {
-        ee_pose_left::emit(
-            runner, ROBOT_NAME.into(), msg.step, msg.position, msg.orientation, msg.stamp,
-        ).await
-    } else {
-        ee_pose_right::emit(
-            runner, ROBOT_NAME.into(), msg.step, msg.position, msg.orientation, msg.stamp,
-        ).await
-    };
-    result.map_err(|e| e.to_string())
+    ee_pose::emit(
+        runner,
+        ROBOT_NAME.into(),
+        msg.step,
+        msg.position,
+        msg.orientation,
+        msg.stamp,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 async fn emit_contact_forces(
     runner: &Arc<NodeRunner>,
-    side: &str,
     msg: &ContactForcesRaw,
     finger1_prefix: &str,
     finger2_prefix: &str,
 ) -> std::result::Result<(), String> {
     let (f1, f2) = partition_contacts(&msg.contacts, finger1_prefix, finger2_prefix);
 
-    if side == "left" {
-        contact_forces_left_finger1::emit(
-            runner, ROBOT_NAME.into(), msg.step, to_left_f1(&f1), msg.stamp,
-        ).await.map_err(|e| e.to_string())?;
-        contact_forces_left_finger2::emit(
-            runner, ROBOT_NAME.into(), msg.step, to_left_f2(&f2), msg.stamp,
-        ).await.map_err(|e| e.to_string())?;
-    } else {
-        contact_forces_right_finger1::emit(
-            runner, ROBOT_NAME.into(), msg.step, to_right_f1(&f1), msg.stamp,
-        ).await.map_err(|e| e.to_string())?;
-        contact_forces_right_finger2::emit(
-            runner, ROBOT_NAME.into(), msg.step, to_right_f2(&f2), msg.stamp,
-        ).await.map_err(|e| e.to_string())?;
-    }
+    contact_forces_finger1::emit(
+        runner,
+        ROBOT_NAME.into(),
+        msg.step,
+        to_f1(&f1),
+        msg.stamp,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    contact_forces_finger2::emit(
+        runner,
+        ROBOT_NAME.into(),
+        msg.step,
+        to_f2(&f2),
+        msg.stamp,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -238,32 +236,18 @@ fn partition_contacts(
     (f1, f2)
 }
 
-// MessageContactsItem is a per-topic type; the four `to_*` helpers exist so
-// the partition logic above stays engine-agnostic and the per-topic codec
+// MessageContactsItem is a per-topic type; the two `to_*` helpers exist so
+// the partition logic above stays codec-agnostic and the per-topic codec
 // layout stays one-to-one with the contract.
-fn to_left_f1(snaps: &[ContactRaw]) -> Vec<contact_forces_left_finger1::MessageContactsItem> {
-    snaps.iter().map(|c| contact_forces_left_finger1::MessageContactsItem {
+fn to_f1(snaps: &[ContactRaw]) -> Vec<contact_forces_finger1::MessageContactsItem> {
+    snaps.iter().map(|c| contact_forces_finger1::MessageContactsItem {
         body1: c.body1.clone(), body2: c.body2.clone(),
         position: c.position, force: c.force,
     }).collect()
 }
 
-fn to_left_f2(snaps: &[ContactRaw]) -> Vec<contact_forces_left_finger2::MessageContactsItem> {
-    snaps.iter().map(|c| contact_forces_left_finger2::MessageContactsItem {
-        body1: c.body1.clone(), body2: c.body2.clone(),
-        position: c.position, force: c.force,
-    }).collect()
-}
-
-fn to_right_f1(snaps: &[ContactRaw]) -> Vec<contact_forces_right_finger1::MessageContactsItem> {
-    snaps.iter().map(|c| contact_forces_right_finger1::MessageContactsItem {
-        body1: c.body1.clone(), body2: c.body2.clone(),
-        position: c.position, force: c.force,
-    }).collect()
-}
-
-fn to_right_f2(snaps: &[ContactRaw]) -> Vec<contact_forces_right_finger2::MessageContactsItem> {
-    snaps.iter().map(|c| contact_forces_right_finger2::MessageContactsItem {
+fn to_f2(snaps: &[ContactRaw]) -> Vec<contact_forces_finger2::MessageContactsItem> {
+    snaps.iter().map(|c| contact_forces_finger2::MessageContactsItem {
         body1: c.body1.clone(), body2: c.body2.clone(),
         position: c.position, force: c.force,
     }).collect()
