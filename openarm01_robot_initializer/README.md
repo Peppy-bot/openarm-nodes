@@ -131,7 +131,7 @@ This README reflects the v0.10 migration on branch `feat/robot-initializer-bridg
    - `Scene loaded — is_ready: true`
    - **No `Failed to emit` warnings, no `Subscribe error` warnings.** (The current build floods both — that's the bug the SenderTarget fix closes.)
 5. Confirm `is_ready` responds: any consumer polling the service should see `{ ready: true }` after the scene loads.
-6. Stop with `peppy node stop <instance-id>`. **Heads-up — orphan-process bug**: `peppy node stop` returns `Process … did not terminate within timeout` even when it succeeds in tracking terms. The Apptainer parent + python child + squashfuse mount usually stay alive holding port 8080. See [Peppy-bot bug log Card 7](../plane_issues_draft.md) or run `pgrep -af 'apptainer|launch.py'` and `kill -KILL <pids>` if you see lingering PIDs.
+6. Stop with `peppy node stop <instance-id>`.
 
 ### Isaac side
 
