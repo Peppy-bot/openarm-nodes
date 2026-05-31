@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::exposed_services::get_gripper_id;
+use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 
