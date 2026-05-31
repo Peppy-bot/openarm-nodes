@@ -9,19 +9,20 @@
 //   3. Streams typed feedback at the requested rate; detects convergence
 //      (worst-finger error < POSITION_TOLERANCE_M) or stall (sum-of-motion
 //      across a ~500ms window < STALL_EPSILON_M).
-//   4. Returns result.
+//   4. Calls complete() or complete_cancelled() on the GoalContext.
 //
 // Convergence + stall logic carries from the bus-era implementation
 // unchanged; only the data path (snapshot from shared cache, publish raw
-// peppylib) differs.
+// peppylib) and the v0.10 GoalContext-driven completion differ.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::move_gripper;
+use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
 use peppylib::config::QoSProfile;
+use peppylib::messaging::SenderTarget;
 use peppylib::runtime::CancellationToken;
 use peppylib::{MessengerHandle, Payload, TopicMessenger};
 use serde::Serialize;
@@ -66,20 +67,10 @@ struct AcceptedGoal {
 
 struct MotionResult {
     success: bool,
+    is_cancelled: bool,
     message: String,
     final_positions: Vec<f64>,
     action_time: f64,
-}
-
-impl Default for MotionResult {
-    fn default() -> Self {
-        Self {
-            success: false,
-            message: "no result".into(),
-            final_positions: vec![],
-            action_time: 0.0,
-        }
-    }
 }
 
 fn feedback_period(freq_hz: u32) -> Duration {
@@ -108,65 +99,78 @@ pub async fn run(
         .await
         .expect("expose move_gripper");
 
-    let pending: Arc<StdMutex<Option<AcceptedGoal>>> = Arc::new(StdMutex::new(None));
-
     loop {
-        let pending_for_handler = pending.clone();
-        let goal_request = action_handle.handle_goal_next_request(move |req| {
-            let pos_m = req.data.position;
-            if !(0.0..=0.044).contains(&pos_m) {
-                return Ok(move_gripper::GoalResponse::new(false));
-            }
-            let mut slot = pending_for_handler.lock().unwrap();
-            if slot.is_some() {
-                return Ok(move_gripper::GoalResponse::new(false));
-            }
-            *slot = Some(AcceptedGoal {
-                target_position_m: pos_m,
-                feedback_period: feedback_period(req.data.feedback_frequency),
+        // v0.10 GoalContext model: the decider closure validates the request
+        // and returns accept/reject; on accept the handle returns Some(ctx)
+        // carrying per-goal state. The outer loop is inherently single-flight
+        // — we only re-enter handle_goal_next_request after the previous goal
+        // has been completed.
+        let goal_request =
+            action_handle.handle_goal_next_request(|req: &move_gripper::GoalRequest| {
+                let pos_m = req.data.position;
+                if !(0.0..=0.044).contains(&pos_m) {
+                    return Ok(move_gripper::GoalResponse::reject(
+                        "position out of range [0.0, 0.044]",
+                    ));
+                }
+                Ok(move_gripper::GoalResponse::accept())
             });
-            Ok(move_gripper::GoalResponse::new(true))
-        });
-        tokio::select! {
+
+        let goal_ctx = tokio::select! {
             _ = token.cancelled() => break,
             result = goal_request => {
-                if let Err(e) = result {
-                    error!("move_gripper goal: {e}");
-                    continue;
+                match result {
+                    Ok(Some(ctx)) => ctx,
+                    Ok(None) => break, // action exposed but shutting down
+                    Err(e) => {
+                        error!("move_gripper goal: {e}");
+                        continue;
+                    }
                 }
             }
-        }
-
-        let goal = pending.lock().unwrap().take();
-        let result = match goal {
-            Some(g) => {
-                run_control_loop(
-                    &handle, &daemon, &state,
-                    &set_ctrl_topic, &instance_id, &actuator_names,
-                    &action_handle, &token, g,
-                ).await
-            }
-            None => continue,
         };
 
-        let stash: Arc<StdMutex<Option<MotionResult>>> = Arc::new(StdMutex::new(Some(result)));
-        let stash_for_handler = stash.clone();
-        let result_request = action_handle.handle_result_next_request(move |_req| {
-            let r = stash_for_handler.lock().unwrap().take().unwrap_or_default();
-            Ok(move_gripper::ResultResponse {
-                success: r.success,
-                message: r.message,
-                final_joint_positions: r.final_positions,
-                action_time: r.action_time,
-            })
-        });
-        tokio::select! {
-            _ = token.cancelled() => break,
-            result = result_request => {
-                if let Err(e) = result {
-                    error!("move_gripper result: {e}");
-                }
-            }
+        let goal = AcceptedGoal {
+            target_position_m: goal_ctx.request().data.position,
+            feedback_period: feedback_period(goal_ctx.request().data.feedback_frequency),
+        };
+
+        let result = run_control_loop(
+            &handle,
+            &daemon,
+            &state,
+            &set_ctrl_topic,
+            &instance_id,
+            &actuator_names,
+            &goal_ctx,
+            &token,
+            goal,
+        )
+        .await;
+
+        // complete() and complete_cancelled() take identical field sets; the
+        // difference is the client-visible status (Completed vs Cancelled).
+        let dispatch = if result.is_cancelled {
+            goal_ctx
+                .complete_cancelled(
+                    result.success,
+                    result.message,
+                    result.final_positions,
+                    result.action_time,
+                )
+                .await
+        } else {
+            goal_ctx
+                .complete(
+                    result.success,
+                    result.message,
+                    result.final_positions,
+                    result.action_time,
+                )
+                .await
+        };
+        if let Err(e) = dispatch {
+            error!("move_gripper complete: {e}");
         }
     }
 }
@@ -179,7 +183,7 @@ async fn run_control_loop(
     set_ctrl_topic: &str,
     instance_id: &str,
     actuator_names: &[String; 2],
-    action_handle: &move_gripper::ActionHandle,
+    goal_ctx: &move_gripper::GoalContext,
     token: &CancellationToken,
     goal: AcceptedGoal,
 ) -> MotionResult {
@@ -200,7 +204,9 @@ async fn run_control_loop(
         // rather than let convergence/stall logic report a false success.
         match publish_set_ctrl(
             handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
-        ).await {
+        )
+        .await
+        {
             Ok(()) => consecutive_publish_failures = 0,
             Err(e) => {
                 consecutive_publish_failures += 1;
@@ -208,6 +214,7 @@ async fn run_control_loop(
                 if consecutive_publish_failures >= MAX_CONSECUTIVE_PUBLISH_FAILURES {
                     return MotionResult {
                         success: false,
+                        is_cancelled: false,
                         message: "set_ctrl publish failing — gripper not commandable".into(),
                         final_positions: vec![],
                         action_time: start.elapsed().as_secs_f64(),
@@ -231,6 +238,7 @@ async fn run_control_loop(
                 if elapsed > MOTION_TIMEOUT {
                     return MotionResult {
                         success: false,
+                        is_cancelled: false,
                         message: "no usable telemetry from robot_initializer".into(),
                         final_positions: vec![],
                         action_time: elapsed_secs,
@@ -238,12 +246,15 @@ async fn run_control_loop(
                 }
                 tokio::select! {
                     _ = token.cancelled() => return cancelled(elapsed_secs, vec![]),
+                    _ = goal_ctx.cancel_signal() => return cancelled(elapsed_secs, vec![]),
                     _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => continue,
                 }
             }
         };
 
-        let worst_err = snap.positions.iter()
+        let worst_err = snap
+            .positions
+            .iter()
             .map(|&q| (q - per_finger).abs())
             .fold(0.0_f64, f64::max);
         let within_tolerance = worst_err < POSITION_TOLERANCE_M;
@@ -261,8 +272,9 @@ async fn run_control_loop(
         };
 
         if last_feedback.elapsed() >= goal.feedback_period {
-            if let Err(e) = action_handle
-                .emit_feedback(snap.positions.clone(), elapsed_secs).await
+            if let Err(e) = goal_ctx
+                .publish_feedback(snap.positions.clone(), elapsed_secs)
+                .await
             {
                 warn!("feedback: {e}");
             }
@@ -272,6 +284,7 @@ async fn run_control_loop(
         if within_tolerance {
             return MotionResult {
                 success: true,
+                is_cancelled: false,
                 message: "reached".into(),
                 final_positions: snap.positions,
                 action_time: elapsed_secs,
@@ -280,6 +293,7 @@ async fn run_control_loop(
         if stalled {
             return MotionResult {
                 success: true,
+                is_cancelled: false,
                 message: "stalled at physical limit".into(),
                 final_positions: snap.positions,
                 action_time: elapsed_secs,
@@ -288,6 +302,7 @@ async fn run_control_loop(
         if elapsed > MOTION_TIMEOUT {
             return MotionResult {
                 success: false,
+                is_cancelled: false,
                 message: "timeout".into(),
                 final_positions: snap.positions,
                 action_time: elapsed_secs,
@@ -296,6 +311,7 @@ async fn run_control_loop(
 
         tokio::select! {
             _ = token.cancelled() => return cancelled(elapsed_secs, snap.positions),
+            _ = goal_ctx.cancel_signal() => return cancelled(elapsed_secs, snap.positions),
             _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => {}
         }
     }
@@ -304,6 +320,7 @@ async fn run_control_loop(
 fn cancelled(action_time: f64, final_positions: Vec<f64>) -> MotionResult {
     MotionResult {
         success: false,
+        is_cancelled: true,
         message: "cancelled".into(),
         final_positions,
         action_time,
@@ -324,11 +341,19 @@ async fn publish_set_ctrl(
     let payload = SetCtrlPayload { actuator_values: values };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
+    // v0.10 peppylib: TopicMessenger::emit takes a typed SenderTarget for
+    // the as_target identity (was a bare &str in v0.9). The gripper publishes
+    // as the openarm01_gripper:v1 interface — same name + tag as the real
+    // hardware impl, so both real and sim instances appear as the same
+    // interface-shaped sender to consumers.
+    let target = SenderTarget::node(GRIPPER_NODE_NAME, "v1")
+        .map_err(|e| format!("invalid as_target: {e}"))?;
+
     TopicMessenger::emit(
         handle,
         &daemon.core_node_name,
         instance_id,
-        GRIPPER_NODE_NAME,
+        target,
         topic,
         QoSProfile::Standard,
         Payload::from(bytes),
@@ -362,7 +387,9 @@ pub async fn shutdown_handler(
     info!("shutdown: zeroing ctrl for gripper_id={}", gripper_id.0);
     if let Err(e) = publish_set_ctrl(
         &handle, &daemon, &set_ctrl_topic, &instance_id, &actuator_names, 0.0,
-    ).await {
+    )
+    .await
+    {
         warn!("shutdown publish: {e}");
     }
     std::process::exit(0);
