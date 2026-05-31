@@ -1,0 +1,12 @@
+// Keyboard variant of openarm01_joint_commander — Rust TUI driven by stepping
+// inputs. Operator selects an arm and a joint, steps the target value, then
+// fires move_arm_joints at backbone. Gripper opens/closes with single keys.
+{
+  peppy_schema: "node_v1",
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    }
+  }
+}

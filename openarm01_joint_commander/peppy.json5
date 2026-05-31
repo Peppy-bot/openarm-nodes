@@ -1,5 +1,10 @@
-// This node sends controls for each arm of the OpenArm01 robot, those controls can emanate from the TUI or from a pose estimation algorithm
-// Since the controls are specific to the openarm01 robot, we prefix the node with `openarm01_*`
+// openarm01_joint_commander — operator entry point. Reads keyboard input,
+// shows arm + gripper state in a TUI, and fires move_arm_joints / move_gripper
+// goals at openarm01_backbone. Backbone routes each goal to the correct
+// arm / gripper instance.
+//
+// MVP scope: keyboard variant only, joint-space. Cartesian + pose_estimation
+// variant are post-MVP and not declared here yet.
 {
   peppy_schema: "node_v1",
   manifest: {
@@ -10,61 +15,36 @@
         {
           name: "openarm01_backbone",
           tag: "0.1.0",
-          local_id: "openarm01_backbone"
-        },
-        // This dependency is only needed for the `pose_estimation` variant, so in the future we will introduce a `for_variant: "pose_estimation"` keyword
-        {
-          name: "uvc_camera",
-          tag: "0.1.0",
-          local_id: "uvc_camera"
+          local_id: "backbone"
         }
       ]
     },
     variants: [
-      // The variant to control the robot via the TUI
+      // Default variant is the keyboard TUI. Operator steps joints, then
+      // hits Enter to fire a goal at backbone. pose_estimation variant
+      // comes post-MVP.
       {
         name: "default",
         source: {
           local: "./variants/keyboard"
         }
-      },
-      // This variant turns feed from uvc_camera into cartesian positions
-      // Although the keyboard variant and the pose estimation variant are very distinct controls, they both share the same goal of "moving the robot arm"
-      {
-        name: "pose_estimation",
-        source: {
-          local: "./variants/pose_estimation"
-        }
-      },
+      }
     ]
   },
-  execution: {
-    language: "rust",
-    container: {
-      def_file: "apptainer.def"
-    }
-  },
-  // Non exhaustive list of interfaces
   interfaces: {
-    topics: {
-      consumes: [
-        {
-          local_node_id: "openarm01_backbone",
-          name: "joint_states"
-        },
-        {
-          local_node_id: "openarm01_backbone",
-          name: "controller/status"
-        },
-      ]
-    },
     actions: {
+      // Goals fired by the operator land on backbone, which forwards to the
+      // arm / gripper instance whose id matches arm_id / gripper_id.
       consumes: [
         {
-          local_node_id: "openarm01_backbone",
-          name: "move_arm"
+          local_node_id: "backbone",
+          name: "move_arm_joints"
+        },
+        {
+          local_node_id: "backbone",
+          name: "move_gripper"
         }
       ]
-    },
+    }
   }
 }
