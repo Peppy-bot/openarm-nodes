@@ -31,6 +31,7 @@ sys.path.insert(0, str(_MUJOCO_DIR))
 from _launcher import SimLauncher
 
 _ready = threading.Event()
+_stop = threading.Event()
 
 
 async def _run_sim(_params, node_runner) -> list:
@@ -43,7 +44,16 @@ async def _run_sim(_params, node_runner) -> list:
 
     async def _run_sim_task() -> None:
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready).run)
+        try:
+            await loop.run_in_executor(
+                None, SimLauncher(_XML_PATH, _ready, _stop).run
+            )
+        finally:
+            # Signal the sim thread to exit. Without this, asyncio task
+            # cancellation cancels the awaitable but leaves the executor
+            # thread spinning forever, blocking process exit and starving
+            # peppylib's framework `shutdown` service.
+            _stop.set()
 
     return [
         asyncio.create_task(_run_sim_task()),

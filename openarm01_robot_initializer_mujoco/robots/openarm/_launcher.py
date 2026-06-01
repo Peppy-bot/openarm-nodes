@@ -18,9 +18,19 @@ _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
 
 
 class SimLauncher:
-    def __init__(self, xml_path: Path, ready: threading.Event) -> None:
+    def __init__(
+        self,
+        xml_path: Path,
+        ready: threading.Event,
+        stop: threading.Event,
+    ) -> None:
         self._xml_path = xml_path
         self._ready = ready
+        # `stop` is flipped by the asyncio caller when its task is cancelled
+        # (SIGTERM, peppy node stop). The sim loop runs on a thread inside
+        # `run_in_executor` and cannot observe signals or asyncio cancellation
+        # on its own — this Event is the only stop path.
+        self._stop = stop
         self._headless = os.environ.get(_HEADLESS_ENV, "1").strip() == "1"
 
     def run(self) -> None:
@@ -67,6 +77,7 @@ class SimLauncher:
         def _step_fn(_m, _d) -> None:
             extension.step()
 
+        server = None
         try:
             server = viser.ViserServer(host="0.0.0.0", port=8080)
             viewer = mjviser.Viewer(model, data, server=server, step_fn=_step_fn)
@@ -92,7 +103,7 @@ class SimLauncher:
             _dt = model.opt.timestep
             _last_render = 0.0
             _last_phys_wall = time.monotonic()
-            while True:
+            while not self._stop.is_set():
                 now = time.monotonic()
                 # Step physics at real time, decoupled from render rate.
                 n = int((now - _last_phys_wall) / _dt)
@@ -110,6 +121,11 @@ class SimLauncher:
                 time.sleep(0.001)
         except KeyboardInterrupt:
             logger.info("Shutting down.")
+        finally:
+            # ViserServer owns non-daemon HTTP/WebSocket threads; without an
+            # explicit stop the process can't exit even after the sim loop ends.
+            if server is not None:
+                server.stop()
 
     def _run_windowed(self, model, data, extension: MujocoBridgeExtension) -> None:
         import mujoco
@@ -118,7 +134,7 @@ class SimLauncher:
         dt = model.opt.timestep
         try:
             with mujoco.viewer.launch_passive(model, data) as viewer:
-                while viewer.is_running():
+                while viewer.is_running() and not self._stop.is_set():
                     step_start = time.monotonic()
                     extension.step()
                     viewer.sync()
