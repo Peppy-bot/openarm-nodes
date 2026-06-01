@@ -1,0 +1,24 @@
+[package]
+name = "openarm01_arm_isaac"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+peppygen = { path = ".peppy/libs/peppygen" }
+peppylib = { path = ".peppy/libs/peppylib" }
+capnp    = "0.25"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+sim_bridge_core = { git = "https://github.com/Peppy-bot/nodes_shared_code", rev = "08c14b41d79dcb58d1addf984c43f1db0e099d72" }
+
+[[bin]]
+name = "openarm01_arm_isaac"
+path = "src/main.rs"
+
+# Redirect sim_bridge_core's `peppylib = "0.0.1"` crates.io ref to the local
+# generated copy (peppylib is not published to crates.io).
+[patch.crates-io]
+peppylib = { path = ".peppy/libs/peppylib" }
