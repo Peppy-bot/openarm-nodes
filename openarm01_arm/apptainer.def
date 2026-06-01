@@ -5,13 +5,14 @@ From: tuatini/peppy-rust-cargo-base
     . /opt/openarm01_arm
 
 %post
+    set -eux
     export DEBIAN_FRONTEND=noninteractive
 
     apt-get update -y
     apt-get install -y --no-install-recommends software-properties-common
     add-apt-repository -y ppa:openarm/main
     apt-get update -y
-    apt-get install -y --no-install-recommends libclang-dev libopenarm-can-dev=1.2.8-1.ubuntu24.04.1
+    apt-get install -y --no-install-recommends libclang-dev libopenarm-can-dev
 
     cd /opt/openarm01_arm
     cargo build --release

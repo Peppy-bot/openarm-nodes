@@ -5,216 +5,55 @@
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_arm",
-    tag: "0.1.0",
-    variants: [
-      // The real thing
+    tag: "v1"
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    },
+    parameters: {
+      arm_id: "u8",
+      can_interface: "string",
+      // Hardware-loop rate (Hz).
+      control_rate_hz: { $type: "u32", $default: 100 },
+      // Per-cycle CAN read deadline (μs).
+      recv_timeout_us: { $type: "u32", $default: 1000 },
+      motion_timeout_s: { $type: "f64", $default: 30.0 },
+      // Minimum trajectory duration (s). Actual duration = max(this, time implied by joint velocity limits).
+      // Raise this for conservative testing; leave at default for normal operation.
+      min_motion_time_s: { $type: "f64", $default: 0.1 },
+      // Per-joint peak velocity (rad/s) used to size the quintic trajectory duration.
+      max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.8 },
+      max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.8 },
+      max_joint_velocity_rad_s_3: { $type: "f64", $default: 5.4 },
+      max_joint_velocity_rad_s_4: { $type: "f64", $default: 5.4 },
+      max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.9 },
+      max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.9 },
+      max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.9 },
+      // MIT-control gains, one per joint (1-indexed).
+      kp1: { $type: "f64", $default: 70.0 },
+      kp2: { $type: "f64", $default: 70.0 },
+      kp3: { $type: "f64", $default: 70.0 },
+      kp4: { $type: "f64", $default: 60.0 },
+      kp5: { $type: "f64", $default: 10.0 },
+      kp6: { $type: "f64", $default: 10.0 },
+      kp7: { $type: "f64", $default: 10.0 },
+      kd1: { $type: "f64", $default: 2.75 },
+      kd2: { $type: "f64", $default: 2.5 },
+      kd3: { $type: "f64", $default: 2.0 },
+      kd4: { $type: "f64", $default: 2.0 },
+      kd5: { $type: "f64", $default: 0.7 },
+      kd6: { $type: "f64", $default: 0.6 },
+      kd7: { $type: "f64", $default: 0.5 }
+    }
+  },
+  interfaces: {
+    conforms_to: [
       {
-        name: "default",
-        source: {
-          local: "./variants/default"
-        }
-      },
-      // The isaac sim variant
-      {
-        name: "isaac",
-        source: {
-          local: "./variants/isaac"
-        }
-      },
-      // The mujoco variant
-      {
-        name: "mujoco",
-        source: {
-          local: "./variants/mujoco"
-        }
-      },
+        name: "openarm01_arm",
+        tag: "v1"
+      }
     ]
   },
-  // Non exhaustive list of interfaces
-  interfaces: {
-    actions: {
-      exposes: [
-        {
-          name: "move_arm",
-          goal_service: {
-            request_message_format: {
-              // The frequency in hertz at which the feedback is being sent
-              feedback_frequency: "u32",
-              // x, y, z
-              desired_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              // quaternion x, y, z, w
-              desired_orientation: {
-                $type: "array",
-                $items: "f64",
-                $length: 4
-              }
-            },
-            response_message_format: {
-              accepted: "bool"
-            }
-          },
-          // Streamed as the arm moves toward the goal
-          feedback_topic: {
-            qos_profile: "standard",
-            message_format: {
-              joint_positions: {
-                $type: "array",
-                $items: "f64"
-              },
-              current_ee_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              action_time: "f64"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64"
-              },
-              final_ee_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              action_time: "f64"
-            }
-          }
-        },
-        // Joint-space motion: backbone calls this after IK resolves joint angles.
-        {
-          name: "move_arm_joints",
-          goal_service: {
-            request_message_format: {
-              feedback_frequency: "u32",
-              joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              }
-            },
-            response_message_format: {
-              accepted: "bool"
-            }
-          },
-          feedback_topic: {
-            qos_profile: "standard",
-            message_format: {
-              joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              },
-              action_time: "f64"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              },
-              action_time: "f64"
-            }
-          }
-        }
-      ]
-    },
-    services: {
-      exposes: [
-        {
-          // Returns the runtime arm_id set in `execution.parameters` (allows `openarm01_backbone` to differentiate between the arms)
-          name: "get_arm_id",
-          response_message_format: {
-            arm_id: "u8"
-          }
-        },
-        {
-          name: "get_joint_positions",
-          response_message_format: {
-            joint_positions: {
-              $type: "array",
-              $items: "f64",
-              $length: 7
-            }
-          }
-        }
-      ]
-    },
-    topics: {
-      emits: [
-        // Joint state (whole-arm: 7 positions + 7 velocities, plus robot, step, stamp).
-        // sim variants emit this on each physics step from MJCF/USD joint readings;
-        // default (real) variant TODO once the CAN-bus driver is updated.
-        {
-          name: "joint_states",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot:      "string",
-            step:       "u64",
-            positions:  { $type: "array", $items: "f64" },
-            velocities: { $type: "array", $items: "f64" },
-            stamp:      "f64"
-          }
-        },
-        // Per-side IMU. Body-mounted sensor reading on this arm.
-        {
-          name: "imu_left",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot:               "string",
-            step:                "u64",
-            orientation:         { $type: "array", $items: "f64", $length: 4 },
-            angular_velocity:    { $type: "array", $items: "f64", $length: 3 },
-            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
-            stamp:               "f64"
-          }
-        },
-        {
-          name: "imu_right",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot:               "string",
-            step:                "u64",
-            orientation:         { $type: "array", $items: "f64", $length: 4 },
-            angular_velocity:    { $type: "array", $items: "f64", $length: 3 },
-            linear_acceleration: { $type: "array", $items: "f64", $length: 3 },
-            stamp:               "f64"
-          }
-        },
-        // TF tree (arm-link frames with parent + 6DoF pose).
-        {
-          name: "tf_tree",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step:  "u64",
-            frames: {
-              $type: "array",
-              $items: {
-                $type:       "object",
-                name:        "string",
-                parent:      "string",
-                position:    { $type: "array", $items: "f64", $length: 3 },
-                orientation: { $type: "array", $items: "f64", $length: 4 }
-              }
-            },
-            stamp: "f64"
-          }
-        }
-      ]
-    }
-  }
 }
