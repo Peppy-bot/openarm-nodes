@@ -47,6 +47,7 @@ sys.path.insert(0, str(_ROBOTS_DIR))
 from _launcher import SimLauncher
 
 _ready = threading.Event()
+_stop = threading.Event()
 
 
 async def setup(_params, node_runner) -> list:
@@ -60,12 +61,19 @@ async def setup(_params, node_runner) -> list:
     return [asyncio.create_task(_is_ready_loop())]
 
 
+def _run_node_builder() -> None:
+    # NodeBuilder.run returns when peppylib's shutdown service cancels its
+    # tasks. Flip _stop so the main-thread sim loop can exit; without this
+    # the asyncio side tears down cleanly but Isaac keeps spinning forever.
+    try:
+        NodeBuilder().run(setup)
+    finally:
+        _stop.set()
+
+
 def main() -> None:
-    threading.Thread(
-        target=lambda: NodeBuilder().run(setup),
-        daemon=True,
-    ).start()
-    SimLauncher(simulation_app, _USD_PATH, _ready).run()
+    threading.Thread(target=_run_node_builder, daemon=True).start()
+    SimLauncher(simulation_app, _USD_PATH, _ready, _stop).run()
 
 
 if __name__ == "__main__":

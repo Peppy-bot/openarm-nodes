@@ -17,10 +17,20 @@ _WARMUP_STEPS = 100
 
 
 class SimLauncher:
-    def __init__(self, sim_app, usd_path: Path, ready: threading.Event) -> None:
+    def __init__(
+        self,
+        sim_app,
+        usd_path: Path,
+        ready: threading.Event,
+        stop: threading.Event,
+    ) -> None:
         self._sim_app = sim_app
         self._usd_path = usd_path
         self._ready = ready
+        # `stop` is flipped by the NodeBuilder thread's finally when peppylib's
+        # shutdown service runs (peppy node stop, SIGTERM). The sim loop owns
+        # the main thread and won't see asyncio cancellation otherwise.
+        self._stop = stop
         self._timeline = None
         self._world = None
         self._extension: Optional[IsaacBridgeExtension] = None
@@ -84,7 +94,7 @@ class SimLauncher:
 
     def _run_loop(self) -> None:
         try:
-            while self._sim_app.is_running():
+            while self._sim_app.is_running() and not self._stop.is_set():
                 # Isaac advances physics inside update(); we then drive the
                 # bridge plugin loop on the same thread (Articulation reads
                 # require Isaac's main thread).
