@@ -79,9 +79,6 @@ fn main() -> Result<()> {
             shared.clone(),
         ));
 
-        // Cartesian move_arm is a stub-reject until backbone IK lands.
-        tokio::spawn(actions::move_arm::run(node_runner.clone(), token.clone()));
-
         tokio::spawn(actions::move_arm_joints::run(
             node_runner.clone(),
             arm_id,
