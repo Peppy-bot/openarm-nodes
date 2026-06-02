@@ -65,7 +65,7 @@ pub async fn run_move_gripper(
             .handle_goal_next_request(|req| {
                 // Reject targets outside the gripper's physical travel (also
                 // rejects NaN/inf, which Limit::contains treats as out of range).
-                if !v10::GRIPPER_LIMITS_M.contains(req.data.position) {
+                if !crate::joint_limits::GRIPPER_LIMITS_M.contains(req.data.position) {
                     return Ok(move_gripper::GoalResponse::reject("target position out of range"));
                 }
                 // Atomically claim the slot; reject if a motion already holds it.

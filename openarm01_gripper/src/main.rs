@@ -1,4 +1,5 @@
 mod control;
+mod joint_limits;
 
 use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
