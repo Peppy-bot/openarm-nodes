@@ -1,8 +1,10 @@
 mod control;
+mod friction;
+mod joint_limits;
 mod trajectory;
 
 use openarm_can::{ArmCan, CallbackMode, v10};
-use control::{ControlConfig, run_move_arm_joints};
+use control::ControlConfig;
 use peppygen::exposed_services::openarm01_arm::v1::{get_arm_id, get_joint_positions};
 use peppygen::{NodeBuilder, Parameters, Result};
 
@@ -10,6 +12,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
+
+/// Degrees of freedom of the arm. Defined here, not pulled from the CAN crate:
+/// the joint count is a property of the arm, not of the CAN transport.
+pub const ARM_DOF: usize = 7;
+/// One joint-space vector (positions, velocities, or torques), j1..j7.
+pub type JointVec = [f64; ARM_DOF];
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
 const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
@@ -55,6 +63,11 @@ fn main() -> Result<()> {
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             max_joint_velocity_rad_s,
             min_motion_time_s: params.min_motion_time_s,
+            coriolis_scale: params.coriolis_scale,
+            friction_scale: params.friction_scale,
+            compensation_timeout: Duration::from_millis(params.compensation_timeout_ms as u64),
+            // Panics on an arm_id other than 0/1, validating the side at startup.
+            limits: joint_limits::for_arm_id(arm_id),
         };
 
         // Instance lock — check if another instance with the same arm_id is running.
@@ -145,8 +158,11 @@ fn main() -> Result<()> {
             });
         }
 
-        // move_arm_joints: trajectory-tracking control loop.
-        tokio::spawn(run_move_arm_joints(node_runner.clone(), arm.clone(), cfg.clone()));
+        // Single control task (the only motor writer): gravity-comp float by
+        // default and at startup, trajectory tracking while a move_arm_joints goal
+        // runs, back to float after. It spawns its own action handler, which only
+        // admits goals and hands them over.
+        control::spawn(node_runner.clone(), arm.clone(), cfg);
 
         Ok(())
     })

@@ -5,7 +5,15 @@
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_arm",
-    tag: "v1"
+    tag: "v1",
+    depends_on: {
+      interfaces: [
+        // Per-arm gravity + Coriolis compensation. Bound (in the launcher) to a
+        // provider instance configured for this arm's side; conventionally the
+        // srs_model node.
+        { name: "gravity_coriolis_compensation", tag: "v1", link_id: "model" },
+      ],
+    },
   },
   execution: {
     language: "rust",
@@ -31,21 +39,28 @@
       max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.9 },
       max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.9 },
       max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.9 },
-      // MIT-control gains, one per joint (1-indexed).
-      kp1: { $type: "f64", $default: 70.0 },
-      kp2: { $type: "f64", $default: 70.0 },
-      kp3: { $type: "f64", $default: 70.0 },
-      kp4: { $type: "f64", $default: 60.0 },
-      kp5: { $type: "f64", $default: 10.0 },
-      kp6: { $type: "f64", $default: 10.0 },
-      kp7: { $type: "f64", $default: 10.0 },
-      kd1: { $type: "f64", $default: 2.75 },
-      kd2: { $type: "f64", $default: 2.5 },
-      kd3: { $type: "f64", $default: 2.0 },
-      kd4: { $type: "f64", $default: 2.0 },
-      kd5: { $type: "f64", $default: 0.7 },
-      kd6: { $type: "f64", $default: 0.6 },
-      kd7: { $type: "f64", $default: 0.5 }
+      // MIT-control gains for trajectory mode, one per joint (1-indexed).
+      // Match the openarm teleop config (Kp/Kd in config/leader.yaml).
+      kp1: { $type: "f64", $default: 240.0 },
+      kp2: { $type: "f64", $default: 240.0 },
+      kp3: { $type: "f64", $default: 240.0 },
+      kp4: { $type: "f64", $default: 240.0 },
+      kp5: { $type: "f64", $default: 24.0 },
+      kp6: { $type: "f64", $default: 31.0 },
+      kp7: { $type: "f64", $default: 25.0 },
+      kd1: { $type: "f64", $default: 3.0 },
+      kd2: { $type: "f64", $default: 3.0 },
+      kd3: { $type: "f64", $default: 3.0 },
+      kd4: { $type: "f64", $default: 3.0 },
+      kd5: { $type: "f64", $default: 0.2 },
+      kd6: { $type: "f64", $default: 0.2 },
+      kd7: { $type: "f64", $default: 0.2 },
+      // Feedforward compensation scales, defaulting to the openarm teleop example:
+      // gravity is always applied in full; Coriolis and friction are scaled down.
+      coriolis_scale: { $type: "f64", $default: 0.1 },
+      friction_scale: { $type: "f64", $default: 0.3 },
+      // Per-tick deadline for the get_compensation service call.
+      compensation_timeout_ms: { $type: "u32", $default: 10 }
     }
   },
   interfaces: {
@@ -54,6 +69,12 @@
         name: "openarm01_arm",
         tag: "v1"
       }
-    ]
+    ],
+    services: {
+      consumes: [
+        // gravity + Coriolis feedforward, fetched each control tick.
+        { link_id: "model", name: "get_compensation" },
+      ],
+    },
   },
 }

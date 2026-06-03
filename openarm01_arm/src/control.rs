@@ -3,37 +3,81 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
+use peppygen::consumed_services::model_get_compensation as compensation;
 use peppygen::exposed_actions::openarm01_arm::v1::move_arm_joints;
-use tracing::{error, info};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
-use openarm_can::{ArmCan, v10};
+use crate::friction;
+use crate::joint_limits::{self, Limit};
 use crate::trajectory::Trajectory;
+use crate::{ARM_DOF, JointVec};
+use openarm_can::ArmCan;
 
-struct AcceptedGoal {
-    target: v10::JointVec,
-    feedback_period: Duration,
-}
+/// kp/kd/dq all zero: pure-torque ("float") command, the arm follows only the
+/// feedforward torque and is otherwise compliant.
+const ZERO: JointVec = [0.0; ARM_DOF];
 
 #[derive(Clone)]
 pub struct ControlConfig {
-    pub kp: v10::JointVec,
-    pub kd: v10::JointVec,
+    pub kp: JointVec,
+    pub kd: JointVec,
     pub cycle_period: Duration,
     pub recv_timeout_us: i32,
     pub motion_timeout: Duration,
-    pub max_joint_velocity_rad_s: v10::JointVec,
+    pub max_joint_velocity_rad_s: JointVec,
     pub min_motion_time_s: f64,
+    /// Scale applied to the Coriolis feedforward term (gravity is always full).
+    /// The openarm teleop example uses a small factor (~0.1).
+    pub coriolis_scale: f64,
+    /// Scale applied to the friction feedforward term. The openarm teleop example
+    /// uses ~0.3 (its transparency mode); 1.0 is the full physical friction.
+    pub friction_scale: f64,
+    /// Per-request deadline for the `get_compensation` service call.
+    pub compensation_timeout: Duration,
+    /// This arm's side-specific joint position limits (selected by `arm_id`).
+    pub limits: &'static [Limit; joint_limits::ARM_DOF],
+}
+
+/// An accepted move goal, handed from the action handler to the single control task.
+struct Goal {
+    target: JointVec,
+    feedback_period: Duration,
+    ctx: move_arm_joints::GoalContext,
+}
+
+/// What the single control task is doing this tick. Because exactly one task ever
+/// writes to the motors, the mode merely selects the command; there is no writer
+/// arbitration.
+enum Mode {
+    /// Compliant gravity/Coriolis/friction compensation (kp=kd=0): the default at
+    /// startup and after every motion, so the arm is never left uncompensated.
+    Float,
+    /// Tracking a trajectory for an accepted `move_arm_joints` goal.
+    Trajectory(ActiveMotion),
+    // TODO: JointAngleStream — track a live stream of joint-angle setpoints (no
+    // trajectory planning), e.g. for teleop from a leader arm or pose estimator.
+    // It slots in here as another command source for the single writer; the
+    // action handler / a topic subscriber would push setpoints and switch the mode.
+}
+
+struct ActiveMotion {
+    trajectory: Trajectory,
+    ctx: move_arm_joints::GoalContext,
+    feedback_period: Duration,
+    last_feedback: Instant,
+    feedback_failures: u32,
 }
 
 struct MotionResult {
     success: bool,
     message: String,
-    final_joint_positions: v10::JointVec,
+    final_joint_positions: JointVec,
     action_time: f64,
 }
 
 impl MotionResult {
-    fn completed(positions: v10::JointVec, action_time: f64) -> Self {
+    fn completed(positions: JointVec, action_time: f64) -> Self {
         Self {
             success: true,
             message: "trajectory complete".into(),
@@ -42,7 +86,7 @@ impl MotionResult {
         }
     }
 
-    fn timed_out(positions: v10::JointVec, action_time: f64) -> Self {
+    fn timed_out(positions: JointVec, action_time: f64) -> Self {
         Self {
             success: false,
             message: "timeout".into(),
@@ -52,36 +96,156 @@ impl MotionResult {
     }
 }
 
-/// Spawn-and-loop entry for the move_arm_joints action: accept a goal, run the
-/// trajectory-tracking control loop, complete the goal with its result. Re-enters
-/// the goal loop afterwards. A goal arriving mid-motion is rejected (single-flight);
-/// the file lock in main.rs guarantees single-instance.
-pub async fn run_move_arm_joints(
+/// Spawn the arm's control: a single task that owns the motors (gravity-comp
+/// float by default, trajectory tracking while a goal runs, back to float after),
+/// plus the action handler that admits `move_arm_joints` goals and feeds them to
+/// it over a channel. The control task is the *only* motor writer, so float and
+/// trajectory can never command concurrently.
+pub fn spawn(runner: Arc<NodeRunner>, arm: Arc<Mutex<ArmCan>>, cfg: ControlConfig) {
+    // Single-flight admission: at most one goal active at a time. This only gates
+    // the action handler; the control task is the sole writer, so there is no
+    // writer race, just admission. Capacity 1 is enough (a goal is admitted only
+    // once the previous one has finished and cleared the flag).
+    let busy = Arc::new(AtomicBool::new(false));
+    let (goal_tx, goal_rx) = mpsc::channel::<Goal>(1);
+    tokio::spawn(run_control(runner.clone(), arm, cfg.clone(), goal_rx, busy.clone()));
+    tokio::spawn(run_action(runner, cfg.limits, goal_tx, busy));
+}
+
+/// The single motor-owning control loop. Runs forever at `cfg.cycle_period`,
+/// reading state and computing one feedforward torque per tick, then commanding
+/// either a compliant float hold or trajectory tracking depending on the mode.
+async fn run_control(
     runner: Arc<NodeRunner>,
     arm: Arc<Mutex<ArmCan>>,
     cfg: ControlConfig,
+    mut goals: mpsc::Receiver<Goal>,
+    busy: Arc<AtomicBool>,
+) {
+    let mut mode = Mode::Float;
+    let mut last_model = ZERO;
+    let mut comp_failures: u32 = 0;
+    // Don't energize the arm until compensation has been obtained at least once:
+    // commanding pure feedforward with a missing gravity term would let it sag.
+    // `depends_on` starts srs_model first, so this clears on the first tick.
+    let mut have_compensation = false;
+
+    info!("control loop started (float gravity compensation)");
+    loop {
+        let cycle_start = Instant::now();
+        let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
+
+        // Admit a new goal only while floating. The action handler already gated
+        // on `busy`, so a goal is waiting here only when the arm is idle; anchor
+        // the trajectory at the freshly measured position.
+        if matches!(mode, Mode::Float) {
+            if let Ok(goal) = goals.try_recv() {
+                info!(
+                    "move_arm_joints: start={} target={}",
+                    fmt_joints(&q),
+                    fmt_joints(&goal.target),
+                );
+                mode = Mode::Trajectory(ActiveMotion {
+                    trajectory: Trajectory::new(
+                        q,
+                        goal.target,
+                        cfg.max_joint_velocity_rad_s,
+                        cfg.min_motion_time_s,
+                    ),
+                    ctx: goal.ctx,
+                    feedback_period: goal.feedback_period,
+                    last_feedback: Instant::now(),
+                    feedback_failures: 0,
+                });
+            }
+        }
+
+        let (tau, ok) = feedforward(&runner, &cfg, &q, &qdot, &mut last_model).await;
+        note_compensation(ok, &mut comp_failures);
+        have_compensation |= ok;
+
+        let mut finished: Option<MotionResult> = None;
+        match &mut mode {
+            Mode::Float => {
+                if have_compensation {
+                    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                    a.mit_control(&ZERO, &ZERO, &q, &ZERO, &tau);
+                }
+            }
+            Mode::Trajectory(m) => {
+                let (q_des, dq_des) = m.trajectory.sample(cycle_start);
+                {
+                    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                    a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &tau);
+                }
+                let elapsed = m.trajectory.motion_start.elapsed().as_secs_f64();
+                if m.last_feedback.elapsed() >= m.feedback_period {
+                    // Warn once per motion if feedback starts failing, then stay quiet.
+                    if let Err(e) = m.ctx.publish_feedback(q, elapsed).await {
+                        m.feedback_failures += 1;
+                        if m.feedback_failures == 1 {
+                            warn!("move_arm_joints feedback publish failing, suppressing repeats: {e}");
+                        }
+                    }
+                    m.last_feedback = Instant::now();
+                }
+                if m.trajectory.is_complete(cycle_start) {
+                    finished = Some(MotionResult::completed(q, elapsed));
+                } else if elapsed > cfg.motion_timeout.as_secs_f64() {
+                    finished = Some(MotionResult::timed_out(q, elapsed));
+                }
+            }
+        }
+
+        // Completing a goal returns to float and frees admission. Done after the
+        // match so the trajectory's `ctx` can be moved out of `mode`.
+        if let Some(result) = finished {
+            if let Mode::Trajectory(m) = std::mem::replace(&mut mode, Mode::Float) {
+                if let Err(e) = m
+                    .ctx
+                    .complete(
+                        result.success,
+                        result.message,
+                        result.final_joint_positions,
+                        result.action_time,
+                    )
+                    .await
+                {
+                    error!("move_arm_joints complete: {e}");
+                }
+            }
+            busy.store(false, Ordering::Release);
+        }
+
+        pace_cycle(cycle_start, cfg.cycle_period).await;
+    }
+}
+
+/// Exposes the `move_arm_joints` action: validates the target against this arm's
+/// limits, admits one goal at a time (`busy`), and hands the accepted goal to the
+/// control task. It never touches the motors.
+async fn run_action(
+    runner: Arc<NodeRunner>,
+    limits: &'static [Limit; joint_limits::ARM_DOF],
+    goals: mpsc::Sender<Goal>,
+    busy: Arc<AtomicBool>,
 ) {
     let mut handle = move_arm_joints::ActionHandle::expose(&runner)
         .await
         .expect("expose move_arm_joints");
 
-    // Single-flight gate: reject a new goal while one is still executing. The
-    // motion runs in a spawned task so the loop keeps listening (and rejecting)
-    // rather than silently queueing a goal that would run stale once the
-    // current one finishes.
-    let busy = Arc::new(AtomicBool::new(false));
-
     loop {
         let ctx = match handle
             .handle_goal_next_request(|req| {
-                // Reject targets outside the arm's joint limits (also rejects
+                // Reject targets outside this arm's joint limits (also rejects
                 // NaN/inf, which Limit::contains treats as out of range).
-                if !target_in_limits(&req.data.joint_positions) {
+                if !target_in_limits(&req.data.joint_positions, limits) {
                     return Ok(move_arm_joints::GoalResponse::reject(
                         "target joint positions out of range",
                     ));
                 }
-                // Atomically claim the slot; reject if a motion already holds it.
+                // Atomically claim the single-flight slot; the control task clears
+                // it when the motion finishes.
                 if busy
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                     .is_err()
@@ -103,115 +267,100 @@ pub async fn run_move_arm_joints(
             }
         };
 
-        let goal = AcceptedGoal {
+        let goal = Goal {
             target: ctx.request().data.joint_positions,
             feedback_period: feedback_period(ctx.request().data.feedback_frequency),
+            ctx,
         };
-
-        let arm = Arc::clone(&arm);
-        let cfg = cfg.clone();
-        let busy = Arc::clone(&busy);
-        tokio::spawn(async move {
-            let result = run_control_loop(&arm, &ctx, &cfg, goal).await;
-            if let Err(e) = ctx
-                .complete(
-                    result.success,
-                    result.message,
-                    result.final_joint_positions,
-                    result.action_time,
-                )
-                .await
-            {
-                error!("move_arm_joints complete: {e}");
-            }
+        if let Err(err) = goals.send(goal).await {
+            // Control task gone (node shutting down): release admission. The goal's
+            // `ctx` drops with it, which the engine reports to the client as abandoned.
+            error!("control task unavailable, dropping goal: {err}");
             busy.store(false, Ordering::Release);
-        });
+        }
     }
 }
 
-async fn run_control_loop(
-    arm: &Arc<Mutex<ArmCan>>,
-    ctx: &move_arm_joints::GoalContext,
+/// Feedforward torque for one control tick: gravity + Coriolis from the
+/// `gravity_coriolis_compensation` service (one round trip), plus locally computed
+/// friction. On a service failure (or a wrong-DOF response) the last good model
+/// torque is reused (gravity/Coriolis change slowly), so the loop neither stalls
+/// nor drops compensation; friction is always applied. Returns the torque and
+/// whether the service answered usefully this tick.
+async fn feedforward(
+    runner: &NodeRunner,
     cfg: &ControlConfig,
-    goal: AcceptedGoal,
-) -> MotionResult {
-    // Anchor the trajectory at the current joint positions.
-    let q_start = {
-        let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-        a.refresh_all();
-        a.recv_all(cfg.recv_timeout_us);
-        a.get_state().positions
+    q: &JointVec,
+    qdot: &JointVec,
+    last_model: &mut JointVec,
+) -> (JointVec, bool) {
+    // The interface is DOF-generic (Vec on the wire); convert at the boundary.
+    let request = compensation::Request {
+        joint_positions: q.to_vec(),
+        joint_velocities: qdot.to_vec(),
     };
-
-    info!(
-        "move_arm_joints: start={} target={}",
-        fmt_joints(&q_start),
-        fmt_joints(&goal.target),
-    );
-    let trajectory = Trajectory::new(q_start, goal.target, cfg.max_joint_velocity_rad_s, cfg.min_motion_time_s);
-    let start = trajectory.motion_start;
-    let mut last_feedback = Instant::now();
-    let mut feedback_failures: u32 = 0;
-    // tau (feedforward torque) is zero. The default ROS2 control path also leaves
-    // tau_commands_ at zero — JointTrajectoryController populates pos/vel command
-    // interfaces only, and v10_simple_hardware just forwards what's there. Adding
-    // gravity compensation would require an inverse-dynamics model (URDF + a solver
-    // like pinocchio or KDL) and would populate this slot with g(q).
-    let zero_tau = [0.0f64; v10::ARM_DOF];
-
-    loop {
-        let cycle_start = Instant::now();
-        let (q_des, dq_des) = trajectory.sample(cycle_start);
-
-        let positions = {
-            let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-            a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &zero_tau);
-            a.refresh_all();
-            a.recv_all(cfg.recv_timeout_us);
-            a.get_state().positions
-        };
-
-        let elapsed = start.elapsed();
-        let elapsed_secs = elapsed.as_secs_f64();
-
-        if last_feedback.elapsed() >= goal.feedback_period {
-            // Warn once per motion if it starts failing, then stay quiet.
-            if let Err(e) = ctx.publish_feedback(positions, elapsed_secs).await {
-                feedback_failures += 1;
-                if feedback_failures == 1 {
-                    tracing::warn!("move_arm_joints feedback publish failing, suppressing repeats: {e}");
-                }
+    let ok = match compensation::poll(runner, cfg.compensation_timeout, request).await {
+        // Gravity is applied in full; Coriolis is scaled (so the combined `total`
+        // field is unused). Lets the consumer weight each term, matching the
+        // openarm teleop example.
+        Ok(response) => match (
+            JointVec::try_from(response.data.gravity.as_slice()),
+            JointVec::try_from(response.data.coriolis.as_slice()),
+        ) {
+            (Ok(gravity), Ok(coriolis)) => {
+                *last_model =
+                    std::array::from_fn(|i| gravity[i] + cfg.coriolis_scale * coriolis[i]);
+                true
             }
-            last_feedback = Instant::now();
-        }
+            _ => false, // wrong joint count for this arm; keep last good
+        },
+        Err(_) => false,
+    };
+    let fric = friction::torques(&friction::V1, qdot);
+    let tau = std::array::from_fn(|i| last_model[i] + cfg.friction_scale * fric[i]);
+    (tau, ok)
+}
 
-        if trajectory.is_complete(cycle_start) {
-            return MotionResult::completed(positions, elapsed_secs);
-        }
-        if elapsed > cfg.motion_timeout {
-            return MotionResult::timed_out(positions, elapsed_secs);
-        }
-
-        let cycle_elapsed = cycle_start.elapsed();
-        if cycle_elapsed < cfg.cycle_period {
-            tokio::time::sleep(cfg.cycle_period - cycle_elapsed).await;
-        } else if cycle_elapsed > cfg.cycle_period.mul_f64(1.2) {
-            tracing::warn!(
-                "control loop overrun: {:.1}ms (budget {:.1}ms)",
-                cycle_elapsed.as_secs_f64() * 1000.0,
-                cfg.cycle_period.as_secs_f64() * 1000.0,
-            );
-        }
+/// Warn once when compensation starts failing, then stay quiet until it recovers,
+/// so a persistent outage doesn't spam the log every control tick.
+fn note_compensation(ok: bool, consecutive_failures: &mut u32) {
+    if ok {
+        *consecutive_failures = 0;
+        return;
+    }
+    *consecutive_failures += 1;
+    if *consecutive_failures == 1 {
+        warn!("get_compensation unavailable; holding last torque (suppressing repeats)");
     }
 }
 
-/// True if every joint target lies within its V10 position limit. Non-finite
+/// Read the measured joint state (positions + velocities) one time.
+fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec) {
+    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+    a.refresh_all();
+    a.recv_all(recv_timeout_us);
+    let state = a.get_state();
+    (state.positions, state.velocities)
+}
+
+/// Sleep out the remainder of a control cycle, warning on a significant overrun.
+async fn pace_cycle(cycle_start: Instant, period: Duration) {
+    let elapsed = cycle_start.elapsed();
+    if elapsed < period {
+        tokio::time::sleep(period - elapsed).await;
+    } else if elapsed > period.mul_f64(1.2) {
+        warn!(
+            "control loop overrun: {:.1}ms (budget {:.1}ms)",
+            elapsed.as_secs_f64() * 1000.0,
+            period.as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+/// True if every joint target lies within this arm's position limits. Non-finite
 /// values (NaN/inf) fall outside any range, so they are rejected too.
-fn target_in_limits(target: &v10::JointVec) -> bool {
-    v10::ARM_JOINT_LIMITS
-        .iter()
-        .zip(target)
-        .all(|(limit, &q)| limit.contains(q))
+fn target_in_limits(target: &JointVec, limits: &[Limit; joint_limits::ARM_DOF]) -> bool {
+    limits.iter().zip(target).all(|(limit, &q)| limit.contains(q))
 }
 
 /// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
@@ -219,7 +368,7 @@ fn feedback_period(freq_hz: u32) -> Duration {
     Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
 }
 
-fn fmt_joints(v: &v10::JointVec) -> String {
+fn fmt_joints(v: &JointVec) -> String {
     let parts: Vec<String> = v.iter().map(|x| format!("{:.3}", x)).collect();
     format!("[{}]", parts.join(", "))
 }
@@ -235,20 +384,22 @@ mod tests {
 
     #[test]
     fn target_in_limits_accepts_home_and_rejects_out_of_range() {
+        let limits = joint_limits::for_arm_id(joint_limits::ARM_ID_LEFT);
+
         // Home pose (all zeros) is inside every joint limit.
-        assert!(target_in_limits(&[0.0; v10::ARM_DOF]));
+        assert!(target_in_limits(&[0.0; ARM_DOF], limits));
 
         // A single joint past its upper bound fails the whole target.
-        let mut over = [0.0; v10::ARM_DOF];
-        over[3] = v10::ARM_JOINT_LIMITS[3].upper + 0.1;
-        assert!(!target_in_limits(&over));
+        let mut over = [0.0; ARM_DOF];
+        over[3] = limits[3].upper + 0.1;
+        assert!(!target_in_limits(&over, limits));
 
         // Non-finite values are rejected.
-        let mut nan = [0.0; v10::ARM_DOF];
+        let mut nan = [0.0; ARM_DOF];
         nan[0] = f64::NAN;
-        assert!(!target_in_limits(&nan));
-        let mut inf = [0.0; v10::ARM_DOF];
+        assert!(!target_in_limits(&nan, limits));
+        let mut inf = [0.0; ARM_DOF];
         inf[0] = f64::INFINITY;
-        assert!(!target_in_limits(&inf));
+        assert!(!target_in_limits(&inf, limits));
     }
 }
