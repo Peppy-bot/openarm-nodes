@@ -1,0 +1,87 @@
+// DNC launcher: one arm + its srs_model (left side) + the IK pose tester.
+//
+// Wiring:
+//   - the arm consumes gravity/Coriolis compensation; its `model` link binds to
+//     the srs_model instance (without it the arm never energizes — see the
+//     have_compensation gate).
+//   - the tester consumes the arm (`arm` link) and IK (`ik` link); the `ik` link
+//     binds to the same srs_model instance.
+//
+// VERIFY before running on hardware:
+//   - srs_model lives in the nodes_hub repo; the relative source path below
+//     assumes nodes_hub is a sibling of openarm01_nodes. Adjust to a git/repo
+//     source if your layout differs.
+//   - urdf_path must be readable by the srs_model node at runtime. The path below
+//     is the vendored description in this repo; confirm it is reachable from the
+//     srs_model container (mount it, or point at a path baked into that image).
+{
+  peppy_schema: "launcher_v1",
+  deployments: [
+    {
+      source: { local: "../nodes_hub/srs_model" },
+      instances: [
+        {
+          instance_id: "srs_left_0",
+          arguments: {
+            urdf_path: "/Volumes/MacMini/Documents/peppy/openarm01_nodes/description/openarm_v10.urdf",
+            base_link: "openarm_left_link0",
+          },
+        },
+      ],
+    },
+    {
+      source: { local: "./openarm01_arm" },
+      instances: [
+        {
+          instance_id: "arm_0",
+          // Starts at the SAFE bring-up config (step 2): all feedforward off, so
+          // the arm is limp while the comp terms + poll latency are logged at 1 Hz.
+          // Ramp by editing these args between steps:
+          //   2 observe : scales all 0, rate 100, motion off (this config)
+          //   3 rate    : control_rate_hz=500; set recv_timeout_us(~400) and
+          //               compensation_timeout_ms from step-2 measured latency
+          //   4 gravity : gravity_scale 0.3 -> confirm each joint pushes UP -> 1.0
+          //               (do this at 100 Hz first, then raise the rate)
+          //   5 traj    : set arm_test_0.motion_enabled=true
+          //   6 friction: friction_scale=0.3   (watch for oscillation)
+          //   7 coriolis: coriolis_scale=0.1
+          //   8 2nd arm : arm_id=1, base_link openarm_right_link0, repeat step 4
+          arguments: {
+            arm_id: 0,
+            can_interface: "left_follower",
+            control_rate_hz: 100,
+            gravity_scale: 0.0,
+            coriolis_scale: 0.0,
+            friction_scale: 0.0,
+            // Conservative floor for testing: each trajectory takes at least 5 s.
+            // Lower toward 0.1 once the arm is verified.
+            min_motion_time_s: 5.0,
+          },
+          bindings: {
+            // gravity/Coriolis compensation provider for this arm's side.
+            model: "srs_left_0",
+          },
+        },
+      ],
+    },
+    {
+      source: { local: "./openarm01_arm_test" },
+      instances: [
+        {
+          instance_id: "arm_test_0",
+          arguments: {
+            // Off for observe/gravity bring-up (steps 2-4). Set true at step 5 to
+            // solve IK for the target pose and move the arm there once. Defaults to
+            // the natural front pose baked into the node; override target_x/y/z +
+            // target_q* to reach a different point.
+            motion_enabled: false,
+          },
+          bindings: {
+            arm: "arm_0",
+            ik: "srs_left_0",
+          },
+        },
+      ],
+    },
+  ],
+}

@@ -1,0 +1,79 @@
+// DNC test harness: drives a single openarm01_arm to a natural pose in front of
+// the robot. The target is specified in the workspace (Cartesian) and resolved to
+// joint angles by the srs_model IK service, then commanded via move_arm_joints.
+// motion_enabled=false just verifies connectivity and logs joint positions.
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_arm_test",
+    tag: "v1",
+    depends_on: {
+      interfaces: [
+        // The arm, bound (in the launcher) to the concrete arm instance.
+        {
+          name: "openarm01_arm",
+          tag: "v1",
+          link_id: "arm",
+        },
+        // Inverse kinematics, bound (in the launcher) to the same srs_model
+        // instance that serves this arm's side.
+        {
+          name: "srs_inverse_kinematics",
+          tag: "v1",
+          link_id: "ik",
+        },
+      ],
+    },
+  },
+  interfaces: {
+    services: {
+      consumes: [
+        { link_id: "arm", name: "get_arm_id" },
+        { link_id: "arm", name: "get_joint_positions" },
+        { link_id: "ik", name: "get_ik" },
+      ],
+    },
+    actions: {
+      consumes: [
+        { link_id: "arm", name: "move_arm_joints" },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
+    },
+    parameters: {
+      // false: verify connectivity and log joint positions, then exit.
+      // true: solve IK for the target pose and move the arm there once.
+      motion_enabled: { $type: "bool", $default: false },
+
+      // World-frame target pose for the end effector. Defaults are a natural
+      // left-arm pose reaching in front of the robot (computed via the srs_model
+      // library FK of q = [0, -0.3, 0, 1.2, 0, 0.4, 0]); IK recovers that interior
+      // configuration at the arm angle below.
+      target_x: { $type: "f64", $default: 0.201320 },
+      target_y: { $type: "f64", $default: 0.241644 },
+      target_z: { $type: "f64", $default: 0.413052 },
+      // Orientation quaternion, ordered [x, y, z, w].
+      target_qx: { $type: "f64", $default: -0.775298 },
+      target_qy: { $type: "f64", $default: -0.028221 },
+      target_qz: { $type: "f64", $default: -0.563937 },
+      target_qw: { $type: "f64", $default:  0.283004 },
+
+      // Redundancy resolution. "fixed" with the arm angle below is reproducible
+      // and keeps the solution interior (away from the wrist limit a "from_seed"
+      // branch from the home pose can ride). "from_seed" uses the seed's arm
+      // angle instead (arm_angle ignored).
+      arm_angle_policy: { $type: "string", $default: "fixed" },
+      arm_angle: { $type: "f64", $default: -1.3994 },
+
+      feedback_frequency: { $type: "u32", $default: 10 },
+      ik_timeout_s: { $type: "f64", $default: 5.0 },
+      goal_timeout_s: { $type: "f64", $default: 10.0 },
+      // Allow generous time; raise the arm's min_motion_time_s for slow testing.
+      result_timeout_s: { $type: "f64", $default: 120.0 },
+    },
+  },
+}
