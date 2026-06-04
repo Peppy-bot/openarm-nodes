@@ -63,6 +63,7 @@ fn main() -> Result<()> {
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             max_joint_velocity_rad_s,
             min_motion_time_s: params.min_motion_time_s,
+            gravity_scale: params.gravity_scale,
             coriolis_scale: params.coriolis_scale,
             friction_scale: params.friction_scale,
             compensation_timeout: Duration::from_millis(params.compensation_timeout_ms as u64),

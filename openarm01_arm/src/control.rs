@@ -27,8 +27,12 @@ pub struct ControlConfig {
     pub motion_timeout: Duration,
     pub max_joint_velocity_rad_s: JointVec,
     pub min_motion_time_s: f64,
-    /// Scale applied to the Coriolis feedforward term (gravity is always full).
-    /// The openarm teleop example uses a small factor (~0.1).
+    /// Scale applied to the gravity feedforward term. 1.0 is full compensation;
+    /// lower it for safe bring-up (e.g. 0.3) to confirm each joint pushes against
+    /// gravity in the right direction before trusting the full term.
+    pub gravity_scale: f64,
+    /// Scale applied to the Coriolis feedforward term. The openarm teleop example
+    /// uses a small factor (~0.1).
     pub coriolis_scale: f64,
     /// Scale applied to the friction feedforward term. The openarm teleop example
     /// uses ~0.3 (its transparency mode); 1.0 is the full physical friction.
@@ -123,9 +127,11 @@ async fn run_control(
     busy: Arc<AtomicBool>,
 ) {
     let mut mode = Mode::Float;
-    let mut last_model = ZERO;
+    let mut last_gravity = ZERO;
+    let mut last_coriolis = ZERO;
     let mut comp_failures: u32 = 0;
     let mut poll_stats = PollStats::new();
+    let mut last_diag = Instant::now();
     // Don't energize the arm until compensation has been obtained at least once:
     // commanding pure feedforward with a missing gravity term would let it sag.
     // `depends_on` starts srs_model first, so this clears on the first tick.
@@ -164,25 +170,37 @@ async fn run_control(
             }
         }
 
-        let (tau, ok) =
-            feedforward(&runner, &cfg, &q, &qdot, &mut last_model, &mut poll_stats).await;
-        note_compensation(ok, &mut comp_failures);
+        let ff = feedforward(
+            &runner,
+            &cfg,
+            &q,
+            &qdot,
+            &mut last_gravity,
+            &mut last_coriolis,
+            &mut poll_stats,
+        )
+        .await;
+        note_compensation(ff.ok, &mut comp_failures);
         poll_stats.report_if_due();
-        have_compensation |= ok;
+        have_compensation |= ff.ok;
+        if last_diag.elapsed() >= Duration::from_secs(1) {
+            log_compensation(&cfg, &q, &qdot, &ff);
+            last_diag = Instant::now();
+        }
 
         let mut finished: Option<MotionResult> = None;
         match &mut mode {
             Mode::Float => {
                 if have_compensation {
                     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                    a.mit_control(&ZERO, &ZERO, &q, &ZERO, &tau);
+                    a.mit_control(&ZERO, &ZERO, &q, &ZERO, &ff.tau);
                 }
             }
             Mode::Trajectory(m) => {
                 let (q_des, dq_des) = m.trajectory.sample(cycle_start);
                 {
                     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                    a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &tau);
+                    a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &ff.tau);
                 }
                 let elapsed = m.trajectory.motion_start.elapsed().as_secs_f64();
                 if m.last_feedback.elapsed() >= m.feedback_period {
@@ -335,20 +353,33 @@ impl PollStats {
     }
 }
 
+/// One tick's feedforward: the commanded `tau` plus the separate terms it was
+/// built from. `gravity`/`coriolis` are the last good model values (stale-reused
+/// on a poll miss); `friction` is always fresh. The breakdown is what the bring-up
+/// diagnostic logs so signs and magnitudes can be judged term by term.
+struct Feedforward {
+    tau: JointVec,
+    /// Whether the compensation service answered usefully this tick.
+    ok: bool,
+    gravity: JointVec,
+    coriolis: JointVec,
+    friction: JointVec,
+}
+
 /// Feedforward torque for one control tick: gravity + Coriolis from the
 /// `gravity_coriolis_compensation` service (one round trip), plus locally computed
-/// friction. On a service failure (or a wrong-DOF response) the last good model
-/// torque is reused (gravity/Coriolis change slowly), so the loop neither stalls
-/// nor drops compensation; friction is always applied. Returns the torque and
-/// whether the service answered usefully this tick.
+/// friction, each weighted by its scale. On a service failure (or a wrong-DOF
+/// response) the last good gravity/Coriolis are reused (they change slowly), so the
+/// loop neither stalls nor drops compensation; friction is always applied.
 async fn feedforward(
     runner: &NodeRunner,
     cfg: &ControlConfig,
     q: &JointVec,
     qdot: &JointVec,
-    last_model: &mut JointVec,
+    last_gravity: &mut JointVec,
+    last_coriolis: &mut JointVec,
     poll_stats: &mut PollStats,
-) -> (JointVec, bool) {
+) -> Feedforward {
     // The interface is DOF-generic (Vec on the wire); convert at the boundary.
     let request = compensation::Request {
         joint_positions: q.to_vec(),
@@ -358,25 +389,47 @@ async fn feedforward(
     let response = compensation::poll(runner, cfg.compensation_timeout, request).await;
     poll_stats.record(poll_start.elapsed());
     let ok = match response {
-        // Gravity is applied in full; Coriolis is scaled (so the combined `total`
-        // field is unused). Lets the consumer weight each term, matching the
-        // openarm teleop example.
         Ok(response) => match (
             JointVec::try_from(response.data.gravity.as_slice()),
             JointVec::try_from(response.data.coriolis.as_slice()),
         ) {
             (Ok(gravity), Ok(coriolis)) => {
-                *last_model =
-                    std::array::from_fn(|i| gravity[i] + cfg.coriolis_scale * coriolis[i]);
+                *last_gravity = gravity;
+                *last_coriolis = coriolis;
                 true
             }
             _ => false, // wrong joint count for this arm; keep last good
         },
         Err(_) => false,
     };
-    let fric = friction::torques(&friction::V1, qdot);
-    let tau = std::array::from_fn(|i| last_model[i] + cfg.friction_scale * fric[i]);
-    (tau, ok)
+    // Each term independently scaled, so bring-up can ramp gravity, then friction,
+    // then Coriolis (matching the openarm teleop weighting at full).
+    let friction = friction::torques(&friction::V1, qdot);
+    let tau = std::array::from_fn(|i| {
+        cfg.gravity_scale * last_gravity[i]
+            + cfg.coriolis_scale * last_coriolis[i]
+            + cfg.friction_scale * friction[i]
+    });
+    Feedforward { tau, ok, gravity: *last_gravity, coriolis: *last_coriolis, friction }
+}
+
+/// Throttled bring-up diagnostic: the measured state and each feedforward term, so
+/// soundness (signs, magnitudes) can be judged from the logs. TEMPORARY; remove
+/// with [`PollStats`] once compensation is trusted.
+fn log_compensation(cfg: &ControlConfig, q: &JointVec, qdot: &JointVec, ff: &Feedforward) {
+    info!(
+        "comp ok={} scales(g={} c={} f={})\n  q={}\n  qdot={}\n  gravity={}\n  coriolis={}\n  friction={}\n  tau={}",
+        ff.ok,
+        cfg.gravity_scale,
+        cfg.coriolis_scale,
+        cfg.friction_scale,
+        fmt_joints(q),
+        fmt_joints(qdot),
+        fmt_joints(&ff.gravity),
+        fmt_joints(&ff.coriolis),
+        fmt_joints(&ff.friction),
+        fmt_joints(&ff.tau),
+    );
 }
 
 /// Warn once when compensation starts failing, then stay quiet until it recovers,
