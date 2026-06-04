@@ -26,21 +26,24 @@ pub struct Params {
     pub k: JointVec,
 }
 
-/// OpenArm V1.0 friction constants, from openarm_teleop's `config/leader.yaml`
-/// and `config/follower.yaml`. Those two are identical (bar a 0.01 rounding on
-/// joint 6): friction is a physical property of the joints, the *same* whether
-/// the arm is leader or follower, and both roles run the same `ComputeFriction`.
+/// OpenArm V1.0 friction constants, taken from openarm_teleop's
+/// `config/leader.yaml`. The float/transparency control this node replicates is
+/// openarm_teleop's `unilateral_step` for the leader role, so the leader config
+/// is the matching reference. `leader.yaml` and `follower.yaml` differ only in
+/// `Fc[5]` (joint 6: leader 0.083, follower 0.093), a 0.01 discrepancy in their
+/// configs; friction is a physical joint property, identical for either role.
 /// The `coef_tmp = 0.1` tanh softening that `ComputeFriction` always applies is
-/// folded into `k`, so the runtime expression is `Fo + Fv·ω + Fc·tanh(k·ω)`.
+/// folded into `k` (so `k` here is `leader.yaml`'s `k` times 0.1), making the
+/// runtime expression `Fo + Fv·ω + Fc·tanh(k·ω)`.
 ///
 /// These are the *physical* (full) friction torques. openarm's transparency /
 /// leader control mode additionally scales the whole friction term by 0.3
-/// (`control.cpp:277`); that scale is a control-layer choice and is intentionally
+/// (`control.cpp`); that scale is a control-layer choice and is intentionally
 /// NOT baked in here (apply it at the call site). Fo is a non-zero static offset,
 /// so at rest the model commands a small directional bias (intentional Coulomb
 /// breakaway).
 pub const V1: Params = Params {
-    fc: [0.306, 0.306, 0.40, 0.166, 0.050, 0.093, 0.172],
+    fc: [0.306, 0.306, 0.40, 0.166, 0.050, 0.083, 0.172],
     fv: [0.063, 0.063, 0.604, 0.813, 0.029, 0.072, 0.084],
     fo: [0.088, 0.088, 0.008, -0.058, 0.005, 0.009, -0.059],
     k: [2.8417, 2.8417, 2.9065, 13.0038, 15.1771, 24.2287, 0.7888],
