@@ -39,6 +39,10 @@ pub struct ControlConfig {
     pub friction_scale: f64,
     /// Per-request deadline for the `get_compensation` service call.
     pub compensation_timeout: Duration,
+    /// How often to emit the bring-up diagnostics (loop timing, poll latency,
+    /// compensation terms, tracking error). Tunable at runtime so logging can be
+    /// sped up for a fast step without rebuilding.
+    pub log_period: Duration,
     /// This arm's side-specific joint position limits (selected by `arm_id`).
     pub limits: &'static [Limit; joint_limits::ARM_DOF],
 }
@@ -131,7 +135,9 @@ async fn run_control(
     let mut last_coriolis = ZERO;
     let mut comp_failures: u32 = 0;
     let mut poll_stats = PollStats::new();
+    let mut loop_stats = LoopStats::new();
     let mut last_diag = Instant::now();
+    let mut prev_q = ZERO;
     // Don't energize the arm until compensation has been obtained at least once:
     // commanding pure feedforward with a missing gravity term would let it sag.
     // `depends_on` starts srs_model first, so this clears on the first tick.
@@ -181,14 +187,15 @@ async fn run_control(
         )
         .await;
         note_compensation(ff.ok, &mut comp_failures);
-        poll_stats.report_if_due();
+        let had_compensation = have_compensation;
         have_compensation |= ff.ok;
-        if last_diag.elapsed() >= Duration::from_secs(1) {
-            log_compensation(&cfg, &q, &qdot, &ff);
-            last_diag = Instant::now();
+        if have_compensation && !had_compensation {
+            info!("compensation acquired; arm will energize");
         }
+        let diag_due = last_diag.elapsed() >= cfg.log_period;
 
         let mut finished: Option<MotionResult> = None;
+        let mut tracking: Option<(JointVec, f64)> = None;
         match &mut mode {
             Mode::Float => {
                 if have_compensation {
@@ -203,6 +210,7 @@ async fn run_control(
                     a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &ff.tau);
                 }
                 let elapsed = m.trajectory.motion_start.elapsed().as_secs_f64();
+                tracking = Some((q_des, elapsed));
                 if m.last_feedback.elapsed() >= m.feedback_period {
                     // Warn once per motion if feedback starts failing, then stay quiet.
                     if let Err(e) = m.ctx.publish_feedback(q, elapsed).await {
@@ -239,6 +247,24 @@ async fn run_control(
                 }
             }
             busy.store(false, Ordering::Release);
+        }
+
+        // Bring-up diagnostics on a fixed cadence: loop timing, poll latency,
+        // compensation breakdown, and (while moving) tracking error. Work time is
+        // measured before the report so the one-per-window log doesn't skew it.
+        loop_stats.record(cycle_start.elapsed(), cfg.cycle_period);
+        if diag_due {
+            let window = last_diag.elapsed();
+            loop_stats.report(window, cfg.cycle_period);
+            poll_stats.report();
+            log_compensation(&cfg, &q, &qdot, &ff, &prev_q);
+            if let Some((q_des, elapsed)) = tracking {
+                log_tracking(&q_des, &q, elapsed);
+            }
+            loop_stats = LoopStats::new();
+            poll_stats = PollStats::new();
+            prev_q = q;
+            last_diag = Instant::now();
         }
 
         pace_cycle(cycle_start, cfg.cycle_period).await;
@@ -305,12 +331,11 @@ async fn run_action(
     }
 }
 
-/// Rolling latency of the per-tick `get_compensation` poll, reported once a
-/// second. TEMPORARY: the compensation fetch sits on the hot control path, so
-/// this confirms it stays in the microsecond range in practice; remove once the
-/// timing is trusted (or the fetch is moved off the tick).
+/// Per-tick `get_compensation` poll latency accumulated over a diagnostic window.
+/// The compensation fetch sits on the hot control path, so the `max` is the number
+/// that says whether the synchronous poll fits the cycle budget at a given rate.
+/// TEMPORARY bring-up instrumentation; remove once timing is trusted.
 struct PollStats {
-    window_start: Instant,
     count: u32,
     sum: Duration,
     min: Duration,
@@ -319,13 +344,7 @@ struct PollStats {
 
 impl PollStats {
     fn new() -> Self {
-        Self {
-            window_start: Instant::now(),
-            count: 0,
-            sum: Duration::ZERO,
-            min: Duration::MAX,
-            max: Duration::ZERO,
-        }
+        Self { count: 0, sum: Duration::ZERO, min: Duration::MAX, max: Duration::ZERO }
     }
 
     fn record(&mut self, elapsed: Duration) {
@@ -335,21 +354,60 @@ impl PollStats {
         self.max = self.max.max(elapsed);
     }
 
-    /// Log avg/min/max once the 1 s window elapses, then reset for the next one.
-    fn report_if_due(&mut self) {
-        if self.window_start.elapsed() < Duration::from_secs(1) {
+    fn report(&self) {
+        if self.count == 0 {
+            info!("poll latency: no samples this window (compensation never polled)");
             return;
         }
-        if self.count > 0 {
-            info!(
-                "compensation poll latency over {} ticks: avg={}µs min={}µs max={}µs",
-                self.count,
-                (self.sum / self.count).as_micros(),
-                self.min.as_micros(),
-                self.max.as_micros(),
-            );
+        info!(
+            "poll latency: avg={}µs min={}µs max={}µs (n={})",
+            (self.sum / self.count).as_micros(),
+            self.min.as_micros(),
+            self.max.as_micros(),
+            self.count,
+        );
+    }
+}
+
+/// Control-loop timing over a diagnostic window: how much of each cycle the work
+/// (state read + compensation + command) consumes and how often it overran the
+/// budget. The headline number for deciding whether the loop can sustain a higher
+/// control rate. TEMPORARY bring-up instrumentation.
+struct LoopStats {
+    count: u32,
+    work_sum: Duration,
+    work_max: Duration,
+    overruns: u32,
+}
+
+impl LoopStats {
+    fn new() -> Self {
+        Self { count: 0, work_sum: Duration::ZERO, work_max: Duration::ZERO, overruns: 0 }
+    }
+
+    fn record(&mut self, work: Duration, budget: Duration) {
+        self.count += 1;
+        self.work_sum += work;
+        self.work_max = self.work_max.max(work);
+        if work > budget {
+            self.overruns += 1;
         }
-        *self = Self::new();
+    }
+
+    fn report(&self, window: Duration, budget: Duration) {
+        if self.count == 0 {
+            return;
+        }
+        let secs = window.as_secs_f64().max(f64::MIN_POSITIVE);
+        info!(
+            "loop: {:.0} Hz (n={}), work avg={:.2}ms max={:.2}ms, overruns={} (budget {:.2}ms)",
+            self.count as f64 / secs,
+            self.count,
+            (self.work_sum.as_secs_f64() / self.count as f64) * 1e3,
+            self.work_max.as_secs_f64() * 1e3,
+            self.overruns,
+            budget.as_secs_f64() * 1e3,
+        );
     }
 }
 
@@ -413,22 +471,46 @@ async fn feedforward(
     Feedforward { tau, ok, gravity: *last_gravity, coriolis: *last_coriolis, friction }
 }
 
-/// Throttled bring-up diagnostic: the measured state and each feedforward term, so
-/// soundness (signs, magnitudes) can be judged from the logs. TEMPORARY; remove
-/// with [`PollStats`] once compensation is trusted.
-fn log_compensation(cfg: &ControlConfig, q: &JointVec, qdot: &JointVec, ff: &Feedforward) {
+/// Bring-up diagnostic: the measured state, each feedforward term, and how far the
+/// arm drifted since the last window (≈0 = holding, large = sagging or running), so
+/// soundness (signs, magnitudes, stability) can be judged from the logs. TEMPORARY;
+/// remove with [`PollStats`]/[`LoopStats`] once compensation is trusted.
+fn log_compensation(
+    cfg: &ControlConfig,
+    q: &JointVec,
+    qdot: &JointVec,
+    ff: &Feedforward,
+    prev_q: &JointVec,
+) {
+    let drift = q.iter().zip(prev_q).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
     info!(
-        "comp ok={} scales(g={} c={} f={})\n  q={}\n  qdot={}\n  gravity={}\n  coriolis={}\n  friction={}\n  tau={}",
+        "comp ok={} scales(g={} c={} f={}) max_drift={:.4}rad\n  q={}\n  qdot={}\n  gravity={}\n  coriolis={}\n  friction={}\n  tau={}",
         ff.ok,
         cfg.gravity_scale,
         cfg.coriolis_scale,
         cfg.friction_scale,
+        drift,
         fmt_joints(q),
         fmt_joints(qdot),
         fmt_joints(&ff.gravity),
         fmt_joints(&ff.coriolis),
         fmt_joints(&ff.friction),
         fmt_joints(&ff.tau),
+    );
+}
+
+/// Bring-up diagnostic for trajectory tracking: commanded vs measured joints and
+/// the worst-joint error, so tracking quality can be judged during a move.
+fn log_tracking(q_des: &JointVec, q: &JointVec, elapsed: f64) {
+    let err: JointVec = std::array::from_fn(|i| q_des[i] - q[i]);
+    let max_err = err.iter().map(|e| e.abs()).fold(0.0, f64::max);
+    info!(
+        "track t={:.2}s max_err={:.4}rad\n  q_des={}\n  q={}\n  err={}",
+        elapsed,
+        max_err,
+        fmt_joints(q_des),
+        fmt_joints(q),
+        fmt_joints(&err),
     );
 }
 
@@ -454,17 +536,12 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec)
     (state.positions, state.velocities)
 }
 
-/// Sleep out the remainder of a control cycle, warning on a significant overrun.
+/// Sleep out the remainder of a control cycle. Overruns are not warned per-tick
+/// (that spams at high rates); `LoopStats` reports the overrun count per window.
 async fn pace_cycle(cycle_start: Instant, period: Duration) {
     let elapsed = cycle_start.elapsed();
     if elapsed < period {
         tokio::time::sleep(period - elapsed).await;
-    } else if elapsed > period.mul_f64(1.2) {
-        warn!(
-            "control loop overrun: {:.1}ms (budget {:.1}ms)",
-            elapsed.as_secs_f64() * 1000.0,
-            period.as_secs_f64() * 1000.0,
-        );
     }
 }
 

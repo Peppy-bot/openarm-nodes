@@ -65,7 +65,11 @@
       coriolis_scale: { $type: "f64", $default: 0.0 },
       friction_scale: { $type: "f64", $default: 0.0 },
       // Per-tick deadline for the get_compensation service call.
-      compensation_timeout_ms: { $type: "u32", $default: 10 }
+      compensation_timeout_ms: { $type: "u32", $default: 10 },
+      // How often to print bring-up diagnostics (loop timing, poll latency,
+      // compensation terms, tracking error). Lower it to watch a fast step more
+      // closely; raise it to quiet the logs. Tunable at runtime (no rebuild).
+      log_period_ms: { $type: "u32", $default: 1000 }
     }
   },
   interfaces: {
