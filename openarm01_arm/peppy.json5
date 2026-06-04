@@ -56,13 +56,14 @@
       kd5: { $type: "f64", $default: 0.2 },
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
-      // Feedforward compensation scales, defaulting to the openarm teleop example
-      // (gravity full, Coriolis and friction scaled down). Each term is scaled
-      // independently so bring-up can ramp them one at a time; set gravity_scale
-      // below 1.0 (e.g. 0.3) to verify gravity direction before full compensation.
-      gravity_scale: { $type: "f64", $default: 1.0 },
-      coriolis_scale: { $type: "f64", $default: 0.1 },
-      friction_scale: { $type: "f64", $default: 0.3 },
+      // Feedforward compensation scales. Each term is scaled independently so
+      // bring-up can ramp them one at a time. Defaults are 0 (fail-safe): an arm
+      // started without explicit scales applies no feedforward and is limp rather
+      // than risking a wrong-signed torque. Once validated, set the openarm teleop
+      // values: gravity_scale 1.0, coriolis_scale 0.1, friction_scale 0.3.
+      gravity_scale: { $type: "f64", $default: 0.0 },
+      coriolis_scale: { $type: "f64", $default: 0.0 },
+      friction_scale: { $type: "f64", $default: 0.0 },
       // Per-tick deadline for the get_compensation service call.
       compensation_timeout_ms: { $type: "u32", $default: 10 }
     }
