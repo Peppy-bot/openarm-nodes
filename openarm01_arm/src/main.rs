@@ -106,20 +106,21 @@ fn main() -> Result<()> {
                     _ = sigterm.recv() => {},
                 }
                 info!("shutdown: disabling motors");
-                {
-                    // unwrap_or_else: recover even if poisoned (panic in control loop)
-                    // so disable_all() always runs and motors don't stay energised.
-                    // Hold the lock across disable + sleep + recv so an in-flight
-                    // control loop can't re-command the motors mid-shutdown.
-                    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                    a.disable_all();
-                    // ROS2 reference: sleep before recv to let motors acknowledge.
-                    std::thread::sleep(POST_DISABLE_SLEEP);
-                    a.recv_all(BRINGUP_RECV_US);
-                }
+                // unwrap_or_else: recover even if poisoned (panic in control loop)
+                // so disable_all() always runs and motors don't stay energised.
+                // Hold the lock from here through process exit so an in-flight
+                // control loop can neither command mid-shutdown nor re-command the
+                // motors after they have been disabled.
+                let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                a.disable_all();
+                // ROS2 reference: sleep before recv to let motors acknowledge.
+                std::thread::sleep(POST_DISABLE_SLEEP);
+                a.recv_all(BRINGUP_RECV_US);
                 if let Err(e) = std::fs::remove_file(&lock_path) {
                     warn!("failed to remove lock {lock_path}: {e}");
                 }
+                // exit() does not run destructors, so the guard is never released;
+                // the motors stay disabled as the process dies.
                 std::process::exit(0);
             });
         }
