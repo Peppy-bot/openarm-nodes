@@ -55,7 +55,7 @@ enum Mode {
     Float,
     /// Tracking a trajectory for an accepted `move_arm_joints` goal.
     Trajectory(ActiveMotion),
-    // TODO: JointAngleStream — track a live stream of joint-angle setpoints (no
+    // TODO: JointAngleStream - track a live stream of joint-angle setpoints (no
     // trajectory planning), e.g. for teleop from a leader arm or pose estimator.
     // It slots in here as another command source for the single writer; the
     // action handler / a topic subscriber would push setpoints and switch the mode.
@@ -125,6 +125,7 @@ async fn run_control(
     let mut mode = Mode::Float;
     let mut last_model = ZERO;
     let mut comp_failures: u32 = 0;
+    let mut poll_stats = PollStats::new();
     // Don't energize the arm until compensation has been obtained at least once:
     // commanding pure feedforward with a missing gravity term would let it sag.
     // `depends_on` starts srs_model first, so this clears on the first tick.
@@ -135,10 +136,13 @@ async fn run_control(
         let cycle_start = Instant::now();
         let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
 
-        // Admit a new goal only while floating. The action handler already gated
-        // on `busy`, so a goal is waiting here only when the arm is idle; anchor
-        // the trajectory at the freshly measured position.
-        if matches!(mode, Mode::Float) {
+        // Admit a new goal only while floating, and only once compensation has
+        // been obtained at least once, so a trajectory never runs with a missing
+        // gravity term (same gate as energizing float below). The action handler
+        // already gated on `busy`, so a goal is waiting here only when the arm is
+        // idle; until then it stays buffered in the channel. Anchor the trajectory
+        // at the freshly measured position.
+        if matches!(mode, Mode::Float) && have_compensation {
             if let Ok(goal) = goals.try_recv() {
                 info!(
                     "move_arm_joints: start={} target={}",
@@ -160,8 +164,10 @@ async fn run_control(
             }
         }
 
-        let (tau, ok) = feedforward(&runner, &cfg, &q, &qdot, &mut last_model).await;
+        let (tau, ok) =
+            feedforward(&runner, &cfg, &q, &qdot, &mut last_model, &mut poll_stats).await;
         note_compensation(ok, &mut comp_failures);
+        poll_stats.report_if_due();
         have_compensation |= ok;
 
         let mut finished: Option<MotionResult> = None;
@@ -281,6 +287,54 @@ async fn run_action(
     }
 }
 
+/// Rolling latency of the per-tick `get_compensation` poll, reported once a
+/// second. TEMPORARY: the compensation fetch sits on the hot control path, so
+/// this confirms it stays in the microsecond range in practice; remove once the
+/// timing is trusted (or the fetch is moved off the tick).
+struct PollStats {
+    window_start: Instant,
+    count: u32,
+    sum: Duration,
+    min: Duration,
+    max: Duration,
+}
+
+impl PollStats {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            count: 0,
+            sum: Duration::ZERO,
+            min: Duration::MAX,
+            max: Duration::ZERO,
+        }
+    }
+
+    fn record(&mut self, elapsed: Duration) {
+        self.count += 1;
+        self.sum += elapsed;
+        self.min = self.min.min(elapsed);
+        self.max = self.max.max(elapsed);
+    }
+
+    /// Log avg/min/max once the 1 s window elapses, then reset for the next one.
+    fn report_if_due(&mut self) {
+        if self.window_start.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        if self.count > 0 {
+            info!(
+                "compensation poll latency over {} ticks: avg={}µs min={}µs max={}µs",
+                self.count,
+                (self.sum / self.count).as_micros(),
+                self.min.as_micros(),
+                self.max.as_micros(),
+            );
+        }
+        *self = Self::new();
+    }
+}
+
 /// Feedforward torque for one control tick: gravity + Coriolis from the
 /// `gravity_coriolis_compensation` service (one round trip), plus locally computed
 /// friction. On a service failure (or a wrong-DOF response) the last good model
@@ -293,13 +347,17 @@ async fn feedforward(
     q: &JointVec,
     qdot: &JointVec,
     last_model: &mut JointVec,
+    poll_stats: &mut PollStats,
 ) -> (JointVec, bool) {
     // The interface is DOF-generic (Vec on the wire); convert at the boundary.
     let request = compensation::Request {
         joint_positions: q.to_vec(),
         joint_velocities: qdot.to_vec(),
     };
-    let ok = match compensation::poll(runner, cfg.compensation_timeout, request).await {
+    let poll_start = Instant::now();
+    let response = compensation::poll(runner, cfg.compensation_timeout, request).await;
+    poll_stats.record(poll_start.elapsed());
+    let ok = match response {
         // Gravity is applied in full; Coriolis is scaled (so the combined `total`
         // field is unused). Lets the consumer weight each term, matching the
         // openarm teleop example.
