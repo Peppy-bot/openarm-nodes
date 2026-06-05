@@ -23,6 +23,11 @@ export CAN=left_follower                            # this arm's CAN interface
 - The arm prints diagnostics every `log_period_ms` (default 1000). Lower it
   (e.g. `log_period_ms=200`) to watch a fast step closely — runtime, no rebuild.
 - Run each long-lived node in its own terminal.
+- Every arm run sets `min_motion_time_s=5.0`. The default is `0.1 s`, and the
+  default `max_joint_velocity_*` are the URDF limits (~16 rad/s), so without it
+  the first trajectory (step 5) would collapse to a 0.1 s slam. It does nothing
+  in the float steps but persists on the arm into the move; lower it once
+  tracking is trusted.
 
 ## 0. Prerequisites
 
@@ -89,7 +94,7 @@ Don't shorten it, or the node exits mid-session while still serving requests.
 ```sh
 peppy node run openarm01_arm:v1 -i arm_0 \
   arm_id=0 can_interface=$CAN control_rate_hz=100 \
-  gravity_scale=0 coriolis_scale=0 friction_scale=0 \
+  gravity_scale=0 coriolis_scale=0 friction_scale=0 min_motion_time_s=5.0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
 
@@ -115,7 +120,7 @@ peppy node stop arm_0
 peppy node run openarm01_arm:v1 -i arm_0 \
   arm_id=0 can_interface=$CAN control_rate_hz=500 \
   recv_timeout_us=400 compensation_timeout_ms=1 \
-  gravity_scale=0 coriolis_scale=0 friction_scale=0 \
+  gravity_scale=0 coriolis_scale=0 friction_scale=0 min_motion_time_s=5.0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
 
@@ -135,12 +140,6 @@ peppy node run openarm01_arm:v1 -i arm_0 \
   gravity_scale=0.3 coriolis_scale=0 friction_scale=0 min_motion_time_s=5.0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
-
-`min_motion_time_s=5.0` does nothing in this float step, but it persists on the
-arm into the first trajectory (step 5). Without it the arm uses its `0.1 s`
-default, and since the default `max_joint_velocity_*` are the URDF limits
-(~16 rad/s), the velocity term never binds — the first hardware move would
-collapse to a 0.1 s slam. Carry the conservative value in now.
 
 Judge: each joint **pushes up against gravity** (arm feels lighter / holds
 better), `comp max_drift` small, **no joint accelerating away**.
@@ -179,7 +178,7 @@ peppy node stop arm_0
 peppy node run openarm01_arm:v1 -i arm_0 \
   arm_id=0 can_interface=$CAN control_rate_hz=500 \
   recv_timeout_us=400 compensation_timeout_ms=1 \
-  gravity_scale=1.0 coriolis_scale=0 friction_scale=0.3 \
+  gravity_scale=1.0 coriolis_scale=0 friction_scale=0.3 min_motion_time_s=5.0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
 
@@ -202,7 +201,7 @@ peppy node run srs_model:v1 -i srs_right_0 \
 
 peppy node run openarm01_arm:v1 -i arm_1 \
   arm_id=1 can_interface=<right_can> control_rate_hz=100 \
-  gravity_scale=0.3 coriolis_scale=0 friction_scale=0 \
+  gravity_scale=0.3 coriolis_scale=0 friction_scale=0 min_motion_time_s=5.0 \
   --bind model@srs_right_0 --idle-timeout 86400 --max-timeout 86400
 ```
 
