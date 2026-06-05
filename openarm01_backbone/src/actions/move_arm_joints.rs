@@ -68,30 +68,38 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
             },
         };
 
-        let outcome = forward(&runner, &goal_ctx, &token).await;
+        // Spawn per goal so the accept loop returns immediately to await the
+        // next probe. Otherwise left+right move_arm_joints serialise through
+        // one task and the second goal sees the backbone instance as
+        // unreachable.
+        let runner_for_goal = Arc::clone(&runner);
+        let token_for_goal = token.clone();
+        tokio::spawn(async move {
+            let outcome = forward(&runner_for_goal, &goal_ctx, &token_for_goal).await;
 
-        let reply = if outcome.is_cancelled {
-            goal_ctx
-                .complete_cancelled(
-                    outcome.success,
-                    outcome.message,
-                    outcome.final_joint_positions,
-                    outcome.action_time,
-                )
-                .await
-        } else {
-            goal_ctx
-                .complete(
-                    outcome.success,
-                    outcome.message,
-                    outcome.final_joint_positions,
-                    outcome.action_time,
-                )
-                .await
-        };
-        if let Err(e) = reply {
-            warn!(error = %e, "move_arm_joints: complete failed");
-        }
+            let reply = if outcome.is_cancelled {
+                goal_ctx
+                    .complete_cancelled(
+                        outcome.success,
+                        outcome.message,
+                        outcome.final_joint_positions,
+                        outcome.action_time,
+                    )
+                    .await
+            } else {
+                goal_ctx
+                    .complete(
+                        outcome.success,
+                        outcome.message,
+                        outcome.final_joint_positions,
+                        outcome.action_time,
+                    )
+                    .await
+            };
+            if let Err(e) = reply {
+                warn!(error = %e, "move_arm_joints: complete failed");
+            }
+        });
     }
     Ok(())
 }
