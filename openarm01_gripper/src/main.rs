@@ -5,6 +5,7 @@ use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
 use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::{NodeBuilder, Parameters, Result};
+use peppylib::datastore::{self, Encoding};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,13 +35,30 @@ fn main() -> Result<()> {
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
         };
 
-        // Instance lock — crash if another instance with the same gripper_id is running.
-        let lock_path = format!("/tmp/openarm_gripper_{gripper_id}.lock");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
+        // Instance lock in the datastore (shared across instances on the bound core
+        // node), so a second instance with the same gripper_id refuses to start.
+        // Get-then-store is non-atomic, so two *simultaneous* starts could both
+        // pass; the realistic case (a leftover instance, then a new run) is
+        // sequential and is caught. Released best-effort on shutdown below; a
+        // hard-killed instance leaves a stale key the next start must clear.
+        let lock_key = format!("openarm_gripper_lock_{gripper_id}");
+        let instance_id = node_runner.processor().bound_instance_id().to_string();
+        match datastore::get(&node_runner, lock_key.clone(), Some(Duration::from_secs(2))).await {
+            Ok(Some(held)) => {
+                panic!("instance lock '{lock_key}' already held by '{}'", held.last_modified_by)
+            }
+            Ok(None) => {}
+            Err(e) => panic!("datastore get for lock '{lock_key}': {e}"),
+        }
+        datastore::store(
+            &node_runner,
+            lock_key.clone(),
+            instance_id,
+            Encoding::TEXT_PLAIN,
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("datastore store for lock '{lock_key}': {e}"));
 
         // Hardware bringup — mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
@@ -64,17 +82,24 @@ fn main() -> Result<()> {
 
         let gripper = Arc::new(Mutex::new(gripper));
 
-        // Shutdown task: disables motor and releases lock on SIGINT/SIGTERM.
+        // Shutdown task: disables the motor and releases the lock. `peppy node
+        // stop` cancels in-band via the runtime cancellation token (not a unix
+        // signal), so observe that too or the motor would stay energised on a
+        // daemon stop.
         {
             let gripper = gripper.clone();
+            let node_runner = node_runner.clone();
+            let cancel = node_runner.cancellation_token().clone();
+            let lock_key = lock_key.clone();
             tokio::spawn(async move {
                 let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
                 let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
                 tokio::select! {
                     _ = sigint.recv() => {},
                     _ = sigterm.recv() => {},
+                    _ = cancel.cancelled() => {},
                 }
-                info!("shutdown: disabling motor");
+                info!("shutdown: disabling motor, releasing lock");
                 {
                     // unwrap_or_else: recover even if poisoned (panic in control loop)
                     // so disable_all() always runs and the motor doesn't stay energised.
@@ -83,11 +108,17 @@ fn main() -> Result<()> {
                     std::thread::sleep(POST_DISABLE_SLEEP);
                     g.recv_all(BRINGUP_RECV_US);
                 }
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
+                // Best-effort: on a `node stop` the messaging session may already be
+                // closing, so this can fail and leave a stale key (cleared on a later
+                // start). Short timeout so motor-disable isn't held up.
+                if let Err(e) =
+                    datastore::remove(&node_runner, lock_key.clone(), Some(Duration::from_millis(500)))
+                        .await
+                {
+                    warn!("failed to release datastore lock '{lock_key}': {e}");
                 }
-                // process::exit: peppylib runtime has no clean shutdown path; motors are
-                // already disabled above so this is safe.
+                // process::exit: peppylib runtime has no clean shutdown path; the
+                // motor is already disabled above so this is safe.
                 std::process::exit(0);
             });
         }

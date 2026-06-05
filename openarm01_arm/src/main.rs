@@ -7,6 +7,7 @@ use openarm_can::{ArmCan, CallbackMode, v10};
 use control::ControlConfig;
 use peppygen::exposed_services::openarm01_arm::v1::{get_arm_id, get_joint_positions};
 use peppygen::{NodeBuilder, Parameters, Result};
+use peppylib::datastore::{self, Encoding};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -87,13 +88,30 @@ fn main() -> Result<()> {
         );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
 
-        // Instance lock — check if another instance with the same arm_id is running.
-        let lock_path = format!("/tmp/openarm_arm_{arm_id}.lock");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
+        // Instance lock in the datastore (shared across instances on the bound core
+        // node), so a second instance with the same arm_id refuses to start.
+        // Get-then-store is non-atomic, so two *simultaneous* starts could both
+        // pass; the realistic case (a leftover instance, then a new run) is
+        // sequential and is caught. Released best-effort on shutdown below; a
+        // hard-killed instance leaves a stale key the next start must clear.
+        let lock_key = format!("openarm_arm_lock_{arm_id}");
+        let instance_id = node_runner.processor().bound_instance_id().to_string();
+        match datastore::get(&node_runner, lock_key.clone(), Some(Duration::from_secs(2))).await {
+            Ok(Some(held)) => {
+                panic!("instance lock '{lock_key}' already held by '{}'", held.last_modified_by)
+            }
+            Ok(None) => {}
+            Err(e) => panic!("datastore get for lock '{lock_key}': {e}"),
+        }
+        datastore::store(
+            &node_runner,
+            lock_key.clone(),
+            instance_id,
+            Encoding::TEXT_PLAIN,
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("datastore store for lock '{lock_key}': {e}"));
 
         // Hardware bringup — sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
@@ -119,8 +137,9 @@ fn main() -> Result<()> {
         // also lets the process exit promptly instead of being force-killed.
         {
             let arm = arm.clone();
-            let lock_path = lock_path.clone();
+            let node_runner = node_runner.clone();
             let cancel = node_runner.cancellation_token().clone();
+            let lock_key = lock_key.clone();
             tokio::spawn(async move {
                 let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
                 let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
@@ -129,7 +148,17 @@ fn main() -> Result<()> {
                     _ = sigterm.recv() => {},
                     _ = cancel.cancelled() => {},
                 }
-                info!("shutdown: disabling motors");
+                info!("shutdown: releasing lock, disabling motors");
+                // Release the lock first (best-effort, while messaging is likely
+                // still alive). Done before taking the motor lock because `remove`
+                // is async and the motor guard below is held across the (sync) exit,
+                // so it cannot be held across this await.
+                if let Err(e) =
+                    datastore::remove(&node_runner, lock_key.clone(), Some(Duration::from_millis(500)))
+                        .await
+                {
+                    warn!("failed to release datastore lock '{lock_key}': {e}");
+                }
                 // unwrap_or_else: recover even if poisoned (panic in control loop)
                 // so disable_all() always runs and motors don't stay energised.
                 // Hold the lock from here through process exit so an in-flight
@@ -140,9 +169,6 @@ fn main() -> Result<()> {
                 // ROS2 reference: sleep before recv to let motors acknowledge.
                 std::thread::sleep(POST_DISABLE_SLEEP);
                 a.recv_all(BRINGUP_RECV_US);
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
-                }
                 // exit() does not run destructors, so the guard is never released;
                 // the motors stay disabled as the process dies.
                 std::process::exit(0);
