@@ -13,9 +13,9 @@ compensation is **off by default (fail-safe)** and ramped explicitly here.
 Set once per shell on the Pi:
 
 ```sh
-export OPENARM=~/path/to/openarm01_nodes   # this repo
-export NODES_HUB=~/path/to/nodes_hub       # holds srs_model
-export CAN=left_follower                    # this arm's CAN interface
+export OPENARM=/home/jared/peppy/openarm01_nodes   # this repo
+export NODES_HUB=/home/jared/peppy/nodes_hub       # holds srs_model
+export CAN=left_follower                            # this arm's CAN interface
 ```
 
 - Left arm: `arm_id=0`, `base_link=openarm_left_link0`.
@@ -63,7 +63,16 @@ peppy node run srs_model:v1 -i srs_left_0 \
   --idle-timeout 86400 --max-timeout 86400
 ```
 
-Confirm it logs the resolved chain/wrist without error. Leave it running.
+Confirm the startup line `srs_model loaded from base 'openarm_left_link0': arm
+base at world [x, y, z] (verify this matches the mounting)`. The world
+translation must match where this arm is physically mounted — a near-identity
+translation on an off-origin arm means the URDF is missing the `world->base`
+mount tree, which silently mis-orients gravity. Leave it running.
+
+`srs_model` is request-driven and prints nothing after startup, so the
+`--idle-timeout` clock (which resets only on output) never resets here: the
+`86400` above is what keeps the node alive for the session, not a safety margin.
+Don't shorten it, or the node exits mid-session while still serving requests.
 
 ## What to watch (arm logs, every `log_period_ms`)
 
@@ -96,7 +105,10 @@ Arm is **limp** (`tau≈0`). Judge:
 ## Step 3 — 500 Hz (still limp)
 
 Size the timeouts from step-2 latency: `compensation_timeout_ms` must exceed the
-observed poll max but stay under the 2 ms cycle; shrink the CAN read too.
+observed poll max but stay under the 2 ms cycle, and shrink the CAN read too.
+Note `compensation_timeout_ms` is whole milliseconds, so at 500 Hz (a 2 ms budget)
+`1` is effectively the only legal value — there's no room to fine-tune it against
+the measured µs latency; that headroom comes from `recv_timeout_us` instead.
 
 ```sh
 peppy node stop arm_0
@@ -120,17 +132,23 @@ signal the synchronous poll can't sustain 500 Hz (revisit the push/topic model).
 peppy node stop arm_0
 peppy node run openarm01_arm:v1 -i arm_0 \
   arm_id=0 can_interface=$CAN control_rate_hz=100 \
-  gravity_scale=0.3 coriolis_scale=0 friction_scale=0 \
+  gravity_scale=0.3 coriolis_scale=0 friction_scale=0 min_motion_time_s=5.0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
+
+`min_motion_time_s=5.0` does nothing in this float step, but it persists on the
+arm into the first trajectory (step 5). Without it the arm uses its `0.1 s`
+default, and since the default `max_joint_velocity_*` are the URDF limits
+(~16 rad/s), the velocity term never binds — the first hardware move would
+collapse to a 0.1 s slam. Carry the conservative value in now.
 
 Judge: each joint **pushes up against gravity** (arm feels lighter / holds
 better), `comp max_drift` small, **no joint accelerating away**.
 
-✅ partial hold, nothing runs → re-run with `gravity_scale=1.0` (expect it to
-roughly float; a little residual wrist sag from the unmodeled gripper body is
-normal). ❌ any joint drives *with* gravity or heads to a limit → **e-stop**,
-sign error, stop here.
+✅ partial hold, nothing runs → re-run with `gravity_scale=1.0` (keep
+`min_motion_time_s=5.0`; expect it to roughly float, a little residual wrist sag
+from the unmodeled gripper body is normal). ❌ any joint drives *with* gravity or
+heads to a limit → **e-stop**, sign error, stop here.
 
 ## Step 5 — Trajectory (gravity on) — Terminal C
 
@@ -143,11 +161,15 @@ peppy node run openarm01_arm_test:v1 -i arm_test_0 \
 ```
 
 The tester logs arm_id, start joints, IK target + solution, goal accepted,
-feedback, and result. The arm logs `track ... max_err`.
+feedback, and result. The arm logs `track ... max_err`. The move takes at least
+`min_motion_time_s` (5 s from step 4) — deliberately slow for the first
+trajectory; lower it on the arm run once tracking is trusted.
 
 ✅ smooth move to the natural front pose, `track max_err` small (a few °),
-result success. Gains default to teleop's 240/3 (validated on this robot). To
-soften the first move, add `kp1=70 ... kp7=70` to the arm run.
+result success. Default gains are the teleop config: 240/3 on the shoulder/elbow
+joints (1-4) and lower wrist gains (`kp5/6/7 = 24/31/25`, `kd = 0.2`). To soften
+the first move, lower the shoulder/elbow gains (e.g. `kp1=70 kp2=70 kp3=70
+kp4=70`) and leave the wrist defaults.
 ❌ overshoot/oscillation → lower kp or investigate.
 
 ## Step 6 — Friction (0.3)

@@ -111,16 +111,23 @@ fn main() -> Result<()> {
 
         let arm = Arc::new(Mutex::new(arm));
 
-        // Shutdown task: disables motors and releases lock on SIGINT/SIGTERM.
+        // Shutdown task: disables motors and releases lock on shutdown.
+        // `peppy node stop` shuts a daemon node down in-band over messaging by
+        // cancelling the runtime's cancellation token, not by sending a unix
+        // signal, so the SIGINT/SIGTERM arms alone never fire on a stop and the
+        // motors would stay energised. Observing the token closes that gap and
+        // also lets the process exit promptly instead of being force-killed.
         {
             let arm = arm.clone();
             let lock_path = lock_path.clone();
+            let cancel = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
                 let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
                 tokio::select! {
                     _ = sigint.recv() => {},
                     _ = sigterm.recv() => {},
+                    _ = cancel.cancelled() => {},
                 }
                 info!("shutdown: disabling motors");
                 // unwrap_or_else: recover even if poisoned (panic in control loop)

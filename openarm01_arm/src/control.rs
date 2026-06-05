@@ -142,6 +142,10 @@ async fn run_control(
     // commanding pure feedforward with a missing gravity term would let it sag.
     // `depends_on` starts srs_model first, so this clears on the first tick.
     let mut have_compensation = false;
+    // Absolute timeline the loop paces against (advances by exactly one
+    // `cycle_period` per tick). Anchoring here rather than to "now + remaining"
+    // keeps per-cycle sleep overshoot from accumulating into a slow loop.
+    let mut next_tick = tokio::time::Instant::now();
 
     info!("control loop started (float gravity compensation)");
     loop {
@@ -267,7 +271,7 @@ async fn run_control(
             last_diag = Instant::now();
         }
 
-        pace_cycle(cycle_start, cfg.cycle_period).await;
+        pace_to_deadline(&mut next_tick, cfg.cycle_period).await;
     }
 }
 
@@ -536,12 +540,22 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec)
     (state.positions, state.velocities)
 }
 
-/// Sleep out the remainder of a control cycle. Overruns are not warned per-tick
-/// (that spams at high rates); `LoopStats` reports the overrun count per window.
-async fn pace_cycle(cycle_start: Instant, period: Duration) {
-    let elapsed = cycle_start.elapsed();
-    if elapsed < period {
-        tokio::time::sleep(period - elapsed).await;
+/// Pace the loop to an absolute timeline: sleep until `next_tick`, which advances
+/// by exactly one `period` each cycle. Because the deadline is absolute (not
+/// "now + remaining"), the ~1 ms overshoot every `tokio::time::sleep` incurs is
+/// corrected on the following cycle instead of accumulating, so the loop holds
+/// its target rate. On an overrun the deadline is already in the past: re-anchor
+/// to now and skip the sleep so the next cycle starts immediately, rather than
+/// firing a burst of zero-length cycles to "catch up" the missed time. Overruns
+/// are not warned per-tick (that spams at high rates); `LoopStats` reports the
+/// overrun count per window.
+async fn pace_to_deadline(next_tick: &mut tokio::time::Instant, period: Duration) {
+    *next_tick += period;
+    let now = tokio::time::Instant::now();
+    if *next_tick <= now {
+        *next_tick = now;
+    } else {
+        tokio::time::sleep_until(*next_tick).await;
     }
 }
 
