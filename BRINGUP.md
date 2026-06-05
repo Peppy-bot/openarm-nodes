@@ -23,11 +23,10 @@ export CAN=left_follower                            # this arm's CAN interface
 - The arm prints diagnostics every `log_period_ms` (default 1000). Lower it
   (e.g. `log_period_ms=200`) to watch a fast step closely — runtime, no rebuild.
 - Run each long-lived node in its own terminal.
-- Every arm run sets `min_motion_time_s=5.0`. The default is `0.1 s`, and the
-  default `max_joint_velocity_*` are the URDF limits (~16 rad/s), so without it
-  the first trajectory (step 5) would collapse to a 0.1 s slam. It does nothing
-  in the float steps but persists on the arm into the move; lower it once
-  tracking is trusted.
+- The arm's `min_motion_time_s` now **defaults to 5 s** (deliberately slow: the
+  URDF velocity limits are high, so a shorter floor would let a move slam). The
+  runs below still pass it explicitly for clarity; lower it once tracking is
+  trusted.
 
 ## 0. Prerequisites
 
@@ -65,8 +64,15 @@ cd $OPENARM/openarm01_arm_test && peppy node add -sb
 peppy node run srs_model:v1 -i srs_left_0 \
   urdf_path=$OPENARM/description/openarm_v10.urdf \
   base_link=openarm_left_link0 \
-  --idle-timeout 86400 --max-timeout 86400
+  --bind-deferred arm@arm_0 --idle-timeout 86400 --max-timeout 86400
 ```
+
+Compensation is now **bidirectional streaming**: srs_model subscribes to the
+arm's `joint_state` and publishes `compensation` back. So srs_model binds to the
+arm (`arm@arm_0`), and the arm binds to srs_model (`model@srs_left_0`, step 2) —
+a mutual binding. `--bind-deferred` lets you start srs_model first (it records
+the binding and waits for `arm_0` to appear); the arm's plain `--bind` is fine
+because srs_model is already up by then.
 
 Confirm the startup line `srs_model loaded from base 'openarm_left_link0': arm
 base at world [x, y, z] (verify this matches the mounting)`. The world
@@ -83,8 +89,11 @@ Don't shorten it, or the node exits mid-session while still serving requests.
 
 - `config: arm_id=.. (left) rate=..Hz scales(..) ...` — confirms this run's params.
 - `loop: N Hz (n=..), work avg/max, overruns (budget ..ms)`
-- `poll latency: avg/min/max (n=..)`
-- `comp ok=.. scales(g.. c.. f..) max_drift=..rad / q / qdot / gravity / coriolis / friction / tau`
+- `comp state=.. fresh=.. age=..ms seq=.. scales(g.. c.. f..) max_drift=..rad / q / qdot / gravity / coriolis / friction / tau`
+  (`state` is `float` or `trajectory`; `fresh`+`age` are the streamed
+  compensation's freshness — `age` should stay well under `stale_timeout_ms`.
+  When stale the model feedforward is dropped: float goes limp, a move keeps
+  tracking on kp/kd. `tau` is the feedforward actually applied.)
 - `track t=.. max_err=..rad / q_des / q / err` (only during a move)
 
 ---
@@ -98,28 +107,31 @@ peppy node run openarm01_arm:v1 -i arm_0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
 
-Arm is **limp** (`tau≈0`). Judge:
+Arm is **limp** (`tau≈0`, `state=float`). Judge:
 
 - `comp` gravity magnitudes plausible (a few Nm on loaded joints, ~0 at the
   wrist), signs consistent with the pose; `tau≈0`.
-- `poll latency` max small (this sets the step-3 timeouts).
+- `comp fresh=true` and `age` small (well under `stale_timeout_ms`): the
+  compensation stream is live. If `fresh=false` persists, the stream never
+  arrived — check srs_model, the arm's `model` binding, and srs_model's `arm`
+  binding (it must be subscribed to this arm's `joint_state`).
 - `loop` holds ~100 Hz, `overruns=0`.
 
-✅ comp sane + low latency → next. ❌ gravity wild/NaN or huge latency → stop.
+✅ comp sane + fresh → next. ❌ gravity wild/NaN, or stream never arrives → stop.
 
-## Step 3 — Confirm 100 Hz timing (500 Hz isn't viable)
+## Step 3 — Confirm loop timing
 
-Stay on the step-2 run (limp, 100 Hz) and watch a few windows. 100 Hz is the
-operating rate: 500 Hz was dropped because the synchronous `get_compensation`
-poll runs ~2 ms (see step-2 `poll latency` avg), which can't fit a 500 Hz 2 ms
-cycle — raise the rate and the latency tail blows the budget. At 100 Hz the
-10 ms budget has comfortable headroom.
+Stay on the step-2 run (limp, 100 Hz) and watch a few windows. Compensation now
+**streams** (the arm publishes `joint_state`, srs_model pushes `compensation`),
+so the control loop no longer does a per-tick round trip — the old ~2 ms
+synchronous poll that capped the rate is gone. 100 Hz is the validated default;
+higher rates are no longer poll-bound and can be re-evaluated here once the
+stream is trusted (watch `comp age` and `overruns`).
 
-✅ `loop` holds ~100 Hz, `overruns=0`, `poll latency` max ≪ 10 ms → gravity next.
-❌ overruns climb or the latency tail spikes → investigate before energizing.
-
-> To run faster later, move `get_compensation` off the hot path (a push/topic
-> model with no per-tick round trip) so the rate isn't bounded by poll latency.
+✅ `loop` holds the requested rate, `overruns=0`, `comp age` ≪ `stale_timeout_ms`
+→ gravity next.
+❌ overruns climb, or `comp age` creeps toward `stale_timeout_ms` (stream not
+keeping up) → drop the rate / investigate before energizing.
 
 ## Step 4 — Gravity (ramp 0.3 → 1.0)
 
@@ -187,7 +199,8 @@ Right is a mirror chain — repeat step 4's sign check, don't assume.
 ```sh
 peppy node run srs_model:v1 -i srs_right_0 \
   urdf_path=$OPENARM/description/openarm_v10.urdf \
-  base_link=openarm_right_link0 --idle-timeout 86400 --max-timeout 86400
+  base_link=openarm_right_link0 \
+  --bind-deferred arm@arm_1 --idle-timeout 86400 --max-timeout 86400
 
 peppy node run openarm01_arm:v1 -i arm_1 \
   arm_id=1 can_interface=<right_can> control_rate_hz=100 \
@@ -215,7 +228,7 @@ per-node `peppy node run` commands above (no rebuild).
 
 - Set the production scales (gravity 1.0, Coriolis 0.1, friction 0.3) explicitly,
   or change the node defaults back from the fail-safe 0.
-- Remove the TEMPORARY instrumentation (`PollStats`, `LoopStats`,
-  `log_compensation`, `log_tracking`, `log_period_ms`, the "compensation
-  acquired" line); keep the startup config echo.
+- Remove the TEMPORARY instrumentation (`LoopStats`, `log_compensation`,
+  `log_tracking`, `log_period_ms`, the "compensation acquired/stale/recovered"
+  lines); keep the startup config echo.
 - Drop the DNC tester commit and this runbook.

@@ -369,6 +369,7 @@ name = "build-helpers"
 version = "0.0.1"
 dependencies = [
  "sha2 0.11.0",
+ "zip",
 ]
 
 [[package]]
@@ -2508,7 +2509,6 @@ dependencies = [
  "tokio",
  "tracing",
  "zenoh",
- "zip",
 ]
 
 [[package]]

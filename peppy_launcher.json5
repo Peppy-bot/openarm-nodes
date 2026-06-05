@@ -26,6 +26,11 @@
             urdf_path: "/Volumes/MacMini/Documents/peppy/openarm01_nodes/description/openarm_v10.urdf",
             base_link: "openarm_left_link0",
           },
+          bindings: {
+            // Subscribes to this arm's joint_state stream and publishes
+            // compensation back. Mutual with arm_0's `model` binding below.
+            arm: "arm_0",
+          },
         },
       ],
     },
@@ -35,13 +40,11 @@
         {
           instance_id: "arm_0",
           // Starts at the SAFE bring-up config (step 2): all feedforward off, so
-          // the arm is limp while the comp terms + poll latency are logged at 1 Hz.
-          // Ramp by editing these args between steps:
+          // the arm is limp while the comp terms are logged at 1 Hz. Ramp by
+          // editing these args between steps:
           //   2 observe : scales all 0, rate 100, motion off (this config)
-          //   3 rate    : control_rate_hz=500; set recv_timeout_us(~400) and
-          //               compensation_timeout_ms from step-2 measured latency
+          //   3 timing  : confirm the loop holds rate, comp age << stale_timeout_ms
           //   4 gravity : gravity_scale 0.3 -> confirm each joint pushes UP -> 1.0
-          //               (do this at 100 Hz first, then raise the rate)
           //   5 traj    : set arm_test_0.motion_enabled=true
           //   6 friction: friction_scale=0.3   (watch for oscillation)
           //   7 coriolis: coriolis_scale=0.1

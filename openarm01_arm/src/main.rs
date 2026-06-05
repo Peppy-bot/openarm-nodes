@@ -66,7 +66,7 @@ fn main() -> Result<()> {
             gravity_scale: params.gravity_scale,
             coriolis_scale: params.coriolis_scale,
             friction_scale: params.friction_scale,
-            compensation_timeout: Duration::from_millis(params.compensation_timeout_ms as u64),
+            stale_timeout: Duration::from_millis(params.stale_timeout_ms as u64),
             log_period: Duration::from_millis(params.log_period_ms as u64),
             // Panics on an arm_id other than 0/1, validating the side at startup.
             limits: joint_limits::for_arm_id(arm_id),
@@ -76,13 +76,13 @@ fn main() -> Result<()> {
         let side = if arm_id == joint_limits::ARM_ID_LEFT { "left" } else { "right" };
         info!(
             "config: arm_id={arm_id} ({side}) rate={}Hz scales(gravity={} coriolis={} friction={}) \
-             recv_timeout={}us compensation_timeout={}ms log_period={}ms",
+             recv_timeout={}us stale_timeout={}ms log_period={}ms",
             params.control_rate_hz,
             cfg.gravity_scale,
             cfg.coriolis_scale,
             cfg.friction_scale,
             cfg.recv_timeout_us,
-            params.compensation_timeout_ms,
+            params.stale_timeout_ms,
             params.log_period_ms,
         );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
