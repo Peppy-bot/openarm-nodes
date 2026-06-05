@@ -19,14 +19,15 @@ fn main() -> Result<()> {
         let token = node_runner.cancellation_token().clone();
         let shared = state::new_shared();
 
-        // The UI loop is the only task — everything else (action firing) is
-        // spawned transiently from key handlers. Errors from inside the UI
-        // are logged here, not returned, so the node exits cleanly via the
-        // TerminalGuard's Drop rather than tearing down on a panic / Result
-        // error path.
-        if let Err(e) = ui::run(node_runner.clone(), shared, token).await {
-            error!(error = %e, "ui loop exited with error");
-        }
+        // ui::run is the long-lived HTTP + WebSocket server. It must be spawned
+        // rather than awaited here: peppylib registers `node_health` only after
+        // the setup closure returns, so awaiting a forever-task starves the
+        // health probe and the daemon SIGKILLs the instance after ~10s.
+        tokio::spawn(async move {
+            if let Err(e) = ui::run(node_runner, shared, token).await {
+                error!(error = %e, "ui server exited with error");
+            }
+        });
         Ok(())
     })
 }
