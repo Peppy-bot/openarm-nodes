@@ -9,18 +9,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppylib::config::QoSProfile;
+use peppylib::messaging::SenderTarget;
 use peppylib::runtime::{NodeBuilder, NodeRunner, StandaloneConfig};
 use peppylib::{ActionMessenger, Payload};
 use tracing::{error, info, warn};
 
 use peppygen::capnp::{
-    emit_move_gripper_feedback_message_capnp::move_gripper_feedback_message,
-    move_gripper_goal_message_capnp::move_gripper_goal_message,
-    move_gripper_goal_response_message_capnp::move_gripper_goal_response_message,
-    move_gripper_result_response_message_capnp::move_gripper_result_response_message,
+    openarm01_gripper_v1_emit_move_gripper_feedback_message_capnp::move_gripper_feedback_message,
+    openarm01_gripper_v1_move_gripper_goal_message_capnp::move_gripper_goal_message,
+    openarm01_gripper_v1_move_gripper_goal_response_message_capnp::move_gripper_goal_response_message,
+    openarm01_gripper_v1_move_gripper_result_response_message_capnp::move_gripper_result_message,
 };
 
-const TARGET_NODE: &str = "openarm01_gripper";
+const TARGET_INTERFACE: &str = "openarm01_gripper";
 const ACTION_NAME: &str = "move_gripper";
 
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]
@@ -131,9 +132,8 @@ fn decode_feedback(payload: &[u8]) -> capnp::Result<(Vec<f64>, f64)> {
 }
 
 fn decode_result(payload: &[u8]) -> capnp::Result<(bool, String, Vec<f64>, f64)> {
-    let mut slice = payload;
-    let r = capnp::serialize::read_message_from_flat_slice(&mut slice, Default::default())?;
-    let res = r.get_root::<move_gripper_result_response_message::Reader>()?;
+    let r = capnp::serialize::read_message(&mut std::io::Cursor::new(payload), Default::default())?;
+    let res = r.get_root::<move_gripper_result_message::Reader>()?;
     let message = res.get_message()?.to_str().unwrap_or("").to_string();
     let final_pos: Vec<f64> = res.get_final_joint_positions()?.iter().collect();
     Ok((res.get_success(), message, final_pos, res.get_action_time()))
@@ -148,11 +148,18 @@ async fn fire_one(
 ) -> bool {
     info!("[{side}] sending move_gripper position={position} feedback_hz={feedback_hz}");
     let payload = Payload::from(encode_goal(feedback_hz, position));
+    let to_target = match SenderTarget::interface(TARGET_INTERFACE, "v1") {
+        Ok(t) => t,
+        Err(e) => {
+            error!("[{side}] build SenderTarget failed: {e:?}");
+            return false;
+        }
+    };
     let mut handle = match ActionMessenger::send_goal(
         runner.messenger(),
         runner.processor().bound_core_node(),
         runner.processor().bound_instance_id(),
-        TARGET_NODE,
+        to_target,
         ACTION_NAME,
         None,
         Some(target_instance),
@@ -215,7 +222,7 @@ async fn fire_one(
 
     match ActionMessenger::request_result(runner.messenger(), &handle, Duration::from_secs(10)).await
     {
-        Ok(res) => match decode_result(res.payload().as_ref()) {
+        Ok(res) => match decode_result(res.body.as_ref()) {
             Ok((success, message, final_pos, t)) => {
                 info!(
                     "[{side}] RESULT success={success} msg={message:?} final={final_pos:?} t={t:.3}s"
