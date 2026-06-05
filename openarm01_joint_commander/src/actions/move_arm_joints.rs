@@ -40,7 +40,12 @@ async fn run(
     feedback_hz: u32,
 ) {
     let label = side.label();
-    info!(side = label, ?joint_positions, feedback_hz, "fire move_arm_joints");
+    info!(
+        side = label,
+        ?joint_positions,
+        feedback_hz,
+        "fire move_arm_joints"
+    );
 
     let goal = backbone_move_arm_joints::GoalRequest {
         arm_id: side.arm_id(),
@@ -111,22 +116,17 @@ async fn run(
                 false,
                 format!("move_arm_joints ({label}) abandoned by backbone"),
             ),
-            ResultOutcome::Expired => (
-                false,
-                format!("move_arm_joints ({label}) result expired"),
-            ),
+            ResultOutcome::Expired => (false, format!("move_arm_joints ({label}) result expired")),
         },
-        Err(e) => (false, format!("move_arm_joints ({label}) result error: {e}")),
+        Err(e) => (
+            false,
+            format!("move_arm_joints ({label}) result error: {e}"),
+        ),
     };
     finalize(&state, side, success, summary).await;
 }
 
-async fn finalize(
-    state: &SharedState,
-    side: Side,
-    success: bool,
-    summary: impl Into<String>,
-) {
+async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
     let summary = summary.into();
     let mut s = state.lock().await;
     s.arm_mut(side).in_flight = false;
@@ -137,4 +137,3 @@ async fn finalize(
         warn!(side = side.label(), %summary, "move_arm_joints done");
     }
 }
-

@@ -1,8 +1,10 @@
 # openarm01_joint_commander
 
-Rust TUI that drives the bimanual openarm01 in joint space. Reads stepping
-input from the keyboard, fires `move_arm_joints` and `move_gripper` actions at
-`openarm01_backbone`, and shows in-flight feedback in a ratatui interface.
+Rust node that drives the bimanual openarm01 in joint space from a browser. On
+startup it binds an HTTP + WebSocket server (default `:8765`, override with
+`PEPPY_JC_PORT`), serves a single-page UI with sliders for every joint and the
+gripper, and fires `move_arm_joints` / `move_gripper` actions at
+`openarm01_backbone`. Action feedback streams back over the WebSocket.
 
 MVP scope: joint-space only. Cartesian operator input (and the upstream IK +
 collision-detection pipeline) is post-MVP; the node goes through `backbone`'s
@@ -35,42 +37,42 @@ Apptainer pulls `tuatini/peppy-rust-cargo-base` and runs `cargo build --release`
 
 ```bash
 peppy node run openarm01_joint_commander:v1
+# logs: "joint commander UI at http://localhost:8765"
 ```
 
-Single instance. The TUI takes over the terminal; press `q` to quit cleanly.
+Open the logged URL in any browser. Cancel the node (`peppy stack stop` or
+ctrl-C on the runner) to shut down the server cleanly.
 
 ---
 
-## Keymap
+## UI
 
-| Key | Effect |
-|---|---|
-| `[` / `]` | Focus left / right arm |
-| `{` / `}` | Focus left / right gripper |
-| `1`..`7` | Select joint of the focused arm |
-| `↑` / `↓` | Step the selected joint by the current step size |
-| `+` / `-` | Halve / double the step size (clamped 0.01 - 0.5 rad) |
-| `Enter` | Fire `move_arm_joints` for the focused arm |
-| `h` | Reset focused arm target to home `[0, 0, 0, 0, 0, 0, 0]` |
-| `o` | Open the focused gripper (0.044 m) |
-| `c` | Close the focused gripper (0.0 m) |
-| `q` / `Esc` | Quit |
+Four panels: left arm, right arm, left gripper, right gripper.
 
-A previous goal must finish before the same arm / gripper accepts a new one —
-the status line shows `previous goal still in flight` otherwise.
+- **Arm**: 7 sliders (±π rad) with live target + feedback readouts. `Send` fires
+  `move_arm_joints` with the current slider values. `Home` resets sliders to
+  zero (does not send).
+- **Gripper**: position slider (0–0.044 m). `Open`, `Close`, and `Send`
+  shortcuts each fire `move_gripper`.
+- A previous goal must finish before the same arm / gripper accepts a new one —
+  the status line shows `previous goal still in flight` otherwise.
+
+The WebSocket auto-reconnects every second when the server restarts, so you can
+leave the browser tab open across rebuilds.
 
 ---
 
 ## Architecture
 
 - `main.rs`: thin entrypoint; `NodeBuilder::new().run(...)` then awaits `ui::run`.
-- `ui.rs`: ratatui render loop + `crossterm::EventStream` input loop. Holds the
-  terminal alive via a `Drop` guard so any exit path restores the TTY.
+- `ui.rs`: axum router (`GET /` → embedded `static/index.html`, `GET /ws` →
+  WebSocket). The WS loop ticks state snapshots out at 10 Hz and dispatches
+  `fire_arm` / `fire_gripper` commands by spawning action tasks.
 - `state.rs`: `Arc<tokio::sync::Mutex<UiState>>` shared with action tasks. The
   `in_flight` flag per arm / gripper is the single-writer gate that prevents
   double-firing.
-- `actions/move_arm_joints.rs` + `actions/move_gripper.rs`: each `Enter` /
-  `o` / `c` spawns one task that fires the consumed action at backbone,
-  streams feedback into the shared state, then writes the result into the
-  status line and clears `in_flight`. Cancel-aware: a global token cancel
-  abandons the feedback wait and finalises with a status message.
+- `actions/move_arm_joints.rs` + `actions/move_gripper.rs`: each command spawns
+  one task that fires the consumed action at backbone, streams feedback into
+  the shared state, then writes the result into the status line and clears
+  `in_flight`. Cancel-aware: a global token cancel abandons the feedback wait
+  and finalises with a status message.

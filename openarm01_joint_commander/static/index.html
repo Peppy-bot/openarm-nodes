@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>openarm01 joint commander</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #0f1115; color: #e6e8eb; }
+  h1 { font-size: 18px; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; }
+  .conn { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #444; }
+  .conn.open { background: #1f7a3a; }
+  .conn.closed { background: #8a2a2a; }
+  .row { display: flex; gap: 16px; margin-bottom: 16px; }
+  .panel { flex: 1; background: #1a1d23; border: 1px solid #2a2f38; border-radius: 6px; padding: 12px; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-weight: 600; }
+  .badge { font-size: 11px; padding: 2px 6px; border-radius: 8px; background: #444; }
+  .badge.flight { background: #b07a1f; }
+  .joint { display: grid; grid-template-columns: 28px 1fr 64px 64px; gap: 8px; align-items: center; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .joint .name { color: #9aa0a8; }
+  .joint .target { text-align: right; }
+  .joint .fb, .gripper .fb { text-align: right; color: #8ab4f8; }
+  .gripper { display: grid; grid-template-columns: 1fr 80px 120px; gap: 8px; align-items: center; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #4a9eff; }
+  button { background: #2a3142; border: 1px solid #3a4258; color: #e6e8eb; padding: 6px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+  button:hover { background: #364060; }
+  button.primary { background: #1e5fa3; border-color: #2d7ac6; }
+  button.primary:hover { background: #2a72b8; }
+  .actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+  .status { padding: 8px 12px; background: #1a1d23; border: 1px solid #2a2f38; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+  <h1>openarm01 joint commander <span id="conn" class="conn closed">disconnected</span></h1>
+
+  <div class="row">
+    <div class="panel" id="left_arm"></div>
+    <div class="panel" id="right_arm"></div>
+  </div>
+  <div class="row">
+    <div class="panel" id="left_gripper"></div>
+    <div class="panel" id="right_gripper"></div>
+  </div>
+  <div class="status" id="status">connecting…</div>
+
+<script>
+const PI = Math.PI;
+const ARM_DOF = 7;
+const GRIPPER_MAX = 0.044;
+let ws = null;
+
+function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
+function $(id) { return document.getElementById(id); }
+
+function build_arm(side, label) {
+  const root = $(`${side}_arm`);
+  root.innerHTML = `
+    <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
+    <div id="${side}_arm_joints"></div>
+    <div class="actions">
+      <button onclick="reset_arm('${side}')">Home</button>
+      <button class="primary" onclick="fire_arm('${side}')">Send</button>
+    </div>`;
+  const joints = $(`${side}_arm_joints`);
+  for (let i = 0; i < ARM_DOF; i++) {
+    const row = document.createElement('div');
+    row.className = 'joint';
+    row.innerHTML = `
+      <span class="name">j${i+1}</span>
+      <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
+             oninput="document.getElementById('${side}_t${i}').textContent = fmt(parseFloat(this.value))" />
+      <span class="target" id="${side}_t${i}">+0.000</span>
+      <span class="fb" id="${side}_f${i}">---</span>`;
+    joints.appendChild(row);
+  }
+}
+
+function build_gripper(side, label) {
+  const root = $(`${side}_gripper`);
+  root.innerHTML = `
+    <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_g_badge">idle</span></div>
+    <div class="gripper">
+      <input type="range" min="0" max="${GRIPPER_MAX}" step="0.0005" value="0" id="${side}_g"
+             oninput="document.getElementById('${side}_gt').textContent = parseFloat(this.value).toFixed(4) + ' m'" />
+      <span class="target" id="${side}_gt">0.0000 m</span>
+      <span class="fb" id="${side}_gf">---</span>
+    </div>
+    <div class="actions">
+      <button onclick="set_gripper('${side}', 0)">Close</button>
+      <button onclick="set_gripper('${side}', ${GRIPPER_MAX})">Open</button>
+      <button class="primary" onclick="fire_gripper('${side}')">Send</button>
+    </div>`;
+}
+
+function reset_arm(side) {
+  for (let i = 0; i < ARM_DOF; i++) {
+    $(`${side}_j${i}`).value = 0;
+    $(`${side}_t${i}`).textContent = '+0.000';
+  }
+}
+
+function fire_arm(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const joints = [];
+  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
+  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints}));
+}
+
+function set_gripper(side, m) {
+  $(`${side}_g`).value = m;
+  $(`${side}_gt`).textContent = parseFloat(m).toFixed(4) + ' m';
+  fire_gripper(side);
+}
+
+function fire_gripper(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const position = parseFloat($(`${side}_g`).value);
+  ws.send(JSON.stringify({cmd: 'fire_gripper', side, position}));
+}
+
+function apply_snapshot(snap) {
+  for (const side of ['left', 'right']) {
+    const a = snap[`${side}_arm`];
+    const b = $(`${side}_arm_badge`);
+    b.textContent = a.in_flight ? 'in flight' : 'idle';
+    b.className = 'badge' + (a.in_flight ? ' flight' : '');
+    for (let i = 0; i < ARM_DOF; i++) {
+      $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
+    }
+
+    const g = snap[`${side}_gripper`];
+    const gb = $(`${side}_g_badge`);
+    gb.textContent = g.in_flight ? 'in flight' : 'idle';
+    gb.className = 'badge' + (g.in_flight ? ' flight' : '');
+    $(`${side}_gf`).textContent = g.feedback && g.feedback.length
+      ? g.feedback.map(x => x.toFixed(4)).join(', ')
+      : '---';
+  }
+  $('status').textContent = snap.status;
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  const conn = $('conn');
+  ws.onopen = () => { conn.className = 'conn open'; conn.textContent = 'connected'; };
+  ws.onclose = () => {
+    conn.className = 'conn closed'; conn.textContent = 'disconnected';
+    setTimeout(connect, 1000);
+  };
+  ws.onmessage = (e) => { try { apply_snapshot(JSON.parse(e.data)); } catch {} };
+}
+
+build_arm('left', 'left arm');
+build_arm('right', 'right arm');
+build_gripper('left', 'left gripper');
+build_gripper('right', 'right gripper');
+connect();
+</script>
+</body>
+</html>

@@ -108,22 +108,14 @@ async fn run(
                 false,
                 format!("move_gripper ({label}) abandoned by backbone"),
             ),
-            ResultOutcome::Expired => (
-                false,
-                format!("move_gripper ({label}) result expired"),
-            ),
+            ResultOutcome::Expired => (false, format!("move_gripper ({label}) result expired")),
         },
         Err(e) => (false, format!("move_gripper ({label}) result error: {e}")),
     };
     finalize(&state, side, success, summary).await;
 }
 
-async fn finalize(
-    state: &SharedState,
-    side: Side,
-    success: bool,
-    summary: impl Into<String>,
-) {
+async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
     let summary = summary.into();
     let mut s = state.lock().await;
     s.gripper_mut(side).in_flight = false;

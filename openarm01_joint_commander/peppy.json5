@@ -1,9 +1,10 @@
-// openarm01_joint_commander — operator entry point. Reads keyboard input,
-// shows arm + gripper state in a TUI, and fires move_arm_joints / move_gripper
-// goals at openarm01_backbone. Backbone routes each goal to the correct
-// arm / gripper instance via launcher-bound interface link_ids.
+// openarm01_joint_commander — operator entry point. Serves a browser-based
+// control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that fires
+// move_arm_joints / move_gripper goals at openarm01_backbone. Backbone routes
+// each goal to the correct arm / gripper instance via launcher-bound interface
+// link_ids.
 //
-// MVP scope: keyboard-driven joint-space only. A future pose_estimation
+// MVP scope: slider-driven joint-space only. A future pose_estimation
 // implementation will land as a separate sibling node
 // (openarm01_joint_commander_pose_estimation), not as a variant.
 {

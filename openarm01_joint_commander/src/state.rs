@@ -1,38 +1,11 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use tokio::sync::Mutex;
 
 pub const ARM_DOF: usize = 7;
 pub const GRIPPER_OPEN_M: f64 = 0.044;
 pub const GRIPPER_CLOSED_M: f64 = 0.0;
-pub const GRIPPER_STEP_M: f64 = 0.005;
 pub const JOINT_LIMIT_RAD: f64 = std::f64::consts::PI;
-pub const DEFAULT_STEP_RAD: f64 = 0.05;
-pub const MIN_STEP_RAD: f64 = 0.01;
-pub const MAX_STEP_RAD: f64 = 0.5;
-pub const STATUS_FRESHNESS_SECS: u64 = 6;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Focus {
-    LeftArm,
-    RightArm,
-    LeftGripper,
-    RightGripper,
-}
-
-impl Focus {
-    pub fn side(self) -> Side {
-        match self {
-            Self::LeftArm | Self::LeftGripper => Side::Left,
-            Self::RightArm | Self::RightGripper => Side::Right,
-        }
-    }
-
-    pub fn is_arm(self) -> bool {
-        matches!(self, Self::LeftArm | Self::RightArm)
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -66,7 +39,6 @@ impl Side {
 #[derive(Clone, Debug)]
 pub struct ArmTarget {
     pub joints: [f64; ARM_DOF],
-    pub selected_joint: usize,
     pub last_feedback: Option<[f64; ARM_DOF]>,
     pub in_flight: bool,
 }
@@ -75,16 +47,9 @@ impl ArmTarget {
     pub fn home() -> Self {
         Self {
             joints: [0.0; ARM_DOF],
-            selected_joint: 0,
             last_feedback: None,
             in_flight: false,
         }
-    }
-
-    pub fn step_selected(&mut self, delta: f64) {
-        let j = self.selected_joint;
-        let next = (self.joints[j] + delta).clamp(-JOINT_LIMIT_RAD, JOINT_LIMIT_RAD);
-        self.joints[j] = next;
     }
 }
 
@@ -103,29 +68,6 @@ impl GripperTarget {
             in_flight: false,
         }
     }
-
-    pub fn step(&mut self, delta: f64) {
-        self.position = (self.position + delta).clamp(GRIPPER_CLOSED_M, GRIPPER_OPEN_M);
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct StatusLine {
-    pub message: String,
-    pub set_at: Instant,
-}
-
-impl StatusLine {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            set_at: Instant::now(),
-        }
-    }
-
-    pub fn is_fresh(&self) -> bool {
-        self.set_at.elapsed().as_secs() < STATUS_FRESHNESS_SECS
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -134,9 +76,7 @@ pub struct UiState {
     pub right_arm: ArmTarget,
     pub left_gripper: GripperTarget,
     pub right_gripper: GripperTarget,
-    pub focus: Focus,
-    pub step_rad: f64,
-    pub status: Option<StatusLine>,
+    pub status: String,
 }
 
 impl UiState {
@@ -146,11 +86,7 @@ impl UiState {
             right_arm: ArmTarget::home(),
             left_gripper: GripperTarget::closed(),
             right_gripper: GripperTarget::closed(),
-            focus: Focus::LeftArm,
-            step_rad: DEFAULT_STEP_RAD,
-            status: Some(StatusLine::new(
-                "ready — [/] arm, {/} gripper, 1-7 joint, ↑↓ step, Enter fire, o/c open/close, h home, q quit",
-            )),
+            status: "ready".to_string(),
         }
     }
 
@@ -183,15 +119,7 @@ impl UiState {
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
-        self.status = Some(StatusLine::new(message));
-    }
-
-    pub fn step_size_inc(&mut self) {
-        self.step_rad = (self.step_rad * 2.0).clamp(MIN_STEP_RAD, MAX_STEP_RAD);
-    }
-
-    pub fn step_size_dec(&mut self) {
-        self.step_rad = (self.step_rad * 0.5).clamp(MIN_STEP_RAD, MAX_STEP_RAD);
+        self.status = message.into();
     }
 }
 
