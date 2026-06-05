@@ -37,12 +37,40 @@ async fn run(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<()> {
     info!("joint_positions: {:.4?}", start);
 
     if !params.motion_enabled {
-        info!("motion_enabled=false: connectivity confirmed; set motion_enabled=true to move");
+        info!("motion_enabled=false: connectivity confirmed; set motion_enabled=true to cycle");
         return Ok(());
     }
 
-    // Resolve the workspace (Cartesian) target to joint angles via IK, seeded with
-    // the current pose so the solver picks the branch nearest where we are.
+    // Workspace endpoint: resolve the Cartesian target to joints via IK once,
+    // seeded with the current pose so the solver picks the nearest branch.
+    let reach = solve_ik(&node_runner, &params, start).await?;
+    // Home endpoint: nearly hanging (all joints ~0). J4's lower limit IS 0, so
+    // rest the elbow a hair above it rather than on the mechanical stop.
+    let home = [0.0, 0.0, 0.0, params.home_elbow_rad, 0.0, 0.0, 0.0];
+
+    info!(
+        "cycling between reach={:.4?} and home={:.4?}, dwell {}s each (stop with `peppy node stop`)",
+        reach, home, params.dwell_s
+    );
+
+    // Oscillate forever. Each move's duration is owned by the arm
+    // (min_motion_time_s); this just commands the two endpoints back to back.
+    loop {
+        for (label, target) in [("reach", reach), ("home", home)] {
+            info!("move to {label}: {:.4?}", target);
+            move_arm(&node_runner, &params, target).await?;
+            tokio::time::sleep(Duration::from_secs_f64(params.dwell_s)).await;
+        }
+    }
+}
+
+/// Resolve the workspace (Cartesian) target to joint angles via the IK service,
+/// seeded with `seed` so the solver picks the branch nearest the current pose.
+async fn solve_ik(
+    node_runner: &Arc<NodeRunner>,
+    params: &Parameters,
+    seed: [f64; 7],
+) -> Result<[f64; 7]> {
     let target_position = [params.target_x, params.target_y, params.target_z];
     let target_orientation = [
         params.target_qx,
@@ -55,12 +83,12 @@ async fn run(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<()> {
         target_position, target_orientation, params.arm_angle_policy, params.arm_angle
     );
     let ik = ik_get_ik::poll(
-        &node_runner,
+        node_runner,
         Duration::from_secs_f64(params.ik_timeout_s),
         ik_get_ik::Request {
             target_position,
             target_orientation,
-            seed: start.to_vec(),
+            seed: seed.to_vec(),
             arm_angle_policy: params.arm_angle_policy.clone(),
             arm_angle: params.arm_angle,
         },
@@ -75,10 +103,9 @@ async fn run(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<()> {
         error!("IK returned {} joints, expected 7", ik.data.joint_positions.len());
         std::process::exit(1);
     }
-    let target: [f64; 7] = std::array::from_fn(|i| ik.data.joint_positions[i]);
-    info!("IK solution: {:.4?} (arm_angle={:.4})", target, ik.data.arm_angle);
-
-    move_arm(&node_runner, &params, target).await
+    let q: [f64; 7] = std::array::from_fn(|i| ik.data.joint_positions[i]);
+    info!("IK solution: {:.4?} (arm_angle={:.4})", q, ik.data.arm_angle);
+    Ok(q)
 }
 
 /// Fire one `move_arm_joints` goal to `joint_positions`, stream feedback, and log
@@ -88,7 +115,6 @@ async fn move_arm(
     params: &Parameters,
     joint_positions: [f64; 7],
 ) -> Result<()> {
-    info!("move to {:.4?}", joint_positions);
     let mut handle = ActionHandle::fire_goal(
         node_runner,
         Duration::from_secs_f64(params.goal_timeout_s),

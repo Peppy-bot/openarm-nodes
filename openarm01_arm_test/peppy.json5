@@ -1,7 +1,8 @@
-// DNC test harness: drives a single openarm01_arm to a natural pose in front of
-// the robot. The target is specified in the workspace (Cartesian) and resolved to
-// joint angles by the srs_model IK service, then commanded via move_arm_joints.
-// motion_enabled=false just verifies connectivity and logs joint positions.
+// DNC test harness: slowly oscillates a single openarm01_arm between a workspace
+// (Cartesian) pose and a near-home "hanging" pose, forever, until stopped. The
+// workspace target is resolved to joint angles once by the srs_model IK service;
+// the home pose is all joints ~0. motion_enabled=false just verifies connectivity
+// and logs joint positions. Move speed is owned by the arm's min_motion_time_s.
 {
   peppy_schema: "node_v1",
   manifest: {
@@ -46,7 +47,7 @@
     },
     parameters: {
       // false: verify connectivity and log joint positions, then exit.
-      // true: solve IK for the target pose and move the arm there once.
+      // true: oscillate between the IK-resolved workspace pose and near-home.
       motion_enabled: { $type: "bool", $default: false },
 
       // World-frame target pose for the end effector. Defaults are a natural
@@ -68,6 +69,12 @@
       // angle instead (arm_angle ignored).
       arm_angle_policy: { $type: "string", $default: "fixed" },
       arm_angle: { $type: "f64", $default: -1.3994 },
+
+      // Home (near-hanging) endpoint: every joint goes to 0 except the elbow (J4),
+      // whose lower limit IS 0 — rest it a hair above so it doesn't sit on the stop.
+      home_elbow_rad: { $type: "f64", $default: 0.05 },
+      // Seconds to dwell at each endpoint before moving to the other.
+      dwell_s: { $type: "f64", $default: 2.0 },
 
       feedback_frequency: { $type: "u32", $default: 10 },
       ik_timeout_s: { $type: "f64", $default: 5.0 },

@@ -146,19 +146,20 @@ Leave the arm running at `gravity_scale=1.0`. Then:
 ```sh
 peppy node run openarm01_arm_test:v1 -i arm_test_0 \
   motion_enabled=true \
-  --bind arm@arm_0,ik@srs_left_0 --max-timeout 600
+  --bind arm@arm_0,ik@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
 
-The tester logs arm_id, start joints, IK target + solution, goal accepted,
-feedback, and result. The arm logs `track ... max_err`. The move takes at least
-`min_motion_time_s` (5 s from step 4) — deliberately slow for the first
-trajectory; lower it on the arm run once tracking is trusted.
+The tester resolves the IK target once, then **oscillates** between that
+workspace pose and near-home, dwelling `dwell_s` (default 2 s) at each end,
+**until you `peppy node stop arm_test_0`**. It logs each move + feedback; the arm
+logs `track ... max_err`. Each move takes `min_motion_time_s` (5 s, from the arm
+run) — deliberately slow.
 
-✅ smooth move to the natural front pose, `track max_err` small (a few °),
-result success. Default gains are the teleop config: 240/3 on the shoulder/elbow
-joints (1-4) and lower wrist gains (`kp5/6/7 = 24/31/25`, `kd = 0.2`). To soften
-the first move, lower the shoulder/elbow gains (e.g. `kp1=70 kp2=70 kp3=70
-kp4=70`) and leave the wrist defaults.
+✅ smooth oscillation reach↔home, `track max_err` small (a few °), each move
+reports success. Default gains are the teleop config: 240/3 on the
+shoulder/elbow joints (1-4) and lower wrist gains (`kp5/6/7 = 24/31/25`,
+`kd = 0.2`). To soften the moves, lower the shoulder/elbow gains (e.g. `kp1=70
+kp2=70 kp3=70 kp4=70`) and leave the wrist defaults.
 ❌ overshoot/oscillation → lower kp or investigate.
 
 ## Step 6 — Friction (0.3)
