@@ -107,29 +107,19 @@ Arm is **limp** (`tau≈0`). Judge:
 
 ✅ comp sane + low latency → next. ❌ gravity wild/NaN or huge latency → stop.
 
-## Step 3 — 500 Hz (still limp)
+## Step 3 — Confirm 100 Hz timing (500 Hz isn't viable)
 
-Size the timeouts from step-2 latency: `compensation_timeout_ms` must exceed the
-observed poll max but stay under the 2 ms cycle, and shrink the CAN read too.
-Note `compensation_timeout_ms` is whole milliseconds, so at 500 Hz (a 2 ms budget)
-`1` is effectively the only legal value — there's no room to fine-tune it against
-the measured µs latency; that headroom comes from `recv_timeout_us` instead.
+Stay on the step-2 run (limp, 100 Hz) and watch a few windows. 100 Hz is the
+operating rate: 500 Hz was dropped because the synchronous `get_compensation`
+poll runs ~2 ms (see step-2 `poll latency` avg), which can't fit a 500 Hz 2 ms
+cycle — raise the rate and the latency tail blows the budget. At 100 Hz the
+10 ms budget has comfortable headroom.
 
-```sh
-peppy node stop arm_0
-peppy node run openarm01_arm:v1 -i arm_0 \
-  arm_id=0 can_interface=$CAN control_rate_hz=500 \
-  recv_timeout_us=400 compensation_timeout_ms=1 \
-  gravity_scale=0 coriolis_scale=0 friction_scale=0 min_motion_time_s=5.0 \
-  --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
-```
+✅ `loop` holds ~100 Hz, `overruns=0`, `poll latency` max ≪ 10 ms → gravity next.
+❌ overruns climb or the latency tail spikes → investigate before energizing.
 
-✅ `loop` ~500 Hz, `overruns≈0`, `poll latency` max ≪ 2 ms → next.
-❌ overruns climb or latency tail blows the budget → drop the rate; that's the
-signal the synchronous poll can't sustain 500 Hz (revisit the push/topic model).
-
-> Recommended: do the **first gravity-on (step 4) at 100 Hz**, confirm direction,
-> then come back to 500 Hz. A sign error is far easier to catch slow.
+> To run faster later, move `get_compensation` off the hot path (a push/topic
+> model with no per-tick round trip) so the rate isn't bounded by poll latency.
 
 ## Step 4 — Gravity (ramp 0.3 → 1.0)
 
@@ -176,8 +166,7 @@ kp4=70`) and leave the wrist defaults.
 ```sh
 peppy node stop arm_0
 peppy node run openarm01_arm:v1 -i arm_0 \
-  arm_id=0 can_interface=$CAN control_rate_hz=500 \
-  recv_timeout_us=400 compensation_timeout_ms=1 \
+  arm_id=0 can_interface=$CAN control_rate_hz=100 \
   gravity_scale=1.0 coriolis_scale=0 friction_scale=0.3 min_motion_time_s=5.0 \
   --bind model@srs_left_0 --idle-timeout 86400 --max-timeout 86400
 ```
