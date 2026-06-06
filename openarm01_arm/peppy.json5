@@ -92,8 +92,7 @@
     ],
     topics: {
       consumes: [
-        // gravity + Coriolis feedforward, pushed by the model node (replaces the
-        // per-tick get_compensation request/response).
+        // gravity + Coriolis feedforward, pushed by the model node each tick.
         { link_id: "model", name: "compensation" },
       ],
     },
