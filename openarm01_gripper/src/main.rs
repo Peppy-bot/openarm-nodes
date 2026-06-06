@@ -2,7 +2,7 @@ mod control;
 
 use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
-use peppygen::exposed_services::get_gripper_id;
+use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::{NodeBuilder, Parameters, Result};
 
 use std::sync::{Arc, Mutex};

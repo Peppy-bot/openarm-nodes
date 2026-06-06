@@ -3,14 +3,13 @@ mod trajectory;
 
 use openarm_can::{ArmCan, CallbackMode, v10};
 use control::{ControlConfig, run_move_arm_joints};
-use peppygen::exposed_actions::move_arm;
-use peppygen::exposed_services::{get_arm_id, get_joint_positions};
+use peppygen::exposed_services::openarm01_arm::v1::{get_arm_id, get_joint_positions};
 use peppygen::{NodeBuilder, Parameters, Result};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
 const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
@@ -94,14 +93,20 @@ fn main() -> Result<()> {
                     _ = sigterm.recv() => {},
                 }
                 info!("shutdown: disabling motors");
-                // unwrap_or_else: recover even if the lock is poisoned (panic in control loop)
-                // so disable_all() always runs and motors don't stay energised.
-                arm.lock().unwrap_or_else(|e| e.into_inner()).disable_all();
-                // ROS2 reference: sleep before recv to give motors time to acknowledge.
-                // Drop the guard across the await so other tasks aren't blocked.
-                tokio::time::sleep(POST_DISABLE_SLEEP).await;
-                arm.lock().unwrap_or_else(|e| e.into_inner()).recv_all(BRINGUP_RECV_US);
-                let _ = std::fs::remove_file(&lock_path);
+                {
+                    // unwrap_or_else: recover even if poisoned (panic in control loop)
+                    // so disable_all() always runs and motors don't stay energised.
+                    // Hold the lock across disable + sleep + recv so an in-flight
+                    // control loop can't re-command the motors mid-shutdown.
+                    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                    a.disable_all();
+                    // ROS2 reference: sleep before recv to let motors acknowledge.
+                    std::thread::sleep(POST_DISABLE_SLEEP);
+                    a.recv_all(BRINGUP_RECV_US);
+                }
+                if let Err(e) = std::fs::remove_file(&lock_path) {
+                    warn!("failed to remove lock {lock_path}: {e}");
+                }
                 std::process::exit(0);
             });
         }
@@ -135,26 +140,6 @@ fn main() -> Result<()> {
                     .await
                     {
                         error!("get_joint_positions: {e}");
-                    }
-                }
-            });
-        }
-
-        // TODO: move_arm (Cartesian) always rejects. To implement: generate a minimum-jerk
-        // Cartesian trajectory, run IK at each control cycle to get joint targets, then MIT
-        // control — requires an embedded IK solver running at control rate.
-        {
-            let runner = node_runner.clone();
-            tokio::spawn(async move {
-                let mut handle = move_arm::ActionHandle::expose(&runner)
-                    .await
-                    .expect("expose move_arm");
-                loop {
-                    if let Err(e) = handle
-                        .handle_goal_next_request(|_req| Ok(move_arm::GoalResponse::new(false)))
-                        .await
-                    {
-                        error!("move_arm goal: {e}");
                     }
                 }
             });
