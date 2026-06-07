@@ -362,13 +362,16 @@ async fn publish_set_ctrl(
     .map_err(|e| e.to_string())
 }
 
-/// SIGINT/SIGTERM handler — publishes ctrl=0.0 then exits. Prevents the
-/// bridge extension from holding the gripper's last commanded position
-/// indefinitely after the node process dies.
+/// SIGINT/SIGTERM handler — cancels the control loop, publishes ctrl=0.0 over a
+/// short grace window, then exits. Without the cancel, the still-running action
+/// loop could overwrite the zero with the last per_finger command between our
+/// publish and process exit; without the repeat publishes, a single best-effort
+/// drop would leave the bridge holding the last non-zero command indefinitely.
 pub async fn shutdown_handler(
     handle: Arc<MessengerHandle>,
     daemon: DaemonState,
     gripper_id: GripperId,
+    token: CancellationToken,
 ) {
     let side = gripper_id.side_word();
     let actuator_names = [
@@ -384,13 +387,23 @@ pub async fn shutdown_handler(
         _ = sigint.recv() => {},
         _ = sigterm.recv() => {},
     }
-    info!("shutdown: zeroing ctrl for gripper_id={}", gripper_id.0);
-    if let Err(e) = publish_set_ctrl(
-        &handle, &daemon, &set_ctrl_topic, &instance_id, &actuator_names, 0.0,
-    )
-    .await
-    {
-        warn!("shutdown publish: {e}");
+    info!(
+        "shutdown: cancelling action loop, zeroing ctrl for gripper_id={}",
+        gripper_id.as_u8()
+    );
+    token.cancel();
+
+    const GRACE_TICK: Duration = Duration::from_millis(10);
+    const GRACE_REPEATS: u32 = 5;
+    for _ in 0..GRACE_REPEATS {
+        if let Err(e) = publish_set_ctrl(
+            &handle, &daemon, &set_ctrl_topic, &instance_id, &actuator_names, 0.0,
+        )
+        .await
+        {
+            warn!("shutdown publish: {e}");
+        }
+        tokio::time::sleep(GRACE_TICK).await;
     }
     std::process::exit(0);
 }

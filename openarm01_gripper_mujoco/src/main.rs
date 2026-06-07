@@ -60,7 +60,7 @@ fn main() -> Result<()> {
         ));
 
         tokio::spawn(actions::move_gripper::shutdown_handler(
-            handle.clone(), daemon.clone(), gripper_id,
+            handle.clone(), daemon.clone(), gripper_id, token.clone(),
         ));
 
         Ok(())
