@@ -106,7 +106,12 @@ class SimLauncher:
         finally:
             self._ready.clear()
             if self._extension is not None:
-                self._extension.shutdown()
+                # An extension shutdown failure must not strand the Isaac process —
+                # timeline.stop + sim_app.close still need to run.
+                try:
+                    self._extension.shutdown()
+                except Exception:
+                    logger.exception("IsaacBridgeExtension shutdown failed")
             if self._timeline is not None:
                 self._timeline.stop()
             self._sim_app.close()
