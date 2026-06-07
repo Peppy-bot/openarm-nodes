@@ -15,6 +15,8 @@ from bridge_extension import MujocoBridgeExtension
 logger = logging.getLogger(__name__)
 
 _HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
+_VIEWER_HOST_ENV = "PEPPY_BRIDGE_VIEWER_HOST"
+_VIEWER_PORT_ENV = "PEPPY_BRIDGE_VIEWER_PORT"
 
 
 class SimLauncher:
@@ -79,7 +81,11 @@ class SimLauncher:
 
         server = None
         try:
-            server = viser.ViserServer(host="0.0.0.0", port=8080)
+            # Loopback by default; opt-in to bind on all interfaces via env so the
+            # viewer isn't exposed network-wide just because someone enabled headed mode.
+            host = os.environ.get(_VIEWER_HOST_ENV, "127.0.0.1")
+            port = int(os.environ.get(_VIEWER_PORT_ENV, "8080"))
+            server = viser.ViserServer(host=host, port=port)
             viewer = mjviser.Viewer(model, data, server=server, step_fn=_step_fn)
 
             # viser sends batched position updates as delta messages only —
@@ -97,7 +103,7 @@ class SimLauncher:
             viewer._render()  # pylint: disable=W0212
 
             logger.info(
-                "MuJoCo viewer available — open http://<host>:8080 in a browser"
+                f"MuJoCo viewer available — open http://{host}:{port} in a browser"
             )
             _render_period = 1.0 / 60.0
             _dt = model.opt.timestep
