@@ -22,7 +22,7 @@ fn main() -> Result<()> {
         let token = node_runner.cancellation_token().clone();
         info!(
             "starting openarm01_gripper:mujoco instance={} gripper_id={}",
-            gripper_id.instance_id(), gripper_id.0
+            gripper_id.instance_id(), gripper_id.as_u8()
         );
 
         // peppylib daemon + messenger handle shared between the action

@@ -84,7 +84,7 @@ struct ContactForcesRaw {
 
 pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<SharedState>) {
     let side = gripper_id.side_word();
-    info!("telemetry: starting pipelines (gripper_id={} side={})", gripper_id.0, side);
+    info!("telemetry: starting pipelines (gripper_id={} side={})", gripper_id.as_u8(), side);
 
     let daemon = match peppylib::info(&runner, None).await {
         Ok(info) => DaemonState {

@@ -1,5 +1,8 @@
+// GripperId is constructed only via `new(0|1)`. The private field stops callers
+// from minting an arbitrary value and bypassing validation, so side_word /
+// instance_id can rely on the invariant instead of carrying "unknown" arms.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct GripperId(pub u8);
+pub struct GripperId(u8);
 
 #[derive(Debug)]
 pub struct InvalidGripperId(pub u8);
@@ -20,11 +23,15 @@ impl GripperId {
         }
     }
 
+    pub fn as_u8(self) -> u8 {
+        self.0
+    }
+
     pub fn side_word(self) -> &'static str {
         match self.0 {
             0 => "left",
             1 => "right",
-            _ => "unknown",
+            _ => unreachable!("GripperId validated at construction"),
         }
     }
 
@@ -32,7 +39,7 @@ impl GripperId {
         match self.0 {
             0 => "left_gripper",
             1 => "right_gripper",
-            _ => "unknown",
+            _ => unreachable!("GripperId validated at construction"),
         }
     }
 }
