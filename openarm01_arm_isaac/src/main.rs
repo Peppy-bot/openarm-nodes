@@ -25,7 +25,7 @@ fn main() -> Result<()> {
         info!(
             "starting openarm01_arm_isaac instance={} arm_id={}",
             arm_id.instance_id(),
-            arm_id.0
+            arm_id.raw()
         );
 
         peppygen::clock::init(&node_runner).await.expect("peppygen::clock::init");

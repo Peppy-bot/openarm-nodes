@@ -25,7 +25,7 @@ fn main() -> Result<()> {
         info!(
             "starting openarm01_arm_mujoco instance={} arm_id={}",
             arm_id.instance_id(),
-            arm_id.0
+            arm_id.raw()
         );
 
         // Initialise peppygen clock so emit-side stamps come from peppy's

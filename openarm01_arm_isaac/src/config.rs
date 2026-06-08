@@ -1,5 +1,5 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ArmId(pub u8);
+pub struct ArmId(u8);
 
 #[derive(Debug)]
 pub struct InvalidArmId(pub u8);
@@ -34,5 +34,9 @@ impl ArmId {
             1 => "right_arm",
             _ => unreachable!("ArmId({}) bypassed new()", self.0),
         }
+    }
+
+    pub fn raw(self) -> u8 {
+        self.0
     }
 }

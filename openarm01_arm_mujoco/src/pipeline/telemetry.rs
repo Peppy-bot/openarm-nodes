@@ -53,7 +53,7 @@ struct TfTreeRaw {
 
 pub async fn run(runner: Arc<NodeRunner>, arm_id: ArmId, state: Arc<SharedState>) {
     let side = arm_id.side_word();
-    info!("telemetry: starting pipelines (arm_id={} side={})", arm_id.0, side);
+    info!("telemetry: starting pipelines (arm_id={} side={})", arm_id.raw(), side);
 
     let daemon = match peppylib::info(&runner, None).await {
         Ok(info) => DaemonState {

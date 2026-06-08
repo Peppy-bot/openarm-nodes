@@ -16,7 +16,7 @@ pub async fn run(
         tokio::select! {
             _ = token.cancelled() => break,
             result = get_arm_id::handle_next_request(&runner, |_req| {
-                Ok(get_arm_id::Response::new(arm_id.0))
+                Ok(get_arm_id::Response::new(arm_id.raw()))
             }) => {
                 if let Err(e) = result {
                     error!("get_arm_id: {e}");
