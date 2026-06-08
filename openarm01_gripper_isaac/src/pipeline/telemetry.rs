@@ -193,24 +193,30 @@ async fn emit_contact_forces(
 ) -> std::result::Result<(), String> {
     let (f1, f2) = partition_contacts(&msg.contacts, finger1_prefix, finger2_prefix);
 
-    contact_forces_finger1::emit(
-        runner,
-        ROBOT_NAME.into(),
-        msg.step,
-        to_f1(&f1),
-        msg.stamp,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    contact_forces_finger2::emit(
-        runner,
-        ROBOT_NAME.into(),
-        msg.step,
-        to_f2(&f2),
-        msg.stamp,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
+    // Skip empty payloads on hot telemetry ticks — at 50-1000 Hz × 2 sides ×
+    // 2 fingers, unconditional emit would flood subscribers with "contacts: []".
+    if !f1.is_empty() {
+        contact_forces_finger1::emit(
+            runner,
+            ROBOT_NAME.into(),
+            msg.step,
+            to_f1(&f1),
+            msg.stamp,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    if !f2.is_empty() {
+        contact_forces_finger2::emit(
+            runner,
+            ROBOT_NAME.into(),
+            msg.step,
+            to_f2(&f2),
+            msg.stamp,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

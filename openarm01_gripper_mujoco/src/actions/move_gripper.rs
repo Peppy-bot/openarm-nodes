@@ -202,6 +202,10 @@ async fn run_control_loop(
         // republishing makes the path self-healing. Idempotent. But if the
         // publish keeps failing, the gripper is not being commanded — bail
         // rather than let convergence/stall logic report a false success.
+        //
+        // Rate: FEEDBACK_LOOP_TICK=5ms ⇒ 200 Hz per side, ~70-byte JSON each.
+        // Bimanual = 400 Hz/process. The bridge_extension's actuator_ctrl
+        // subscriber drains-latest on receipt, so redundant copies are harmless.
         match publish_set_ctrl(
             handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
         )
