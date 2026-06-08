@@ -28,7 +28,7 @@ from sim_ext_core import (
     TfTreeBridge,
     WrenchBridge,
 )
-from sim_ext_core.isaac import (
+from exts import (
     IsaacActuatorCtrl,
     IsaacArticulation,
     IsaacClockSensor,

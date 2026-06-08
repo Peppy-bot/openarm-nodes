@@ -29,7 +29,7 @@ from sim_ext_core import (
     TfTreeBridge,
     WrenchBridge,
 )
-from sim_ext_core.mujoco import (
+from exts import (
     MujocoActuatorCtrl,
     MujocoArticulation,
     MujocoClockSensor,
