@@ -47,7 +47,12 @@ const MOTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Stall detection: when the arm can't reach the requested target (jammed by
 // collision, hitting a joint limit, lost actuation), qpos stops changing.
-// Compare current sum of |positions| against the sum from ~500ms ago.
+// Compare the current pose against the pose from ~500ms ago; if the worst
+// per-joint diff is below STALL_EPSILON_RAD, treat as stalled.
+//
+// Per-joint max (vs sum |q_i|) — a scalar sum aliases on coordinated motion
+// where one joint moves up by ε and another down by ε (sum unchanged).
+//
 // STALL_LOOKBACK_ITERS × FEEDBACK_LOOP_TICK = 500ms window; 0.5 mrad over
 // 500ms = 1 mrad/s — below that the arm is treated as stalled.
 const STALL_LOOKBACK_ITERS: u32 = 100;
@@ -208,7 +213,7 @@ async fn run_control_loop(
 ) -> MotionResult {
     let start = Instant::now();
     let mut last_feedback = Instant::now();
-    let mut window_anchor: Option<f64> = None;
+    let mut window_anchor: Option<[f64; DOF]> = None;
     let mut iter: u32 = 0;
     let mut consecutive_publish_failures: u32 = 0;
 
@@ -301,14 +306,20 @@ async fn run_control_loop(
             .map(|(&q, &target)| (q - target).abs())
             .fold(0.0_f64, f64::max);
         let within_tolerance = worst_err < POSITION_TOLERANCE_RAD;
-        let motion_metric: f64 = current.iter().map(|q| q.abs()).sum();
 
         iter += 1;
         let stalled = if iter % STALL_LOOKBACK_ITERS == 0 {
             let was_stalled = window_anchor
-                .map(|prev| (motion_metric - prev).abs() < STALL_EPSILON_RAD)
+                .map(|prev| {
+                    current
+                        .iter()
+                        .zip(prev.iter())
+                        .map(|(&q, &p)| (q - p).abs())
+                        .fold(0.0_f64, f64::max)
+                        < STALL_EPSILON_RAD
+                })
                 .unwrap_or(false);
-            window_anchor = Some(motion_metric);
+            window_anchor = Some(current);
             was_stalled
         } else {
             false
