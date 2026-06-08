@@ -13,28 +13,30 @@ fn main() -> Result<()> {
     NodeBuilder::new().run(|_params: Parameters, node_runner| async move {
         let token = node_runner.cancellation_token().clone();
 
-        // Gate on the world being ready before exposing any action.
-        startup::wait_until_ready(&node_runner, &token).await;
-
-        // Spawn action handlers as background tasks and return Ok so NodeBuilder
-        // can finish bringing up framework services (notably node_health).
-        // Awaiting via try_join! here would hold the closure open forever
-        // (loops never complete) and starve framework finalisation, which
-        // causes peppy's health probe to time out.
+        // Spawn the entire startup-and-action-handler chain in the background
+        // so this setup closure returns immediately and NodeBuilder can
+        // register `node_health` before the daemon's health probe fires.
+        // Awaiting `wait_until_ready` here blocked the closure for the full
+        // Isaac USD-load window (~30-60s on cold start), which tripped peppy's
+        // health-probe timeout and the daemon SIGKILL'd the instance before it
+        // could expose actions.
         //
-        // A JoinSet supervises both handlers in a detached task so an early
-        // exit (ActionHandle::expose error or panic in a callback) surfaces in
-        // the logs instead of disappearing.
-        let mut set = JoinSet::new();
-        set.spawn(actions::move_arm_joints::run(
-            node_runner.clone(),
-            token.clone(),
-        ));
-        set.spawn(actions::move_gripper::run(
-            node_runner.clone(),
-            token.clone(),
-        ));
+        // A JoinSet supervises both handlers so an early exit
+        // (ActionHandle::expose error or panic in a callback) surfaces in the
+        // logs instead of disappearing.
         tokio::spawn(async move {
+            // Gate on the world being ready before exposing any action.
+            startup::wait_until_ready(&node_runner, &token).await;
+
+            let mut set = JoinSet::new();
+            set.spawn(actions::move_arm_joints::run(
+                node_runner.clone(),
+                token.clone(),
+            ));
+            set.spawn(actions::move_gripper::run(
+                node_runner.clone(),
+                token.clone(),
+            ));
             while let Some(joined) = set.join_next().await {
                 match joined {
                     Ok(Ok(())) => info!("backbone action handler exited cleanly"),
