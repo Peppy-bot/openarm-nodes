@@ -193,12 +193,18 @@ async fn run_control(
             }
         }
 
-        // Completing a goal latches its commanded target as the hold setpoint (hold
-        // the goal, not wherever the arm drifted) and frees admission.
+        // Completing a goal frees admission and latches a hold setpoint. On success
+        // hold the commanded goal (not wherever the arm drifted); on failure (a
+        // timeout) hold the measured position, so a failed move does not keep
+        // driving the motors toward the goal it just reported it could not reach.
         if let Some(result) = finished {
-            let hold = match &mode {
-                Mode::Trajectory(m) => m.trajectory.target(),
-                Mode::Hold { setpoint } => *setpoint,
+            let hold = if result.success {
+                match &mode {
+                    Mode::Trajectory(m) => m.trajectory.target(),
+                    Mode::Hold { setpoint } => *setpoint,
+                }
+            } else {
+                result.final_joint_positions
             };
             if let Mode::Trajectory(m) = std::mem::replace(&mut mode, Mode::Hold { setpoint: hold }) {
                 if let Err(e) = m
@@ -217,7 +223,14 @@ async fn run_control(
             busy.store(false, Ordering::Release);
         }
 
-        pace_to_deadline(&mut next_tick, cfg.cycle_period).await;
+        // Overruns are not expected; surface each one so a loop that cannot hold
+        // its rate is visible rather than silently re-anchoring.
+        if pace_to_deadline(&mut next_tick, cfg.cycle_period).await {
+            warn!(
+                "control loop overran its {:?} cycle period; per-tick work exceeds the budget",
+                cfg.cycle_period
+            );
+        }
     }
 }
 
@@ -295,14 +308,16 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec)
 /// `tokio::time::sleep` incurs is corrected on the next cycle instead of
 /// accumulating. On an overrun the deadline is already past: re-anchor to now and
 /// skip the sleep so the next cycle starts immediately rather than bursting to
-/// catch up.
-async fn pace_to_deadline(next_tick: &mut tokio::time::Instant, period: Duration) {
+/// catch up. Returns true if the cycle overran (the caller surfaces it).
+async fn pace_to_deadline(next_tick: &mut tokio::time::Instant, period: Duration) -> bool {
     *next_tick += period;
     let now = tokio::time::Instant::now();
     if *next_tick <= now {
         *next_tick = now;
+        true
     } else {
         tokio::time::sleep_until(*next_tick).await;
+        false
     }
 }
 
