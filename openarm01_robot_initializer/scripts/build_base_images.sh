@@ -15,7 +15,7 @@ export RCLONE_S3_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY:?RCLONE_S3_SEC
 # ── Version manifest ──────────────────────────────────────────────────────────
 ISAAC_VERSION="5.1.0"   # mirrors nvcr.io/nvidia/isaac-sim upstream version
 MUJOCO_VERSION="3.8.1"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
-IMAGE_REV="5"           # bump when image content changes without an upstream version bump
+IMAGE_REV="6"           # bump when image content changes without an upstream version bump
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,6 +25,7 @@ MUJOCO_IMAGE="aaqibmahamood/openarm01-mujoco-sim:${MUJOCO_VERSION}-${IMAGE_REV}"
 
 echo "==> Building Isaac base image (${ISAAC_IMAGE})..."
 DOCKER_BUILDKIT=1 docker build \
+    --network=host \
     --secret id=rclone_key,env=RCLONE_S3_ACCESS_KEY_ID \
     --secret id=rclone_secret,env=RCLONE_S3_SECRET_ACCESS_KEY \
     --build-arg ISAAC_VERSION="${ISAAC_VERSION}" \
@@ -34,6 +35,7 @@ DOCKER_BUILDKIT=1 docker build \
 
 echo "==> Building MuJoCo base image (${MUJOCO_IMAGE})..."
 DOCKER_BUILDKIT=1 docker build \
+    --network=host \
     --secret id=rclone_key,env=RCLONE_S3_ACCESS_KEY_ID \
     --secret id=rclone_secret,env=RCLONE_S3_SECRET_ACCESS_KEY \
     -t "${MUJOCO_IMAGE}" \
