@@ -1,4 +1,5 @@
 mod control;
+mod geometry;
 
 use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
@@ -33,7 +34,7 @@ fn main() -> Result<()> {
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
         };
 
-        // Instance lock — crash if another instance with the same gripper_id is running.
+        // Instance lock: crash if another instance with the same gripper_id is running.
         let lock_path = format!("/tmp/openarm_gripper_{gripper_id}.lock");
         std::fs::OpenOptions::new()
             .write(true)
@@ -41,7 +42,7 @@ fn main() -> Result<()> {
             .open(&lock_path)
             .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
 
-        // Hardware bringup — mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
+        // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
         let mut gripper = GripperCan::new(&can_interface, ENABLE_FD).expect("GripperCan::new");
         gripper.init_motor(v10::GRIPPER_MOTOR_TYPE, v10::GRIPPER_SEND_ID, v10::GRIPPER_RECV_ID);
@@ -63,17 +64,24 @@ fn main() -> Result<()> {
 
         let gripper = Arc::new(Mutex::new(gripper));
 
-        // Shutdown task: disables motor and releases lock on SIGINT/SIGTERM.
+        // Shutdown task: disables the motor and releases the lock. `peppy node
+        // stop` cancels in-band via the runtime cancellation token (not a unix
+        // signal), so observe that too or the motor would stay energised on a
+        // daemon stop.
         {
             let gripper = gripper.clone();
+            let node_runner = node_runner.clone();
+            let cancel = node_runner.cancellation_token().clone();
+            let lock_path = lock_path.clone();
             tokio::spawn(async move {
                 let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
                 let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
                 tokio::select! {
                     _ = sigint.recv() => {},
                     _ = sigterm.recv() => {},
+                    _ = cancel.cancelled() => {},
                 }
-                info!("shutdown: disabling motor");
+                info!("shutdown: disabling motor, releasing lock");
                 {
                     // unwrap_or_else: recover even if poisoned (panic in control loop)
                     // so disable_all() always runs and the motor doesn't stay energised.
@@ -85,8 +93,8 @@ fn main() -> Result<()> {
                 if let Err(e) = std::fs::remove_file(&lock_path) {
                     warn!("failed to remove lock {lock_path}: {e}");
                 }
-                // process::exit: peppylib runtime has no clean shutdown path; motors are
-                // already disabled above so this is safe.
+                // process::exit: peppylib runtime has no clean shutdown path; the
+                // motor is already disabled above so this is safe.
                 std::process::exit(0);
             });
         }

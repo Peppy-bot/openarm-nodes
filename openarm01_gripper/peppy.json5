@@ -15,9 +15,10 @@
     parameters: {
       gripper_id: "u8",
       can_interface: "string",
-      // Hardware-loop rate (Hz).
-      control_rate_hz: { $type: "u32", $default: 100 },
-      // Per-cycle CAN read deadline (μs).
+      // Hardware-loop rate (Hz). 500 Hz matches the arm and the OpenArm teleop
+      // reference, which drives the gripper in the same 500 Hz loop as the arm.
+      control_rate_hz: { $type: "u32", $default: 500 },
+      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (2 ms at 500 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
       // Error threshold (m) for goal completion.
       position_tolerance: { $type: "f64", $default: 0.001 },
