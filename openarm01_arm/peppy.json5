@@ -29,12 +29,6 @@
       // Per-cycle CAN read deadline (μs). Must fit the cycle budget (2 ms at 500 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
       motion_timeout_s: { $type: "f64", $default: 30.0 },
-      // Minimum trajectory duration (s). Actual duration = max(this, time implied by joint velocity limits).
-      // Defaults to a deliberately slow 5 s for safe bring-up: the URDF velocity
-      // limits are high, so without this floor a move would slam. Every move uses
-      // this node-level floor; per-goal durations from the commander are not wired
-      // yet (move_arm_joints carries no duration field). Lower it once trusted.
-      min_motion_time_s: { $type: "f64", $default: 5.0 },
       // Per-joint peak velocity (rad/s) used to size the quintic trajectory
       // duration. Defaults are the OpenArm V1.0 URDF joint velocity limits.
       max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
