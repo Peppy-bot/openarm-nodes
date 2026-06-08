@@ -22,7 +22,7 @@ use peppygen::NodeRunner;
 use peppygen::emitted_topics::{joint_states, tf_tree};
 use serde::Deserialize;
 use sim_bridge_core::{BoxFuture, DaemonState, SimBridge};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::ArmId;
 use crate::state::{JointStatesLatest, SharedState};
@@ -51,20 +51,14 @@ struct TfTreeRaw {
     frames: Vec<TfFrameRaw>,
 }
 
-pub async fn run(runner: Arc<NodeRunner>, arm_id: ArmId, state: Arc<SharedState>) {
+pub async fn run(
+    runner: Arc<NodeRunner>,
+    arm_id: ArmId,
+    state: Arc<SharedState>,
+    daemon: DaemonState,
+) {
     let side = arm_id.side_word();
     info!("telemetry: starting pipelines (arm_id={} side={})", arm_id.raw(), side);
-
-    let daemon = match peppylib::info(&runner, None).await {
-        Ok(info) => DaemonState {
-            core_node_name: info.core_node_name,
-            messaging_port: info.messaging_port,
-        },
-        Err(e) => {
-            error!("telemetry: peppylib::info failed: {e}");
-            return;
-        }
-    };
 
     // sim_node = the publisher node name configured in
     // robot_initializer_mujoco's bridge_extension (defaults to "sim").

@@ -77,6 +77,7 @@ fn main() -> Result<()> {
             node_runner.clone(),
             arm_id,
             shared.clone(),
+            daemon.clone(),
         ));
 
         tokio::spawn(actions::move_arm_joints::run(
