@@ -72,6 +72,10 @@ const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = STALL_LOOKBACK_ITERS;
 
 const ARM_NODE_NAME: &str = "openarm01_arm";
 
+// Keys are joint names (`openarm_<side>_joint{1..7}`), not MJCF actuator
+// names. MujocoActuatorCtrl indexes its ctrl map by both, so joint names hit
+// the joint-name alias and resolve to the same ctrl id; same payload works
+// against USD dof_names on Isaac without per-engine branching.
 #[derive(Serialize)]
 struct SetCtrlPayload<'a> {
     actuator_values: HashMap<&'a str, f64>,
