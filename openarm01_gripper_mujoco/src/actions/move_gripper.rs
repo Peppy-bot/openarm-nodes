@@ -1,19 +1,6 @@
-// move_gripper action handler — peppylib-mediated control direction.
-//
-// Each goal:
-//   1. Enters a feedback loop reading the latest gripper_state from the
-//      shared cache (populated by pipeline::telemetry).
-//   2. Re-publishes raw set_ctrl_gripper_<side> on every tick. peppylib
-//      QoSProfile::Standard is best-effort; a single dropped message would
-//      otherwise stall the gripper. The publish is idempotent.
-//   3. Streams typed feedback at the requested rate; detects convergence
-//      (worst-finger error < POSITION_TOLERANCE_M) or stall (sum-of-motion
-//      across a ~500ms window < STALL_EPSILON_M).
-//   4. Calls complete() or complete_cancelled() on the GoalContext.
-//
-// Convergence + stall logic carries from the bus-era implementation
-// unchanged; only the data path (snapshot from shared cache, publish raw
-// peppylib) and the v0.10 GoalContext-driven completion differ.
+// Per-finger control: run a feedback loop on the shared gripper_state cache
+// and republish set_ctrl_gripper_<side> every tick to survive best-effort
+// QoS drops. Convergence on worst-finger error; stall on per-window motion.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,20 +1,6 @@
-// Telemetry pipelines: subscribe to raw peppylib telemetry from
-// robot_initializer:mujoco's bridge extension, re-emit as typed peppygen on
-// the gripper instance's contract topics, and update the shared state that
-// the move_gripper action handler reads for feedback.
-//
-// One SimBridge per gripper instance (left or right). Each builds three
-// sim_to_os pipelines:
-//
-//   raw gripper_state_<side>   →  typed gripper_state   (+ shared state)
-//   raw ee_pose_<side>         →  typed ee_pose
-//   raw contact_forces (world) →  typed contact_forces_finger1
-//                              +  typed contact_forces_finger2
-//                              (filtered by body-name prefix on this side)
-//
-// Topic names on the peppygen side are flat (un-suffixed): each gripper node
-// instance owns one side, selected by the gripper_id execution parameter. The
-// _left / _right suffix lives on the raw peppylib channel from the sim only.
+// SimBridge pipelines for this gripper side: re-emit gripper_state + ee_pose
+// as typed peppygen, partition world contact_forces by finger-body prefix.
+// Side suffix lives only on the raw peppylib channel; bus topics are flat.
 
 use std::sync::Arc;
 
