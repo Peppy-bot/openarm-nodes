@@ -64,7 +64,9 @@ leave the browser tab open across rebuilds.
 
 ## Architecture
 
-- `main.rs`: thin entrypoint; `NodeBuilder::new().run(...)` then awaits `ui::run`.
+- `main.rs`: thin entrypoint; `NodeBuilder::new().run(...)` spawns `ui::run` in a
+  background task so `node_health` registers during NodeBuilder finalisation
+  before the daemon's health probe fires.
 - `ui.rs`: axum router (`GET /` → embedded `static/index.html`, `GET /ws` →
   WebSocket). The WS loop ticks state snapshots out at 10 Hz and dispatches
   `fire_arm` / `fire_gripper` commands by spawning action tasks.
