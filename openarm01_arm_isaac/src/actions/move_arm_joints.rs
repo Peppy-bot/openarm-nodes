@@ -223,7 +223,11 @@ async fn run_control_loop(
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
 
-        let latest = { state.joint_states.lock().await.clone() };
+        let latest = state
+            .joint_states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let snap = match latest {
             Some(s) if s.positions.len() == DOF => s,
             Some(s) => {

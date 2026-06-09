@@ -31,13 +31,7 @@ pub async fn run(runner: Arc<NodeRunner>, state: Arc<SharedState>, token: Cancel
 }
 
 fn snapshot_positions(state: &Arc<SharedState>) -> [f64; DOF] {
-    let guard = match state.joint_states.try_lock() {
-        Ok(g) => g,
-        Err(_) => {
-            warn!("get_joint_positions: contended cache lock, returning zeros");
-            return [0.0; DOF];
-        }
-    };
+    let guard = state.joint_states.lock().unwrap_or_else(|p| p.into_inner());
     match guard.as_ref() {
         Some(latest) if latest.positions.len() == DOF => {
             let mut out = [0.0; DOF];

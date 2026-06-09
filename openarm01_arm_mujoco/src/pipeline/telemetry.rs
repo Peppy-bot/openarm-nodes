@@ -149,7 +149,7 @@ async fn emit_joint_states(
     // Only cache complete 7-DOF samples — a partial payload would corrupt the
     // pose snapshot move_arm_joints + get_joint_positions read on each tick.
     if positions.len() == ARM_DOF {
-        let mut latest = state.joint_states.lock().await;
+        let mut latest = state.joint_states.lock().unwrap_or_else(|p| p.into_inner());
         *latest = Some(JointStatesLatest {
             positions: positions.clone(),
         });
