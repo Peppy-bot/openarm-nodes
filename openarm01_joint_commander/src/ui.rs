@@ -1,7 +1,12 @@
-// HTTP + WebSocket server. Binds 0.0.0.0:PEPPY_JC_PORT (default 8765), serves a
-// single embedded HTML page at `/`, and pushes state snapshots over `/ws` every
-// 100 ms while accepting fire_arm / fire_gripper commands. Each command spawns
-// the same transient action task the TUI used.
+// HTTP + WebSocket server. Binds 127.0.0.1:PEPPY_JC_PORT (default 8765), serves
+// a single embedded HTML page at `/`, and pushes state snapshots over `/ws`
+// every 100 ms while accepting fire_arm / fire_gripper commands. Each command
+// spawns the same transient action task the TUI used.
+//
+// Loopback by default because the UI exposes unauthenticated motion control
+// over WebSocket. Override the bind interface via PEPPY_JC_BIND_IP (e.g.
+// 0.0.0.0 for any-interface, or a specific NIC address) when the operator
+// is on a different machine on a trusted network.
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -47,7 +52,11 @@ pub async fn run(
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+    let bind_ip = env::var("PEPPY_JC_BIND_IP")
+        .ok()
+        .and_then(|s| s.parse::<IpAddr>().ok())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::new(bind_ip, port);
 
     let app_state = AppState {
         runner,
