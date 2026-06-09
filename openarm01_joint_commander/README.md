@@ -9,7 +9,7 @@ gripper, and fires `move_arm_joints` / `move_gripper` actions at
 MVP scope: joint-space only. Cartesian operator input (and the upstream IK +
 collision-detection pipeline) is post-MVP; the node goes through `backbone`'s
 `move_arm_joints` action which arm executes directly. A future pose-estimation
-variant will land as a separate sibling node, not as a variant of this one.
+implementation will land as a separate sibling node.
 
 ---
 
@@ -25,11 +25,10 @@ launcher binds concrete impls (real / mujoco / isaac) at startup.
 ## Build
 
 ```bash
-peppy node sync .              # regenerate peppygen
 peppy node add . -sb           # add + sync + build
 ```
 
-Apptainer pulls `tuatini/peppy-rust-cargo-base` and runs `cargo build --release`.
+Apptainer pulls `tuatini/peppy-rust-cargo-base:latest` and runs `cargo build --release`.
 
 ---
 
@@ -70,7 +69,7 @@ leave the browser tab open across rebuilds.
 - `ui.rs`: axum router (`GET /` → embedded `static/index.html`, `GET /ws` →
   WebSocket). The WS loop ticks state snapshots out at 10 Hz and dispatches
   `fire_arm` / `fire_gripper` commands by spawning action tasks.
-- `state.rs`: `Arc<tokio::sync::Mutex<UiState>>` shared with action tasks. The
+- `state.rs`: `Arc<std::sync::Mutex<UiState>>` shared with action tasks. The
   `in_flight` flag per arm / gripper is the single-writer gate that prevents
   double-firing.
 - `actions/move_arm_joints.rs` + `actions/move_gripper.rs`: each command spawns

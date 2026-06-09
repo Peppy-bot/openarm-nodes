@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub const ARM_DOF: usize = 7;
 pub const GRIPPER_OPEN_M: f64 = 0.044;

@@ -1,12 +1,7 @@
 // openarm01_joint_commander — operator entry point. Serves a browser-based
 // control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that fires
-// move_arm_joints / move_gripper goals at openarm01_backbone. Backbone routes
-// each goal to the correct arm / gripper instance via launcher-bound interface
-// link_ids.
-//
-// MVP scope: slider-driven joint-space only. A future pose_estimation
-// implementation will land as a separate sibling node
-// (openarm01_joint_commander_pose_estimation), not as a variant.
+// move_arm_joints / move_gripper goals at openarm01_backbone. MVP scope is
+// slider-driven joint-space; pose_estimation will land as a sibling node.
 {
   peppy_schema: "node_v1",
   manifest: {

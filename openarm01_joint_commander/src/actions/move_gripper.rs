@@ -75,7 +75,7 @@ async fn run(
             }
             feedback = downstream.on_next_feedback_message() => match feedback {
                 Ok(f) => {
-                    let mut s = state.lock().await;
+                    let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
                     s.gripper_mut(side).last_feedback = Some(f.joint_positions);
                 }
                 Err(_) => break,
@@ -83,12 +83,9 @@ async fn run(
         }
     }
 
-    // v0.10 peppylib: ResultResponse.outcome is a typed enum
-    // (Completed/Cancelled/Abandoned/Expired). Completed and Cancelled carry the
-    // payload; the latter two are terminal-without-data.
-    //
-    // Wrap in tokio::select! so a shutdown during the up-to-RESULT_TIMEOUT wait
-    // doesn't wedge the task.
+    // v0.10 ResultResponse.outcome is a typed enum (Completed/Cancelled/
+    // Abandoned/Expired). Wrap in tokio::select! so a shutdown during the
+    // up-to-RESULT_TIMEOUT wait doesn't wedge the task.
     let outcome = tokio::select! {
         _ = token.cancelled() => {
             finalize(&state, side, false, "shutting down — result abandoned").await;
@@ -126,7 +123,7 @@ async fn run(
 
 async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
     let summary = summary.into();
-    let mut s = state.lock().await;
+    let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
     s.gripper_mut(side).in_flight = false;
     s.set_status(summary.clone());
     if success {

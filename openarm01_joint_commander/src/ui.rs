@@ -87,7 +87,7 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             _ = app.token.cancelled() => break,
             _ = tick.tick() => {
                 let snap = {
-                    let s = app.state.lock().await;
+                    let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
                     Snapshot::from(&*s)
                 };
                 let json = match serde_json::to_string(&snap) {
@@ -132,7 +132,7 @@ async fn handle_command(text: &str, app: &AppState) {
 
 async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF]) {
     {
-        let mut s = app.state.lock().await;
+        let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.arm(side).in_flight {
             s.set_status(format!(
                 "{} arm: previous goal still in flight",
@@ -156,7 +156,7 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF]) {
 
 async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
     {
-        let mut s = app.state.lock().await;
+        let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.gripper(side).in_flight {
             s.set_status(format!(
                 "{} gripper: previous goal still in flight",
