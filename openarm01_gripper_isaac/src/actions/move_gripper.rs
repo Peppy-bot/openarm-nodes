@@ -26,11 +26,8 @@ use crate::state::SharedState;
 const POSITION_TOLERANCE_M: f64 = 0.002;
 const MOTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Stall detection: when the fingers can't reach the requested target (e.g.,
-// pressed against each other at full close, jammed by an object, motor at
-// its limit), qpos stops changing. We compare current sum against the sum
-// from ~500ms ago. STALL_LOOKBACK_ITERS × FEEDBACK_LOOP_TICK = 500ms window;
-// 0.5mm-over-500ms = 1mm/s — below that is treated as stalled.
+// Sum-of-positions diff over a 500ms window; below STALL_EPSILON_M → stalled.
+// Sum is fine for the gripper: both fingers move in the same direction.
 const STALL_LOOKBACK_ITERS: u32 = 100;
 const STALL_EPSILON_M: f64 = 5e-4;
 const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
@@ -87,11 +84,8 @@ pub async fn run(
         .expect("expose move_gripper");
 
     loop {
-        // v0.10 GoalContext model: the decider closure validates the request
-        // and returns accept/reject; on accept the handle returns Some(ctx)
-        // carrying per-goal state. The outer loop is inherently single-flight
-        // — we only re-enter handle_goal_next_request after the previous goal
-        // has been completed.
+        // Single-flight: the next handle_goal_next_request only resumes after
+        // the previous goal's GoalContext completes.
         let goal_request =
             action_handle.handle_goal_next_request(|req: &move_gripper::GoalRequest| {
                 let pos_m = req.data.position;
@@ -184,17 +178,16 @@ async fn run_control_loop(
     let mut consecutive_publish_failures: u32 = 0;
 
     loop {
-        // Re-publish ctrl every tick. peppylib Standard QoS is best-effort, so
-        // a single dropped message would otherwise stall the gripper;
-        // republishing makes the path self-healing. Idempotent. But if the
-        // publish keeps failing, the gripper is not being commanded — bail
-        // rather than let convergence/stall logic report a false success.
-        //
-        // Rate: FEEDBACK_LOOP_TICK=5ms ⇒ 200 Hz per side, ~70-byte JSON each.
-        // Bimanual = 400 Hz/process. The bridge_extension's actuator_ctrl
-        // subscriber drains-latest on receipt, so redundant copies are harmless.
+        // Republish every tick: peppylib Standard is best-effort, so this is
+        // the self-healing path. Idempotent. If it keeps failing, bail before
+        // convergence/stall reports false success.
         match publish_set_ctrl(
-            handle, daemon, set_ctrl_topic, instance_id, actuator_names, per_finger,
+            handle,
+            daemon,
+            set_ctrl_topic,
+            instance_id,
+            actuator_names,
+            per_finger,
         )
         .await
         {
@@ -329,14 +322,13 @@ async fn publish_set_ctrl(
     let mut values: HashMap<&str, f64> = HashMap::new();
     values.insert(actuator_names[0].as_str(), value);
     values.insert(actuator_names[1].as_str(), value);
-    let payload = SetCtrlPayload { actuator_values: values };
+    let payload = SetCtrlPayload {
+        actuator_values: values,
+    };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
-    // v0.10 peppylib: TopicMessenger::emit takes a typed SenderTarget for
-    // the as_target identity (was a bare &str in v0.9). The gripper publishes
-    // as the openarm01_gripper:v1 interface — same name + tag as the real
-    // hardware impl, so both real and sim instances appear as the same
-    // interface-shaped sender to consumers.
+    // Publish as openarm01_gripper:v1 so real + sim instances look identical
+    // to consumers on the bus.
     let target = SenderTarget::node(GRIPPER_NODE_NAME, "v1")
         .map_err(|e| format!("invalid as_target: {e}"))?;
 
@@ -388,7 +380,12 @@ pub async fn shutdown_handler(
     const GRACE_REPEATS: u32 = 5;
     for _ in 0..GRACE_REPEATS {
         if let Err(e) = publish_set_ctrl(
-            &handle, &daemon, &set_ctrl_topic, &instance_id, &actuator_names, 0.0,
+            &handle,
+            &daemon,
+            &set_ctrl_topic,
+            &instance_id,
+            &actuator_names,
+            0.0,
         )
         .await
         {
