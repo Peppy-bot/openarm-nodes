@@ -49,10 +49,10 @@
     { type: "actuator_ctrl", topic: "set_ctrl_gripper_left",  source_node: "openarm01_gripper" },
     { type: "actuator_ctrl", topic: "set_ctrl_gripper_right", source_node: "openarm01_gripper" },
 
-    // Arm subscribers — MujocoActuatorCtrl resolves keys directly against the
-    // MJCF actuator name table at setup, so no params.joint_names is needed.
-    // Publisher (openarm01_arm Rust runtime) sends actuator_values keyed by
-    // MJCF actuator name (`openarm_<side>_joint{1..7}_ctrl`).
+    // Arm subscribers — MujocoActuatorCtrl indexes both actuator names AND
+    // joint names (via actuator_trnid walk), so the arm runtime can send the
+    // canonical joint name (`openarm_<side>_joint{1..7}`) and it resolves on
+    // both engines (USD dof_names == joint names; MJCF resolves via alias).
     { type: "actuator_ctrl", topic: "set_ctrl_arm_left",  source_node: "openarm01_arm" },
     { type: "actuator_ctrl", topic: "set_ctrl_arm_right", source_node: "openarm01_arm" },
   ],
