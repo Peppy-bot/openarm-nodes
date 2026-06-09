@@ -1,16 +1,8 @@
-// Bridge plugin config for the openarm bimanual MuJoCo scene.
-// Loaded by bridge_extension.py at startup. Each `publishers` entry becomes a
-// per-step bridge that emits raw peppylib JSON to consumers; each `subscribers`
-// entry becomes a per-step plugin that pulls the latest message and applies it
-// to the sim (today: actuator_ctrl writes to data.ctrl before mj_step).
-//
-// Naming convention for per-side topics: `<topic>_left` / `<topic>_right`
-// matches the typed peppygen topic names emitted by the gripper/arm Rust nodes
-// that consume from here. Keeps the raw → typed mapping mechanical.
+// Bridge plugin registry for the MuJoCo openarm scene. Per-side suffix
+// (`<topic>_left` / `<topic>_right`) lines up with the typed peppygen topic
+// names on the gripper/arm Rust side.
 {
-  // ------------------------------------------------------------------------
-  // PUBLISHERS — robot_initializer emits these raw peppylib topics each step.
-  // ------------------------------------------------------------------------
+  // Publishers emit raw peppylib JSON each tick.
   publishers: [
     // Whole-robot joint state. Consumers slice by joint name on their side.
     { type: "joint_states", topic: "joint_states", robot_name: "openarm" },
@@ -40,19 +32,15 @@
     // { type: "imu", prim: "openarm_right_imu", topic: "imu_right", robot_name: "openarm" },
   ],
 
-  // ------------------------------------------------------------------------
-  // SUBSCRIBERS — robot_initializer pulls these and applies before mj_step.
-  // Topic convention: set_ctrl_<component>_<side> with
-  // payload { actuator_values: { <actuator_name>: <value>, ... } }.
-  // ------------------------------------------------------------------------
+  // Subscribers drain latest before mj_step. Topic: set_ctrl_<component>_<side>
+  // with payload { actuator_values: { <name>: <value>, ... } }.
   subscribers: [
     { type: "actuator_ctrl", topic: "set_ctrl_gripper_left",  source_node: "openarm01_gripper" },
     { type: "actuator_ctrl", topic: "set_ctrl_gripper_right", source_node: "openarm01_gripper" },
 
-    // Arm subscribers — MujocoActuatorCtrl indexes both actuator names AND
-    // joint names (via actuator_trnid walk), so the arm runtime can send the
-    // canonical joint name (`openarm_<side>_joint{1..7}`) and it resolves on
-    // both engines (USD dof_names == joint names; MJCF resolves via alias).
+    // Arm subscribers — MujocoActuatorCtrl indexes by both actuator name AND
+    // joint name (via actuator_trnid walk), letting the arm runtime send the
+    // canonical joint name `openarm_<side>_joint{1..7}` and resolve on both engines.
     { type: "actuator_ctrl", topic: "set_ctrl_arm_left",  source_node: "openarm01_arm" },
     { type: "actuator_ctrl", topic: "set_ctrl_arm_right", source_node: "openarm01_arm" },
   ],

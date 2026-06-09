@@ -7,11 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class MujocoEePoseSensor:
-    """Reads world-frame pose of a named MuJoCo body (end-effector link).
-
-    prim is the last path component of the config entry and must match the
-    body name in the MuJoCo XML model exactly.
-    """
+    """Reads world-frame pose of a named MuJoCo body (end-effector link). The
+    prim is the last path component of the config entry and must match the body
+    name in the MuJoCo XML model exactly."""
 
     def __init__(self, model, data, body_name: str) -> None:
         self._model = model

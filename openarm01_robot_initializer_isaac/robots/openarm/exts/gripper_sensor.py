@@ -7,11 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class IsaacGripperSensor:
-    """Reads finger joint positions and applied forces from an Isaac Sim articulation.
-
-    finger_joints is a list of DOF names to monitor.  Names not found in the
-    articulation are skipped with a warning at setup time.
-    """
+    """Reads finger joint positions and applied forces from an Isaac Sim
+    articulation. finger_joints is a list of DOF names to monitor; names not
+    found in the articulation are skipped with a warning at setup time."""
 
     def __init__(self, prim_path: str, finger_joints: list[str]) -> None:
         self._prim_path = prim_path

@@ -47,10 +47,9 @@ async def _run_sim(_params, node_runner) -> list:
         try:
             await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready, _stop).run)
         finally:
-            # Signal the sim thread to exit. Without this, asyncio task
-            # cancellation cancels the awaitable but leaves the executor
-            # thread spinning forever, blocking process exit and starving
-            # peppylib's framework `shutdown` service.
+            # Signal the sim thread to exit; otherwise asyncio cancellation
+            # leaves the executor thread spinning, blocking process exit and
+            # starving peppylib's framework shutdown.
             _stop.set()
 
     return [

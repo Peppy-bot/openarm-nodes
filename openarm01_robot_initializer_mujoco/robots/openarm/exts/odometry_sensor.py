@@ -8,11 +8,8 @@ logger = logging.getLogger(__name__)
 
 class MujocoOdometrySensor:
     """Reads world-frame pose and velocity of a named MuJoCo body (base link).
-
-    Uses data.xpos / data.xquat for position/orientation and data.cvel for
-    velocity. cvel layout is [ang_vel_x, ang_vel_y, ang_vel_z, lin_vel_x,
-    lin_vel_y, lin_vel_z] — angular comes first in MuJoCo convention.
-    """
+    Uses xpos / xquat for position+orientation, cvel for velocity. cvel layout
+    is [ang_vel(3), lin_vel(3)] — angular first per MuJoCo convention."""
 
     def __init__(self, model, data, body_name: str) -> None:
         self._model = model

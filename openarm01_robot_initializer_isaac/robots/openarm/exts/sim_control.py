@@ -10,11 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class IsaacSimControl:
-    """Isaac Sim implementation of simulator control operations.
-
-    Uses the shared IsaacArticulation for set_joint_positions.
-    Pause and reset delegate to the Isaac Sim timeline interface.
-    step_sim is not supported in the callback-driven Isaac Sim model.
+    """Isaac Sim implementation of simulator control. Pause/reset go through the
+    timeline interface; set_joint_positions uses the shared IsaacArticulation.
+    step_sim is not supported in the callback-driven Isaac model.
     """
 
     def __init__(self, articulation: "IsaacArticulation", timeline) -> None:

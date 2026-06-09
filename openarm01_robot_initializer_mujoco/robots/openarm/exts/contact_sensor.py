@@ -7,16 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class MujocoContactSensor:
-    """Reads active contact forces from a MuJoCo scene.
-
-    When body_name is provided, returns only contacts that involve that
-    body. When body_name is empty, returns every active contact in the
-    scene — used by per-stack publishers where the consumer filters on
-    its own side.
-
-    Forces are reported in world frame via mj_contactForce + the contact
-    rotation matrix. Returns an empty list when no contacts are active —
-    not an error.
+    """Reads active contact forces from a MuJoCo scene. When body_name is set,
+    filters to contacts involving that body; when empty, returns all contacts.
+    Forces reported in world frame via mj_contactForce; empty list is not an error.
     """
 
     def __init__(self, model, data, body_name: str) -> None:
@@ -64,10 +57,8 @@ class MujocoContactSensor:
         self._body_id = None
 
     def get_contact_data(self) -> Optional[list[dict]]:
-        """Return active contacts, optionally filtered to the target body.
-
-        Each entry: body1, body2 (MJCF body names — geom→body lookup),
-        position (3, world frame), force (3, world frame).
+        """Return active contacts, optionally filtered to the target body. Each
+        entry: body1, body2 (MJCF names), position (world frame), force (world frame).
         """
         if not self._ready:
             return None

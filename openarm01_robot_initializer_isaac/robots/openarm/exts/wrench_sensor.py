@@ -7,13 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class IsaacWrenchSensor:
-    """Reads joint reaction force/torque from an Isaac Sim articulation.
-
-    Uses Articulation.get_measured_joint_forces() which returns PhysX joint
-    reaction forces as (num_envs, num_dof, 6) where the 6 values are
-    [fx, fy, fz, tx, ty, tz] in world frame.
-
-    joint_index=-1 selects the last joint (end-effector), which is the default.
+    """Reads joint reaction force/torque from an Isaac Sim articulation. Uses
+    Articulation.get_measured_joint_forces() which returns (num_envs, num_dof, 6)
+    where the 6 values are [fx, fy, fz, tx, ty, tz] in world frame.
     """
 
     def __init__(self, prim_path: str, joint_index: int = -1) -> None:

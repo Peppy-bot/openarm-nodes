@@ -1,16 +1,7 @@
-// Bridge plugin config for the openarm bimanual Isaac scene.
-// Loaded by bridge_extension.py at startup. Each `publishers` entry becomes a
-// per-step bridge that emits raw peppylib JSON to consumers; each `subscribers`
-// entry becomes a per-step plugin that pulls the latest message and applies
-// it to the sim (today: actuator_ctrl writes via ArticulationView).
-//
-// `prim` fields must match the actual USD prim paths in openarm_bimanual.usd.
-// Verify against the stage on first build — paths below are reasonable
-// defaults but may need adjustment.
+// Bridge plugin registry for the Isaac openarm scene. `prim` paths must match
+// the USD stage — verify against openarm_bimanual.usd on first build.
 {
-  // ------------------------------------------------------------------------
-  // PUBLISHERS — robot_initializer emits these raw peppylib topics each step.
-  // ------------------------------------------------------------------------
+  // Publishers emit raw peppylib JSON each tick.
   publishers: [
     // Whole-robot joint state. Arm Rust runtime subscribes and filters by
     // joint_names prefix (`openarm_<side>_joint`) to slice its 7-DOF set.
@@ -48,11 +39,8 @@
     // { type: "imu", prim: "/World/openarm/right_imu", topic: "imu_right", robot_name: "openarm" },
   ],
 
-  // ------------------------------------------------------------------------
-  // SUBSCRIBERS — robot_initializer pulls these and applies via ArticulationView.
-  // Topic convention: set_ctrl_<component>_<side> with
-  // payload { actuator_values: { <joint_name>: <value>, ... } }.
-  // ------------------------------------------------------------------------
+  // Subscribers apply via ArticulationView. Topic: set_ctrl_<component>_<side>
+  // with payload { actuator_values: { <joint_name>: <value>, ... } }.
   subscribers: [
     {
       type: "actuator_ctrl", prim: "/openarm",
@@ -65,10 +53,9 @@
       params: { joint_names: ["openarm_right_finger_joint1", "openarm_right_finger_joint2"] },
     },
 
-    // Arm subscribers — IsaacActuatorCtrl needs joint_names listed in
-    // params to filter the articulation's dof set down to this side's joints.
-    // joint_names below must match the USD's dof_names verbatim; tweak after
-    // first-run inspection if Articulation logs `unknown actuator … dropped`.
+    // Arm subscribers — IsaacActuatorCtrl uses joint_names to filter the
+    // articulation's dof set. Names must match USD dof_names verbatim; check
+    // for `unknown actuator … dropped` warnings if Articulation rejects entries.
     {
       type: "actuator_ctrl", prim: "/openarm",
       topic: "set_ctrl_arm_left", source_node: "openarm01_arm",

@@ -11,18 +11,9 @@ _DEFAULT_FREQUENCY: float = 0.0  # 0 = match physics rate
 
 
 class IsaacImuSensor:
-    """Reads IMU data from an Isaac Sim IMU sensor prim.
-
-    Uses isaacsim.sensor.imu.IMUSensor which reads orientation, angular
-    velocity, and linear acceleration directly from the PhysX physics engine
-    — no finite-difference approximation needed.
-
-    The prim_path must point to an existing IMU sensor prim in the USD stage
-    (typically placed as a child of the rigid body you want to measure).
-
-    translation — sensor offset from parent body frame (xyz, metres).
-    orientation — sensor mount orientation relative to parent body (wxyz quaternion).
-    frequency   — sampling rate in Hz; 0 matches the physics step rate.
+    """Reads IMU data (orientation, angular velocity, linear acceleration) from
+    an Isaac Sim IMUSensor prim. Values come from PhysX directly — no
+    finite-difference approximation needed.
     """
 
     def __init__(

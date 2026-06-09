@@ -9,11 +9,8 @@ _ARTICULATION_NAME = "peppy_actuator_ctrl"
 
 class IsaacActuatorCtrl:
     """Resolves joint names to indices on a target articulation and writes
-    position targets via ArticulationView.set_joint_position_targets().
-
-    One instance per articulation (one gripper, one arm side, etc). The
-    ActuatorCtrlBridge takes incoming {actuator_values: {name: value}} payloads
-    and routes them through this writer.
+    position targets via ArticulationView.set_joint_position_targets(). One
+    instance per articulation (one gripper, one arm side, etc).
     """
 
     def __init__(self, prim_path: str, joint_names: list[str]) -> None:
@@ -73,10 +70,9 @@ class IsaacActuatorCtrl:
         self._ready = False
 
     def write_targets(self, actuator_values: dict) -> int:
-        """Write each {name: value} pair into the articulation's joint
-        position targets. Unknown names + non-numeric values are dropped
-        per-item — a single bad entry must not poison the whole batch.
-        """
+        """Write each {name: value} pair into the articulation's joint position
+        targets. Unknown names and non-numeric values are dropped per-item so a
+        single bad entry does not poison the whole batch."""
         if not self._ready or self._view is None:
             return 0
         if not isinstance(actuator_values, dict):

@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +10,9 @@ _MAX_STEPS_PER_REQUEST = 1000
 
 
 class MujocoSimControl:
-    """MuJoCo implementation of simulator control operations.
-
-    Wraps a MuJoCo model/data pair and exposes reset, pause, step, and
-    set_joint_positions operations. Intended to be used with SimControlBridge.
+    """MuJoCo implementation of simulator control operations. Wraps a model/data
+    pair and exposes reset, pause, step, and set_joint_positions. Intended to be
+    used with SimControlBridge.
     """
 
     def __init__(self, model, data) -> None:
@@ -53,10 +48,9 @@ class MujocoSimControl:
         return {"success": True, "paused": self._paused}
 
     def step(self, num_steps: int) -> dict:
-        """Step physics num_steps times regardless of pause state.
-
-        This is an explicit step request from a user node — it overrides pause.
-        Returns sim_time from data.time so the caller is in sync with the clock topic.
+        """Step physics num_steps times regardless of pause state. This is an
+        explicit step request from a user node and overrides pause. Returns
+        sim_time from data.time so the caller stays in sync with the clock topic.
         """
         if num_steps <= 0:
             return {
@@ -85,11 +79,10 @@ class MujocoSimControl:
             return {"success": False, "steps_executed": 0, "sim_time": 0.0}
 
     def set_joint_positions(self, arm: str, positions: list[float]) -> dict:
-        """Set joint angles for the specified arm of the bimanual robot.
-
-        Looks up each joint by name (openarm_{arm}_joint1..7) using MuJoCo's
-        joint name index so the mapping is robust to XML ordering changes.
-        Calls mj_forward after writing qpos to update kinematics immediately.
+        """Set joint angles for the specified arm of the bimanual robot. Looks
+        up each joint by name (openarm_{arm}_joint1..7) using MuJoCo's name index
+        so the mapping is robust to XML ordering; calls mj_forward after writing
+        qpos to update kinematics immediately.
         """
         if arm not in ("left", "right"):
             return {

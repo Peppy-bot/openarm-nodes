@@ -1,9 +1,6 @@
-// Isaac Sim implementation of robot_initializer. Owns the Isaac Sim process and the
-// USD scene; conforms to openarm01_robot_initializer:v1 (is_ready signal) and (in
-// subsequent commits) exposes engine-specific raw topics that the gripper_isaac /
-// arm_isaac sim peripherals attach to. Sim peripherals couple to this node by node
-// name (engine-internal coupling), not by interface — only the readiness signal is
-// interface-resolved.
+// Isaac Sim implementation of robot_initializer. Conforms to
+// openarm01_robot_initializer:v1 (is_ready signal). Sim peripherals attach
+// to this node by node name for engine-internal coupling, not by interface.
 {
   peppy_schema: "node_v1",
   manifest: {

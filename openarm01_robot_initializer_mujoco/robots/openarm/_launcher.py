@@ -28,10 +28,9 @@ class SimLauncher:
     ) -> None:
         self._xml_path = xml_path
         self._ready = ready
-        # `stop` is flipped by the asyncio caller when its task is cancelled
-        # (SIGTERM, peppy node stop). The sim loop runs on a thread inside
-        # `run_in_executor` and cannot observe signals or asyncio cancellation
-        # on its own — this Event is the only stop path.
+        # Set by the asyncio caller on cancel (SIGTERM, peppy node stop). The
+        # sim loop runs in run_in_executor and cannot observe asyncio
+        # cancellation directly — this Event is the only stop path.
         self._stop = stop
         self._headless = os.environ.get(_HEADLESS_ENV, "1").strip() == "1"
 
@@ -81,8 +80,8 @@ class SimLauncher:
 
         server = None
         try:
-            # Loopback by default; opt-in to bind on all interfaces via env so the
-            # viewer isn't exposed network-wide just because someone enabled headed mode.
+            # Loopback by default; env opt-in for binding to all interfaces
+            # avoids accidentally exposing the viewer in headed mode.
             host = os.environ.get(_VIEWER_HOST_ENV, "127.0.0.1")
             port = int(os.environ.get(_VIEWER_PORT_ENV, "8080"))
             server = viser.ViserServer(host=host, port=port)

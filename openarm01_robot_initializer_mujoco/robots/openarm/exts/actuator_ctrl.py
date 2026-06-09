@@ -6,11 +6,9 @@ logger = logging.getLogger(__name__)
 
 
 class MujocoActuatorCtrl:
-    """Resolves MJCF actuator names to ctrl indices and writes targets into data.ctrl[].
-
-    Used by ActuatorCtrlBridge to translate raw set_ctrl messages
-    ({actuator_values: {name: value, ...}}) into in-process MuJoCo ctrl writes
-    before mj_step.
+    """Resolves MJCF actuator names to ctrl indices and writes targets into
+    data.ctrl[]. Used by ActuatorCtrlBridge to translate raw set_ctrl messages
+    into in-process MuJoCo writes before mj_step.
     """
 
     def __init__(self, model, data) -> None:
@@ -20,12 +18,10 @@ class MujocoActuatorCtrl:
         self._ready: bool = False
 
     def setup(self) -> bool:
-        """Build the name → ctrl-id map.
-
-        Accepts both the MJCF actuator name and the joint name the actuator
-        drives, so callers can address ctrl indices by either. The joint name
-        is the cross-engine canonical key (Isaac's dof_names are joint names),
-        which lets components ship one payload shape that works on both engines.
+        """Build the name → ctrl-id map. Indexes by both actuator name and the
+        joint name the actuator drives — the joint-name alias is the cross-engine
+        canonical key (matches Isaac dof_names), so components ship one payload
+        for both engines.
         """
         try:
             import mujoco  # pylint: disable=E0401
@@ -68,11 +64,9 @@ class MujocoActuatorCtrl:
         self._name_to_id = {}
 
     def write_targets(self, actuator_values: dict) -> int:
-        """Write each {name: value} pair into data.ctrl[ctrl_id[name]].
-
-        Returns the count of values actually applied. Unknown actuator names
-        are logged and dropped — they should not stop the rest of the batch.
-        """
+        """Write each {name: value} pair into data.ctrl[ctrl_id[name]]. Returns
+        the count of values applied. Unknown actuator names are logged and
+        dropped so a single bad entry does not stop the rest of the batch."""
         if not self._ready:
             return 0
         if not isinstance(actuator_values, dict):

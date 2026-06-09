@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 # pylint: disable=R0902,R0903,C0413
-"""MujocoBridgeExtension — owns the physics tick and the per-step bridge
-plugin loop for the openarm bimanual scene.
-
-The extension is instantiated by _launcher.py once MuJoCo's model+data
-exist. startup() loads config/sim_bridge.json5, builds the plugin set,
-and starts the peppylib daemon connection. step() advances physics and
-drives every plugin on each tick.
+"""MujocoBridgeExtension owns the physics tick and the per-step bridge plugin
+loop for the openarm scene. startup() loads config/sim_bridge.json5 and builds
+the plugin set; step() advances physics and drives every plugin on each tick.
 """
 from __future__ import annotations
 
@@ -47,11 +43,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_NODE_NAME = "sim"
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
 
-# Split by direction so a sim_bridge.json5 entry in the wrong section fails
-# validation. With a single registry, e.g. type:"joint_states" in subscribers
-# instantiated JointStatesBridge as a "subscriber" — its on_step then published
-# the topic from the subscribers section while the user thought they were
-# subscribing. Per direction now: publishers only, subscribers only.
+# Split by direction so a misplaced sim_bridge.json5 entry fails validation:
+# a single registry would let "joint_states" in subscribers instantiate as a
+# subscriber and silently publish.
 _PUBLISHER_REGISTRY: dict = {
     "joint_states": JointStatesBridge,
     "imu": ImuBridge,
@@ -98,11 +92,9 @@ class MujocoBridgeExtension:
             for source_node, topic, qos in plugin.subscriptions():
                 self._io.register_subscription(source_node, topic, qos)
 
-        # Split plugins by direction so the step loop can run subscribers
-        # (which write ctrl[] / qpos) before mj_step and publishers (which
-        # read post-step state) after. SimControlBridge has subscriptions
-        # so it lands on the writer side — its set_joint_positions dispatch
-        # writes qpos and must precede the physics step.
+        # Writers (subscribers) run before mj_step; readers (publishers) after.
+        # SimControlBridge has subscriptions, so its set_joint_positions writes
+        # qpos on the writer side before the step consumes it.
         self._writers = [p for p in self._plugins if p.subscriptions()]
         self._readers = [p for p in self._plugins if not p.subscriptions()]
 
@@ -115,10 +107,8 @@ class MujocoBridgeExtension:
 
     def step(self) -> None:
         """Drive subscriber plugins, advance physics, drive publisher plugins.
-
-        When paused, only SimControlBridge runs so unpause/step/reset
-        requests can still be processed.
-        """
+        When paused, only SimControlBridge runs so unpause/step/reset can still
+        be processed."""
         if self._sim_control and self._sim_control.is_paused:
             for plugin in self._plugins:
                 if isinstance(plugin, SimControlBridge):

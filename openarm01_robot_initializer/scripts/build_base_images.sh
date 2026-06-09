@@ -48,4 +48,4 @@ docker push "${MUJOCO_IMAGE}"
 
 echo "==> Done."
 echo "    Update apptainer.def From: tags to match, then run:"
-echo "    peppy node build openarm01_robot_initializer:0.1.0"
+echo "    peppy node build openarm01_robot_initializer:v1"

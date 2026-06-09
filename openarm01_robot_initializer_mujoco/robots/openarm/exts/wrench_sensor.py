@@ -7,11 +7,9 @@ logger = logging.getLogger(__name__)
 
 
 class MujocoWrenchSensor:
-    """Reads total external contact force/torque on a named MuJoCo body.
-
-    Uses data.cfrc_ext which gives the net external force and torque acting on
-    each body in world frame. Layout: [torque_x, torque_y, torque_z, force_x,
-    force_y, force_z] — torque comes first in MuJoCo convention.
+    """Reads total external contact force/torque on a named MuJoCo body. Uses
+    data.cfrc_ext (net external force/torque in world frame). Layout is
+    [torque(3), force(3)] — torque first per MuJoCo convention.
     """
 
     def __init__(self, model, data, body_name: str) -> None:

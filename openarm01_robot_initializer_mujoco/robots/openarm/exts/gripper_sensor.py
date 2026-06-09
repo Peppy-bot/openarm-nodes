@@ -9,16 +9,9 @@ _JOINT_TRANSMISSION_TYPE = 0  # mjTRN_JOINT
 
 
 class MujocoGripperSensor:
-    """Reads finger joint positions and measured actuator forces.
-
-    finger_joints is a list of joint names in the MuJoCo XML model.  Each
-    joint is resolved to a qpos index (for position) and an actuator index
-    (for measured force via data.actuator_force, -1 if no actuator drives
-    that joint).  Joints not found in the model are skipped with a warning.
-
-    applied_forces reports data.actuator_force[act_i] — the actual force the
-    actuator exerted this timestep, matching the Isaac backend which reads
-    measured joint reaction forces.
+    """Reads finger joint positions and measured actuator forces. finger_joints
+    is a list of MJCF joint names; each resolves to a qpos index and an actuator
+    index for data.actuator_force (-1 if no actuator drives the joint).
     """
 
     def __init__(self, model, data, finger_joints: list[str]) -> None:
@@ -82,10 +75,8 @@ class MujocoGripperSensor:
 
     def get_gripper_state(self) -> Optional[dict]:
         """Return finger joint names, positions, and measured actuator forces.
-
-        applied_forces = data.actuator_force[act_i] in Newtons — the force the
-        actuator actually produced this timestep (not the ctrl command target).
-        """
+        The applied_forces value is data.actuator_force in Newtons (the force the
+        actuator actually produced, not the ctrl command target)."""
         if not self._ready:
             return None
 

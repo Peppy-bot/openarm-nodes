@@ -3,7 +3,7 @@ From: tuatini/peppy-rust-cargo-base:latest
 
 %labels
     Name openarm01_robot_initializer
-    Version 0.1.0
+    Version v1
 
 %files
     . /opt/openarm01_robot_initializer

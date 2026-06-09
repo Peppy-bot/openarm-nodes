@@ -11,13 +11,9 @@ _DEFAULT_RADIUS = 1.0
 
 
 class IsaacContactSensor:
-    """Reads active contact forces at an Isaac Sim rigid body prim.
-
-    Uses isaacsim.sensors.physics.ContactSensor — creates the sensor prim
-    programmatically if it does not exist. Parent prim must have CollisionAPI.
-
-    Returns an empty contact list when no contacts are active — this is not
-    an error condition.
+    """Reads active contact forces at an Isaac Sim rigid body prim. Creates the
+    ContactSensor prim if absent; parent prim must have CollisionAPI. Empty
+    contact list means no active contacts, not an error.
     """
 
     def __init__(

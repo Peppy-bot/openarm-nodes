@@ -71,7 +71,7 @@ PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer_isaac:v1
 
 Robot assets (USD, MJCF, meshes) are baked into the container images:
 - `aaqibmahamood/openarm01-isaac-sim:5.1.0` (Isaac variant base)
-- `aaqibmahamood/openarm01-mujoco-sim:3.8.1-4` (current MuJoCo variant base — see Status below for the rebump)
+- `aaqibmahamood/openarm01-mujoco-sim:3.8.1-4` (MuJoCo variant base)
 
 Contributors do not need to fetch assets — `peppy node build` pulls the pre-built images from Docker Hub.
 
@@ -111,28 +111,3 @@ openarm01_nodes/
       config/sim_bridge.json5
 ```
 
-## Build / deployment status
-
-This README reflects the v0.10 migration on branch `feat/robot-initializer-bridge-ext`. Two upstream dependencies must land before the full stack passes end-to-end:
-
-1. **`openarm01_robot_initializer:v1` interface** — [`Peppy-bot/interfaces_hub#4`](https://github.com/Peppy-bot/interfaces_hub/pull/4). Until merged, CI on this repo cannot resolve `conforms_to`. Locally registered interfaces_hub checkouts resolve fine.
-2. **`sim_ext_core` peppylib SenderTarget fix** — [`Peppy-bot/nodes_shared_code#4`](https://github.com/Peppy-bot/nodes_shared_code/pull/4). v0.10 peppylib tightened `as_target` / `from_target` from `str` to `peppylib.messaging.SenderTarget`. Until merged + the MuJoCo base image is rebuilt against the new revision, every raw JSON publish/subscribe between `_mujoco` and its sim peripherals (`gripper_mujoco`, `arm_mujoco`) fails silently with `'str' object is not an instance of 'SenderTarget'` warnings — the node still runs and `is_ready` still responds, but no engine-internal topics propagate.
-
-### Verifying after both PRs land
-
-1. Bump `From:` in `openarm01_robot_initializer_mujoco/apptainer.def` from `aaqibmahamood/openarm01-mujoco-sim:3.8.1-4` to whatever tag the rebuilt image gets (e.g. `:3.8.1-5`).
-2. `peppy node add openarm01_robot_initializer_mujoco -sb` → SIF rebuild.
-3. `peppy node run openarm01_robot_initializer_mujoco:v1`.
-4. Expected log shape — boot:
-   - `Loading model: /opt/robot_assets/openarm/mujoco/openarm_bimanual.xml`
-   - `Registered publisher: joint_states → topic='joint_states'` (and friends)
-   - `MujocoBridgeExtension ready — 12 plugin(s)`
-   - `peppylib connected (instance_id=...)`
-   - `Scene loaded — is_ready: true`
-   - **No `Failed to emit` warnings, no `Subscribe error` warnings.** (The current build floods both — that's the bug the SenderTarget fix closes.)
-5. Confirm `is_ready` responds: any consumer polling the service should see `{ ready: true }` after the scene loads.
-6. Stop with `peppy node stop <instance-id>`.
-
-### Isaac side
-
-Isaac requires NVIDIA GPU which the current dev machine does not have. `_isaac` was structurally migrated and syncs cleanly under v0.10 but has not been runtime-tested. Same SenderTarget fix applies; same base-image rebump procedure (`aaqibmahamood/openarm01-isaac-sim:5.1.0` → whatever tag the rebuilt image gets).
