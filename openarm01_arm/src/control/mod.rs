@@ -1,13 +1,15 @@
 //! The arm's control: a single task that owns the motors and runs a state
 //! machine at a fixed rate. Each tick the current [`Mode`] commands the motors
 //! exactly once and returns the next mode, so every transition is a return
-//! value: `Hold` admits a goal and becomes a move; a move runs to its
-//! terminal (completion, cancellation, abort, or timeout), completes its goal,
-//! and becomes `Hold` at the last commanded setpoint.
+//! value: `Startup` eases to the ready pose and becomes `Hold`; `Hold` admits a
+//! goal and becomes a move; a move runs to its terminal (completion,
+//! cancellation, abort, or timeout), completes its goal, and becomes `Hold` at
+//! the last commanded setpoint.
 
 mod cartesian_move;
 mod feedback;
 mod joint_move;
+mod startup;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -27,6 +29,7 @@ use crate::{ARM_DOF, JointVec};
 use cartesian_move::CartesianMove;
 use joint_move::JointMove;
 use openarm_can::ArmCan;
+use startup::StartupMove;
 
 /// All-zero joint vector, the zero desired velocity sent alongside a held or
 /// commanded position.
@@ -54,9 +57,10 @@ struct TickIo<'a> {
     cfg: &'a ControlConfig,
     model: &'a srs_model::Arm,
     goals: &'a mut mpsc::Receiver<Goal>,
-    /// The single-flight flag claimed by the action handlers at goal acceptance.
-    /// A mode releases it exactly where it completes a goal's context, so every
-    /// claim is released once: at a motion's terminal, or at a failed admission.
+    /// The single-flight flag claimed by the action handlers at goal acceptance
+    /// and held through startup. A mode releases it exactly where it completes a
+    /// goal's context (a motion's terminal, or a failed admission) or, once, when
+    /// the startup move reaches the ready pose.
     busy: &'a AtomicBool,
     /// Measured joint positions this tick.
     q: JointVec,
@@ -75,6 +79,11 @@ struct TickIo<'a> {
 // with no fixed endpoint). Each is one more variant whose tick polls its input
 // and exits to `Hold`.
 enum Mode {
+    /// Easing from the measured power-on configuration to the ready pose, once,
+    /// before any goal is admitted (`busy` is held through it). The arm powers
+    /// off wherever it hung, often on the straight-arm singularity, so the first
+    /// state brings it somewhere Cartesian control is well behaved.
+    Startup(StartupMove),
     /// Holding a fixed setpoint with gravity/Coriolis/friction feedforward plus PD
     /// (kp/kd): the state between motions (each motion's final config is held) and
     /// the only state that admits a new goal. The PD term holds position, so the
@@ -99,6 +108,7 @@ impl Mode {
     /// Run one control tick: command the motors once and return the next mode.
     async fn tick(self, io: &mut TickIo<'_>) -> Mode {
         match self {
+            Mode::Startup(s) => s.tick(io),
             Mode::Hold { setpoint } => hold_tick(setpoint, io).await,
             Mode::JointMove(m) => m.tick(io).await,
             Mode::CartesianMove(m) => m.tick(io).await,
@@ -135,7 +145,10 @@ async fn hold_tick(setpoint: JointVec, io: &mut TickIo<'_>) -> Mode {
 pub async fn spawn(runner: &NodeRunner, arm: Arc<Mutex<ArmCan>>, cfg: ControlConfig, model: srs_model::Arm) -> Result<()> {
     let joints_action = move_arm_joints::ActionHandle::expose(runner).await?;
     let cartesian_action = move_arm::ActionHandle::expose(runner).await?;
-    let busy = Arc::new(AtomicBool::new(false));
+    // Born busy: the Startup state holds the flag through its move to the ready
+    // pose, so a goal arriving during startup is rejected as busy instead of
+    // accepted and silently queued behind a motion the caller never requested.
+    let busy = Arc::new(AtomicBool::new(true));
     let (goal_tx, goal_rx) = mpsc::channel::<Goal>(1);
     tokio::spawn(run_control(arm, cfg.clone(), goal_rx, busy.clone(), model));
     tokio::spawn(actions::run_move_arm_joints(joints_action, cfg.limits, goal_tx.clone(), busy.clone()));
@@ -145,8 +158,9 @@ pub async fn spawn(runner: &NodeRunner, arm: Arc<Mutex<ArmCan>>, cfg: ControlCon
 
 /// The single motor-owning control loop. Runs forever at `cfg.cycle_period`:
 /// reads the measured state, computes the feedforward, and runs one [`Mode`]
-/// tick, which commands the motors and yields the next mode. Starts holding the
-/// power-on pose (never lunge to zero on boot).
+/// tick, which commands the motors and yields the next mode. Starts in
+/// [`Mode::Startup`], easing from the measured power-on pose to the ready pose
+/// (never lunge on boot).
 async fn run_control(
     arm: Arc<Mutex<ArmCan>>,
     cfg: ControlConfig,
@@ -156,7 +170,7 @@ async fn run_control(
 ) {
     let mut pacer = Pacer::new(cfg.cycle_period);
     let (q0, _) = read_state(&arm, cfg.recv_timeout_us);
-    let mut mode = Mode::Hold { setpoint: q0 };
+    let mut mode = Mode::Startup(StartupMove::new(q0, &cfg));
 
     info!("control loop started (in-process gravity compensation + IK)");
     loop {
