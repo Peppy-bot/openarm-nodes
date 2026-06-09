@@ -17,10 +17,6 @@ use crate::state::{GripperStateLatest, SharedState};
 
 const ROBOT_NAME: &str = "openarm";
 
-// ---------------------------------------------------------------------------
-// Raw peppylib message shapes — mirror what robot_initializer:mujoco emits.
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Deserialize)]
 struct GripperStateRaw {
     #[allow(dead_code)]
@@ -64,10 +60,6 @@ struct ContactForcesRaw {
     stamp: f64,
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
 pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<SharedState>) {
     let side = gripper_id.side_word();
     info!(
@@ -88,7 +80,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
     };
 
     // sim_node = the publisher node name configured in
-    // robot_initializer:mujoco's bridge_extension (defaults to "sim").
+    // openarm01_robot_initializer_isaac's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
     let token = runner.cancellation_token().clone();
 
@@ -97,7 +89,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
     let contact_topic: Arc<str> = Arc::from("contact_forces");
 
     // Body-name prefixes used to split world-wide contacts into per-finger
-    // topics. Matches the openarm MJCF naming: openarm_<side>_right_finger*
+    // topics. Matches the openarm USD body naming: openarm_<side>_right_finger*
     // bodies belong to finger1, openarm_<side>_left_finger* to finger2.
     let finger1_prefix: Arc<str> = Arc::from(format!("openarm_{side}_right_finger").as_str());
     let finger2_prefix: Arc<str> = Arc::from(format!("openarm_{side}_left_finger").as_str());
@@ -112,7 +104,10 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
                 Box::pin(async move {
                     // Cache for the action handler's feedback loop.
                     {
-                        let mut latest = state.gripper_state.lock().await;
+                        let mut latest = state
+                            .gripper_state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
                         *latest = Some(GripperStateLatest {
                             step: msg.step,
                             positions: msg.positions.clone(),

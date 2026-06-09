@@ -1,9 +1,7 @@
-// Isaac sim implementation of openarm01_gripper. Rust node that talks to a
-// running Isaac sim via the raw peppylib JSON channel published by
+// Isaac sim implementation of openarm01_gripper. Rust node talking to a
+// running Isaac Sim via raw peppylib JSON channels published by
 // openarm01_robot_initializer_isaac — engine-internal coupling, not part of
-// the openarm01_gripper:v1 interface contract. The gripper:v1 surface
-// (move_gripper action, get_gripper_id service) is fully declared via
-// conforms_to; topics.emits below are sim-only extras.
+// the openarm01_gripper:v1 interface contract.
 {
   peppy_schema: "node_v1",
   manifest: {
@@ -19,13 +17,10 @@
     conforms_to: [
       { name: "openarm01_gripper", tag: "v1" },
     ],
-    // Engine-specific sim telemetry. Not part of openarm01_gripper:v1 — the
-    // shared interface only exposes move_gripper + get_gripper_id (the cross-
-    // impl contract). These emits exist because the sim has cheap access to
-    // joint state, EE pose, and per-finger contacts; the real-hardware impl
-    // doesn't have a force sensor per finger and reports gripper state through
-    // its own channel. Topic names are flat (un-suffixed) because each gripper
-    // instance owns one side, selected by the gripper_id execution parameter.
+    // Engine-specific sim telemetry — NOT in openarm01_gripper:v1 (shared
+    // interface is move_gripper + get_gripper_id only). Sim emits these because
+    // it has cheap access to joint state, EE pose, and per-finger contacts;
+    // real-hardware has no per-finger force sensor and reports via its own channel.
     topics: {
       emits: [
         {

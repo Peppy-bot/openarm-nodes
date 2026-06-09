@@ -1,9 +1,9 @@
 // Standalone harness that fires move_gripper at running gripper instances and
-// prints feedback + result. Rust port of test_move_gripper.py — uses the same
-// raw peppylib ActionMessenger path so no Python peppygen / venv is needed.
+// prints feedback + result. Uses the raw peppylib ActionMessenger path so no
+// Python peppygen / venv is needed.
 //
-// Run from variants/mujoco/:
-//     cargo run --release --bin test_move_gripper -- \
+// Run from this node directory:
+//     cargo run --release --features test-tools --bin test_move_gripper -- \
 //         [--side left|right|both] [--position 0..=0.044] [--feedback-hz N]
 use std::sync::Arc;
 use std::time::Duration;
@@ -220,7 +220,8 @@ async fn fire_one(
         }
     }
 
-    match ActionMessenger::request_result(runner.messenger(), &handle, Duration::from_secs(10)).await
+    match ActionMessenger::request_result(runner.messenger(), &handle, Duration::from_secs(10))
+        .await
     {
         Ok(res) => match decode_result(res.body.as_ref()) {
             Ok((success, message, final_pos, t)) => {
@@ -247,19 +248,17 @@ fn main() -> peppylib::PeppyResult<()> {
         .init();
     let args = parse_args();
 
-    // Standalone runtime loads variants/mujoco/peppy.json5 for param validation
-    // and the manifest declares gripper_id as required. We're not actually a
-    // gripper instance, but passing a dummy 0 satisfies the validator. The
-    // test code below ignores `_params`.
+    // Standalone runtime loads peppy.json5 for param validation; the manifest
+    // declares gripper_id as required. We're not actually a gripper instance,
+    // but passing a dummy 0 satisfies the validator. _params is ignored below.
     let config = StandaloneConfig::new()
         .with_node_name("test_move_gripper_caller")
         .with_messaging("127.0.0.1", 7448)
         .with_instance_id("test-caller")
         .with_parameters_json(serde_json::json!({ "gripper_id": 0 }));
 
-    NodeBuilder::<NoParams>::new()
-        .standalone(config)
-        .run(move |_params, runner: Arc<NodeRunner>| async move {
+    NodeBuilder::<NoParams>::new().standalone(config).run(
+        move |_params, runner: Arc<NodeRunner>| async move {
             let mut all_ok = true;
             for (side, instance_id) in args.instances() {
                 let ok =
@@ -271,5 +270,6 @@ fn main() -> peppylib::PeppyResult<()> {
                 std::process::exit(1);
             }
             Ok(())
-        })
+        },
+    )
 }

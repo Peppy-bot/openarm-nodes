@@ -7,11 +7,7 @@ use tracing::error;
 
 use crate::config::GripperId;
 
-pub async fn run(
-    runner: Arc<NodeRunner>,
-    gripper_id: GripperId,
-    token: CancellationToken,
-) {
+pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: CancellationToken) {
     loop {
         tokio::select! {
             _ = token.cancelled() => break,

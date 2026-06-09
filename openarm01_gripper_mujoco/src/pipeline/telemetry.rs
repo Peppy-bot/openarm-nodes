@@ -17,10 +17,6 @@ use crate::state::{GripperStateLatest, SharedState};
 
 const ROBOT_NAME: &str = "openarm";
 
-// ---------------------------------------------------------------------------
-// Raw peppylib message shapes — mirror what robot_initializer:mujoco emits.
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Deserialize)]
 struct GripperStateRaw {
     #[allow(dead_code)]
@@ -63,10 +59,6 @@ struct ContactForcesRaw {
     contacts: Vec<ContactRaw>,
     stamp: f64,
 }
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 
 pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<SharedState>) {
     let side = gripper_id.side_word();
@@ -112,7 +104,10 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
                 Box::pin(async move {
                     // Cache for the action handler's feedback loop.
                     {
-                        let mut latest = state.gripper_state.lock().await;
+                        let mut latest = state
+                            .gripper_state
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
                         *latest = Some(GripperStateLatest {
                             step: msg.step,
                             positions: msg.positions.clone(),

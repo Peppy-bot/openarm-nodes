@@ -210,15 +210,17 @@ async fn run_control_loop(
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
 
-        let latest = { state.gripper_state.lock().await.clone() };
+        let latest = state
+            .gripper_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let snap = match latest {
             Some(s) if !s.positions.is_empty() => s,
             _ => {
-                // No usable telemetry yet (no message, or one with empty joint
-                // positions) — wait, but honour timeout so we don't hang
-                // indefinitely. Empty positions must not reach the convergence
-                // math below, where worst_err would fold to 0.0 and falsely
-                // report "reached".
+                // No usable telemetry yet — empty positions must not reach the
+                // convergence math, where worst_err would fold to 0.0 and falsely
+                // report "reached". Wait, but honour timeout.
                 if elapsed > MOTION_TIMEOUT {
                     return MotionResult {
                         success: false,
@@ -346,10 +348,8 @@ async fn publish_set_ctrl(
 }
 
 /// SIGINT/SIGTERM handler — cancels the control loop, publishes ctrl=0.0 over a
-/// short grace window, then exits. Without the cancel, the still-running action
-/// loop could overwrite the zero with the last per_finger command between our
-/// publish and process exit; without the repeat publishes, a single best-effort
-/// drop would leave the bridge holding the last non-zero command indefinitely.
+/// short grace window, then exits. The cancel stops the action loop overwriting
+/// the zero; the repeats survive a best-effort drop on the bridge.
 pub async fn shutdown_handler(
     handle: Arc<MessengerHandle>,
     daemon: DaemonState,

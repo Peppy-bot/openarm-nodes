@@ -23,7 +23,7 @@ fn main() -> Result<()> {
             GripperId::new(params.gripper_id).expect("gripper_id must be 0 (left) or 1 (right)");
         let token = node_runner.cancellation_token().clone();
         info!(
-            "starting openarm01_gripper:isaac instance={} gripper_id={}",
+            "starting openarm01_gripper_isaac instance={} gripper_id={}",
             gripper_id.instance_id(),
             gripper_id.as_u8()
         );
@@ -48,9 +48,6 @@ fn main() -> Result<()> {
                 .expect("peppylib connect"),
         );
 
-        // Shared latest-gripper-state cache. Written by the telemetry pipeline
-        // on each incoming raw gripper_state_<side>; read by move_gripper on
-        // each feedback tick for convergence + stall detection.
         let shared = state::new_shared();
 
         tokio::spawn(services::get_gripper_id::run(
