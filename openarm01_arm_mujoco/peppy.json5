@@ -1,10 +1,7 @@
-// Mujoco sim implementation of openarm01_arm. Rust node that talks to a
-// running MuJoCo sim via the raw peppylib JSON channel published by
+// MuJoCo sim implementation of openarm01_arm. Rust node talking to a running
+// MuJoCo sim via raw peppylib JSON channels published by
 // openarm01_robot_initializer_mujoco — engine-internal coupling, not part of
-// the openarm01_arm:v1 interface contract. The arm:v1 surface
-// (move_arm + move_arm_joints actions, get_arm_id + get_joint_positions
-// services) is fully declared via conforms_to; topics.emits below are
-// sim-only extras.
+// the openarm01_arm:v1 interface contract.
 {
   peppy_schema: "node_v1",
   manifest: {
@@ -20,14 +17,10 @@
     conforms_to: [
       { name: "openarm01_arm", tag: "v1" },
     ],
-    // Engine-specific sim telemetry. Not part of openarm01_arm:v1 — the
-    // shared interface only exposes move_arm + move_arm_joints + get_arm_id +
-    // get_joint_positions (the cross-impl contract). These emits exist because
-    // the sim has cheap access to joint state, IMU, and the kinematic tf tree;
-    // the real-hardware impl reports those through its own channel (CAN +
-    // sensors) with a different shape. Topic names are flat (un-suffixed)
-    // because each arm node instance owns one side, selected by the arm_id
-    // execution parameter.
+    // Engine-specific sim telemetry — NOT in openarm01_arm:v1 (shared interface
+    // is move_arm* + get_arm_id + get_joint_positions only). Sim emits these
+    // because it has cheap access to joint state, IMU, and the tf tree;
+    // real-hardware reports them via its own CAN/sensor channel.
     topics: {
       emits: [
         {

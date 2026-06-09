@@ -1,10 +1,6 @@
-// get_joint_positions service — returns the latest 7-DOF joint positions
-// from the telemetry cache. Used by the backbone to anchor IK / planning
-// queries to the arm's current pose.
-//
-// If telemetry hasn't started yet (the sim's first joint_states hasn't
-// arrived), responds with all zeros. Backbone treats this the same way
-// `is_ready` short-circuits: it polls until live values appear.
+// get_joint_positions — returns the latest 7-DOF joint positions from the
+// telemetry cache. Before the first joint_states arrives, responds with
+// zeros; backbone polls until live values appear (same shape as is_ready).
 
 use std::sync::Arc;
 
@@ -17,11 +13,7 @@ use crate::state::SharedState;
 
 const DOF: usize = 7;
 
-pub async fn run(
-    runner: Arc<NodeRunner>,
-    state: Arc<SharedState>,
-    token: CancellationToken,
-) {
+pub async fn run(runner: Arc<NodeRunner>, state: Arc<SharedState>, token: CancellationToken) {
     loop {
         let state = state.clone();
         tokio::select! {

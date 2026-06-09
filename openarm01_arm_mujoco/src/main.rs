@@ -19,8 +19,7 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
-        let arm_id = ArmId::new(params.arm_id)
-            .expect("arm_id must be 0 (left) or 1 (right)");
+        let arm_id = ArmId::new(params.arm_id).expect("arm_id must be 0 (left) or 1 (right)");
         let token = node_runner.cancellation_token().clone();
         info!(
             "starting openarm01_arm_mujoco instance={} arm_id={}",
@@ -28,18 +27,16 @@ fn main() -> Result<()> {
             arm_id.raw()
         );
 
-        // Initialise peppygen clock so emit-side stamps come from peppy's
-        // wall/sim clock (governed by launcher's framework.use_sim_time)
-        // rather than the monolith's wall-clock time.time() forwarded in
-        // raw payloads.
-        peppygen::clock::init(&node_runner).await.expect("peppygen::clock::init");
+        // Stamps must come from peppy's wall/sim clock (per launcher's
+        // framework.use_sim_time), not the monolith's time.time() in raw payloads.
+        peppygen::clock::init(&node_runner)
+            .await
+            .expect("peppygen::clock::init");
 
-        // peppylib daemon + messenger handle shared with the action handler
-        // for per-tick set_ctrl publishes. No shutdown handler — unlike the
-        // gripper we must NOT publish ctrl=0.0 on exit: zeroing arm joint
-        // targets would command the arm into a hard self-collision pose.
-        // peppy node stop / SIGINT just cancels the token; the action loop
-        // exits cleanly with the arm holding its current commanded pose.
+        // No shutdown handler — unlike the gripper we must NOT publish ctrl=0.0
+        // on exit: zeroing arm joint targets would command the arm into a hard
+        // self-collision pose. SIGINT cancels the token; the action loop exits
+        // with the arm holding its last commanded pose.
         let daemon_info = peppylib::info(&node_runner, None)
             .await
             .expect("peppylib::info");
@@ -53,10 +50,6 @@ fn main() -> Result<()> {
                 .expect("peppylib connect"),
         );
 
-        // Shared latest-joint-states cache. Written by the telemetry pipeline
-        // on each incoming raw joint_states; read by move_arm_joints on each
-        // feedback tick for convergence + stall detection, and by
-        // get_joint_positions for one-shot service responses.
         let shared = state::new_shared();
 
         tokio::spawn(services::get_arm_id::run(
@@ -71,7 +64,7 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // Telemetry pipelines — SimBridge gets its own cancel token from
+        // telemetry::run doesn't take a token — SimBridge derives its own from
         // node_runner internally.
         tokio::spawn(pipeline::telemetry::run(
             node_runner.clone(),

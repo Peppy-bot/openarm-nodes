@@ -25,16 +25,8 @@ const DOF: usize = 7;
 const POSITION_TOLERANCE_RAD: f64 = 0.01;
 const MOTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Stall detection: when the arm can't reach the requested target (jammed by
-// collision, hitting a joint limit, lost actuation), qpos stops changing.
-// Compare the current pose against the pose from ~500ms ago; if the worst
-// per-joint diff is below STALL_EPSILON_RAD, treat as stalled.
-//
-// Per-joint max (vs sum |q_i|) — a scalar sum aliases on coordinated motion
-// where one joint moves up by ε and another down by ε (sum unchanged).
-//
-// STALL_LOOKBACK_ITERS × FEEDBACK_LOOP_TICK = 500ms window; 0.5 mrad over
-// 500ms = 1 mrad/s — below that the arm is treated as stalled.
+// Per-joint max diff (not sum |q_i|, which aliases when one joint moves +ε
+// and another -ε). Below STALL_EPSILON_RAD over a 500ms window → stalled.
 const STALL_LOOKBACK_ITERS: u32 = 100;
 const STALL_EPSILON_RAD: f64 = 5e-4;
 const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
@@ -52,10 +44,8 @@ const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = STALL_LOOKBACK_ITERS;
 
 const ARM_NODE_NAME: &str = "openarm01_arm";
 
-// Keys are joint names (`openarm_<side>_joint{1..7}`), not MJCF actuator
-// names. IsaacActuatorCtrl resolves them against the articulation's
-// dof_names (which equal joint names in USD); same payload works against
-// MuJoCo via MujocoActuatorCtrl's joint-name alias without per-engine branching.
+// Keys are joint names (openarm_<side>_joint{1..7}). Isaac resolves them via
+// USD dof_names; MuJoCo via the joint-name alias. Same payload, both engines.
 #[derive(Serialize)]
 struct SetCtrlPayload<'a> {
     actuator_values: HashMap<&'a str, f64>,
@@ -102,9 +92,8 @@ pub async fn run(
     daemon: DaemonState,
 ) {
     let side = arm_id.side_word();
-    let actuator_names: [String; DOF] = std::array::from_fn(|i| {
-        format!("openarm_{side}_joint{}", i + 1)
-    });
+    let actuator_names: [String; DOF] =
+        std::array::from_fn(|i| format!("openarm_{side}_joint{}", i + 1));
     let set_ctrl_topic = format!("set_ctrl_arm_{side}");
     // Unique instance_id per arm side so concurrent left+right arms don't
     // collide on the peppylib publisher registry.
@@ -202,12 +191,9 @@ async fn run_control_loop(
     let mut consecutive_publish_failures: u32 = 0;
 
     loop {
-        // Re-publish ctrl every tick (5ms = 200 Hz per arm side). peppylib
-        // Standard QoS is best-effort, so a single dropped message would
-        // otherwise stall the arm; republishing makes the path self-healing.
-        // Idempotent. But if publishing keeps failing, the arm is not being
-        // commanded — bail rather than let stall detection report a false
-        // "physical limit".
+        // Republish every tick: peppylib Standard is best-effort, so this is
+        // the self-healing path. Idempotent. If it keeps failing the arm isn't
+        // commanded — bail before stall lies.
         match publish_set_ctrl(
             handle,
             daemon,
@@ -377,16 +363,15 @@ async fn publish_set_ctrl(
     for (name, &target) in actuator_names.iter().zip(targets.iter()) {
         values.insert(name.as_str(), target);
     }
-    let payload = SetCtrlPayload { actuator_values: values };
+    let payload = SetCtrlPayload {
+        actuator_values: values,
+    };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
-    // v0.10 peppylib: TopicMessenger::emit takes a typed SenderTarget for
-    // the as_target identity (was &str in v0.9). The arm publishes as the
-    // openarm01_arm:v1 interface — same name + tag as the real-hardware
-    // impl, so both real and sim instances appear as the same
-    // interface-shaped sender to consumers.
-    let target = SenderTarget::node(ARM_NODE_NAME, "v1")
-        .map_err(|e| format!("invalid as_target: {e}"))?;
+    // Publish as openarm01_arm:v1 so real + sim instances look identical to
+    // consumers on the bus.
+    let target =
+        SenderTarget::node(ARM_NODE_NAME, "v1").map_err(|e| format!("invalid as_target: {e}"))?;
 
     TopicMessenger::emit(
         handle,

@@ -19,8 +19,7 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
-        let arm_id = ArmId::new(params.arm_id)
-            .expect("arm_id must be 0 (left) or 1 (right)");
+        let arm_id = ArmId::new(params.arm_id).expect("arm_id must be 0 (left) or 1 (right)");
         let token = node_runner.cancellation_token().clone();
         info!(
             "starting openarm01_arm_isaac instance={} arm_id={}",
@@ -28,7 +27,9 @@ fn main() -> Result<()> {
             arm_id.raw()
         );
 
-        peppygen::clock::init(&node_runner).await.expect("peppygen::clock::init");
+        peppygen::clock::init(&node_runner)
+            .await
+            .expect("peppygen::clock::init");
 
         let daemon_info = peppylib::info(&node_runner, None)
             .await

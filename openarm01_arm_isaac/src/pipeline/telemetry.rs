@@ -46,7 +46,11 @@ pub async fn run(
     daemon: DaemonState,
 ) {
     let side = arm_id.side_word();
-    info!("telemetry: starting pipelines (arm_id={} side={})", arm_id.raw(), side);
+    info!(
+        "telemetry: starting pipelines (arm_id={} side={})",
+        arm_id.raw(),
+        side
+    );
 
     // sim_node = the publisher node name configured in
     // robot_initializer_mujoco's bridge_extension (defaults to "sim").
@@ -56,13 +60,9 @@ pub async fn run(
     let joint_states_topic: Arc<str> = Arc::from("joint_states");
     let tf_tree_topic: Arc<str> = Arc::from("tf_tree");
 
-    // MJCF/USD names on the openarm robot share an `openarm_<side>_` prefix
-    // BUT finger joints/links use `openarm_<side>_finger_*` which would
-    // otherwise leak into arm's filter. Exclude that subtree explicitly.
-    //   arm joint names:  openarm_<side>_joint{1..7}
-    //   arm link frames:  openarm_<side>_link* / openarm_<side>_<joint|link>*
-    //   gripper joints:   openarm_<side>_finger_joint{1..2}   (owned by gripper)
-    //   gripper frames:   openarm_<side>_finger_*             (owned by gripper)
+    // Filter tf_tree to this arm side. Both arm and gripper frames share the
+    // `openarm_<side>_` prefix; explicitly exclude `openarm_<side>_finger*` so
+    // gripper-owned frames don't leak into the arm topic.
     let arm_frame_prefix: Arc<str> = Arc::from(format!("openarm_{side}_").as_str());
     let finger_frame_prefix: Arc<str> = Arc::from(format!("openarm_{side}_finger").as_str());
 
@@ -77,20 +77,22 @@ pub async fn run(
     let arm_joints_js = arm_joints.clone();
 
     let bridge = SimBridge::new(runner.clone(), daemon, token, sim_node)
-        .sim_to_os(joint_states_topic, move |runner, msg: JointStatesRaw|
-            -> BoxFuture<std::result::Result<(), String>>
-        {
-            let state = state_for_js.clone();
-            let names = arm_joints_js.clone();
-            Box::pin(async move { emit_joint_states(&runner, &state, &names, &msg).await })
-        })
-        .sim_to_os(tf_tree_topic, move |runner, msg: TfTreeRaw|
-            -> BoxFuture<std::result::Result<(), String>>
-        {
-            let include = arm_frame_prefix.clone();
-            let exclude = finger_frame_prefix.clone();
-            Box::pin(async move { emit_tf_tree(&runner, &msg, &include, &exclude).await })
-        });
+        .sim_to_os(
+            joint_states_topic,
+            move |runner, msg: JointStatesRaw| -> BoxFuture<std::result::Result<(), String>> {
+                let state = state_for_js.clone();
+                let names = arm_joints_js.clone();
+                Box::pin(async move { emit_joint_states(&runner, &state, &names, &msg).await })
+            },
+        )
+        .sim_to_os(
+            tf_tree_topic,
+            move |runner, msg: TfTreeRaw| -> BoxFuture<std::result::Result<(), String>> {
+                let include = arm_frame_prefix.clone();
+                let exclude = finger_frame_prefix.clone();
+                Box::pin(async move { emit_tf_tree(&runner, &msg, &include, &exclude).await })
+            },
+        );
 
     bridge.run().await;
     info!("telemetry: pipelines exited");
@@ -148,7 +150,9 @@ async fn emit_joint_states(
     // pose snapshot move_arm_joints + get_joint_positions read on each tick.
     if positions.len() == ARM_DOF {
         let mut latest = state.joint_states.lock().await;
-        *latest = Some(JointStatesLatest { positions: positions.clone() });
+        *latest = Some(JointStatesLatest {
+            positions: positions.clone(),
+        });
     } else {
         warn!(
             got = positions.len(),
@@ -178,9 +182,7 @@ async fn emit_tf_tree(
     let frames: Vec<tf_tree::MessageFramesItem> = msg
         .frames
         .iter()
-        .filter(|f| {
-            f.name.starts_with(include_prefix) && !f.name.starts_with(exclude_prefix)
-        })
+        .filter(|f| f.name.starts_with(include_prefix) && !f.name.starts_with(exclude_prefix))
         .map(|f| tf_tree::MessageFramesItem {
             name: f.name.clone(),
             parent: f.parent.clone(),
@@ -189,7 +191,13 @@ async fn emit_tf_tree(
         })
         .collect();
 
-    tf_tree::emit(runner, ROBOT_NAME.into(), msg.step, frames, stamp_now_secs())
-        .await
-        .map_err(|e| e.to_string())
+    tf_tree::emit(
+        runner,
+        ROBOT_NAME.into(),
+        msg.step,
+        frames,
+        stamp_now_secs(),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
