@@ -28,6 +28,7 @@ use crate::config::ArmId;
 use crate::state::{JointStatesLatest, SharedState};
 
 const ROBOT_NAME: &str = "openarm";
+const ARM_DOF: usize = 7;
 
 #[derive(Debug, Clone, Deserialize)]
 struct JointStatesRaw {
@@ -75,20 +76,26 @@ pub async fn run(
     //   arm link frames:  openarm_<side>_link* / openarm_<side>_<joint|link>*
     //   gripper joints:   openarm_<side>_finger_joint{1..2}   (owned by gripper)
     //   gripper frames:   openarm_<side>_finger_*             (owned by gripper)
-    let arm_joint_prefix: Arc<str> = Arc::from(format!("openarm_{side}_joint").as_str());
     let arm_frame_prefix: Arc<str> = Arc::from(format!("openarm_{side}_").as_str());
     let finger_frame_prefix: Arc<str> = Arc::from(format!("openarm_{side}_finger").as_str());
 
+    // Pre-build the 7 canonical arm joint names for this side; emit_joint_states
+    // looks each up by exact match so cache ordering doesn't depend on publisher
+    // joint order.
+    let arm_joints: Arc<[String; ARM_DOF]> = Arc::new(std::array::from_fn(|i| {
+        format!("openarm_{side}_joint{}", i + 1)
+    }));
+
     let state_for_js = state.clone();
-    let arm_joint_prefix_js = arm_joint_prefix.clone();
+    let arm_joints_js = arm_joints.clone();
 
     let bridge = SimBridge::new(runner.clone(), daemon, token, sim_node)
         .sim_to_os(joint_states_topic, move |runner, msg: JointStatesRaw|
             -> BoxFuture<std::result::Result<(), String>>
         {
             let state = state_for_js.clone();
-            let prefix = arm_joint_prefix_js.clone();
-            Box::pin(async move { emit_joint_states(&runner, &state, &prefix, &msg).await })
+            let names = arm_joints_js.clone();
+            Box::pin(async move { emit_joint_states(&runner, &state, &names, &msg).await })
         })
         .sim_to_os(tf_tree_topic, move |runner, msg: TfTreeRaw|
             -> BoxFuture<std::result::Result<(), String>>
@@ -115,7 +122,7 @@ fn stamp_now_secs() -> f64 {
 async fn emit_joint_states(
     runner: &Arc<NodeRunner>,
     state: &Arc<SharedState>,
-    prefix: &str,
+    expected: &[String; ARM_DOF],
     msg: &JointStatesRaw,
 ) -> std::result::Result<(), String> {
     // Sanity: monolith should send equal-length vectors.
@@ -129,21 +136,37 @@ async fn emit_joint_states(
         ));
     }
 
-    let mut joint_names = Vec::with_capacity(n_names);
-    let mut positions = Vec::with_capacity(n_names);
-    let mut velocities = Vec::with_capacity(n_names);
-    for (i, name) in msg.joint_names.iter().enumerate() {
-        if name.starts_with(prefix) {
-            joint_names.push(name.clone());
-            positions.push(msg.positions[i]);
-            velocities.push(msg.velocities[i]);
-        }
+    // Index by name so the output order is deterministic (joint1..joint7) and
+    // doesn't drift with publisher reordering.
+    let by_name: std::collections::HashMap<&str, usize> = msg
+        .joint_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    let mut joint_names = Vec::with_capacity(ARM_DOF);
+    let mut positions = Vec::with_capacity(ARM_DOF);
+    let mut velocities = Vec::with_capacity(ARM_DOF);
+    for name in expected {
+        let Some(&src) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        joint_names.push(name.clone());
+        positions.push(msg.positions[src]);
+        velocities.push(msg.velocities[src]);
     }
 
-    // Cache for action handler + get_joint_positions service.
-    {
+    // Only cache complete 7-DOF samples — a partial payload would corrupt the
+    // pose snapshot move_arm_joints + get_joint_positions read on each tick.
+    if positions.len() == ARM_DOF {
         let mut latest = state.joint_states.lock().await;
         *latest = Some(JointStatesLatest { positions: positions.clone() });
+    } else {
+        warn!(
+            got = positions.len(),
+            "joint_states: incomplete arm sample (expected {ARM_DOF}); not caching"
+        );
     }
 
     joint_states::emit(
