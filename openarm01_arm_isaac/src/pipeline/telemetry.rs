@@ -1,20 +1,7 @@
-// Telemetry pipelines: subscribe to raw peppylib telemetry from
-// robot_initializer_mujoco's in-process bridge extension, filter to this
-// arm side's joints/frames, re-emit as typed peppygen on the contract
-// topics, and update the shared state that move_arm_joints +
-// get_joint_positions read.
-//
-// One SimBridge per arm instance (left or right). Each builds sim_to_os
-// pipelines:
-//
-//   raw joint_states (whole-robot) → typed joint_states (per-side, cached)
-//   raw tf_tree (whole world)      → typed tf_tree     (per-side prefix filter)
-//
-// IMU pipelines are stubbed — TODO when bridge_extension publishes imu_<side>.
-// Topic names on the peppygen side are flat (un-suffixed) because each arm
-// node instance owns one side, selected by the arm_id execution parameter.
-// Stamps come from peppygen::clock::now_ns() so they honour the launcher's
-// framework.use_sim_time setting.
+// SimBridge pipelines for this arm side: slice whole-robot joint_states to
+// the 7 joints (cached for the action handler) and filter tf_tree by side
+// prefix. IMU stubbed until bridge_extension publishes imu_<side>. Stamps
+// via peppygen::clock so use_sim_time wins.
 
 use std::sync::Arc;
 

@@ -1,26 +1,6 @@
-// move_arm_joints action handler — peppylib-mediated joint-space control.
-//
-// Each goal:
-//   1. Validates the 7-DOF target (each joint angle within the v10 arm's
-//      [-pi, pi] limits — wider checks live in the backbone's IK + CD pass).
-//   2. Enters a feedback loop reading the latest joint_states from the
-//      shared cache (populated by pipeline::telemetry).
-//   3. Re-publishes raw set_ctrl_arm_<side> on every tick. peppylib
-//      QoSProfile::Standard is best-effort; a single dropped message would
-//      otherwise stall the arm. The publish is idempotent.
-//   4. Streams typed feedback at the requested rate via
-//      goal_ctx.publish_feedback; detects convergence (worst per-joint
-//      error < POSITION_TOLERANCE_RAD) or stall (sum-of-motion across
-//      a ~500ms window < STALL_EPSILON_RAD).
-//   5. Calls complete() or complete_cancelled() on the GoalContext.
-//
-// Mirrors the convergence + stall pattern from move_gripper but operates
-// in 7-D joint space instead of 2-finger displacement. The set_ctrl
-// payload carries 7 actuator values; the MuJoCo bridge_extension's
-// actuator_ctrl subscriber writes them to MjData.ctrl[] before each
-// mj_step. Unlike the gripper, this node does NOT install a shutdown
-// handler that zeroes ctrl on exit — zeroing arm joint targets would
-// command the arm into a hard self-collision pose.
+// Joint-space 7-DOF control: validate target, run a feedback loop on the
+// shared joint_states cache, and republish set_ctrl_arm_<side> every tick
+// to survive best-effort QoS drops. No shutdown zero — would self-collide.
 
 use std::collections::HashMap;
 use std::sync::Arc;
