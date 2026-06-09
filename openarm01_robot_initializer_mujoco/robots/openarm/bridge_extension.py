@@ -53,17 +53,17 @@ _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.
 # the topic from the subscribers section while the user thought they were
 # subscribing. Per direction now: publishers only, subscribers only.
 _PUBLISHER_REGISTRY: dict = {
-    "joint_states":    JointStatesBridge,
-    "imu":             ImuBridge,
-    "tf_tree":         TfTreeBridge,
-    "clock":           ClockBridge,
-    "ee_pose":         EePoseBridge,
-    "wrench":          WrenchBridge,
-    "contact_forces":  ContactForcesBridge,
-    "gripper_state":   GripperStateBridge,
+    "joint_states": JointStatesBridge,
+    "imu": ImuBridge,
+    "tf_tree": TfTreeBridge,
+    "clock": ClockBridge,
+    "ee_pose": EePoseBridge,
+    "wrench": WrenchBridge,
+    "contact_forces": ContactForcesBridge,
+    "gripper_state": GripperStateBridge,
 }
 _SUBSCRIBER_REGISTRY: dict = {
-    "actuator_ctrl":   ActuatorCtrlBridge,
+    "actuator_ctrl": ActuatorCtrlBridge,
 }
 
 
@@ -83,7 +83,8 @@ class MujocoBridgeExtension:
     def startup(self) -> None:
         """Load config, build plugins, register subscriptions, start I/O."""
         self._config = BridgeConfig.from_file(
-            path=_DEFAULT_CONFIG_PATH, default_node_name=_DEFAULT_NODE_NAME,
+            path=_DEFAULT_CONFIG_PATH,
+            default_node_name=_DEFAULT_NODE_NAME,
         )
         _validate_config(self._config)
         self._io = PeppylibIO(self._config)
@@ -183,7 +184,9 @@ def _make_sensor(entry, model, data):  # pylint: disable=R0911
     if entry.type == "contact_forces":
         return MujocoContactSensor(model, data, body_name)
     if entry.type == "gripper_state":
-        finger_joints = entry.params.get("finger_joints", []) if hasattr(entry, "params") else []
+        finger_joints = (
+            entry.params.get("finger_joints", []) if hasattr(entry, "params") else []
+        )
         return MujocoGripperSensor(model, data, finger_joints=finger_joints)
     if entry.type == "actuator_ctrl":
         return MujocoActuatorCtrl(model, data)

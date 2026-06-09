@@ -53,17 +53,17 @@ _ROOT_ARTICULATION_PRIM = "/World/openarm"
 # the topic from the subscribers section while the user thought they were
 # subscribing. Per direction now: publishers only, subscribers only.
 _PUBLISHER_REGISTRY: dict = {
-    "joint_states":   JointStatesBridge,
-    "imu":            ImuBridge,
-    "tf_tree":        TfTreeBridge,
-    "clock":          ClockBridge,
-    "ee_pose":        EePoseBridge,
-    "wrench":         WrenchBridge,
+    "joint_states": JointStatesBridge,
+    "imu": ImuBridge,
+    "tf_tree": TfTreeBridge,
+    "clock": ClockBridge,
+    "ee_pose": EePoseBridge,
+    "wrench": WrenchBridge,
     "contact_forces": ContactForcesBridge,
-    "gripper_state":  GripperStateBridge,
+    "gripper_state": GripperStateBridge,
 }
 _SUBSCRIBER_REGISTRY: dict = {
-    "actuator_ctrl":  ActuatorCtrlBridge,
+    "actuator_ctrl": ActuatorCtrlBridge,
 }
 
 
@@ -80,7 +80,8 @@ class IsaacBridgeExtension:
     def startup(self) -> None:
         """Load config, build plugins, register subscriptions, start I/O."""
         self._config = BridgeConfig.from_file(
-            path=_DEFAULT_CONFIG_PATH, default_node_name=_DEFAULT_NODE_NAME,
+            path=_DEFAULT_CONFIG_PATH,
+            default_node_name=_DEFAULT_NODE_NAME,
         )
         _validate_config(self._config)
         self._io = PeppylibIO(self._config)
@@ -96,6 +97,7 @@ class IsaacBridgeExtension:
         # omni.timeline imported lazily — top-level omni.* breaks before
         # SimulationApp init (common-pitfalls.md #9).
         import omni.timeline  # pylint: disable=E0401,C0415
+
         self._sim_articulation = IsaacArticulation(_ROOT_ARTICULATION_PRIM)
         self._sim_control = IsaacSimControl(
             articulation=self._sim_articulation,
@@ -179,10 +181,14 @@ def _make_sensor(entry):  # pylint: disable=R0911
     if entry.type == "contact_forces":
         return IsaacContactSensor(prim)
     if entry.type == "gripper_state":
-        finger_joints = entry.params.get("finger_joints", []) if hasattr(entry, "params") else []
+        finger_joints = (
+            entry.params.get("finger_joints", []) if hasattr(entry, "params") else []
+        )
         return IsaacGripperSensor(prim, finger_joints=finger_joints)
     if entry.type == "actuator_ctrl":
-        joint_names = entry.params.get("joint_names", []) if hasattr(entry, "params") else []
+        joint_names = (
+            entry.params.get("joint_names", []) if hasattr(entry, "params") else []
+        )
         return IsaacActuatorCtrl(prim, joint_names=joint_names)
     return IsaacArticulation(prim)
 

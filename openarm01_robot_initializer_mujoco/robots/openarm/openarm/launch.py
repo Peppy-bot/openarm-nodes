@@ -45,9 +45,7 @@ async def _run_sim(_params, node_runner) -> list:
     async def _run_sim_task() -> None:
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(
-                None, SimLauncher(_XML_PATH, _ready, _stop).run
-            )
+            await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready, _stop).run)
         finally:
             # Signal the sim thread to exit. Without this, asyncio task
             # cancellation cancels the awaitable but leaves the executor
