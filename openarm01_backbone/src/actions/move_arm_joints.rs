@@ -188,7 +188,14 @@ async fn relay_left(
 
     loop {
         tokio::select! {
-            _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+            _ = token.cancelled() => {
+                // Propagate shutdown to the in-flight left arm goal so it
+                // stops publishing set_ctrl instead of running until timeout.
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(error = %e, "move_arm_joints: left shutdown cancel propagation failed");
+                }
+                return Outcome::failed("backbone shutting down");
+            }
             _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
                 if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
                     warn!(error = %e, "move_arm_joints: left cancel propagation failed");
@@ -249,7 +256,14 @@ async fn relay_right(
 
     loop {
         tokio::select! {
-            _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+            _ = token.cancelled() => {
+                // Propagate shutdown to the in-flight right arm goal so it
+                // stops publishing set_ctrl instead of running until timeout.
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(error = %e, "move_arm_joints: right shutdown cancel propagation failed");
+                }
+                return Outcome::failed("backbone shutting down");
+            }
             _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
                 if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
                     warn!(error = %e, "move_arm_joints: right cancel propagation failed");

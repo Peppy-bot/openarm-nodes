@@ -186,7 +186,14 @@ async fn relay_left(
 
     loop {
         tokio::select! {
-            _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+            _ = token.cancelled() => {
+                // Propagate shutdown to the in-flight left gripper goal so it
+                // stops driving fingers instead of running until timeout.
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(error = %e, "move_gripper: left shutdown cancel propagation failed");
+                }
+                return Outcome::failed("backbone shutting down");
+            }
             _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
                 if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
                     warn!(error = %e, "move_gripper: left cancel propagation failed");
@@ -247,7 +254,14 @@ async fn relay_right(
 
     loop {
         tokio::select! {
-            _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+            _ = token.cancelled() => {
+                // Propagate shutdown to the in-flight right gripper goal so it
+                // stops driving fingers instead of running until timeout.
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(error = %e, "move_gripper: right shutdown cancel propagation failed");
+                }
+                return Outcome::failed("backbone shutting down");
+            }
             _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
                 if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
                     warn!(error = %e, "move_gripper: right cancel propagation failed");
