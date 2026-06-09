@@ -2,7 +2,7 @@
 
 Manages the simulation process lifecycle for the OpenArm01 bimanual robot. Exposes the `is_ready` service that dependent nodes poll before initialising — ensuring the simulation world is fully loaded before any control logic runs.
 
-Under peppy v0.10's interface-conformance model, the former `variants/{default,isaac,mujoco}` sub-folders are gone. Each implementation is now a separate top-level node that `conforms_to openarm01_robot_initializer:v1` (interface defined in [Peppy-bot/interfaces_hub](https://github.com/Peppy-bot/interfaces_hub/blob/main/openarm01/robot_initializer.json5)).
+Under peppy v0.10's interface-conformance model, each implementation is a separate top-level node that `conforms_to openarm01_robot_initializer:v1`.
 
 ## Implementations
 
@@ -70,8 +70,8 @@ PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer_isaac:v1
 ## Assets
 
 Robot assets (USD, MJCF, meshes) are baked into the container images:
-- `aaqibmahamood/openarm01-isaac-sim:5.1.0` (Isaac variant base)
-- `aaqibmahamood/openarm01-mujoco-sim:3.8.1-4` (MuJoCo variant base)
+- `aaqibmahamood/openarm01-isaac-sim:5.1.0-7` (Isaac sim base)
+- `aaqibmahamood/openarm01-mujoco-sim:3.8.1-7` (MuJoCo sim base)
 
 Contributors do not need to fetch assets — `peppy node build` pulls the pre-built images from Docker Hub.
 
@@ -100,6 +100,7 @@ openarm01_nodes/
       bridge_extension.py                  # plugin registry + step hook
       openarm/launch.py                    # entrypoint, wires peppylib + SimLauncher
       config/sim_bridge.json5              # publisher/subscriber declarations
+      exts/                                # MuJoCo engine wrappers (sensors + actuator_ctrl)
 
   openarm01_robot_initializer_isaac/       # Python ext, Isaac Sim
     peppy.json5                            # conforms_to openarm01_robot_initializer:v1
@@ -109,5 +110,6 @@ openarm01_nodes/
       bridge_extension.py
       openarm/launch.py                    # entrypoint, Isaac Sim must own main thread
       config/sim_bridge.json5
+      exts/                                # Isaac Sim engine wrappers (sensors + actuator_ctrl)
 ```
 
