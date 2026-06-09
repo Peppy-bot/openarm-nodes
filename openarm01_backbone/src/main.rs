@@ -13,17 +13,11 @@ fn main() -> Result<()> {
     NodeBuilder::new().run(|_params: Parameters, node_runner| async move {
         let token = node_runner.cancellation_token().clone();
 
-        // Spawn the entire startup-and-action-handler chain in the background
-        // so this setup closure returns immediately and NodeBuilder can
-        // register `node_health` before the daemon's health probe fires.
-        // Awaiting `wait_until_ready` here blocked the closure for the full
-        // Isaac USD-load window (~30-60s on cold start), which tripped peppy's
-        // health-probe timeout and the daemon SIGKILL'd the instance before it
-        // could expose actions.
-        //
-        // A JoinSet supervises both handlers so an early exit
-        // (ActionHandle::expose error or panic in a callback) surfaces in the
-        // logs instead of disappearing.
+        // Spawn the startup-and-handlers chain so this setup closure returns
+        // immediately and NodeBuilder can register node_health before the
+        // daemon's health probe fires (awaiting wait_until_ready here would
+        // block for the Isaac USD-load window ~30-60s and trip the probe).
+        // JoinSet supervises both handlers so an early exit surfaces.
         tokio::spawn(async move {
             // Gate on the world being ready before exposing any action.
             startup::wait_until_ready(&node_runner, &token).await;
@@ -41,7 +35,9 @@ fn main() -> Result<()> {
                 match joined {
                     Ok(Ok(())) => info!("backbone action handler exited cleanly"),
                     Ok(Err(e)) => error!(error = %e, "backbone action handler returned Err"),
-                    Err(e) if e.is_panic() => error!(error = %e, "backbone action handler panicked"),
+                    Err(e) if e.is_panic() => {
+                        error!(error = %e, "backbone action handler panicked")
+                    }
                     Err(e) => error!(error = %e, "backbone action handler join failed"),
                 }
             }

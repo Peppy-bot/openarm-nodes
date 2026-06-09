@@ -4,7 +4,9 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::{left_arm_move_arm_joints, right_arm_move_arm_joints};
-use peppygen::exposed_actions::move_arm_joints::{ActionHandle, GoalContext, GoalRequest, GoalResponse};
+use peppygen::exposed_actions::move_arm_joints::{
+    ActionHandle, GoalContext, GoalRequest, GoalResponse,
+};
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
@@ -104,7 +106,11 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
     Ok(())
 }
 
-async fn forward(runner: &NodeRunner, goal_ctx: &GoalContext, token: &CancellationToken) -> Outcome {
+async fn forward(
+    runner: &NodeRunner,
+    goal_ctx: &GoalContext,
+    token: &CancellationToken,
+) -> Outcome {
     let req_data = goal_ctx.request().data.clone();
     match req_data.arm_id {
         0 => dispatch_left(runner, &req_data, goal_ctx, token).await,
@@ -135,7 +141,10 @@ async fn dispatch_left(
         Ok(handle) => {
             return Outcome::failed(format!(
                 "left arm rejected goal: {}",
-                handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+                handle
+                    .data
+                    .error_message
+                    .unwrap_or_else(|| "no reason given".into())
             ));
         }
         Err(e) => return Outcome::failed(format!("fire_goal to left arm failed: {e}")),
@@ -166,7 +175,10 @@ async fn dispatch_right(
         Ok(handle) => {
             return Outcome::failed(format!(
                 "right arm rejected goal: {}",
-                handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+                handle
+                    .data
+                    .error_message
+                    .unwrap_or_else(|| "no reason given".into())
             ));
         }
         Err(e) => return Outcome::failed(format!("fire_goal to right arm failed: {e}")),
@@ -234,8 +246,12 @@ async fn relay_left(
                 action_time: data.action_time,
                 is_cancelled: true,
             },
-            left_arm_move_arm_joints::ResultOutcome::Abandoned => Outcome::failed("left arm abandoned"),
-            left_arm_move_arm_joints::ResultOutcome::Expired => Outcome::failed("left arm result expired"),
+            left_arm_move_arm_joints::ResultOutcome::Abandoned => {
+                Outcome::failed("left arm abandoned")
+            }
+            left_arm_move_arm_joints::ResultOutcome::Expired => {
+                Outcome::failed("left arm result expired")
+            }
         },
         Err(e) => {
             if upstream_cancelled {
@@ -302,8 +318,12 @@ async fn relay_right(
                 action_time: data.action_time,
                 is_cancelled: true,
             },
-            right_arm_move_arm_joints::ResultOutcome::Abandoned => Outcome::failed("right arm abandoned"),
-            right_arm_move_arm_joints::ResultOutcome::Expired => Outcome::failed("right arm result expired"),
+            right_arm_move_arm_joints::ResultOutcome::Abandoned => {
+                Outcome::failed("right arm abandoned")
+            }
+            right_arm_move_arm_joints::ResultOutcome::Expired => {
+                Outcome::failed("right arm result expired")
+            }
         },
         Err(e) => {
             if upstream_cancelled {

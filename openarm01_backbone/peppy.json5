@@ -1,17 +1,16 @@
-// openarm01_backbone — orchestrator. Receives motion commands from openarm01_joint_commander,
-// routes each to the correct openarm01_arm / openarm01_gripper instance (left/right), and relays
-// feedback + result upward. Sim/real agnostic — it never touches a sim or hardware API; the
-// component nodes own that abstraction. No variants.
+// openarm01_backbone — orchestrator. Receives motion commands from
+// openarm01_joint_commander, routes each to the correct openarm01_arm /
+// openarm01_gripper instance (left/right), and relays feedback + result upward.
+// Sim/real agnostic — component nodes own that abstraction.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_backbone",
     tag: "v1",
     depends_on: {
-      // Engine-agnostic via interface conformance: backbone names the contracts, the launcher
-      // picks the concrete impl per slot at startup (real / mujoco / isaac). Splitting arm and
-      // gripper into per-side link_ids makes left/right dispatch a compile-time choice — no
-      // runtime get_arm_id/get_gripper_id discovery, no stack_list scan.
+      // Per-side link_ids make left/right dispatch a compile-time choice — no
+      // runtime get_arm_id/get_gripper_id discovery, no stack_list scan. The
+      // launcher picks the concrete impl per slot (real / mujoco / isaac).
       interfaces: [
         {
           name: "openarm01_robot_initializer",

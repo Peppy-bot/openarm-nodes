@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: tuatini/peppy-rust-cargo-base
+From: tuatini/peppy-rust-cargo-base:latest
 
 %files
     . /opt/openarm01_backbone

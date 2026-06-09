@@ -4,7 +4,9 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::{left_gripper_move_gripper, right_gripper_move_gripper};
-use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalContext, GoalRequest, GoalResponse};
+use peppygen::exposed_actions::move_gripper::{
+    ActionHandle, GoalContext, GoalRequest, GoalResponse,
+};
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
@@ -102,7 +104,11 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
     Ok(())
 }
 
-async fn forward(runner: &NodeRunner, goal_ctx: &GoalContext, token: &CancellationToken) -> Outcome {
+async fn forward(
+    runner: &NodeRunner,
+    goal_ctx: &GoalContext,
+    token: &CancellationToken,
+) -> Outcome {
     let req_data = goal_ctx.request().data.clone();
     match req_data.gripper_id {
         0 => dispatch_left(runner, &req_data, goal_ctx, token).await,
@@ -133,7 +139,10 @@ async fn dispatch_left(
         Ok(handle) => {
             return Outcome::failed(format!(
                 "left gripper rejected goal: {}",
-                handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+                handle
+                    .data
+                    .error_message
+                    .unwrap_or_else(|| "no reason given".into())
             ));
         }
         Err(e) => return Outcome::failed(format!("fire_goal to left gripper failed: {e}")),
@@ -164,7 +173,10 @@ async fn dispatch_right(
         Ok(handle) => {
             return Outcome::failed(format!(
                 "right gripper rejected goal: {}",
-                handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+                handle
+                    .data
+                    .error_message
+                    .unwrap_or_else(|| "no reason given".into())
             ));
         }
         Err(e) => return Outcome::failed(format!("fire_goal to right gripper failed: {e}")),
@@ -232,8 +244,12 @@ async fn relay_left(
                 action_time: data.action_time,
                 is_cancelled: true,
             },
-            left_gripper_move_gripper::ResultOutcome::Abandoned => Outcome::failed("left gripper abandoned"),
-            left_gripper_move_gripper::ResultOutcome::Expired => Outcome::failed("left gripper result expired"),
+            left_gripper_move_gripper::ResultOutcome::Abandoned => {
+                Outcome::failed("left gripper abandoned")
+            }
+            left_gripper_move_gripper::ResultOutcome::Expired => {
+                Outcome::failed("left gripper result expired")
+            }
         },
         Err(e) => {
             if upstream_cancelled {
@@ -300,8 +316,12 @@ async fn relay_right(
                 action_time: data.action_time,
                 is_cancelled: true,
             },
-            right_gripper_move_gripper::ResultOutcome::Abandoned => Outcome::failed("right gripper abandoned"),
-            right_gripper_move_gripper::ResultOutcome::Expired => Outcome::failed("right gripper result expired"),
+            right_gripper_move_gripper::ResultOutcome::Abandoned => {
+                Outcome::failed("right gripper abandoned")
+            }
+            right_gripper_move_gripper::ResultOutcome::Expired => {
+                Outcome::failed("right gripper result expired")
+            }
         },
         Err(e) => {
             if upstream_cancelled {
