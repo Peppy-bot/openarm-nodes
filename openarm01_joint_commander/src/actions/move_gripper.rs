@@ -86,7 +86,16 @@ async fn run(
     // v0.10 peppylib: ResultResponse.outcome is a typed enum
     // (Completed/Cancelled/Abandoned/Expired). Completed and Cancelled carry the
     // payload; the latter two are terminal-without-data.
-    let outcome = downstream.get_result(RESULT_TIMEOUT).await;
+    //
+    // Wrap in tokio::select! so a shutdown during the up-to-RESULT_TIMEOUT wait
+    // doesn't wedge the task.
+    let outcome = tokio::select! {
+        _ = token.cancelled() => {
+            finalize(&state, side, false, "shutting down — result abandoned").await;
+            return;
+        }
+        result = downstream.get_result(RESULT_TIMEOUT) => result,
+    };
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
             ResultOutcome::Completed(data) => {
