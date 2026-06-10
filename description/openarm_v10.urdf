@@ -161,7 +161,12 @@
     <parent link="openarm_left_link3"/>
     <child link="openarm_left_link4"/>
     <axis xyz="0 1 0"/>
-    <limit effort="27" lower="0.0" upper="2.443461" velocity="5.445426"/>
+    <!-- J4 (elbow) lower limit raised from the vendored 0.0 to 0.05 rad. At 0.0 the
+         arm is fully extended (straight-arm singularity), where this node's in-process
+         closed-form arm-angle IK is undefined; the floor keeps the elbow off it. The
+         reference enactic/openarm_ros2 keeps 0.0: its real-time control is joint-space
+         and its Cartesian IK is MoveIt's numerical KDL solver. -->
+    <limit effort="27" lower="0.05" upper="2.443461" velocity="5.445426"/>
   </joint>
   <link name="openarm_left_link5">
     <visual name="openarm_left_link5_visual">
@@ -375,7 +380,10 @@
     <parent link="openarm_right_link3"/>
     <child link="openarm_right_link4"/>
     <axis xyz="0 1 0"/>
-    <limit effort="27" lower="0.0" upper="2.443461" velocity="5.445426"/>
+    <!-- J4 (elbow) lower limit raised from the vendored 0.0 to 0.05 rad; see the
+         left_joint4 note. Keeps the elbow off the straight-arm singularity where the
+         in-process closed-form arm-angle IK is undefined. -->
+    <limit effort="27" lower="0.05" upper="2.443461" velocity="5.445426"/>
   </joint>
   <link name="openarm_right_link5">
     <visual name="openarm_right_link5_visual">

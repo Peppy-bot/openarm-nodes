@@ -1,5 +1,7 @@
+mod actions;
 mod control;
 mod friction;
+mod pacer;
 mod trajectory;
 
 use openarm_can::{ArmCan, CallbackMode, v10};
@@ -61,7 +63,6 @@ fn main() -> Result<()> {
             max_joint_velocity_rad_s.iter().all(|v| *v > 0.0),
             "all max_joint_velocity_rad_s_N must be > 0"
         );
-        assert!(params.min_motion_time_s >= 0.0, "min_motion_time_s must be >= 0");
         let side = side_label(arm_id);
 
         // Build the srs_model arm from the URDF: forward kinematics for the
@@ -100,7 +101,6 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             max_joint_velocity_rad_s,
-            min_motion_time_s: params.min_motion_time_s,
             limits: model.limits(),
         };
 
@@ -209,11 +209,12 @@ fn main() -> Result<()> {
             });
         }
 
-        // Single control task (the only motor writer): holds its setpoint with
-        // gravity-comp + PD at startup and between moves, trajectory tracking while a
-        // move_arm_joints goal runs, back to holding the goal after. It spawns its
-        // own action handler, which only admits goals and hands them over.
-        control::spawn(node_runner.clone(), arm.clone(), cfg, model);
+        // Single control task (the only motor writer): eases to the ready pose on
+        // startup, holds with gravity-comp + PD between moves, and tracks joint or
+        // Cartesian trajectories while a goal runs. Its action handlers only admit
+        // goals and hand them over; both actions are exposed before anything spawns,
+        // so a failed registration fails bringup here.
+        control::spawn(&node_runner, arm.clone(), cfg, model).await?;
 
         Ok(())
     })
