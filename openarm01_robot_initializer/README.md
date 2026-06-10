@@ -1,115 +1,59 @@
 # openarm01_robot_initializer
 
-Manages the simulation process lifecycle for the OpenArm01 bimanual robot. Exposes the `is_ready` service that dependent nodes poll before initialising — ensuring the simulation world is fully loaded before any control logic runs.
+This node owns the world the OpenArm V10 lives in. It loads the simulation (or does nothing, on the real robot) and exposes an `is_ready` service that the rest of the stack polls, so nothing tries to command an arm until this node says the world is actually up.
 
-Under peppy v0.10's interface-conformance model, each implementation is a separate top-level node that `conforms_to openarm01_robot_initializer:v1`.
+Three siblings conform to the same `openarm01_robot_initializer:v1` interface, and the launcher picks one:
 
-## Implementations
+| Node | Use case |
+|---|---|
+| `openarm01_robot_initializer` | real robot: nothing to load, `is_ready` is true immediately |
+| `openarm01_robot_initializer_mujoco` | MuJoCo: ready once the model is loaded |
+| `openarm01_robot_initializer_isaac` | Isaac Sim: ready once the stage finishes warming up |
 
-| Node directory | Language | Use case |
-|---|---|---|
-| `openarm01_robot_initializer/` | Rust | Real robot — no simulation, `is_ready` returns `true` instantly |
-| `openarm01_robot_initializer_mujoco/` | Python | MuJoCo simulation — `is_ready: true` once the model is loaded |
-| `openarm01_robot_initializer_isaac/` | Python | Isaac Sim simulation — `is_ready: true` once the stage warmup completes |
+Robot assets (USD, MJCF, meshes) are baked into the sim base images, so there is nothing to download or mount yourself.
 
-All three implementations expose exactly one service from the interface:
+## Build
 
-```yaml
-is_ready:
-  response: { ready: bool }
+The first build pulls the sim base image (about 1 GB for MuJoCo, 7.5 GB for Isaac), so give it a generous idle timeout or the daemon will kill the build mid-download:
+
+```sh
+peppy node add /path/to/ws/openarm01_nodes/openarm01_robot_initializer_mujoco -sb --idle-timeout 18000
 ```
 
-Consumers (e.g. `openarm01_backbone`) depend on `openarm01_robot_initializer:v1` and bind to one of the three implementations via the launcher's `bindings:` block. The consumer's binary is identical across deployments.
+Swap in `openarm01_robot_initializer_isaac` or `openarm01_robot_initializer` (real) as needed. Rebuild after code changes by re-running with `--force`. When the build finishes, `peppy stack list` shows the node at `Stage: Ready`.
 
-## Running
+## Run
 
-The interface (`openarm01_robot_initializer:v1`) is resolved from the configured `interfaces_hub` repo. If you haven't registered it locally yet:
+Start it standalone with a known instance id (the arms and grippers bind to this id later):
 
-```bash
-peppy repo add /path/to/interfaces_hub          # or the git URL once published
-peppy repo refresh
+```sh
+peppy node run openarm01_robot_initializer_mujoco:v1 -i sim
 ```
 
-### Real robot
+MuJoCo runs headless and renders to your browser at **http://localhost:8080**. Isaac runs headless and streams over WebRTC; connect with the [Isaac Sim livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). If you want a native window on the same machine instead, prefix the command with `PEPPY_BRIDGE_HEADLESS=0`.
 
-```bash
-peppy node add openarm01_robot_initializer -sb
-peppy node run openarm01_robot_initializer:v1
+Watch it come up with:
+
+```sh
+peppy node info openarm01_robot_initializer_mujoco:v1
 ```
 
-### MuJoCo
+Normally you won't run it by hand; the launchers in [launchers_hub/openarm01](https://github.com/Peppy-bot/launchers_hub/tree/main/openarm01) start it together with the rest of the stack. The [top-level README](../README.md) walks through the whole sequence:
 
-```bash
-peppy node add openarm01_robot_initializer_mujoco -sb
-peppy node run openarm01_robot_initializer_mujoco:v1
+```sh
+peppy stack launch /path/to/ws/launchers_hub/openarm01/openarm01_teleop_mujoco.json5
 ```
 
-Headless by default. Open `http://<host>:8080` in any browser for the [mjviser](https://github.com/mujocolab/mjviser) view — no GPU or display required client-side.
+## Troubleshooting
 
-To open the native MuJoCo viewer window on the same machine instead:
+**The first build times out**
+That's the base image pull outliving the daemon's idle timeout. Re-run with `--idle-timeout 18000`; later builds reuse the cached image and finish quickly.
 
-```bash
-PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer_mujoco:v1
+**`is_ready` never becomes true**
+The world failed to load. Read the log; the load error is usually near the top:
+```sh
+peppy node info openarm01_robot_initializer_mujoco:v1
 ```
 
-### Isaac Sim
-
-```bash
-peppy node add openarm01_robot_initializer_isaac -sb
-peppy node run openarm01_robot_initializer_isaac:v1
-```
-
-Headless with WebRTC streaming by default. Connect via the [Isaac Sim Livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). Requires NVIDIA GPU.
-
-To open the Isaac Sim window on the same machine instead:
-
-```bash
-PEPPY_BRIDGE_HEADLESS=0 peppy node run openarm01_robot_initializer_isaac:v1
-```
-
-## Assets
-
-Robot assets (USD, MJCF, meshes) are baked into the container images:
-- `aaqibmahamood/openarm01-isaac-sim:5.1.0-7` (Isaac sim base)
-- `aaqibmahamood/openarm01-mujoco-sim:3.8.1-7` (MuJoCo sim base)
-
-Contributors do not need to fetch assets — `peppy node build` pulls the pre-built images from Docker Hub.
-
-To rebuild the base images (maintainers only, requires R2 credentials):
-
-```bash
-RCLONE_S3_ACCESS_KEY_ID=<key> RCLONE_S3_SECRET_ACCESS_KEY=<secret> \
-  bash scripts/build_base_images.sh
-```
-
-## Project structure
-
-```text
-openarm01_nodes/
-  openarm01_robot_initializer/             # Rust, real robot
-    peppy.json5                            # conforms_to openarm01_robot_initializer:v1
-    Cargo.toml + src/{main.rs, service.rs}
-    apptainer.def
-    scripts/, README.md (this file)
-
-  openarm01_robot_initializer_mujoco/      # Python ext, MuJoCo
-    peppy.json5                            # conforms_to openarm01_robot_initializer:v1
-    apptainer.def
-    robots/openarm/
-      _launcher.py                         # SimLauncher — loads model, steps physics
-      bridge_extension.py                  # plugin registry + step hook
-      openarm/launch.py                    # entrypoint, wires peppylib + SimLauncher
-      config/sim_bridge.json5              # publisher/subscriber declarations
-      exts/                                # MuJoCo engine wrappers (sensors + actuator_ctrl)
-
-  openarm01_robot_initializer_isaac/       # Python ext, Isaac Sim
-    peppy.json5                            # conforms_to openarm01_robot_initializer:v1
-    apptainer.def
-    robots/openarm/
-      _launcher.py                         # SimLauncher — loads USD stage, runs timeline
-      bridge_extension.py
-      openarm/launch.py                    # entrypoint, Isaac Sim must own main thread
-      config/sim_bridge.json5
-      exts/                                # Isaac Sim engine wrappers (sensors + actuator_ctrl)
-```
-
+**The Isaac stream is a black screen**
+Stop the node, clear the shader cache with `rm -rf ~/.cache/isaac-sim`, and start it again.
