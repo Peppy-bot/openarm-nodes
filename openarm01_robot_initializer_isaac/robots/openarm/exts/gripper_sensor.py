@@ -18,6 +18,9 @@ class IsaacGripperSensor:
         self._finger_indices: list[int] = []
         self._resolved_names: list[str] = []
         self._ready: bool = False
+        # One-shot guard — the force-read fallback fires every physics step
+        # when broken; warn once instead of spamming at step rate.
+        self._force_warning_logged: bool = False
 
     def setup(self) -> bool:
         """Initialise the Articulation and resolve finger joint indices."""
@@ -44,6 +47,7 @@ class IsaacGripperSensor:
                     )
 
             self._ready = True
+            self._force_warning_logged = False
         except Exception as exc:
             logger.error(
                 f"Failed to setup IsaacGripperSensor at '{self._prim_path}': {exc}"
@@ -64,6 +68,7 @@ class IsaacGripperSensor:
         self._finger_indices = []
         self._resolved_names = []
         self._ready = False
+        self._force_warning_logged = False
 
     def get_gripper_state(self) -> Optional[dict]:
         """Return finger joint names, positions, and applied forces."""
@@ -84,10 +89,12 @@ class IsaacGripperSensor:
                     for i in self._finger_indices
                 ]
             except Exception as exc:
-                logger.warning(
-                    "Could not read gripper applied forces — falling back to"
-                    f" zeros: {exc}"
-                )
+                if not self._force_warning_logged:
+                    logger.warning(
+                        "Could not read gripper applied forces — falling back"
+                        f" to zeros (warning once): {exc}"
+                    )
+                    self._force_warning_logged = True
                 applied_forces = [0.0] * len(self._finger_indices)
 
             return {

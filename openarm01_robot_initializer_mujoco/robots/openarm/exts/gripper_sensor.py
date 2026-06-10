@@ -21,6 +21,9 @@ class MujocoGripperSensor:
         # List of (resolved_name, qpos_adr, ctrl_adr or -1)
         self._resolved: list[tuple[str, int, int]] = []
         self._ready: bool = False
+        # One-shot guard — the state-read fallback fires every physics step
+        # when broken; warn once instead of spamming at step rate.
+        self._read_warning_logged: bool = False
 
     def setup(self) -> bool:
         """Resolve joint and actuator indices from the model."""
@@ -58,6 +61,7 @@ class MujocoGripperSensor:
 
             self._resolved = resolved
             self._ready = True
+            self._read_warning_logged = False
         except Exception as exc:
             logger.error(f"Failed to setup MujocoGripperSensor: {exc}")
             return False
@@ -72,6 +76,7 @@ class MujocoGripperSensor:
         """Reset sensor state."""
         self._resolved = []
         self._ready = False
+        self._read_warning_logged = False
 
     def get_gripper_state(self) -> Optional[dict]:
         """Return finger joint names, positions, and measured actuator forces.
@@ -93,7 +98,9 @@ class MujocoGripperSensor:
                 "applied_forces": applied_forces,
             }
         except Exception as exc:
-            logger.warning(f"Could not read gripper state: {exc}")
+            if not self._read_warning_logged:
+                logger.warning(f"Could not read gripper state (warning once): {exc}")
+                self._read_warning_logged = True
             return None
 
     @property
