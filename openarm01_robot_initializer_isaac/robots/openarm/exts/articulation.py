@@ -66,6 +66,20 @@ class IsaacArticulation:
         """Cross-engine alias of get_dof_names — order matches get_joint_states()."""
         return self.get_dof_names()
 
+    def get_joint_limits(self) -> Optional[tuple[list[float], list[float]]]:
+        """Return (lower, upper) DOF limits in get_joint_states() order.
+        PhysX's ±3.4e38 unbounded sentinels are squashed to ±1e6 (JSON-safe)."""
+        if self._view is None:
+            return None
+        try:
+            limits = self._view.get_dof_limits()[0]
+            lower = [max(float(lo), -1e6) for lo in limits[:, 0]]
+            upper = [min(float(hi), 1e6) for hi in limits[:, 1]]
+            return lower, upper
+        except Exception as exc:
+            logger.warning(f"Could not read joint limits: {exc}")
+            return None
+
     def get_joint_states(self) -> Optional[tuple[list[float], list[float]]]:
         """Read current joint positions and velocities."""
         if self._view is None:
