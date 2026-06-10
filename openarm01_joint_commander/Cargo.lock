@@ -422,6 +422,7 @@ name = "build-helpers"
 version = "0.0.1"
 dependencies = [
  "sha2 0.11.0",
+ "zip",
 ]
 
 [[package]]
@@ -2266,6 +2267,7 @@ name = "openarm01_joint_commander"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "json5",
  "peppygen",
  "peppylib",
  "serde",
@@ -2533,7 +2535,6 @@ dependencies = [
  "tokio",
  "tracing",
  "zenoh",
- "zip",
 ]
 
 [[package]]

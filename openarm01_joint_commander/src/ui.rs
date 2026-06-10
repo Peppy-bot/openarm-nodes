@@ -20,15 +20,39 @@ use tracing::{info, warn};
 
 use crate::actions::{move_arm_joints, move_gripper};
 use crate::error::Result;
-use crate::state::{
-    ARM_DOF, ArmTarget, GRIPPER_CLOSED_M, GRIPPER_OPEN_M, GripperTarget, JOINT_LIMIT_RAD,
-    SharedState, Side, UiState,
-};
+use crate::state::{ARM_DOF, ArmTarget, GripperTarget, SharedState, Side, UiState};
 
 const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const FEEDBACK_HZ: u32 = 20;
 const INDEX_HTML: &str = include_str!("../static/index.html");
+
+// Joint + gripper ranges from the robot model — the single source for slider
+// bounds (via the WS snapshot) and for clamping incoming commands.
+const JOINT_LIMITS_SRC: &str = include_str!("../config/joint_limits.json5");
+
+#[derive(Clone, Copy, Deserialize)]
+struct JointLimits {
+    gripper: [f64; 2],
+    left: [[f64; 2]; ARM_DOF],
+    right: [[f64; 2]; ARM_DOF],
+}
+
+impl JointLimits {
+    fn arm(&self, side: Side) -> &[[f64; 2]; ARM_DOF] {
+        match side {
+            Side::Left => &self.left,
+            Side::Right => &self.right,
+        }
+    }
+}
+
+fn joint_limits() -> &'static JointLimits {
+    static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
+    LIMITS.get_or_init(|| {
+        json5::from_str(JOINT_LIMITS_SRC).expect("config/joint_limits.json5 must parse")
+    })
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -116,15 +140,17 @@ async fn handle_command(text: &str, app: &AppState) {
             return;
         }
     };
+    let limits = joint_limits();
     match cmd {
         Command::FireArm { side, mut joints } => {
-            for j in &mut joints {
-                *j = j.clamp(-JOINT_LIMIT_RAD, JOINT_LIMIT_RAD);
+            let side: Side = side.into();
+            for (j, &[lo, hi]) in joints.iter_mut().zip(limits.arm(side).iter()) {
+                *j = j.clamp(lo, hi);
             }
-            fire_arm(app, side.into(), joints).await;
+            fire_arm(app, side, joints).await;
         }
         Command::FireGripper { side, position } => {
-            let position = position.clamp(GRIPPER_CLOSED_M, GRIPPER_OPEN_M);
+            let position = position.clamp(limits.gripper[0], limits.gripper[1]);
             fire_gripper(app, side.into(), position).await;
         }
     }
@@ -197,6 +223,8 @@ struct ArmView {
     joints: [f64; ARM_DOF],
     feedback: Option<[f64; ARM_DOF]>,
     in_flight: bool,
+    // Per-joint [min, max] (rad) — the browser bounds its sliders with these.
+    limits: [[f64; 2]; ARM_DOF],
 }
 
 #[derive(Serialize)]
@@ -211,34 +239,32 @@ struct GripperView {
 impl From<&UiState> for Snapshot {
     fn from(s: &UiState) -> Self {
         Self {
-            left_arm: ArmView::from(&s.left_arm),
-            right_arm: ArmView::from(&s.right_arm),
-            left_gripper: GripperView::from(&s.left_gripper),
-            right_gripper: GripperView::from(&s.right_gripper),
+            left_arm: arm_view(&s.left_arm, Side::Left),
+            right_arm: arm_view(&s.right_arm, Side::Right),
+            left_gripper: gripper_view(&s.left_gripper),
+            right_gripper: gripper_view(&s.right_gripper),
             status: s.status.clone(),
         }
     }
 }
 
-impl From<&ArmTarget> for ArmView {
-    fn from(a: &ArmTarget) -> Self {
-        Self {
-            joints: a.joints,
-            feedback: a.last_feedback,
-            in_flight: a.in_flight,
-        }
+fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
+    ArmView {
+        joints: a.joints,
+        feedback: a.last_feedback,
+        in_flight: a.in_flight,
+        limits: *joint_limits().arm(side),
     }
 }
 
-impl From<&GripperTarget> for GripperView {
-    fn from(g: &GripperTarget) -> Self {
-        Self {
-            position: g.position,
-            feedback: g.last_feedback.clone(),
-            in_flight: g.in_flight,
-            min: GRIPPER_CLOSED_M,
-            max: GRIPPER_OPEN_M,
-        }
+fn gripper_view(g: &GripperTarget) -> GripperView {
+    let [min, max] = joint_limits().gripper;
+    GripperView {
+        position: g.position,
+        feedback: g.last_feedback.clone(),
+        in_flight: g.in_flight,
+        min,
+        max,
     }
 }
 

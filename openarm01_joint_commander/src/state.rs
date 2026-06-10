@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 pub const ARM_DOF: usize = 7;
-pub const GRIPPER_OPEN_M: f64 = 0.044;
+// Range bounds live in config/joint_limits.json5 (loaded by ui.rs); this is
+// only the startup default for the gripper target.
 pub const GRIPPER_CLOSED_M: f64 = 0.0;
-pub const JOINT_LIMIT_RAD: f64 = std::f64::consts::PI;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Side {

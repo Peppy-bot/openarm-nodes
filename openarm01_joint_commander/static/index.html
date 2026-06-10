@@ -124,12 +124,22 @@ function apply_snapshot(snap) {
     b.className = 'badge' + (a.in_flight ? ' flight' : '');
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
+      // Slider bounds come from the server's joint_limits config.
+      if (a.limits) {
+        const el = $(`${side}_j${i}`);
+        const [lo, hi] = a.limits[i];
+        if (el.min != lo) el.min = lo;
+        if (el.max != hi) el.max = hi;
+      }
     }
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);
     gb.textContent = g.in_flight ? 'in flight' : 'idle';
     gb.className = 'badge' + (g.in_flight ? ' flight' : '');
+    const gs = $(`${side}_g`);
+    if (gs.min != g.min) gs.min = g.min;
+    if (gs.max != g.max) gs.max = g.max;
     $(`${side}_gf`).textContent = g.feedback && g.feedback.length
       ? g.feedback.map(x => x.toFixed(4)).join(', ')
       : '---';
