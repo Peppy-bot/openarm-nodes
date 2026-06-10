@@ -23,6 +23,12 @@ struct JointStatesRaw {
     joint_names: Vec<String>,
     positions: Vec<f64>,
     velocities: Vec<f64>,
+    // Static joint limits from the sim model (optional — older monoliths
+    // don't send them). Same order as joint_names.
+    #[serde(default)]
+    limits_lower: Vec<f64>,
+    #[serde(default)]
+    limits_upper: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -134,9 +140,14 @@ async fn emit_joint_states(
         .map(|(i, n)| (n.as_str(), i))
         .collect();
 
+    let have_limits =
+        msg.limits_lower.len() == n_names && msg.limits_upper.len() == n_names;
+
     let mut joint_names = Vec::with_capacity(ARM_DOF);
     let mut positions = Vec::with_capacity(ARM_DOF);
     let mut velocities = Vec::with_capacity(ARM_DOF);
+    let mut limits_lower = Vec::with_capacity(ARM_DOF);
+    let mut limits_upper = Vec::with_capacity(ARM_DOF);
     for name in expected {
         let Some(&src) = by_name.get(name.as_str()) else {
             continue;
@@ -144,6 +155,24 @@ async fn emit_joint_states(
         joint_names.push(name.clone());
         positions.push(msg.positions[src]);
         velocities.push(msg.velocities[src]);
+        if have_limits {
+            limits_lower.push(msg.limits_lower[src]);
+            limits_upper.push(msg.limits_upper[src]);
+        }
+    }
+
+    // Limits are static — cache once so move_arm_joints can clamp targets.
+    if have_limits && limits_lower.len() == ARM_DOF {
+        let mut cached = state.joint_limits.lock().unwrap_or_else(|p| p.into_inner());
+        if cached.is_none() {
+            *cached = Some(
+                limits_lower
+                    .iter()
+                    .zip(limits_upper.iter())
+                    .map(|(&lo, &hi)| (lo, hi))
+                    .collect(),
+            );
+        }
     }
 
     // Only cache complete 7-DOF samples — a partial payload would corrupt the

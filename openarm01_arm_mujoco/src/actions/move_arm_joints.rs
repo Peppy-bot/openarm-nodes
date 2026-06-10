@@ -31,12 +31,6 @@ const STALL_LOOKBACK_ITERS: u32 = 100;
 const STALL_EPSILON_RAD: f64 = 5e-4;
 const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
 
-// Joint angle hard limits — rejected at goal time. MuJoCo clamps internally
-// too, but rejecting early gives the caller a clear "out of range" failure
-// instead of silently saturating.
-const JOINT_MIN_RAD: f64 = -std::f64::consts::PI;
-const JOINT_MAX_RAD: f64 = std::f64::consts::PI;
-
 // If set_ctrl publishing fails for this many consecutive ticks (one full
 // stall window, ~500ms), the arm is not being commanded — bail rather than
 // let stall detection report a false "physical limit".
@@ -54,6 +48,32 @@ struct SetCtrlPayload<'a> {
 struct AcceptedGoal {
     target_positions: [f64; DOF],
     feedback_period: Duration,
+    // True when any target was clamped to the model's joint limits (noted
+    // in the result message).
+    clamped: bool,
+}
+
+// Clamp targets into the sim model's joint limits (cached from telemetry).
+// Before limits arrive targets pass through — the sim clamps ctrl natively.
+fn clamp_to_limits(state: &Arc<SharedState>, target: &mut [f64; DOF]) -> bool {
+    let limits = state
+        .joint_limits
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let Some(limits) = limits else { return false };
+    if limits.len() != DOF {
+        return false;
+    }
+    let mut clamped = false;
+    for (q, &(lo, hi)) in target.iter_mut().zip(limits.iter()) {
+        let c = q.clamp(lo, hi);
+        if (c - *q).abs() > 1e-9 {
+            clamped = true;
+        }
+        *q = c;
+    }
+    clamped
 }
 
 struct MotionResult {
@@ -68,16 +88,12 @@ fn feedback_period(freq_hz: u32) -> Duration {
     Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
 }
 
+// Range enforcement is clamp_to_limits (model joint ranges are asymmetric and
+// exceed ±π on j1/j2, so a fixed bound here would reject valid targets).
 fn validate_positions(positions: &[f64; DOF]) -> Result<(), String> {
     for (i, &q) in positions.iter().enumerate() {
         if !q.is_finite() {
             return Err(format!("joint {} target is not finite: {q}", i + 1));
-        }
-        if !(JOINT_MIN_RAD..=JOINT_MAX_RAD).contains(&q) {
-            return Err(format!(
-                "joint {} target {q} out of range [{JOINT_MIN_RAD}, {JOINT_MAX_RAD}]",
-                i + 1,
-            ));
         }
     }
     Ok(())
@@ -129,9 +145,12 @@ pub async fn run(
             }
         };
 
+        let mut target_positions = goal_ctx.request().data.joint_positions;
+        let clamped = clamp_to_limits(&state, &mut target_positions);
         let goal = AcceptedGoal {
-            target_positions: goal_ctx.request().data.joint_positions,
+            target_positions,
             feedback_period: feedback_period(goal_ctx.request().data.feedback_frequency),
+            clamped,
         };
 
         let result = run_control_loop(
@@ -307,10 +326,15 @@ async fn run_control_loop(
         }
 
         if within_tolerance {
+            let message = if goal.clamped {
+                "reached (target clamped to joint limits)".into()
+            } else {
+                "reached".into()
+            };
             return MotionResult {
                 success: true,
                 is_cancelled: false,
-                message: "reached".into(),
+                message,
                 final_positions: current,
                 action_time: elapsed_secs,
             };
