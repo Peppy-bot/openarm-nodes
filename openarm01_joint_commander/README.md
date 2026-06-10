@@ -1,79 +1,40 @@
 # openarm01_joint_commander
 
-Rust node that drives the bimanual openarm01 in joint space from a browser. On
-startup it binds an HTTP + WebSocket server (default `:8765`, override with
-`PEPPY_JC_PORT`), serves a single-page UI with sliders for every joint and the
-gripper, and fires `move_arm_joints` / `move_gripper` actions at
-`openarm01_backbone`. Action feedback streams back over the WebSocket.
+The browser control panel for the OpenArm V10. It serves a page on port 8765 with a slider per joint and per gripper; pressing **Send** fires the matching `move_arm_joints` or `move_gripper` goal at `openarm01_backbone`, and feedback streams back into the page while the arm moves.
 
-MVP scope: joint-space only. Cartesian operator input (and the upstream IK +
-collision-detection pipeline) is post-MVP; the node goes through `backbone`'s
-`move_arm_joints` action which arm executes directly. A future pose-estimation
-implementation will land as a separate sibling node.
-
----
-
-## Dependency
-
-`openarm01_backbone:v1` must be in the stack (backbone forwards goals to
-arm / gripper instances). Backbone in turn depends on `openarm01_robot_initializer:v1`,
-`openarm01_arm:v1`, `openarm01_gripper:v1` via interface conformance — the
-launcher binds concrete impls (real / mujoco / isaac) at startup.
-
----
+Slider ranges come from `config/joint_limits.json5`, which mirrors the robot model's joint limits, so the UI won't let you ask for an angle the arm can't physically reach. If the model's limits ever change, update that file and rebuild.
 
 ## Build
 
-```bash
-peppy node add . -sb           # add + sync + build
+```sh
+peppy node add /path/to/ws/openarm01_nodes/openarm01_joint_commander -sb --idle-timeout 1800
 ```
 
-Apptainer pulls `tuatini/peppy-rust-cargo-base:latest` and runs `cargo build --release`.
-
----
+Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in `peppy stack list` once built.
 
 ## Run
 
-```bash
-peppy node run openarm01_joint_commander:v1
-# logs: "joint commander UI at http://localhost:8765"
+It needs a running backbone, so the usual way is through a launcher; the [top-level README](../README.md) has the complete sequence:
+
+```sh
+peppy stack launch /path/to/ws/launchers_hub/openarm01/openarm01_teleop_mujoco.json5
 ```
 
-Open the logged URL in any browser. Cancel the node (`peppy stack stop` or
-ctrl-C on the runner) to shut down the server cleanly.
+You can also run it alone against an existing backbone instance:
 
----
+```sh
+peppy node run openarm01_joint_commander:v1 --bind backbone@backbone_inst
+```
 
-## UI
+Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to fully open (0.044 m), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.
 
-Four panels: left arm, right arm, left gripper, right gripper.
+## Troubleshooting
 
-- **Arm**: 7 sliders (±π rad) with live target + feedback readouts. `Send` fires
-  `move_arm_joints` with the current slider values. `Home` resets sliders to
-  zero (does not send).
-- **Gripper**: position slider (0–0.044 m). `Open`, `Close`, and `Send`
-  shortcuts each fire `move_gripper`.
-- A previous goal must finish before the same arm / gripper accepts a new one —
-  the status line shows `previous goal still in flight` otherwise.
+**The page loads but Send does nothing**
+Backbone isn't up or isn't healthy. Check `peppy stack list`, then `peppy node info openarm01_backbone:v1`.
 
-The WebSocket auto-reconnects every second when the server restarts, so you can
-leave the browser tab open across rebuilds.
+**The status line says "previous goal still in flight"**
+Each arm and gripper takes one goal at a time, so wait for the badge to flip back to idle before sending again.
 
----
-
-## Architecture
-
-- `main.rs`: thin entrypoint; `NodeBuilder::new().run(...)` spawns `ui::run` in a
-  background task so `node_health` registers during NodeBuilder finalisation
-  before the daemon's health probe fires.
-- `ui.rs`: axum router (`GET /` → embedded `static/index.html`, `GET /ws` →
-  WebSocket). The WS loop ticks state snapshots out at 10 Hz and dispatches
-  `fire_arm` / `fire_gripper` commands by spawning action tasks.
-- `state.rs`: `Arc<std::sync::Mutex<UiState>>` shared with action tasks. The
-  `in_flight` flag per arm / gripper is the single-writer gate that prevents
-  double-firing.
-- `actions/move_arm_joints.rs` + `actions/move_gripper.rs`: each command spawns
-  one task that fires the consumed action at backbone, streams feedback into
-  the shared state, then writes the result into the status line and clears
-  `in_flight`. Cancel-aware: a global token cancel abandons the feedback wait
-  and finalises with a status message.
+**Port 8765 is already in use**
+A previous instance is still running. Find it with `peppy stack list` and stop it with `peppy node stop <instance_id>`, or set `PEPPY_JC_PORT` to a different port.
