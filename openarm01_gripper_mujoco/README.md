@@ -1,76 +1,40 @@
 # openarm01_gripper_mujoco
 
-Rust peppy node that drives the gripper in a MuJoCo sim. Subscribes to raw
-peppylib telemetry published by `openarm01_robot_initializer_mujoco`'s
-in-process bridge extension, and publishes raw `set_ctrl_gripper_<side>` back
-to it for actuator control.
+Drives one side of the OpenArm V10 gripper inside MuJoCo. It conforms to `openarm01_gripper:v1`, the same interface the real gripper driver implements, so backbone and the UI work with it unchanged.
 
-The container talks only over the peppy daemon — no shared filesystem with
-`robot_initializer`, no mmap, no host-bind dependencies. Same transport as
-every other peppy node; works cross-host out of the box.
-
----
-
-## Dependency
-
-This node needs `openarm01_robot_initializer_mujoco:v1` running. That node owns
-the MuJoCo process and emits the raw telemetry topics (`gripper_state_<side>`,
-`ee_pose_<side>`, `contact_forces`, …) that this gripper subscribes to, and
-subscribes to `set_ctrl_gripper_<side>` to apply ctrl writes inside its
-`mj_step` loop.
-
-If `openarm01_robot_initializer_mujoco` is not running, the gripper starts but
-does not publish telemetry until the raw topics begin flowing.
-
----
+It attaches to the MuJoCo world that `openarm01_robot_initializer_mujoco` owns, so that node has to be running first. `move_gripper` takes the total aperture in meters (0.0 closed, 0.044 fully open); each finger moves to half of it.
 
 ## Build
 
-```bash
-peppy node add openarm01_gripper_mujoco -sb
+```sh
+peppy node add /path/to/ws/openarm01_nodes/openarm01_gripper_mujoco -sb --idle-timeout 1800
 ```
 
-The apptainer build pulls `tuatini/peppy-rust-cargo-base:latest` and runs
-`cargo build --release` inside the container.
-
----
+Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in `peppy stack list` once built.
 
 ## Run
 
-Two instances — left and right — pinned to deterministic IDs so the test
-harness can address them:
+One instance drives one side. `gripper_id` picks the side (0 = left, 1 = right), `-i` names the instance, and `--bind` points the node at the sim instance it should attach to:
 
-```bash
-peppy node run openarm01_robot_initializer_mujoco:v1
-peppy node run openarm01_gripper_mujoco:v1 gripper_id=0 -i left_gripper
-peppy node run openarm01_gripper_mujoco:v1 gripper_id=1 -i right_gripper
-peppy stack list
+```sh
+peppy node run openarm01_robot_initializer_mujoco:v1 -i sim
+peppy node run openarm01_gripper_mujoco:v1 gripper_id=0 -i left_grip_inst --bind sim@sim
+peppy node run openarm01_gripper_mujoco:v1 gripper_id=1 -i right_grip_inst --bind sim@sim
 ```
 
----
+For the full stack, with the browser UI driving both arms and grippers, use the launcher instead; the [top-level README](../README.md) has the complete sequence:
 
-## Testing
-
-Standalone Rust harness fires `move_gripper` at the running instances over the
-typed peppygen path. Gated behind the `test-tools` cargo feature so the
-production SIF doesn't ship it.
-
-```bash
-cargo build --release --features test-tools --bin test_move_gripper
-
-./target/release/test_move_gripper                              # both grippers, fully open
-./target/release/test_move_gripper --side left --position 0.0   # close left only
-./target/release/test_move_gripper --side right --position 0.022 --feedback-hz 20
+```sh
+peppy stack launch /path/to/ws/launchers_hub/openarm01/openarm01_teleop_mujoco.json5
 ```
 
----
+## Troubleshooting
 
-## Architecture notes
+**Goals time out with "no usable telemetry from robot_initializer"**
+The sim isn't running or hasn't finished loading. Check it with `peppy node info openarm01_robot_initializer_mujoco:v1`.
 
-- **No mmap, no offsets, no shared memory.** All telemetry comes in via raw
-  peppylib JSON from the daemon; all control goes out via raw peppylib.
-- **Driver-only abstraction.** `src/main.rs` wires `sim_bridge_core::SimBridge`
-  pipelines: each raw subscription is paired with one typed peppygen emit.
-- **`position` semantics.** `position` in `move_gripper` is total aperture per
-  V10 spec (0.0 closed, 0.044 fully open). Each finger is driven to
-  `position / 2` via the same `set_ctrl_gripper_<side>` payload.
+**A move finishes with "stalled at physical limit"**
+That's success: the fingers closed onto something (or hit fully open) before reaching the exact target, which is exactly how gripping is supposed to work.
+
+**A goal is rejected with "position out of range"**
+`move_gripper` accepts 0.0 to 0.044 meters of total aperture.
