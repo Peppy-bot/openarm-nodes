@@ -56,7 +56,10 @@
                 $type: "array",
                 $items: "f64",
                 $length: 7
-              }
+              },
+              // Requested trajectory duration (s), forwarded to the arm, which
+              // floors it at its per-joint velocity-limit duration. 0 = fastest.
+              duration_s: "f64"
             },
             response_message_format: {
               accepted: "bool"

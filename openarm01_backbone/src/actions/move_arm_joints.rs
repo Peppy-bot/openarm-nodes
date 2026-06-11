@@ -132,6 +132,7 @@ async fn dispatch_left(
         left_arm_move_arm_joints::GoalRequest {
             feedback_frequency: req.feedback_frequency,
             joint_positions: req.joint_positions,
+            duration_s: req.duration_s,
         },
         QoSProfile::SensorData,
     )
@@ -166,6 +167,7 @@ async fn dispatch_right(
         right_arm_move_arm_joints::GoalRequest {
             feedback_frequency: req.feedback_frequency,
             joint_positions: req.joint_positions,
+            duration_s: req.duration_s,
         },
         QoSProfile::SensorData,
     )
