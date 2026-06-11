@@ -5,6 +5,7 @@ use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
 use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::{NodeBuilder, Parameters, Result};
+use peppylib::datastore::{self, Encoding};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +17,7 @@ const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 2000;
 const ENABLE_FD: bool = true;
+const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
@@ -34,13 +36,23 @@ fn main() -> Result<()> {
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
         };
 
-        // Instance lock: crash if another instance with the same gripper_id is running.
-        let lock_path = format!("/tmp/openarm_gripper_{gripper_id}.lock");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
+        // Instance lock: crash if another instance with the same gripper_id is
+        // running. Held in the core-node datastore, so a lock leaked by a hard
+        // crash clears with the stack instead of lingering like a /tmp file.
+        // get-then-store is not atomic yet; two simultaneous starts can race.
+        // Datastore keys only allow node-name characters, hence no slashes.
+        let lock_key = format!("openarm01_gripper_{gripper_id}_instance_lock");
+        if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
+            panic!("instance lock {lock_key} held by {}", held.last_modified_by);
+        }
+        datastore::store(
+            &node_runner,
+            lock_key.as_str(),
+            b"locked".to_vec(),
+            Encoding::TEXT_PLAIN,
+            DATASTORE_TIMEOUT,
+        )
+        .await?;
 
         // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
@@ -72,7 +84,7 @@ fn main() -> Result<()> {
             let gripper = gripper.clone();
             let node_runner = node_runner.clone();
             let cancel = node_runner.cancellation_token().clone();
-            let lock_path = lock_path.clone();
+            let lock_key = lock_key.clone();
             tokio::spawn(async move {
                 let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
                 let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
@@ -90,8 +102,8 @@ fn main() -> Result<()> {
                     std::thread::sleep(POST_DISABLE_SLEEP);
                     g.recv_all(BRINGUP_RECV_US);
                 }
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
+                if let Err(e) = datastore::remove(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
+                    warn!("failed to remove lock {lock_key}: {e}");
                 }
                 // process::exit: peppylib runtime has no clean shutdown path; the
                 // motor is already disabled above so this is safe.
