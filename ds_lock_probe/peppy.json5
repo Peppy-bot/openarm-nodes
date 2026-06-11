@@ -1,0 +1,28 @@
+// Minimal harness for the datastore instance-lock shutdown paths: stores a
+// key on startup, removes it on SIGINT / SIGTERM / runtime cancellation, and
+// logs which trigger fired so the three stop paths can be told apart.
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "ds_lock_probe",
+    tag: "v1",
+  },
+  interfaces: {},
+
+  execution: {
+    language: "rust",
+    build_cmd: [
+      "cargo",
+      "build",
+      "--release"
+    ],
+    run_cmd: [
+      "./target/release/ds_lock_probe"
+    ],
+    parameters: {
+      lock_key: "string",
+      // "lock" = normal instance-lock flow; "clean" = remove the key and exit.
+      mode: { $type: "string", $default: "lock" }
+    }
+  },
+}
