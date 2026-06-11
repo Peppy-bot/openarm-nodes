@@ -1,9 +1,13 @@
-// Joint-space 7-DOF control: validate target, run a feedback loop on the
-// shared joint_states cache, and republish set_ctrl_arm_<side> every tick
-// to survive best-effort QoS drops. No shutdown zero — would self-collide.
+// Joint-space 7-DOF control mirroring the real driver: reject out-of-limit
+// targets, anchor a quintic minimum-jerk trajectory at the current pose, and
+// stream (q_des, dq_des) setpoints at 100 Hz. The sim-side actuator plugin
+// applies the same MIT gains the real motors run, so motion timing, gravity
+// sag, and completion semantics match hardware. Completion is time-based
+// (trajectory elapsed), exactly like the real driver — no convergence check.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
@@ -14,73 +18,38 @@ use peppylib::runtime::CancellationToken;
 use peppylib::{MessengerHandle, Payload, TopicMessenger};
 use serde::Serialize;
 use sim_bridge_core::DaemonState;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::config::ArmId;
 use crate::state::SharedState;
+use crate::trajectory::{ARM_DOF as DOF, JointVec, Trajectory};
 
-const DOF: usize = 7;
-
-// Per-joint tolerance (radians) for "reached target". ~0.5° at each joint.
-const POSITION_TOLERANCE_RAD: f64 = 0.01;
+// Real-driver defaults (openarm01_arm peppy.json5): 100 Hz control cycle,
+// 30 s motion timeout, per-joint peak velocities sizing the quintic duration.
+const CYCLE_PERIOD: Duration = Duration::from_millis(10);
 const MOTION_TIMEOUT: Duration = Duration::from_secs(30);
+const MIN_MOTION_TIME_S: f64 = 0.1;
+const MAX_JOINT_VELOCITY_RAD_S: JointVec = [16.8, 16.8, 5.4, 5.4, 20.9, 20.9, 20.9];
 
-// Per-joint max diff (not sum |q_i|, which aliases when one joint moves +ε
-// and another -ε). Below STALL_EPSILON_RAD over a 500ms window → stalled.
-const STALL_LOOKBACK_ITERS: u32 = 100;
-const STALL_EPSILON_RAD: f64 = 5e-4;
-const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
-
-// If set_ctrl publishing fails for this many consecutive ticks (one full
-// stall window, ~500ms), the arm is not being commanded — bail rather than
-// let stall detection report a false "physical limit".
-const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = STALL_LOOKBACK_ITERS;
+// ~500 ms of dropped publishes at 100 Hz → the arm isn't being commanded;
+// bail instead of playing the trajectory into the void.
+const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = 50;
 
 const ARM_NODE_NAME: &str = "openarm01_arm";
 
-// Keys are joint names (openarm_<side>_joint{1..7}). Isaac resolves them via
-// USD dof_names; MuJoCo via the joint-name alias. Same payload, both engines.
+// Keys are joint names (openarm_<side>_joint{1..7}). The sim-side actuator
+// plugin owns the MIT gains and combines q_des/dq_des into motor torque.
 #[derive(Serialize)]
 struct SetCtrlPayload<'a> {
     actuator_values: HashMap<&'a str, f64>,
-}
-
-struct AcceptedGoal {
-    target_positions: [f64; DOF],
-    feedback_period: Duration,
-    // True when any target was clamped to the model's joint limits (noted
-    // in the result message).
-    clamped: bool,
-}
-
-// Clamp targets into the sim model's joint limits (cached from telemetry).
-// Before limits arrive targets pass through — the sim clamps ctrl natively.
-fn clamp_to_limits(state: &Arc<SharedState>, target: &mut [f64; DOF]) -> bool {
-    let limits = state
-        .joint_limits
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
-    let Some(limits) = limits else { return false };
-    if limits.len() != DOF {
-        return false;
-    }
-    let mut clamped = false;
-    for (q, &(lo, hi)) in target.iter_mut().zip(limits.iter()) {
-        let c = q.clamp(lo, hi);
-        if (c - *q).abs() > 1e-9 {
-            clamped = true;
-        }
-        *q = c;
-    }
-    clamped
+    velocity_values: HashMap<&'a str, f64>,
 }
 
 struct MotionResult {
     success: bool,
     is_cancelled: bool,
     message: String,
-    final_positions: [f64; DOF],
+    final_positions: JointVec,
     action_time: f64,
 }
 
@@ -88,15 +57,18 @@ fn feedback_period(freq_hz: u32) -> Duration {
     Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
 }
 
-// Range enforcement is clamp_to_limits (model joint ranges are asymmetric and
-// exceed ±π on j1/j2, so a fixed bound here would reject valid targets).
-fn validate_positions(positions: &[f64; DOF]) -> Result<(), String> {
-    for (i, &q) in positions.iter().enumerate() {
-        if !q.is_finite() {
-            return Err(format!("joint {} target is not finite: {q}", i + 1));
-        }
-    }
-    Ok(())
+// Mirrors the real driver's target_in_limits: every joint inside the model's
+// range, non-finite rejected. Limits come from telemetry (MJCF / USD ranges).
+fn target_in_limits(target: &JointVec, limits: &[(f64, f64)]) -> bool {
+    target
+        .iter()
+        .zip(limits.iter())
+        .all(|(&q, &(lo, hi))| q.is_finite() && q >= lo && q <= hi)
+}
+
+fn snapshot_positions(state: &Arc<SharedState>) -> Option<JointVec> {
+    let guard = state.joint_states.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_ref().and_then(|s| s.positions.as_slice().try_into().ok())
 }
 
 pub async fn run(
@@ -108,25 +80,49 @@ pub async fn run(
     daemon: DaemonState,
 ) {
     let side = arm_id.side_word();
-    let actuator_names: [String; DOF] =
-        std::array::from_fn(|i| format!("openarm_{side}_joint{}", i + 1));
-    let set_ctrl_topic = format!("set_ctrl_arm_{side}");
+    let actuator_names: Arc<[String; DOF]> = Arc::new(std::array::from_fn(|i| {
+        format!("openarm_{side}_joint{}", i + 1)
+    }));
+    let set_ctrl_topic: Arc<str> = Arc::from(format!("set_ctrl_arm_{side}").as_str());
     // Unique instance_id per arm side so concurrent left+right arms don't
     // collide on the peppylib publisher registry.
-    let instance_id = format!("openarm01_arm_{side}_setctrl_pub");
+    let instance_id: Arc<str> = Arc::from(format!("openarm01_arm_{side}_setctrl_pub").as_str());
 
     let mut action_handle = move_arm_joints::ActionHandle::expose(&runner)
         .await
         .expect("expose move_arm_joints");
 
+    // Single-flight gate, same as the real driver: a goal arriving mid-motion
+    // is actively rejected rather than queued to run stale afterwards.
+    let busy = Arc::new(AtomicBool::new(false));
+
     loop {
-        // v0.10 GoalContext model: the decider closure validates and returns
-        // accept/reject. On accept, handle_goal_next_request yields Some(ctx).
+        let state_for_decider = state.clone();
+        let busy_for_decider = busy.clone();
         let goal_request =
-            action_handle.handle_goal_next_request(|req: &move_arm_joints::GoalRequest| {
-                let positions = req.data.joint_positions;
-                if let Err(why) = validate_positions(&positions) {
-                    return Ok(move_arm_joints::GoalResponse::reject(why));
+            action_handle.handle_goal_next_request(move |req: &move_arm_joints::GoalRequest| {
+                let limits = state_for_decider
+                    .joint_limits
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
+                let Some(limits) = limits.filter(|l| l.len() == DOF) else {
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "arm telemetry not ready",
+                    ));
+                };
+                if !target_in_limits(&req.data.joint_positions, &limits) {
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "target joint positions out of range",
+                    ));
+                }
+                if busy_for_decider
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "arm is already executing a motion",
+                    ));
                 }
                 Ok(move_arm_joints::GoalResponse::accept())
             });
@@ -145,49 +141,53 @@ pub async fn run(
             }
         };
 
-        let mut target_positions = goal_ctx.request().data.joint_positions;
-        let clamped = clamp_to_limits(&state, &mut target_positions);
-        let goal = AcceptedGoal {
-            target_positions,
-            feedback_period: feedback_period(goal_ctx.request().data.feedback_frequency),
-            clamped,
-        };
+        // Spawn the motion so the accept loop keeps listening (and rejecting)
+        // during execution — mirrors the real driver's structure.
+        let handle = handle.clone();
+        let daemon = daemon.clone();
+        let state = state.clone();
+        let token = token.clone();
+        let busy = busy.clone();
+        let actuator_names = actuator_names.clone();
+        let set_ctrl_topic = set_ctrl_topic.clone();
+        let instance_id = instance_id.clone();
+        tokio::spawn(async move {
+            let result = run_control_loop(
+                &handle,
+                &daemon,
+                &state,
+                &set_ctrl_topic,
+                &instance_id,
+                &actuator_names,
+                &goal_ctx,
+                &token,
+            )
+            .await;
 
-        let result = run_control_loop(
-            &handle,
-            &daemon,
-            &state,
-            &set_ctrl_topic,
-            &instance_id,
-            &actuator_names,
-            &goal_ctx,
-            &token,
-            goal,
-        )
-        .await;
-
-        let dispatch = if result.is_cancelled {
-            goal_ctx
-                .complete_cancelled(
-                    result.success,
-                    result.message,
-                    result.final_positions,
-                    result.action_time,
-                )
-                .await
-        } else {
-            goal_ctx
-                .complete(
-                    result.success,
-                    result.message,
-                    result.final_positions,
-                    result.action_time,
-                )
-                .await
-        };
-        if let Err(e) = dispatch {
-            error!("move_arm_joints complete: {e}");
-        }
+            let dispatch = if result.is_cancelled {
+                goal_ctx
+                    .complete_cancelled(
+                        result.success,
+                        result.message,
+                        result.final_positions,
+                        result.action_time,
+                    )
+                    .await
+            } else {
+                goal_ctx
+                    .complete(
+                        result.success,
+                        result.message,
+                        result.final_positions,
+                        result.action_time,
+                    )
+                    .await
+            };
+            if let Err(e) = dispatch {
+                error!("move_arm_joints complete: {e}");
+            }
+            busy.store(false, Ordering::Release);
+        });
     }
 }
 
@@ -201,25 +201,42 @@ async fn run_control_loop(
     actuator_names: &[String; DOF],
     goal_ctx: &move_arm_joints::GoalContext,
     token: &CancellationToken,
-    goal: AcceptedGoal,
 ) -> MotionResult {
-    let start = Instant::now();
+    let target = goal_ctx.request().data.joint_positions;
+    let feedback_period = feedback_period(goal_ctx.request().data.feedback_frequency);
+
+    // Anchor the trajectory at the current pose, like the real driver anchors
+    // at the measured CAN state. The decider guaranteed telemetry exists.
+    let Some(q_start) = snapshot_positions(state) else {
+        return MotionResult {
+            success: false,
+            is_cancelled: false,
+            message: "telemetry lost before motion start".into(),
+            final_positions: [0.0; DOF],
+            action_time: 0.0,
+        };
+    };
+
+    info!(
+        "move_arm_joints: start={q_start:.3?} target={target:.3?}",
+    );
+    let trajectory = Trajectory::new(q_start, target, MAX_JOINT_VELOCITY_RAD_S, MIN_MOTION_TIME_S);
+    let start = trajectory.motion_start;
     let mut last_feedback = Instant::now();
-    let mut window_anchor: Option<[f64; DOF]> = None;
-    let mut iter: u32 = 0;
     let mut consecutive_publish_failures: u32 = 0;
 
     loop {
-        // Republish every tick: peppylib Standard is best-effort, so this is
-        // the self-healing path. Idempotent. If it keeps failing the arm isn't
-        // commanded — bail before stall lies.
+        let cycle_start = Instant::now();
+        let (q_des, dq_des) = trajectory.sample(cycle_start);
+
         match publish_set_ctrl(
             handle,
             daemon,
             set_ctrl_topic,
             instance_id,
             actuator_names,
-            &goal.target_positions,
+            &q_des,
+            &dq_des,
         )
         .await
         {
@@ -232,7 +249,7 @@ async fn run_control_loop(
                         success: false,
                         is_cancelled: false,
                         message: "set_ctrl publish failing — arm not commandable".into(),
-                        final_positions: [0.0; DOF],
+                        final_positions: snapshot_positions(state).unwrap_or([0.0; DOF]),
                         action_time: start.elapsed().as_secs_f64(),
                     };
                 }
@@ -241,113 +258,24 @@ async fn run_control_loop(
 
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
+        let positions = snapshot_positions(state).unwrap_or(q_start);
 
-        let latest = state
-            .joint_states
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
-        let snap = match latest {
-            Some(s) if s.positions.len() == DOF => s,
-            Some(s) => {
-                warn!(
-                    "move_arm_joints: cache has {} positions, expected {DOF} — waiting",
-                    s.positions.len()
-                );
-                if elapsed > MOTION_TIMEOUT {
-                    return MotionResult {
-                        success: false,
-                        is_cancelled: false,
-                        message: format!(
-                            "telemetry DOF mismatch: got {}, expected {DOF}",
-                            s.positions.len()
-                        ),
-                        final_positions: [0.0; DOF],
-                        action_time: elapsed_secs,
-                    };
-                }
-                tokio::select! {
-                    _ = token.cancelled() => return cancelled(elapsed_secs, [0.0; DOF]),
-                    _ = goal_ctx.cancel_signal() => return cancelled(elapsed_secs, [0.0; DOF]),
-                    _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => continue,
-                }
-            }
-            None => {
-                if elapsed > MOTION_TIMEOUT {
-                    return MotionResult {
-                        success: false,
-                        is_cancelled: false,
-                        message: "no telemetry from robot_initializer".into(),
-                        final_positions: [0.0; DOF],
-                        action_time: elapsed_secs,
-                    };
-                }
-                tokio::select! {
-                    _ = token.cancelled() => return cancelled(elapsed_secs, [0.0; DOF]),
-                    _ = goal_ctx.cancel_signal() => return cancelled(elapsed_secs, [0.0; DOF]),
-                    _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => continue,
-                }
-            }
-        };
-
-        let mut current: [f64; DOF] = [0.0; DOF];
-        current.copy_from_slice(&snap.positions);
-
-        let worst_err = current
-            .iter()
-            .zip(goal.target_positions.iter())
-            .map(|(&q, &target)| (q - target).abs())
-            .fold(0.0_f64, f64::max);
-        let within_tolerance = worst_err < POSITION_TOLERANCE_RAD;
-
-        iter += 1;
-        let stalled = if iter % STALL_LOOKBACK_ITERS == 0 {
-            let was_stalled = window_anchor
-                .map(|prev| {
-                    current
-                        .iter()
-                        .zip(prev.iter())
-                        .map(|(&q, &p)| (q - p).abs())
-                        .fold(0.0_f64, f64::max)
-                        < STALL_EPSILON_RAD
-                })
-                .unwrap_or(false);
-            window_anchor = Some(current);
-            was_stalled
-        } else {
-            false
-        };
-
-        if last_feedback.elapsed() >= goal.feedback_period {
-            if let Err(e) = goal_ctx.publish_feedback(current, elapsed_secs).await {
+        if last_feedback.elapsed() >= feedback_period {
+            if let Err(e) = goal_ctx.publish_feedback(positions, elapsed_secs).await {
                 warn!("feedback: {e}");
             }
             last_feedback = Instant::now();
         }
 
-        if within_tolerance {
-            let message = if goal.clamped {
-                "reached (target clamped to joint limits)".into()
-            } else {
-                "reached".into()
-            };
+        // Time-based completion, exactly like the real driver: the trajectory
+        // has played out and the servo holds the final setpoint. No
+        // convergence check — gravity sag is real behavior, not failure.
+        if trajectory.is_complete(cycle_start) {
             return MotionResult {
                 success: true,
                 is_cancelled: false,
-                message,
-                final_positions: current,
-                action_time: elapsed_secs,
-            };
-        }
-        if stalled {
-            // Stall on the arm is NOT success the way it is on the gripper
-            // (a gripper at a physical limit has done its job). Arm stall
-            // means the goal couldn't be reached — fail with the final pose.
-            return MotionResult {
-                success: false,
-                is_cancelled: false,
-                message: "stalled before reaching target".into(),
-                final_positions: current,
+                message: "trajectory complete".into(),
+                final_positions: positions,
                 action_time: elapsed_secs,
             };
         }
@@ -356,20 +284,21 @@ async fn run_control_loop(
                 success: false,
                 is_cancelled: false,
                 message: "timeout".into(),
-                final_positions: current,
+                final_positions: positions,
                 action_time: elapsed_secs,
             };
         }
 
+        let cycle_budget = CYCLE_PERIOD.saturating_sub(cycle_start.elapsed());
         tokio::select! {
-            _ = token.cancelled() => return cancelled(elapsed_secs, current),
-            _ = goal_ctx.cancel_signal() => return cancelled(elapsed_secs, current),
-            _ = tokio::time::sleep(FEEDBACK_LOOP_TICK) => {}
+            _ = token.cancelled() => return cancelled(elapsed_secs, positions),
+            _ = goal_ctx.cancel_signal() => return cancelled(elapsed_secs, positions),
+            _ = tokio::time::sleep(cycle_budget) => {}
         }
     }
 }
 
-fn cancelled(action_time: f64, final_positions: [f64; DOF]) -> MotionResult {
+fn cancelled(action_time: f64, final_positions: JointVec) -> MotionResult {
     MotionResult {
         success: false,
         is_cancelled: true,
@@ -379,25 +308,29 @@ fn cancelled(action_time: f64, final_positions: [f64; DOF]) -> MotionResult {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_set_ctrl(
     handle: &MessengerHandle,
     daemon: &DaemonState,
     topic: &str,
     instance_id: &str,
     actuator_names: &[String; DOF],
-    targets: &[f64; DOF],
+    q_des: &JointVec,
+    dq_des: &JointVec,
 ) -> std::result::Result<(), String> {
-    let mut values: HashMap<&str, f64> = HashMap::with_capacity(DOF);
-    for (name, &target) in actuator_names.iter().zip(targets.iter()) {
-        values.insert(name.as_str(), target);
+    let mut positions: HashMap<&str, f64> = HashMap::with_capacity(DOF);
+    let mut velocities: HashMap<&str, f64> = HashMap::with_capacity(DOF);
+    for i in 0..DOF {
+        positions.insert(actuator_names[i].as_str(), q_des[i]);
+        velocities.insert(actuator_names[i].as_str(), dq_des[i]);
     }
     let payload = SetCtrlPayload {
-        actuator_values: values,
+        actuator_values: positions,
+        velocity_values: velocities,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
-    // Publish as openarm01_arm:v1 so real + sim instances look identical to
-    // consumers on the bus.
+    // Publish as openarm01_arm:v1 so real + sim look identical to consumers.
     let target =
         SenderTarget::node(ARM_NODE_NAME, "v1").map_err(|e| format!("invalid as_target: {e}"))?;
 
