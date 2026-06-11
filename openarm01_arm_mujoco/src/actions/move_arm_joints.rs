@@ -25,11 +25,13 @@ use crate::state::SharedState;
 use crate::trajectory::{ARM_DOF as DOF, JointVec, Trajectory};
 
 // Real-driver defaults (openarm01_arm peppy.json5): 100 Hz control cycle,
-// 30 s motion timeout, per-joint peak velocities sizing the quintic duration.
+// 30 s motion timeout, per-joint peak velocities (OpenArm V1.0 URDF joint
+// velocity limits) sizing the quintic duration.
 const CYCLE_PERIOD: Duration = Duration::from_millis(10);
 const MOTION_TIMEOUT: Duration = Duration::from_secs(30);
-const MIN_MOTION_TIME_S: f64 = 0.1;
-const MAX_JOINT_VELOCITY_RAD_S: JointVec = [16.8, 16.8, 5.4, 5.4, 20.9, 20.9, 20.9];
+const MAX_JOINT_VELOCITY_RAD_S: JointVec = [
+    16.754666, 16.754666, 5.445426, 5.445426, 20.943946, 20.943946, 20.943946,
+];
 
 // ~500 ms of dropped publishes at 100 Hz → the arm isn't being commanded;
 // bail instead of playing the trajectory into the void.
@@ -114,6 +116,11 @@ pub async fn run(
                 if !target_in_limits(&req.data.joint_positions, &limits) {
                     return Ok(move_arm_joints::GoalResponse::reject(
                         "target joint positions out of range",
+                    ));
+                }
+                if !(req.data.duration_s.is_finite() && req.data.duration_s >= 0.0) {
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "duration_s must be finite and >= 0",
                     ));
                 }
                 if busy_for_decider
@@ -204,6 +211,10 @@ async fn run_control_loop(
 ) -> MotionResult {
     let target = goal_ctx.request().data.joint_positions;
     let feedback_period = feedback_period(goal_ctx.request().data.feedback_frequency);
+    // Trajectory::new floors the requested duration at the per-joint
+    // velocity-limit duration — a too-fast request (or 0 = no preference) is
+    // slowed to the fastest safe move rather than rejected (interface contract).
+    let duration_s = goal_ctx.request().data.duration_s;
 
     // Anchor the trajectory at the current pose, like the real driver anchors
     // at the measured CAN state. The decider guaranteed telemetry exists.
@@ -220,7 +231,7 @@ async fn run_control_loop(
     info!(
         "move_arm_joints: start={q_start:.3?} target={target:.3?}",
     );
-    let trajectory = Trajectory::new(q_start, target, MAX_JOINT_VELOCITY_RAD_S, MIN_MOTION_TIME_S);
+    let trajectory = Trajectory::new(q_start, target, MAX_JOINT_VELOCITY_RAD_S, duration_s);
     let start = trajectory.motion_start;
     let mut last_feedback = Instant::now();
     let mut consecutive_publish_failures: u32 = 0;

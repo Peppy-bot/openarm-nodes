@@ -76,6 +76,8 @@ fn main() -> Result<()> {
             transport,
         ));
 
+        tokio::spawn(actions::move_arm::run(node_runner.clone(), token.clone()));
+
         tokio::spawn(actions::move_arm_joints::run(
             node_runner.clone(),
             arm_id,
