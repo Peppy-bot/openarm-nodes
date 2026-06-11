@@ -12,13 +12,9 @@ peppylib = { path = ".peppy/libs/peppylib" }
 capnp    = "0.25"
 serde     = { version = "1", features = ["derive"] }
 serde_json = "1"
-sim_bridge_core = { git = "https://github.com/Peppy-bot/nodes_shared_code", rev = "dca9c2df771a39b3cdb3b839bdfc63ace15063a6" }
+tokio-util = "0.7"
+sim_bridge_core = { git = "https://github.com/Peppy-bot/nodes_shared_code", rev = "ba06070ca98a5d0583758bfd7e160a1fec050f8c" }
 
 [[bin]]
 name = "openarm01_arm_mujoco"
 path = "src/main.rs"
-
-# Redirect sim_bridge_core's `peppylib = "0.0.1"` crates.io ref to the local
-# generated copy (peppylib is not published to crates.io).
-[patch.crates-io]
-peppylib = { path = ".peppy/libs/peppylib" }

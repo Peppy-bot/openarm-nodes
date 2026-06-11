@@ -3,6 +3,8 @@ mod config;
 mod pipeline;
 mod services;
 mod state;
+mod trajectory;
+mod transport;
 
 use std::sync::Arc;
 
@@ -58,11 +60,14 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
+        // SimBridge is peppylib-free; this node hands it a peppylib-backed
+        // transport (telemetry::run bridges the cancel token internally).
+        let transport = transport::PeppylibTransport::new(daemon.clone());
         tokio::spawn(pipeline::telemetry::run(
             node_runner.clone(),
             arm_id,
             shared.clone(),
-            daemon.clone(),
+            transport,
         ));
 
         tokio::spawn(actions::move_arm_joints::run(

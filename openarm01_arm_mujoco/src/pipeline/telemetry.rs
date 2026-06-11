@@ -8,11 +8,12 @@ use std::sync::Arc;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::{joint_states, tf_tree};
 use serde::Deserialize;
-use sim_bridge_core::{BoxFuture, DaemonState, SimBridge};
+use sim_bridge_core::{BoxFuture, SimBridge};
 use tracing::{info, warn};
 
 use crate::config::ArmId;
 use crate::state::{JointStatesLatest, SharedState};
+use crate::transport::PeppylibTransport;
 
 const ROBOT_NAME: &str = "openarm";
 const ARM_DOF: usize = 7;
@@ -49,7 +50,7 @@ pub async fn run(
     runner: Arc<NodeRunner>,
     arm_id: ArmId,
     state: Arc<SharedState>,
-    daemon: DaemonState,
+    transport: Arc<PeppylibTransport>,
 ) {
     let side = arm_id.side_word();
     info!(
@@ -61,7 +62,18 @@ pub async fn run(
     // sim_node = the publisher node name configured in
     // robot_initializer_mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
-    let token = runner.cancellation_token().clone();
+
+    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
+    // the node's peppylib cancellation into it.
+    let token = tokio_util::sync::CancellationToken::new();
+    {
+        let node_token = runner.cancellation_token().clone();
+        let lib_token = token.clone();
+        tokio::spawn(async move {
+            node_token.cancelled().await;
+            lib_token.cancel();
+        });
+    }
 
     let joint_states_topic: Arc<str> = Arc::from("joint_states");
     let tf_tree_topic: Arc<str> = Arc::from("tf_tree");
@@ -82,7 +94,7 @@ pub async fn run(
     let state_for_js = state.clone();
     let arm_joints_js = arm_joints.clone();
 
-    let bridge = SimBridge::new(runner.clone(), daemon, token, sim_node)
+    let bridge = SimBridge::new(runner.clone(), transport, token, sim_node)
         .sim_to_os(
             joint_states_topic,
             move |runner, msg: JointStatesRaw| -> BoxFuture<std::result::Result<(), String>> {
