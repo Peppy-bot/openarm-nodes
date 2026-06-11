@@ -93,7 +93,8 @@ peppy stack launch /path/to/ws/launchers_hub/openarm01/openarm01_teleop_mujoco.j
 The launcher starts all eight instances in dependency order (sim first, then arms and grippers, then backbone, then the UI) and wires them together. Once it prints `Launch complete`:
 
 - open **http://localhost:8765** for the control panel, one slider per joint
-- open **http://localhost:8080** for the MuJoCo viewer (for Isaac, connect with the [livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html) instead)
+- MuJoCo: open **http://localhost:8080** for the browser viewer
+- Isaac: connect with the [livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html)
 
 Move a slider, press **Send**, and watch the arm follow in the viewer. The launchers themselves are documented in [launchers_hub/openarm01](https://github.com/Peppy-bot/launchers_hub/tree/main/openarm01). Check the stack's health any time:
 
