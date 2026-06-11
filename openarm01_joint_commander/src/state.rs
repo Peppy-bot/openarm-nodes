@@ -39,6 +39,9 @@ pub struct ArmTarget {
     pub joints: [f64; ARM_DOF],
     pub last_feedback: Option<[f64; ARM_DOF]>,
     pub in_flight: bool,
+    // Cancels the in-flight goal so a new Send preempts instead of being
+    // rejected by the arm's single-flight gate.
+    pub preempt: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl ArmTarget {
@@ -47,6 +50,7 @@ impl ArmTarget {
             joints: [0.0; ARM_DOF],
             last_feedback: None,
             in_flight: false,
+            preempt: None,
         }
     }
 }

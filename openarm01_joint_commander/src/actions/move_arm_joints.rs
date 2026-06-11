@@ -22,21 +22,26 @@ pub fn spawn(
     runner: Arc<NodeRunner>,
     state: SharedState,
     token: CancellationToken,
+    preempt: tokio_util::sync::CancellationToken,
     side: Side,
     joint_positions: [f64; ARM_DOF],
+    duration_s: f64,
     feedback_hz: u32,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, side, joint_positions, feedback_hz).await;
+        run(runner, state, token, preempt, side, joint_positions, duration_s, feedback_hz).await;
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     runner: Arc<NodeRunner>,
     state: SharedState,
     token: CancellationToken,
+    preempt: tokio_util::sync::CancellationToken,
     side: Side,
     joint_positions: [f64; ARM_DOF],
+    duration_s: f64,
     feedback_hz: u32,
 ) {
     let label = side.label();
@@ -51,6 +56,7 @@ async fn run(
         arm_id: side.arm_id(),
         feedback_frequency: feedback_hz,
         joint_positions,
+        duration_s,
     };
 
     // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
@@ -74,12 +80,21 @@ async fn run(
         }
     };
 
-    // Feedback loop — drain in-order until the stream closes or we're cancelled.
+    // Feedback loop — drain in-order until the stream closes, we're cancelled,
+    // or a new Send preempts this goal (cancel propagates to the arm, which
+    // stops and returns a cancelled result through the normal path).
+    let mut preempted = false;
     loop {
         tokio::select! {
             _ = token.cancelled() => {
                 finalize(&state, side, false, "shutting down — feedback abandoned").await;
                 return;
+            }
+            _ = preempt.cancelled(), if !preempted => {
+                preempted = true;
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(side = side.label(), error = %e, "preempt cancel failed");
+                }
             }
             feedback = downstream.on_next_feedback_message() => match feedback {
                 Ok(f) => {
@@ -136,6 +151,7 @@ async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl 
     let summary = summary.into();
     let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
     s.arm_mut(side).in_flight = false;
+    s.arm_mut(side).preempt = None;
     s.set_status(summary.clone());
     if success {
         info!(side = side.label(), %summary, "move_arm_joints done");

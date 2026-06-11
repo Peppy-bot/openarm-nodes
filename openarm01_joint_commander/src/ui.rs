@@ -142,12 +142,15 @@ async fn handle_command(text: &str, app: &AppState) {
     };
     let limits = joint_limits();
     match cmd {
-        Command::FireArm { side, mut joints } => {
+        Command::FireArm { side, mut joints, duration_s } => {
             let side: Side = side.into();
             for (j, &[lo, hi]) in joints.iter_mut().zip(limits.arm(side).iter()) {
                 *j = j.clamp(lo, hi);
             }
-            fire_arm(app, side, joints).await;
+            // The arm floors the duration at its velocity-limit minimum; this
+            // guard only catches garbage input (NaN, negative, absurd).
+            let duration_s = if duration_s.is_finite() { duration_s.clamp(0.0, 30.0) } else { 0.0 };
+            fire_arm(app, side, joints, duration_s).await;
         }
         Command::FireGripper { side, position } => {
             let position = position.clamp(limits.gripper[0], limits.gripper[1]);
@@ -156,26 +159,54 @@ async fn handle_command(text: &str, app: &AppState) {
     }
 }
 
-async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF]) {
+async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s: f64) {
+    // Preempt: a Send while a goal is in flight cancels it (the arm's
+    // single-flight gate would otherwise reject the new goal), then waits —
+    // bounded — for the cancelled goal's result before firing.
+    let preempt = {
+        let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.arm(side).in_flight { s.arm(side).preempt.clone() } else { None }
+    };
+    if let Some(tok) = preempt {
+        tok.cancel();
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let clear = !app
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .arm(side)
+                .in_flight;
+            if clear {
+                break;
+            }
+        }
+        // Grace for the arm to release its busy gate after the result lands.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let goal_preempt = tokio_util::sync::CancellationToken::new();
     {
         let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.arm(side).in_flight {
             s.set_status(format!(
-                "{} arm: previous goal still in flight",
+                "{} arm: previous goal would not preempt; try again",
                 side.label()
             ));
             return;
         }
         s.arm_mut(side).in_flight = true;
         s.arm_mut(side).joints = joints;
+        s.arm_mut(side).preempt = Some(goal_preempt.clone());
         s.set_status(format!("{} arm: firing move_arm_joints", side.label()));
     }
     move_arm_joints::spawn(
         app.runner.clone(),
         app.state.clone(),
         app.token.clone(),
+        goal_preempt,
         side,
         joints,
+        duration_s,
         FEEDBACK_HZ,
     );
 }
@@ -274,6 +305,10 @@ enum Command {
     FireArm {
         side: SideWire,
         joints: [f64; ARM_DOF],
+        // Requested move duration (s); 0 = fastest safe. Default keeps older
+        // clients without the field working.
+        #[serde(default)]
+        duration_s: f64,
     },
     FireGripper {
         side: SideWire,
