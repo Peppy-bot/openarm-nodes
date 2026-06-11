@@ -7,15 +7,39 @@ no hardware.
 ## The pattern
 
 The node stores a datastore key on startup and removes it from a shutdown hook
-registered with `node_runner.on_shutdown(...)`. The peppylib runtime owns every
-stop path (it handles SIGINT/SIGTERM itself, acks the in-band
-`SHUTDOWN_SERVICE` from `peppy node stop`, and reacts to daemon-liveness loss),
-cancels the cancellation token, and then awaits the registered hooks, bounded
-by `lifecycle.shutdown_grace_secs`, before `run()` returns. This is the
-instance-lock pattern openarm01_arm / openarm01_gripper should use for motor
-disable + lock release. The full contract (stop paths, hook ordering, grace
-windows, migration from the old spawned-task pattern) is documented in the
-shutdown lifecycle guide: https://dev.peppy.bot/advanced_guides/shutdown/
+registered with `node_runner.on_shutdown(...)` (see `src/main.rs` for the full
+version with log markers):
+
+```rust
+datastore::store(
+    &node_runner,
+    lock_key.as_str(),
+    b"locked".to_vec(),
+    Encoding::TEXT_PLAIN,
+    DATASTORE_TIMEOUT,
+)
+.await?;
+
+// Release the lock on shutdown. The runtime awaits this hook (the
+// messenger is still connected) on every stop path before exiting.
+let runner = node_runner.clone();
+node_runner.on_shutdown(async move {
+    if let Err(e) = datastore::remove(&runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
+        eprintln!("failed to release lock {lock_key}: {e}");
+    }
+});
+```
+
+The peppylib runtime owns every stop path (it handles SIGINT/SIGTERM itself,
+acks the in-band `SHUTDOWN_SERVICE` from `peppy node stop`, and reacts to
+daemon-liveness loss), cancels the cancellation token, and then awaits the
+registered hooks, bounded by `lifecycle.shutdown_grace_secs`, before `run()`
+returns. No signal handling, spawned cleanup task, or `process::exit` in the
+node. This is the instance-lock pattern openarm01_arm / openarm01_gripper
+should use for motor disable + lock release. The full contract (stop paths,
+hook ordering, grace windows, migration from the old spawned-task pattern) is
+documented in the shutdown lifecycle guide:
+https://dev.peppy.bot/advanced_guides/shutdown/
 
 `mode=clean` doubles as a probe of a fourth stop path: it cancels the
 cancellation token itself (programmatic cancel) and returns, exiting through

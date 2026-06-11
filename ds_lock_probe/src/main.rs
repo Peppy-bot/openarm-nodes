@@ -2,11 +2,11 @@
 // startup and removes it from a shutdown hook registered with
 // `node_runner.on_shutdown`. The peppylib runtime owns every stop path
 // (SIGINT, SIGTERM, `peppy node stop`, daemon teardown/loss) and awaits the
-// hook — bounded by `lifecycle.shutdown_grace_secs` — before the process
+// hook, bounded by `lifecycle.shutdown_grace_secs`, before the process
 // exits, so the lock is released on all of them.
 //
-// Historical note: this node started as the minimal repro for the lock LEAK on
-// `peppy node stop` — the old pattern (a spawned task selecting on
+// Historical note: this node started as the minimal repro for the lock LEAK
+// on `peppy node stop`. The old pattern (a spawned task selecting on
 // SIGINT/SIGTERM/the cancellation token) was never polled on the in-band stop
 // because `run()` returned, and dropped the tokio runtime, as soon as the
 // token was cancelled. Cleanup now belongs in `on_shutdown`, which `run()`
