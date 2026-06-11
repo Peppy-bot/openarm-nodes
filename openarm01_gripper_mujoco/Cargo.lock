@@ -367,6 +367,7 @@ name = "build-helpers"
 version = "0.0.1"
 dependencies = [
  "sha2 0.11.0",
+ "zip",
 ]
 
 [[package]]
@@ -2199,6 +2200,7 @@ dependencies = [
  "serde_json",
  "sim_bridge_core",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2461,7 +2463,6 @@ dependencies = [
  "tokio",
  "tracing",
  "zenoh",
- "zip",
 ]
 
 [[package]]
@@ -3363,12 +3364,12 @@ dependencies = [
 [[package]]
 name = "sim_bridge_core"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/nodes_shared_code?rev=08c14b41d79dcb58d1addf984c43f1db0e099d72#08c14b41d79dcb58d1addf984c43f1db0e099d72"
+source = "git+https://github.com/Peppy-bot/nodes_shared_code?rev=ba06070ca98a5d0583758bfd7e160a1fec050f8c#ba06070ca98a5d0583758bfd7e160a1fec050f8c"
 dependencies = [
- "peppylib",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

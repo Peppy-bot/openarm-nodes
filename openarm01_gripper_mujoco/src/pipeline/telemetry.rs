@@ -9,11 +9,12 @@ use peppygen::emitted_topics::{
     contact_forces_finger1, contact_forces_finger2, ee_pose, gripper_state,
 };
 use serde::Deserialize;
-use sim_bridge_core::{BoxFuture, DaemonState, SimBridge};
-use tracing::{error, info, warn};
+use sim_bridge_core::{BoxFuture, SimBridge};
+use tracing::{info, warn};
 
 use crate::config::GripperId;
 use crate::state::{GripperStateLatest, SharedState};
+use crate::transport::PeppylibTransport;
 
 const ROBOT_NAME: &str = "openarm";
 
@@ -60,7 +61,12 @@ struct ContactForcesRaw {
     stamp: f64,
 }
 
-pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<SharedState>) {
+pub async fn run(
+    runner: Arc<NodeRunner>,
+    gripper_id: GripperId,
+    state: Arc<SharedState>,
+    transport: Arc<PeppylibTransport>,
+) {
     let side = gripper_id.side_word();
     info!(
         "telemetry: starting pipelines (gripper_id={} side={})",
@@ -68,21 +74,20 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
         side
     );
 
-    let daemon = match peppylib::info(&runner, None).await {
-        Ok(info) => DaemonState {
-            core_node_name: info.core_node_name,
-            messaging_port: info.messaging_port,
-        },
-        Err(e) => {
-            error!("telemetry: peppylib::info failed: {e}");
-            return;
-        }
-    };
-
     // sim_node = the publisher node name configured in
     // robot_initializer:mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
-    let token = runner.cancellation_token().clone();
+    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
+    // the node's peppylib cancellation into it.
+    let token = tokio_util::sync::CancellationToken::new();
+    {
+        let node_token = runner.cancellation_token().clone();
+        let lib_token = token.clone();
+        tokio::spawn(async move {
+            node_token.cancelled().await;
+            lib_token.cancel();
+        });
+    }
 
     let gripper_state_topic: Arc<str> = Arc::from(format!("gripper_state_{side}"));
     let ee_pose_topic: Arc<str> = Arc::from(format!("ee_pose_{side}"));
@@ -96,7 +101,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, state: Arc<Shar
 
     let state_for_gs = state.clone();
 
-    let bridge = SimBridge::new(runner.clone(), daemon, token, sim_node)
+    let bridge = SimBridge::new(runner.clone(), transport, token, sim_node)
         .sim_to_os(
             gripper_state_topic,
             move |runner, msg: GripperStateRaw| -> BoxFuture<std::result::Result<(), String>> {
