@@ -57,6 +57,7 @@ class MujocoActuatorCtrl:
                     joint_aliases += 1
             self._name_to_id = name_to_id
             self._apply_gains()
+            self._apply_gravity_compensation()
             self._ready = True
         except Exception as exc:
             logger.error(f"Failed to setup MujocoActuatorCtrl: {exc}")
@@ -75,20 +76,53 @@ class MujocoActuatorCtrl:
         gainprm[0]*ctrl + biasprm[1]*q + biasprm[2]*dq, so kp/kd map to
         (kp, -kp, -kd). Joints without configured gains keep the MJCF values.
         """
+        import mujoco  # pylint: disable=E0401
+        import numpy as np
+
         joint_names = self._params.get("joint_names") or []
         kps = self._params.get("kp") or []
         kds = self._params.get("kd") or []
         if not (len(joint_names) == len(kps) == len(kds)) or not joint_names:
             return
+        # Per-dof inertia from the sim's own mass matrix (home config). The
+        # real gearbox/motor adds damping the sim plant lacks; without it the
+        # real driver's gains ring badly (~0.14 damping ratio). Raise the
+        # servo damping to critical — the dq_des feedforward cancels it along
+        # the trajectory, so tracking is unaffected while deviations damp.
+        mujoco.mj_forward(self._model, self._data)
+        full_m = np.zeros((self._model.nv, self._model.nv))
+        mujoco.mj_fullM(self._model, full_m, self._data.qM)
         for name, kp, kd in zip(joint_names, kps, kds):
             ctrl_id = self._name_to_id.get(name)
             if ctrl_id is None:
                 logger.warning(f"gain config: unknown joint '{name}' — skipped")
                 continue
+            jid = int(self._model.actuator_trnid[ctrl_id, 0])
+            dof = int(self._model.jnt_dofadr[jid])
+            inertia = float(full_m[dof, dof])
+            kv = max(float(kd), 2.0 * (float(kp) * inertia) ** 0.5)
             self._model.actuator_gainprm[ctrl_id][0] = float(kp)
             self._model.actuator_biasprm[ctrl_id][1] = -float(kp)
-            self._model.actuator_biasprm[ctrl_id][2] = -float(kd)
-            self._kd_over_kp[name] = float(kd) / float(kp)
+            self._model.actuator_biasprm[ctrl_id][2] = -kv
+            self._kd_over_kp[name] = kv / float(kp)
+
+    def _apply_gravity_compensation(self) -> None:
+        """Mirror the real driver's in-process gravity feedforward: MuJoCo's
+        body_gravcomp applies an exact counter-gravity force per body, every
+        step, inside the engine. Enabled for the whole robot subtree (the real
+        arm and gripper drivers both feedforward). Coriolis is intentionally
+        not compensated — negligible at teleop speeds."""
+        if not self._params.get("gravity_compensation"):
+            return
+        import mujoco  # pylint: disable=E0401
+
+        compensated = 0
+        for i in range(self._model.nbody):
+            name = mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_BODY, i) or ""
+            if name.startswith("openarm_"):
+                self._model.body_gravcomp[i] = 1.0
+                compensated += 1
+        logger.info(f"gravity compensation enabled on {compensated} robot bodies")
 
     def teardown(self) -> None:
         self._ready = False

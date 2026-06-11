@@ -56,9 +56,11 @@
     // Arm subscribers — IsaacActuatorCtrl uses joint_names to filter the
     // articulation's dof set. Names must match USD dof_names verbatim; check
     // for `unknown actuator … dropped` warnings if Articulation rejects entries.
-    // kp/kd are the real driver's MIT gains and max_efforts the motor torque
-    // caps (DM8009/4340/4310) — applied to the PhysX drives at setup so sim
-    // servo dynamics match hardware.
+    // kp/kd are the real driver's current MIT gains (openarm01_arm peppy.json5
+    // defaults) and max_efforts the motor torque caps (DM8009/4340/4310),
+    // applied to the PhysX drives at setup; gravity_compensation mirrors the
+    // real driver's in-process gravity feedforward by disabling gravity on the
+    // robot links. Sim servo dynamics match hardware.
     {
       type: "actuator_ctrl", prim: "/openarm",
       topic: "set_ctrl_arm_left", source_node: "openarm01_arm",
@@ -68,8 +70,9 @@
           "openarm_left_joint4", "openarm_left_joint5", "openarm_left_joint6",
           "openarm_left_joint7",
         ],
-        kp: [70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0],
-        kd: [2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5],
+        kp: [240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 25.0],
+        kd: [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2],
+        gravity_compensation: true,
         max_efforts: [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 7.0],
       },
     },
@@ -82,8 +85,9 @@
           "openarm_right_joint4", "openarm_right_joint5", "openarm_right_joint6",
           "openarm_right_joint7",
         ],
-        kp: [70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0],
-        kd: [2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5],
+        kp: [240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 25.0],
+        kd: [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2],
+        gravity_compensation: true,
         max_efforts: [40.0, 40.0, 27.0, 27.0, 7.0, 7.0, 7.0],
       },
     },

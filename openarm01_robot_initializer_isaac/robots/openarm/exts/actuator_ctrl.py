@@ -58,6 +58,7 @@ class IsaacActuatorCtrl:
                 self._view = None
                 return False
             self._apply_gains()
+            self._apply_gravity_compensation()
             self._ready = True
         except Exception as exc:
             logger.error(
@@ -84,15 +85,31 @@ class IsaacActuatorCtrl:
         efforts = self._params.get("max_efforts") or []
         if not (len(joint_names) == len(kps) == len(kds)) or not kps:
             return
+        # Per-dof inertia from the articulation mass matrix (home config). The
+        # real gearbox/motor adds damping the sim plant lacks; raise the drive
+        # damping to critical. PhysX damping acts on (dq_target - dq) and we
+        # stream dq_des as the velocity target, so tracking is unaffected
+        # while deviations damp.
+        diag_inertia = None
+        try:
+            mm = self._view.get_mass_matrices()
+            diag_inertia = mm[0].diagonal()
+        except Exception as exc:
+            logger.warning(f"mass matrix unavailable ({exc}) — using configured kd")
+
         indices, kp_list, kd_list, effort_list = [], [], [], []
         for i, name in enumerate(joint_names):
             idx = self._name_to_idx.get(name)
             if idx is None:
                 logger.warning(f"gain config: unknown joint '{name}' — skipped")
                 continue
+            kp = float(kps[i])
+            kd = float(kds[i])
+            if diag_inertia is not None:
+                kd = max(kd, 2.0 * (kp * float(diag_inertia[idx])) ** 0.5)
             indices.append(idx)
-            kp_list.append(float(kps[i]))
-            kd_list.append(float(kds[i]))
+            kp_list.append(kp)
+            kd_list.append(kd)
             if i < len(efforts):
                 effort_list.append(float(efforts[i]))
         if not indices:
@@ -110,6 +127,32 @@ class IsaacActuatorCtrl:
         logger.info(
             f"IsaacActuatorCtrl: applied MIT gains to {len(indices)} joint(s)"
         )
+
+    def _apply_gravity_compensation(self) -> None:
+        """Mirror the real driver's in-process gravity feedforward by disabling
+        gravity on every rigid-body link of the robot — PhysX then behaves as
+        if an exact counter-gravity force were applied each step. Enabled for
+        the whole robot subtree (the real arm and gripper drivers both
+        feedforward). Coriolis is intentionally not compensated."""
+        if not self._params.get("gravity_compensation"):
+            return
+        import omni.usd  # pylint: disable=E0401
+        from pxr import PhysxSchema, Usd, UsdPhysics  # pylint: disable=E0401
+
+        stage = omni.usd.get_context().get_stage()
+        root = stage.GetPrimAtPath(self._prim_path)
+        if not root.IsValid():
+            logger.warning(
+                f"gravity compensation: prim '{self._prim_path}' not found — skipped"
+            )
+            return
+        compensated = 0
+        for prim in Usd.PrimRange(root):
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+                api.CreateDisableGravityAttr().Set(True)
+                compensated += 1
+        logger.info(f"gravity compensation enabled on {compensated} robot links")
 
     def teardown(self) -> None:
         self._view = None
