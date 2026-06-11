@@ -1,0 +1,100 @@
+// Isaac sim implementation of openarm01_gripper. Rust node talking to a
+// running Isaac Sim via raw peppylib JSON channels published by
+// openarm01_robot_initializer_isaac — engine-internal coupling, not part of
+// the openarm01_gripper:v1 interface contract.
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_gripper_isaac",
+    tag: "v1",
+    depends_on: {
+      nodes: [
+        { name: "openarm01_robot_initializer_isaac", tag: "v1", link_id: "sim" },
+      ],
+    },
+  },
+  interfaces: {
+    conforms_to: [
+      { name: "openarm01_gripper", tag: "v1" },
+    ],
+    // Engine-specific sim telemetry — NOT in openarm01_gripper:v1 (shared
+    // interface is move_gripper + get_gripper_id only). Sim emits these because
+    // it has cheap access to joint state, EE pose, and per-finger contacts;
+    // real-hardware has no per-finger force sensor and reports via its own channel.
+    topics: {
+      emits: [
+        {
+          name: "gripper_state",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            joint_names: { $type: "array", $items: "string" },
+            positions: { $type: "array", $items: "f64" },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "ee_pose",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            position: { $type: "array", $items: "f64", $length: 3 },
+            orientation: { $type: "array", $items: "f64", $length: 4 },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_finger1",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type: "object",
+                body1: "string",
+                body2: "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force: { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "contact_forces_finger2",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            contacts: {
+              $type: "array",
+              $items: {
+                $type: "object",
+                body1: "string",
+                body2: "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                force: { $type: "array", $items: "f64", $length: 3 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
+    },
+    parameters: {
+      // The gripper_id at runtime (0 = left, 1 = right). Two instances are
+      // expected; the bin's file-lock + gripper_id guard rejects collisions.
+      gripper_id: "u8",
+    },
+  },
+}
