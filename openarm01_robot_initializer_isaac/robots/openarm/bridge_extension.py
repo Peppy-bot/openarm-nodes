@@ -20,11 +20,11 @@ from sim_ext_core import (
     GripperStateBridge,
     ImuBridge,
     JointStatesBridge,
-    PeppylibIO,
     SimControlBridge,
     TfTreeBridge,
     WrenchBridge,
 )
+from peppylib_io import PeppylibIO
 from exts import (
     IsaacActuatorCtrl,
     IsaacArticulation,
@@ -175,7 +175,8 @@ def _make_sensor(entry):  # pylint: disable=R0911
         joint_names = (
             entry.params.get("joint_names", []) if hasattr(entry, "params") else []
         )
-        return IsaacActuatorCtrl(prim, joint_names=joint_names)
+        params = entry.params if hasattr(entry, "params") else {}
+        return IsaacActuatorCtrl(prim, joint_names=joint_names, params=params)
     return IsaacArticulation(prim)
 
 

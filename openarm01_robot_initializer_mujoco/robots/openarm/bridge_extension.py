@@ -20,11 +20,11 @@ from sim_ext_core import (
     GripperStateBridge,
     ImuBridge,
     JointStatesBridge,
-    PeppylibIO,
     SimControlBridge,
     TfTreeBridge,
     WrenchBridge,
 )
+from peppylib_io import PeppylibIO
 from exts import (
     MujocoActuatorCtrl,
     MujocoArticulation,
@@ -179,7 +179,8 @@ def _make_sensor(entry, model, data):  # pylint: disable=R0911
         )
         return MujocoGripperSensor(model, data, finger_joints=finger_joints)
     if entry.type == "actuator_ctrl":
-        return MujocoActuatorCtrl(model, data)
+        params = entry.params if hasattr(entry, "params") else {}
+        return MujocoActuatorCtrl(model, data, params=params)
     return MujocoArticulation(model, data)  # joint_states default
 
 
