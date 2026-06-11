@@ -1,25 +1,30 @@
-// Minimal repro for the core-node datastore instance-lock leak on
-// `peppy node stop`.
+// Probe for the datastore instance-lock shutdown paths: stores a key on
+// startup and removes it from a shutdown hook registered with
+// `node_runner.on_shutdown`. The peppylib runtime owns every stop path
+// (SIGINT, SIGTERM, `peppy node stop`, daemon teardown/loss) and awaits the
+// hook — bounded by `lifecycle.shutdown_grace_secs` — before the process
+// exits, so the lock is released on all of them.
 //
-// Lock flow mirrors openarm01_arm/_gripper: get -> panic if held, store,
-// remove from a spawned shutdown task selecting on SIGINT / SIGTERM / the
-// runtime cancellation token. SIGINT and SIGTERM release the lock; on
-// `peppy node stop` the task never runs and the lock leaks.
+// Historical note: this node started as the minimal repro for the lock LEAK on
+// `peppy node stop` — the old pattern (a spawned task selecting on
+// SIGINT/SIGTERM/the cancellation token) was never polled on the in-band stop
+// because `run()` returned, and dropped the tokio runtime, as soon as the
+// token was cancelled. Cleanup now belongs in `on_shutdown`, which `run()`
+// awaits on every path.
 //
-// Log markers: LOCK_ACQUIRED / LOCK_HELD / SHUTDOWN_TRIGGER <which> /
-// REMOVE_PRE / REMOVE_POST. A run with SHUTDOWN_TRIGGER but no REMOVE_POST
-// means the remove was cancelled mid-await; no SHUTDOWN_TRIGGER at all means
-// the shutdown task was never polled.
+// Log markers: LOCK_ACQUIRED / LOCK_HELD / SHUTDOWN_HOOK / REMOVE_PRE /
+// REMOVE_POST. A run with SHUTDOWN_HOOK but no REMOVE_POST means the remove
+// was cut off by the grace window; no SHUTDOWN_HOOK at all means the hook
+// never ran (the original bug).
 //
-// mode=clean is a janitor: removes the key and exits, so the repro can be
-// re-run without restarting the core-node stack (a leaked key persists until
-// then; there is no datastore CLI).
+// mode=clean is a janitor: removes the key and exits, so the probe can be
+// re-run after a leak without restarting the core-node stack (there is no
+// datastore CLI).
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
 
 use std::io::Write;
 use std::time::Duration;
-use tokio::signal::unix::{SignalKind, signal};
 
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -35,7 +40,10 @@ fn main() -> Result<()> {
         if params.mode == "clean" {
             let removed = datastore::remove(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await?;
             say(&format!("CLEANED key={lock_key} removed={removed}"));
-            std::process::exit(0);
+            // Programmatic cancel: the janitor requests its own shutdown and
+            // returns; run() sees the cancelled token and exits cleanly.
+            node_runner.cancellation_token().cancel();
+            return Ok(());
         }
 
         if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
@@ -52,22 +60,16 @@ fn main() -> Result<()> {
         .await?;
         say(&format!("LOCK_ACQUIRED key={lock_key}"));
 
-        let cancel = node_runner.cancellation_token().clone();
-        tokio::spawn(async move {
-            let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-            let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-            let trigger = tokio::select! {
-                _ = sigint.recv() => "sigint",
-                _ = sigterm.recv() => "sigterm",
-                _ = cancel.cancelled() => "cancel",
-            };
-            say(&format!("SHUTDOWN_TRIGGER {trigger} key={lock_key}"));
+        // Release the lock on shutdown. The runtime awaits this hook (the
+        // messenger is still connected) on every stop path before exiting.
+        let runner = node_runner.clone();
+        node_runner.on_shutdown(async move {
+            say(&format!("SHUTDOWN_HOOK key={lock_key}"));
             say("REMOVE_PRE");
-            match datastore::remove(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
+            match datastore::remove(&runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
                 Ok(removed) => say(&format!("REMOVE_POST ok removed={removed}")),
                 Err(e) => say(&format!("REMOVE_POST err={e}")),
             }
-            std::process::exit(0);
         });
 
         Ok(())
