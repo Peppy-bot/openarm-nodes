@@ -3,6 +3,7 @@ FROM python:3.11-slim
 RUN apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
     && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         ca-certificates \
+        git \
         rclone \
         libgl1 \
         libgl1-mesa-dri \
@@ -18,7 +19,7 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/requirements.mujoco.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --retries 5 --timeout 180 -r /tmp/requirements.txt
 
 COPY scripts/download_assets.sh /tmp/download_assets.sh
 RUN --mount=type=secret,id=rclone_key \

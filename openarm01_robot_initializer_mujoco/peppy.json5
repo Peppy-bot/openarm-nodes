@@ -1,0 +1,23 @@
+// MuJoCo implementation of robot_initializer. Conforms to
+// openarm01_robot_initializer:v1 (is_ready signal). Sim peripherals attach to
+// this node by node name for engine-internal coupling, not by interface.
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_robot_initializer_mujoco",
+    tag: "v1",
+  },
+  interfaces: {
+    conforms_to: [
+      { name: "openarm01_robot_initializer", tag: "v1" },
+    ],
+  },
+  execution: {
+    language: "python",
+    container: {
+      def_file: "apptainer.def",
+      apptainer_run_extra_args: ["--nv"],
+      mount_paths: ["/run/user"],
+    },
+  },
+}

@@ -5,11 +5,12 @@ USER root
 RUN apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true update \
     && apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install-recommends \
         ca-certificates \
+        git \
         rclone \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/requirements.isaac.txt /tmp/requirements.txt
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir -r /tmp/requirements.txt
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --retries 5 --timeout 180 -r /tmp/requirements.txt
 
 COPY scripts/download_assets.sh /tmp/download_assets.sh
 RUN --mount=type=secret,id=rclone_key \

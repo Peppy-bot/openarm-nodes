@@ -1,0 +1,75 @@
+// Bridge plugin registry for the MuJoCo openarm scene. Per-side suffix
+// (`<topic>_left` / `<topic>_right`) lines up with the typed peppygen topic
+// names on the gripper/arm Rust side.
+{
+  // Publishers emit raw peppylib JSON each tick.
+  publishers: [
+    // Whole-robot joint state. Consumers slice by joint name on their side.
+    { type: "joint_states", topic: "joint_states", robot_name: "openarm" },
+
+    // Whole-world TF tree. Consumers walk frames they care about.
+    { type: "tf_tree", topic: "tf_tree", robot_name: "openarm" },
+
+    // Whole-world contacts. Consumers filter by their own geom IDs.
+    { type: "contact_forces", topic: "contact_forces", robot_name: "openarm" },
+
+    // Per-side gripper finger joints (positions + measured actuator forces).
+    {
+      type: "gripper_state", topic: "gripper_state_left", robot_name: "openarm",
+      params: { finger_joints: ["openarm_left_finger_joint1", "openarm_left_finger_joint2"] },
+    },
+    {
+      type: "gripper_state", topic: "gripper_state_right", robot_name: "openarm",
+      params: { finger_joints: ["openarm_right_finger_joint1", "openarm_right_finger_joint2"] },
+    },
+
+    // Per-side end-effector pose (TCP body).
+    { type: "ee_pose", prim: "openarm_left_hand_tcp",  topic: "ee_pose_left",  robot_name: "openarm" },
+    { type: "ee_pose", prim: "openarm_right_hand_tcp", topic: "ee_pose_right", robot_name: "openarm" },
+
+    // IMU publishers: uncomment once the MJCF declares the IMU bodies.
+    // { type: "imu", prim: "openarm_left_imu",  topic: "imu_left",  robot_name: "openarm" },
+    // { type: "imu", prim: "openarm_right_imu", topic: "imu_right", robot_name: "openarm" },
+  ],
+
+  // Subscribers drain latest before mj_step. Topic: set_ctrl_<component>_<side>
+  // with payload { actuator_values: { <name>: <value>, ... } }.
+  subscribers: [
+    { type: "actuator_ctrl", topic: "set_ctrl_gripper_left",  source_node: "openarm01_gripper" },
+    { type: "actuator_ctrl", topic: "set_ctrl_gripper_right", source_node: "openarm01_gripper" },
+
+    // Arm subscribers — MujocoActuatorCtrl indexes by both actuator name AND
+    // joint name (via actuator_trnid walk), letting the arm runtime send the
+    // canonical joint name `openarm_<side>_joint{1..7}` and resolve on both engines.
+    // kp/kd are the real driver's current MIT gains (openarm01_arm peppy.json5
+    // defaults), applied to the position actuators at setup; gravity_compensation
+    // mirrors the real driver's in-process gravity feedforward with the engine's
+    // own exact gravity model. Sim servo dynamics match hardware.
+    {
+      type: "actuator_ctrl", topic: "set_ctrl_arm_left", source_node: "openarm01_arm",
+      params: {
+        joint_names: [
+          "openarm_left_joint1", "openarm_left_joint2", "openarm_left_joint3",
+          "openarm_left_joint4", "openarm_left_joint5", "openarm_left_joint6",
+          "openarm_left_joint7",
+        ],
+        kp: [240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 25.0],
+        kd: [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2],
+        gravity_compensation: true,
+      },
+    },
+    {
+      type: "actuator_ctrl", topic: "set_ctrl_arm_right", source_node: "openarm01_arm",
+      params: {
+        joint_names: [
+          "openarm_right_joint1", "openarm_right_joint2", "openarm_right_joint3",
+          "openarm_right_joint4", "openarm_right_joint5", "openarm_right_joint6",
+          "openarm_right_joint7",
+        ],
+        kp: [240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 25.0],
+        kd: [3.0, 3.0, 3.0, 3.0, 0.2, 0.2, 0.2],
+        gravity_compensation: true,
+      },
+    },
+  ],
+}
