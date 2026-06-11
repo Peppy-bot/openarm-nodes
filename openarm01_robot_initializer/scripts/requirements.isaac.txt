@@ -1,3 +1,3 @@
 pycapnp==2.2.2
 pyjson5==2.0.0
-sim_ext_core @ git+https://github.com/Peppy-bot/nodes_shared_code.git@2fbab8bec792b7f69c075da03293f90504ed6d4c#subdirectory=sim_ext_core
+sim_ext_core @ git+https://github.com/Peppy-bot/nodes_shared_code.git@ba06070ca98a5d0583758bfd7e160a1fec050f8c#subdirectory=sim_ext_core
