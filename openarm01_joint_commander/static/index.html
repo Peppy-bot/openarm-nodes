@@ -2,30 +2,147 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>openarm01 joint commander</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700&family=Inter+Tight:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; background: #0f1115; color: #e6e8eb; }
-  h1 { font-size: 18px; margin: 0 0 12px; display: flex; align-items: center; gap: 12px; }
-  .conn { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #444; }
-  .conn.open { background: #1f7a3a; }
-  .conn.closed { background: #8a2a2a; }
-  .row { display: flex; gap: 16px; margin-bottom: 16px; }
-  .panel { flex: 1; background: #1a1d23; border: 1px solid #2a2f38; border-radius: 6px; padding: 12px; }
-  .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-weight: 600; }
-  .badge { font-size: 11px; padding: 2px 6px; border-radius: 8px; background: #444; }
-  .badge.flight { background: #b07a1f; }
-  .joint { display: grid; grid-template-columns: 28px 1fr 64px 64px; gap: 8px; align-items: center; margin: 4px 0; font-variant-numeric: tabular-nums; }
-  .joint .name { color: #9aa0a8; }
-  .joint .target { text-align: right; }
-  .joint .fb, .gripper .fb { text-align: right; color: #8ab4f8; }
-  .gripper { display: grid; grid-template-columns: 1fr 80px 120px; gap: 8px; align-items: center; margin: 4px 0; font-variant-numeric: tabular-nums; }
-  input[type=range] { width: 100%; accent-color: #4a9eff; }
-  button { background: #2a3142; border: 1px solid #3a4258; color: #e6e8eb; padding: 6px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
-  button:hover { background: #364060; }
-  button.primary { background: #1e5fa3; border-color: #2d7ac6; }
-  button.primary:hover { background: #2a72b8; }
-  .actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
-  .status { padding: 8px 12px; background: #1a1d23; border: 1px solid #2a2f38; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 13px; }
+  :root {
+    --bg-soft: #edeff2;
+    --card: #e8eaed;
+    --ink: #1a1d22;
+    --ink-70: rgba(26, 29, 34, 0.72);
+    --ink-50: rgba(26, 29, 34, 0.5);
+    --ink-15: rgba(26, 29, 34, 0.13);
+    --hi: rgba(255, 255, 255, 0.95);
+    --lo: rgba(158, 166, 178, 0.5);
+    --dark: #0b0c0e;
+    --w: #f3f5f8;
+    --ok: #2e7d4f;
+    --warn: #a8741f;
+    --err: #9b3535;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 32px 36px;
+    background: linear-gradient(165deg, #fcfcfd 0%, #eceef1 42%, #dadde2 100%) fixed;
+    color: var(--ink);
+    font: 14px/1.45 'Inter Tight', -apple-system, system-ui, sans-serif;
+  }
+  h1 {
+    font-family: 'Big Shoulders Display', 'Inter Tight', sans-serif;
+    font-size: 26px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    margin: 0 0 20px; display: flex; align-items: baseline; gap: 14px;
+  }
+  .conn {
+    font: 600 11px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 5px 12px; border-radius: 999px; color: var(--w);
+    background: var(--ink-50);
+    box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25);
+  }
+  .conn.open { background: var(--ok); }
+  .conn.closed { background: var(--err); }
+
+  .row { display: flex; gap: 22px; margin-bottom: 22px; flex-wrap: wrap; }
+  .panel {
+    flex: 1; min-width: 380px;
+    background: var(--card);
+    border-radius: 18px; padding: 18px 20px 16px;
+    box-shadow: -6px -6px 12px var(--hi), 6px 6px 14px var(--lo);
+  }
+  .panel-head {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+  }
+  .panel-head span:first-child {
+    font-family: 'Big Shoulders Display', 'Inter Tight', sans-serif;
+    font-size: 17px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-70);
+  }
+  .badge {
+    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 5px 11px; border-radius: 999px; color: var(--ink-50);
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  }
+  .badge.flight { color: var(--w); background: var(--warn); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+
+  .joint {
+    display: grid; grid-template-columns: 30px 1fr 66px 66px; gap: 10px;
+    align-items: center; margin: 7px 0; font-variant-numeric: tabular-nums;
+  }
+  .joint .name { color: var(--ink-50); font-weight: 600; font-size: 12px; }
+  .joint .target { text-align: right; font-weight: 500; }
+  .joint .fb, .gripper .fb { text-align: right; color: var(--ink-50); }
+
+  .gripper {
+    display: grid; grid-template-columns: 1fr 84px 130px; gap: 10px;
+    align-items: center; margin: 10px 0 4px; font-variant-numeric: tabular-nums;
+  }
+
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 8px; border-radius: 999px; outline: none;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+    background: radial-gradient(circle at 34% 28%, #ffffff 0%, #e4e7ec 45%, #c2c7cf 100%);
+    box-shadow: -2px -2px 5px var(--hi), 3px 3px 6px var(--lo), inset 0 0 0 1px var(--ink-15);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 20px; height: 20px; border: none; border-radius: 50%; cursor: pointer;
+    background: radial-gradient(circle at 34% 28%, #ffffff 0%, #e4e7ec 45%, #c2c7cf 100%);
+    box-shadow: -2px -2px 5px var(--hi), 3px 3px 6px var(--lo), inset 0 0 0 1px var(--ink-15);
+  }
+
+  .actions {
+    display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; align-items: center;
+  }
+  .dur {
+    display: flex; align-items: center; gap: 7px; margin-right: auto;
+    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink-50);
+  }
+  .dur input {
+    width: 64px; padding: 7px 9px; border: none; border-radius: 10px;
+    font: 500 13px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
+    color: var(--ink); text-align: right;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+    outline: none;
+  }
+  .dur input:focus { box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi), 0 0 0 2px var(--ink-15); }
+
+  button {
+    font: 600 12px/1 'Inter Tight', sans-serif; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--ink-70); cursor: pointer;
+    padding: 10px 16px; border: none; border-radius: 12px;
+    background: var(--card);
+    box-shadow: -3px -3px 7px var(--hi), 3px 3px 7px var(--lo);
+    transition: box-shadow 0.12s ease, transform 0.12s ease;
+  }
+  button:hover { color: var(--ink); }
+  button:active {
+    box-shadow: inset 2px 2px 5px var(--lo), inset -2px -2px 5px var(--hi);
+    transform: translateY(1px);
+  }
+  button.primary {
+    color: var(--w); background: var(--dark);
+    box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0, 0, 0, 0.35);
+  }
+  button.primary:active {
+    box-shadow: inset 2px 2px 6px rgba(0, 0, 0, 0.6);
+  }
+
+  .status {
+    padding: 13px 18px; border-radius: 14px;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 5px var(--lo), inset -2px -2px 5px var(--hi);
+    font: 12.5px/1.4 ui-monospace, 'SF Mono', Menlo, monospace;
+    color: var(--ink-70);
+  }
 </style>
 </head>
 <body>
@@ -56,6 +173,9 @@ function build_arm(side, label) {
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
     <div id="${side}_arm_joints"></div>
     <div class="actions">
+      <label class="dur" title="move duration in seconds; 0 = fastest safe move">
+        duration <input type="number" id="${side}_dur" value="2" min="0" max="30" step="0.5"> s
+      </label>
       <button onclick="reset_arm('${side}')">Home</button>
       <button class="primary" onclick="fire_arm('${side}')">Send</button>
     </div>`;
@@ -95,13 +215,15 @@ function reset_arm(side) {
     $(`${side}_j${i}`).value = 0;
     $(`${side}_t${i}`).textContent = '+0.000';
   }
+  fire_arm(side);  // Home is a motion: send the all-zeros goal at the panel's duration
 }
 
 function fire_arm(side) {
   if (!ws || ws.readyState !== 1) return;
   const joints = [];
   for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
-  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints}));
+  const duration_s = Math.max(0, parseFloat($(`${side}_dur`).value) || 0);
+  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints, duration_s}));
 }
 
 function set_gripper(side, m) {
