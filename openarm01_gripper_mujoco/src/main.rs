@@ -34,8 +34,8 @@ fn main() -> Result<()> {
             .expect("peppygen::clock::init");
 
         // peppylib daemon + messenger handle shared between the action
-        // handler (per-tick set_ctrl publish) and the shutdown handler
-        // (ctrl=0.0 on SIGINT/SIGTERM).
+        // handler (per-tick set_ctrl publish) and the shutdown hook
+        // (ctrl=0.0 on every stop path).
         let daemon_info = peppylib::info(&node_runner, None)
             .await
             .expect("peppylib::info");
@@ -48,6 +48,18 @@ fn main() -> Result<()> {
                 .await
                 .expect("peppylib connect"),
         );
+
+        // Zero the gripper ctrl on every stop path (in-band stop, signal,
+        // daemon loss, setup error): the runtime awaits this hook after the
+        // cancellation token has stopped the control loop, so nothing
+        // overwrites the zero.
+        {
+            let handle = handle.clone();
+            let daemon = daemon.clone();
+            node_runner.on_shutdown(async move {
+                actions::move_gripper::zero_ctrl(&handle, &daemon, gripper_id).await;
+            });
+        }
 
         let shared = state::new_shared();
 
@@ -76,13 +88,6 @@ fn main() -> Result<()> {
             token.clone(),
             handle.clone(),
             daemon.clone(),
-        ));
-
-        tokio::spawn(actions::move_gripper::shutdown_handler(
-            handle.clone(),
-            daemon.clone(),
-            gripper_id,
-            token.clone(),
         ));
 
         Ok(())

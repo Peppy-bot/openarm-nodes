@@ -12,7 +12,6 @@ use srs_model::nalgebra::Isometry3;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
 /// Degrees of freedom of the arm.
@@ -120,6 +119,17 @@ fn main() -> Result<()> {
             .open(&lock_path)
             .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
 
+        // Lock-release hook, registered first: hooks run in reverse registration
+        // order, so the lock is released last, after the motor-disable hook below.
+        {
+            let lock_path = lock_path.clone();
+            node_runner.on_shutdown(async move {
+                if let Err(e) = std::fs::remove_file(&lock_path) {
+                    warn!("failed to remove lock {lock_path}: {e}");
+                }
+            });
+        }
+
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
         let mut arm = ArmCan::new(&can_interface, ENABLE_FD).expect("ArmCan::new");
@@ -136,56 +146,44 @@ fn main() -> Result<()> {
 
         let arm = Arc::new(Mutex::new(arm));
 
-        // Shutdown task: disables motors and releases the lock on shutdown.
-        // `peppy node stop` shuts a daemon node down in-band over messaging by
-        // cancelling the runtime's cancellation token, not by sending a unix
-        // signal, so the SIGINT/SIGTERM arms alone never fire on a stop and the
-        // motors would stay energised. Observing the token closes that gap and
-        // also lets the process exit promptly instead of being force-killed.
+        // Motor-disable hook, registered second so it runs first at shutdown
+        // (before the lock-release hook above). The runtime fires it on every
+        // stop path (signals, `peppy node stop`, daemon loss) and awaits it
+        // before exiting, so the motors never stay energised. The control loop
+        // observes the same token and stops commanding (see `control::command`),
+        // so no in-flight tick can re-energise the motors after this disables them.
         {
             let arm = arm.clone();
-            let node_runner = node_runner.clone();
-            let cancel = node_runner.cancellation_token().clone();
-            let lock_path = lock_path.clone();
-            tokio::spawn(async move {
-                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-                tokio::select! {
-                    _ = sigint.recv() => {},
-                    _ = sigterm.recv() => {},
-                    _ = cancel.cancelled() => {},
+            node_runner.on_shutdown(async move {
+                info!("shutdown: disabling motors");
+                {
+                    // unwrap_or_else: recover even if poisoned (panic in control loop)
+                    // so disable_all() always runs and motors don't stay energised.
+                    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                    a.disable_all();
                 }
-                info!("shutdown: disabling motors, releasing lock");
-                // unwrap_or_else: recover even if poisoned (panic in control loop)
-                // so disable_all() always runs and motors don't stay energised.
-                // Hold the lock from here through process exit so an in-flight
-                // control loop can neither command mid-shutdown nor re-command the
-                // motors after they have been disabled.
-                let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                a.disable_all();
                 // ROS2 reference: sleep before recv to let motors acknowledge.
-                std::thread::sleep(POST_DISABLE_SLEEP);
+                tokio::time::sleep(POST_DISABLE_SLEEP).await;
+                let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
                 a.recv_all(BRINGUP_RECV_US);
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
-                }
-                // exit() does not run destructors, so the guard is never released;
-                // the motors stay disabled as the process dies.
-                std::process::exit(0);
             });
         }
 
         // get_arm_id service.
         {
             let runner = node_runner.clone();
+            let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 loop {
-                    if let Err(e) = get_arm_id::handle_next_request(&runner, |_req| {
-                        Ok(get_arm_id::Response::new(arm_id))
-                    })
-                    .await
-                    {
-                        error!("get_arm_id: {e}");
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        res = get_arm_id::handle_next_request(&runner, |_req| {
+                            Ok(get_arm_id::Response::new(arm_id))
+                        }) => {
+                            if let Err(e) = res {
+                                error!("get_arm_id: {e}");
+                            }
+                        }
                     }
                 }
             });
@@ -195,15 +193,19 @@ fn main() -> Result<()> {
         {
             let runner = node_runner.clone();
             let arm = arm.clone();
+            let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 loop {
-                    if let Err(e) = get_joint_positions::handle_next_request(&runner, |_req| {
-                        let a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                        Ok(get_joint_positions::Response::new(a.get_state().positions))
-                    })
-                    .await
-                    {
-                        error!("get_joint_positions: {e}");
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        res = get_joint_positions::handle_next_request(&runner, |_req| {
+                            let a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                            Ok(get_joint_positions::Response::new(a.get_state().positions))
+                        }) => {
+                            if let Err(e) = res {
+                                error!("get_joint_positions: {e}");
+                            }
+                        }
                     }
                 }
             });

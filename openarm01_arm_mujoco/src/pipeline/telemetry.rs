@@ -46,11 +46,15 @@ struct TfTreeRaw {
     frames: Vec<TfFrameRaw>,
 }
 
+// `token` is the tokio_util token sim_bridge_core watches (the lib is
+// peppylib-free); main.rs cancels it from a shutdown hook so the pipelines
+// observe cancellation before the runtime is torn down.
 pub async fn run(
     runner: Arc<NodeRunner>,
     arm_id: ArmId,
     state: Arc<SharedState>,
     transport: Arc<PeppylibTransport>,
+    token: tokio_util::sync::CancellationToken,
 ) {
     let side = arm_id.side_word();
     info!(
@@ -62,18 +66,6 @@ pub async fn run(
     // sim_node = the publisher node name configured in
     // robot_initializer_mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
-
-    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
-    // the node's peppylib cancellation into it.
-    let token = tokio_util::sync::CancellationToken::new();
-    {
-        let node_token = runner.cancellation_token().clone();
-        let lib_token = token.clone();
-        tokio::spawn(async move {
-            node_token.cancelled().await;
-            lib_token.cancel();
-        });
-    }
 
     let joint_states_topic: Arc<str> = Arc::from("joint_states");
     let tf_tree_topic: Arc<str> = Arc::from("tf_tree");

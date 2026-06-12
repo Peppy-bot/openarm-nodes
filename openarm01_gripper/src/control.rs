@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
+use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
 use openarm_can::GripperCan;
@@ -43,6 +44,10 @@ impl MotionResult {
     fn timed_out(position_m: f64, action_time: f64) -> Self {
         Self { success: false, message: "timeout".into(), final_position_m: position_m, action_time }
     }
+
+    fn cancelled(position_m: f64, action_time: f64) -> Self {
+        Self { success: false, message: "cancelled".into(), final_position_m: position_m, action_time }
+    }
 }
 
 /// Spawn-and-loop entry for the move_gripper action. Mirrors the pattern in the arm node:
@@ -63,34 +68,37 @@ pub async fn run_move_gripper(
     // current one finishes.
     let busy = Arc::new(AtomicBool::new(false));
 
+    let token = runner.cancellation_token().clone();
+
     loop {
-        let ctx = match handle
-            .handle_goal_next_request(|req| {
-                // Reject targets outside the gripper's physical travel (also
-                // rejects NaN/inf, which Limit::contains treats as out of range).
-                if !GRIPPER_LIMITS_M.contains(req.data.position) {
-                    return Ok(move_gripper::GoalResponse::reject("target position out of range"));
-                }
-                // Atomically claim the slot; reject if a motion already holds it.
-                if busy
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
-                    Ok(move_gripper::GoalResponse::reject(
-                        "gripper is already executing a motion",
-                    ))
-                } else {
-                    Ok(move_gripper::GoalResponse::accept())
-                }
-            })
-            .await
-        {
-            Ok(Some(ctx)) => ctx,
-            Ok(None) => break, // action closed (node shutting down)
-            Err(e) => {
-                error!("move_gripper goal: {e}");
-                continue;
+        let accept = handle.handle_goal_next_request(|req| {
+            // Reject targets outside the gripper's physical travel (also
+            // rejects NaN/inf, which Limit::contains treats as out of range).
+            if !GRIPPER_LIMITS_M.contains(req.data.position) {
+                return Ok(move_gripper::GoalResponse::reject("target position out of range"));
             }
+            // Atomically claim the slot; reject if a motion already holds it.
+            if busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                Ok(move_gripper::GoalResponse::reject(
+                    "gripper is already executing a motion",
+                ))
+            } else {
+                Ok(move_gripper::GoalResponse::accept())
+            }
+        });
+        let ctx = tokio::select! {
+            _ = token.cancelled() => break, // node shutting down
+            res = accept => match res {
+                Ok(Some(ctx)) => ctx,
+                Ok(None) => break, // action closed (node shutting down)
+                Err(e) => {
+                    error!("move_gripper goal: {e}");
+                    continue;
+                }
+            },
         };
 
         let goal = AcceptedGoal {
@@ -101,8 +109,9 @@ pub async fn run_move_gripper(
         let gripper = Arc::clone(&gripper);
         let cfg = cfg.clone();
         let busy = Arc::clone(&busy);
+        let token = token.clone();
         tokio::spawn(async move {
-            let result = run_control_loop(&gripper, &ctx, &cfg, goal).await;
+            let result = run_control_loop(&gripper, &ctx, &cfg, goal, &token).await;
             if let Err(e) = ctx
                 .complete(
                     result.success,
@@ -124,6 +133,7 @@ async fn run_control_loop(
     ctx: &move_gripper::GoalContext,
     cfg: &ControlConfig,
     goal: AcceptedGoal,
+    token: &CancellationToken,
 ) -> MotionResult {
     // ROS2 reference (v10_simple_hardware write()): mit_control_all with target, then recv_all.
     // No trajectory: a single MIT setpoint held by the motor PD gains; the gripper's
@@ -140,7 +150,14 @@ async fn run_control_loop(
     loop {
         let motor_rad = {
             let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
-            g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0);
+            // Checked under the lock: the disable hook (main.rs) only runs after
+            // the token cancels and takes this same lock to disable_all(), so a
+            // tick that observes the cancel here never re-energises the motor
+            // with one last MIT frame after it has been disabled. The biased
+            // select at the bottom of the loop then fails the goal as cancelled.
+            if !token.is_cancelled() {
+                g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0);
+            }
             g.refresh_all();
             g.recv_all(cfg.recv_timeout_us);
             g.get_state().position
@@ -170,7 +187,14 @@ async fn run_control_loop(
             return MotionResult::timed_out(position_m, elapsed_secs);
         }
 
-        pace_to_deadline(&mut next_tick, cfg.cycle_period).await;
+        // Biased so a cancelled token always wins over an overrun (already-due)
+        // tick: on shutdown stop commanding the motor and fail the goal; the
+        // on_shutdown hook in main.rs disables the hardware.
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => return MotionResult::cancelled(position_m, elapsed_secs),
+            _ = pace_to_deadline(&mut next_tick, cfg.cycle_period) => {}
+        }
     }
 }
 

@@ -6,8 +6,8 @@
 // (trajectory elapsed), exactly like the real driver — no convergence check.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
@@ -55,6 +55,30 @@ struct MotionResult {
     action_time: f64,
 }
 
+/// Slot tracking the in-flight motion task. The control loop stops on the
+/// node token, but the goal completion it dispatches afterwards (e.g.
+/// `complete_cancelled` telling the client the goal was interrupted) would
+/// otherwise live in a detached task that races runtime teardown. main.rs
+/// registers a shutdown hook that awaits this slot so the dispatch is an
+/// awaited obligation. The single-flight `busy` gate ensures at most one
+/// motion task exists at a time.
+#[derive(Clone, Default)]
+pub struct InflightMotion(Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>);
+
+impl InflightMotion {
+    fn set(&self, task: tokio::task::JoinHandle<()>) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(task);
+    }
+
+    /// Await the current motion task, if any. Called from the shutdown hook.
+    pub async fn wait_idle(&self) {
+        let task = self.0.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+}
+
 fn feedback_period(freq_hz: u32) -> Duration {
     Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
 }
@@ -80,6 +104,7 @@ pub async fn run(
     token: CancellationToken,
     handle: Arc<MessengerHandle>,
     daemon: DaemonState,
+    inflight: InflightMotion,
 ) {
     let side = arm_id.side_word();
     let actuator_names: Arc<[String; DOF]> = Arc::new(std::array::from_fn(|i| {
@@ -158,7 +183,7 @@ pub async fn run(
         let actuator_names = actuator_names.clone();
         let set_ctrl_topic = set_ctrl_topic.clone();
         let instance_id = instance_id.clone();
-        tokio::spawn(async move {
+        inflight.set(tokio::spawn(async move {
             let result = run_control_loop(
                 &handle,
                 &daemon,
@@ -194,7 +219,7 @@ pub async fn run(
                 error!("move_arm_joints complete: {e}");
             }
             busy.store(false, Ordering::Release);
-        });
+        }));
     }
 }
 

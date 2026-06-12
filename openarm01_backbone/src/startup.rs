@@ -13,7 +13,13 @@ const SERVICE_TIMEOUT: Duration = Duration::from_secs(5);
 // launcher-pinned via link_ids, so no runtime discovery is needed.
 pub async fn wait_until_ready(runner: &NodeRunner, token: &CancellationToken) {
     loop {
-        match robot_init_is_ready::poll(runner, SERVICE_TIMEOUT).await {
+        // Race the poll itself against the token so cancellation arriving
+        // mid-poll is seen immediately rather than after SERVICE_TIMEOUT.
+        let result = tokio::select! {
+            _ = token.cancelled() => return,
+            result = robot_init_is_ready::poll(runner, SERVICE_TIMEOUT) => result,
+        };
+        match result {
             Ok(resp) if resp.data.ready => {
                 info!("robot_initializer reported ready");
                 return;

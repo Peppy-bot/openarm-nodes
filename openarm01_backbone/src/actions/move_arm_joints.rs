@@ -47,7 +47,11 @@ impl Outcome {
 // Expose move_arm_joints. For each accepted goal, dispatch on arm_id to the
 // left or right consumed action, relay feedback upward, propagate cancel
 // downward, and answer the caller with either complete or complete_cancelled.
-pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen::Result<()> {
+pub async fn run(
+    runner: Arc<NodeRunner>,
+    token: CancellationToken,
+    in_flight: super::InFlightGoals,
+) -> peppygen::Result<()> {
     let mut handle = ActionHandle::expose(&runner).await?;
 
     loop {
@@ -73,10 +77,11 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
         // Spawn per goal so the accept loop returns immediately to await the
         // next probe. Otherwise left+right move_arm_joints serialise through
         // one task and the second goal sees the backbone instance as
-        // unreachable.
+        // unreachable. Spawned into the shared registry so the shutdown hook
+        // awaits the relay's cancel propagation and upstream reply.
         let runner_for_goal = Arc::clone(&runner);
         let token_for_goal = token.clone();
-        tokio::spawn(async move {
+        super::spawn_goal_task(&in_flight, async move {
             let outcome = forward(&runner_for_goal, &goal_ctx, &token_for_goal).await;
 
             let reply = if outcome.is_cancelled {
@@ -126,18 +131,23 @@ async fn dispatch_left(
     goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
-    let mut downstream = match left_arm_move_arm_joints::ActionHandle::fire_goal(
-        runner,
-        GOAL_TIMEOUT,
-        left_arm_move_arm_joints::GoalRequest {
-            feedback_frequency: req.feedback_frequency,
-            joint_positions: req.joint_positions,
-            duration_s: req.duration_s,
-        },
-        QoSProfile::SensorData,
-    )
-    .await
-    {
+    // The fire can park up to GOAL_TIMEOUT; race it against the token so a goal
+    // that lands in the in-flight registry mid-fire cannot hold the shutdown
+    // hook past the grace window before the relay loop below can cancel it.
+    let fired = tokio::select! {
+        _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+        fired = left_arm_move_arm_joints::ActionHandle::fire_goal(
+            runner,
+            GOAL_TIMEOUT,
+            left_arm_move_arm_joints::GoalRequest {
+                feedback_frequency: req.feedback_frequency,
+                joint_positions: req.joint_positions,
+                duration_s: req.duration_s,
+            },
+            QoSProfile::SensorData,
+        ) => fired,
+    };
+    let mut downstream = match fired {
         Ok(handle) if handle.data.accepted => handle,
         Ok(handle) => {
             return Outcome::failed(format!(
@@ -161,18 +171,23 @@ async fn dispatch_right(
     goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
-    let mut downstream = match right_arm_move_arm_joints::ActionHandle::fire_goal(
-        runner,
-        GOAL_TIMEOUT,
-        right_arm_move_arm_joints::GoalRequest {
-            feedback_frequency: req.feedback_frequency,
-            joint_positions: req.joint_positions,
-            duration_s: req.duration_s,
-        },
-        QoSProfile::SensorData,
-    )
-    .await
-    {
+    // The fire can park up to GOAL_TIMEOUT; race it against the token so a goal
+    // that lands in the in-flight registry mid-fire cannot hold the shutdown
+    // hook past the grace window before the relay loop below can cancel it.
+    let fired = tokio::select! {
+        _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+        fired = right_arm_move_arm_joints::ActionHandle::fire_goal(
+            runner,
+            GOAL_TIMEOUT,
+            right_arm_move_arm_joints::GoalRequest {
+                feedback_frequency: req.feedback_frequency,
+                joint_positions: req.joint_positions,
+                duration_s: req.duration_s,
+            },
+            QoSProfile::SensorData,
+        ) => fired,
+    };
+    let mut downstream = match fired {
         Ok(handle) if handle.data.accepted => handle,
         Ok(handle) => {
             return Outcome::failed(format!(
@@ -232,7 +247,13 @@ async fn relay_left(
         }
     }
 
-    match downstream.get_result(RESULT_TIMEOUT).await {
+    // Race the (up to RESULT_TIMEOUT) result wait against the token so a
+    // shutdown arriving here does not hold the shutdown hook for up to 60s.
+    let result = tokio::select! {
+        _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+        result = downstream.get_result(RESULT_TIMEOUT) => result,
+    };
+    match result {
         Ok(result) => match result.outcome {
             left_arm_move_arm_joints::ResultOutcome::Completed(data) => Outcome {
                 success: data.success,
@@ -304,7 +325,13 @@ async fn relay_right(
         }
     }
 
-    match downstream.get_result(RESULT_TIMEOUT).await {
+    // Race the (up to RESULT_TIMEOUT) result wait against the token so a
+    // shutdown arriving here does not hold the shutdown hook for up to 60s.
+    let result = tokio::select! {
+        _ = token.cancelled() => return Outcome::failed("backbone shutting down"),
+        result = downstream.get_result(RESULT_TIMEOUT) => result,
+    };
+    match result {
         Ok(result) => match result.outcome {
             right_arm_move_arm_joints::ResultOutcome::Completed(data) => Outcome {
                 success: data.success,

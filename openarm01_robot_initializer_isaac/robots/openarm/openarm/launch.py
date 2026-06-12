@@ -48,23 +48,60 @@ from _launcher import SimLauncher
 
 _ready = threading.Event()
 _stop = threading.Event()
+# Set by the sim main thread once the bounded part of its teardown (bridge
+# extension shutdown, timeline stop) is done; only sim_app.close() remains.
+_torn_down = threading.Event()
 
 
 async def setup(_params, node_runner) -> list:
+    loop = asyncio.get_running_loop()
+    token = node_runner.cancellation_token()
+
+    async def _stop_sim() -> None:
+        # Isaac teardown must run on the sim main thread, which cannot observe
+        # asyncio cancellation; _stop is its only stop path. Awaiting
+        # _torn_down makes the bounded teardown (bridge/messenger shutdown,
+        # timeline stop) an awaited obligation inside the shutdown grace
+        # window. sim_app.close() stays outside the wait: renderer teardown
+        # can exceed any realistic grace window and is covered by the
+        # force-kill.
+        _stop.set()
+        await loop.run_in_executor(None, _torn_down.wait, 2.5)
+
+    node_runner.on_shutdown(_stop_sim)
+
     async def _is_ready_loop() -> None:
-        while True:
-            await is_ready.handle_next_request(
-                node_runner,
-                lambda _req: is_ready.Response(ready=_ready.is_set()),
-            )
+        # handle_next_request parks until the next request arrives and is not
+        # token-aware, so race it against the token: otherwise the loop stays
+        # blocked on this await at shutdown and only ends when the runtime
+        # force-cancels the task (best effort, racing process exit) instead of
+        # returning cooperatively within the grace window.
+        cancelled = asyncio.ensure_future(token.cancelled())
+        try:
+            while not token.is_cancelled():
+                next_req = asyncio.ensure_future(
+                    is_ready.handle_next_request(
+                        node_runner,
+                        lambda _req: is_ready.Response(ready=_ready.is_set()),
+                    )
+                )
+                await asyncio.wait(
+                    [cancelled, next_req], return_when=asyncio.FIRST_COMPLETED
+                )
+                if not next_req.done():
+                    next_req.cancel()
+                    break
+        finally:
+            cancelled.cancel()
 
     return [asyncio.create_task(_is_ready_loop())]
 
 
 def _run_node_builder() -> None:
-    # NodeBuilder.run returns when peppylib's shutdown service cancels its
-    # tasks. Flip _stop so the main-thread sim loop can exit; without this
-    # the asyncio side tears down cleanly but Isaac keeps spinning forever.
+    # The on_shutdown hook flips _stop on every runtime stop path; this
+    # finally is the backstop for exits that bypass the hook (NodeBuilder.run
+    # failing before setup registers it), so the main-thread sim loop is
+    # always released and Isaac never keeps spinning forever.
     try:
         NodeBuilder().run(setup)
     finally:
@@ -73,7 +110,7 @@ def _run_node_builder() -> None:
 
 def main() -> None:
     threading.Thread(target=_run_node_builder, daemon=True).start()
-    SimLauncher(simulation_app, _USD_PATH, _ready, _stop).run()
+    SimLauncher(simulation_app, _USD_PATH, _ready, _stop, _torn_down).run()
 
 
 if __name__ == "__main__":

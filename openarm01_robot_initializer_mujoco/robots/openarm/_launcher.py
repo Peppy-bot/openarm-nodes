@@ -28,9 +28,9 @@ class SimLauncher:
     ) -> None:
         self._xml_path = xml_path
         self._ready = ready
-        # Set by the asyncio caller on cancel (SIGTERM, peppy node stop). The
-        # sim loop runs in run_in_executor and cannot observe asyncio
-        # cancellation directly — this Event is the only stop path.
+        # Set by the node's on_shutdown hook, which then awaits this thread's
+        # teardown. The sim loop runs in run_in_executor and cannot observe
+        # asyncio cancellation directly — this Event is the only stop path.
         self._stop = stop
         self._headless = os.environ.get(_HEADLESS_ENV, "1").strip() == "1"
 

@@ -9,15 +9,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppylib::config::QoSProfile;
+use peppylib::messaging::SenderTarget;
 use peppylib::runtime::{NodeBuilder, NodeRunner, StandaloneConfig};
 use peppylib::{ActionMessenger, Payload};
 use tracing::{error, info, warn};
 
 use peppygen::capnp::{
-    emit_move_gripper_feedback_message_capnp::move_gripper_feedback_message,
-    move_gripper_goal_message_capnp::move_gripper_goal_message,
-    move_gripper_goal_response_message_capnp::move_gripper_goal_response_message,
-    move_gripper_result_response_message_capnp::move_gripper_result_response_message,
+    openarm01_gripper_v1_emit_move_gripper_feedback_message_capnp::move_gripper_feedback_message,
+    openarm01_gripper_v1_move_gripper_goal_message_capnp::move_gripper_goal_message,
+    openarm01_gripper_v1_move_gripper_goal_response_message_capnp::move_gripper_goal_response_message,
+    openarm01_gripper_v1_move_gripper_result_response_message_capnp::move_gripper_result_message,
 };
 
 const TARGET_NODE: &str = "openarm01_gripper";
@@ -133,7 +134,7 @@ fn decode_feedback(payload: &[u8]) -> capnp::Result<(Vec<f64>, f64)> {
 fn decode_result(payload: &[u8]) -> capnp::Result<(bool, String, Vec<f64>, f64)> {
     let mut slice = payload;
     let r = capnp::serialize::read_message_from_flat_slice(&mut slice, Default::default())?;
-    let res = r.get_root::<move_gripper_result_response_message::Reader>()?;
+    let res = r.get_root::<move_gripper_result_message::Reader>()?;
     let message = res.get_message()?.to_str().unwrap_or("").to_string();
     let final_pos: Vec<f64> = res.get_final_joint_positions()?.iter().collect();
     Ok((res.get_success(), message, final_pos, res.get_action_time()))
@@ -148,11 +149,18 @@ async fn fire_one(
 ) -> bool {
     info!("[{side}] sending move_gripper position={position} feedback_hz={feedback_hz}");
     let payload = Payload::from(encode_goal(feedback_hz, position));
+    let to_target = match SenderTarget::node(TARGET_NODE, "v1") {
+        Ok(t) => t,
+        Err(e) => {
+            error!("[{side}] invalid target node: {e:?}");
+            return false;
+        }
+    };
     let mut handle = match ActionMessenger::send_goal(
         runner.messenger(),
         runner.processor().bound_core_node(),
         runner.processor().bound_instance_id(),
-        TARGET_NODE,
+        to_target,
         ACTION_NAME,
         None,
         Some(target_instance),
@@ -183,9 +191,18 @@ async fn fire_one(
     }
     info!("[{side}] goal accepted");
 
+    let token = runner.cancellation_token();
     let mut count = 0u32;
     loop {
-        let next = tokio::time::timeout(Duration::from_secs(2), handle.on_next_feedback()).await;
+        // Standalone mode doesn't race the setup fn against the token, so
+        // observe it here to keep a single Ctrl+C able to end an in-flight run.
+        let next = tokio::select! {
+            _ = token.cancelled() => {
+                info!("[{side}] shutdown requested — stopping feedback drain");
+                return false;
+            }
+            next = tokio::time::timeout(Duration::from_secs(2), handle.on_next_feedback()) => next,
+        };
         let fb_msg = match next {
             Ok(Ok(m)) => m,
             Ok(Err(e)) => {
@@ -216,7 +233,7 @@ async fn fire_one(
     match ActionMessenger::request_result(runner.messenger(), &handle, Duration::from_secs(10))
         .await
     {
-        Ok(res) => match decode_result(res.payload().as_ref()) {
+        Ok(res) => match decode_result(res.body.as_ref()) {
             Ok((success, message, final_pos, t)) => {
                 info!(
                     "[{side}] RESULT success={success} msg={message:?} final={final_pos:?} t={t:.3}s"
@@ -254,13 +271,21 @@ fn main() -> peppylib::PeppyResult<()> {
         move |_params, runner: Arc<NodeRunner>| async move {
             let mut all_ok = true;
             for (side, instance_id) in args.instances() {
+                if runner.cancellation_token().is_cancelled() {
+                    all_ok = false;
+                    break;
+                }
                 let ok =
                     fire_one(&runner, side, instance_id, args.position, args.feedback_hz).await;
                 all_ok = all_ok && ok;
             }
             info!("OVERALL: {}", if all_ok { "PASS" } else { "FAIL" });
+            // One-shot harness: cancel the token so the standalone runtime
+            // exits instead of parking on "Press Ctrl+C to shutdown". A FAIL
+            // surfaces as an Err, which run() propagates as a non-zero exit.
+            runner.cancellation_token().cancel();
             if !all_ok {
-                std::process::exit(1);
+                return Err(std::io::Error::other("move_gripper test failed").into());
             }
             Ok(())
         },

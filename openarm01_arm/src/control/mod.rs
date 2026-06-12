@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use peppygen::exposed_actions::openarm01_arm::v1::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
+use peppylib::runtime::CancellationToken;
 use srs_model::nalgebra::Isometry3;
 use srs_model::Limit;
 use tokio::sync::mpsc;
@@ -62,6 +63,10 @@ struct TickIo<'a> {
     /// goal's context (a motion's terminal, or a failed admission) or, once, when
     /// the startup move reaches the ready pose.
     busy: &'a AtomicBool,
+    /// The node's cancellation token, checked under the arm lock in [`command`]
+    /// so a tick already in flight when shutdown begins cannot re-energise the
+    /// motors after the on_shutdown hook in main.rs has disabled them.
+    cancel: &'a CancellationToken,
     /// Measured joint positions this tick.
     q: JointVec,
     /// Gravity + Coriolis + friction feedforward at the measured state.
@@ -150,23 +155,25 @@ pub async fn spawn(runner: &NodeRunner, arm: Arc<Mutex<ArmCan>>, cfg: ControlCon
     // accepted and silently queued behind a motion the caller never requested.
     let busy = Arc::new(AtomicBool::new(true));
     let (goal_tx, goal_rx) = mpsc::channel::<Goal>(1);
-    tokio::spawn(run_control(arm, cfg.clone(), goal_rx, busy.clone(), model));
-    tokio::spawn(actions::run_move_arm_joints(joints_action, cfg.limits, goal_tx.clone(), busy.clone()));
-    tokio::spawn(actions::run_move_arm(cartesian_action, goal_tx, busy));
+    let token = runner.cancellation_token().clone();
+    tokio::spawn(run_control(arm, cfg.clone(), goal_rx, busy.clone(), model, token.clone()));
+    tokio::spawn(actions::run_move_arm_joints(joints_action, cfg.limits, goal_tx.clone(), busy.clone(), token.clone()));
+    tokio::spawn(actions::run_move_arm(cartesian_action, goal_tx, busy, token));
     Ok(())
 }
 
-/// The single motor-owning control loop. Runs forever at `cfg.cycle_period`:
-/// reads the measured state, computes the feedforward, and runs one [`Mode`]
-/// tick, which commands the motors and yields the next mode. Starts in
-/// [`Mode::Startup`], easing from the measured power-on pose to the ready pose
-/// (never lunge on boot).
+/// The single motor-owning control loop. Runs at `cfg.cycle_period` until the
+/// node's cancellation token fires: reads the measured state, computes the
+/// feedforward, and runs one [`Mode`] tick, which commands the motors and
+/// yields the next mode. Starts in [`Mode::Startup`], easing from the measured
+/// power-on pose to the ready pose (never lunge on boot).
 async fn run_control(
     arm: Arc<Mutex<ArmCan>>,
     cfg: ControlConfig,
     mut goals: mpsc::Receiver<Goal>,
     busy: Arc<AtomicBool>,
     mut model: srs_model::Arm,
+    token: CancellationToken,
 ) {
     let mut pacer = Pacer::new(cfg.cycle_period);
     let (q0, _) = read_state(&arm, cfg.recv_timeout_us);
@@ -182,14 +189,23 @@ async fn run_control(
             model: &model,
             goals: &mut goals,
             busy: &busy,
+            cancel: &token,
             q,
             ff_tau,
             ee_base,
             now: Instant::now(),
         };
         mode = mode.tick(&mut io).await;
-        pacer.pace().await;
+        // Biased so a cancelled token always wins over an overrun (already-due)
+        // tick: on shutdown stop commanding the motors; the on_shutdown hook in
+        // main.rs disables the hardware.
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            _ = pacer.pace() => {}
+        }
     }
+    info!("control loop stopped (node shutting down)");
 }
 
 /// One tick of rigid-body feedforward: gravity and Coriolis from the posed chain
@@ -208,10 +224,18 @@ fn feedforward(model: &mut srs_model::Arm, q: &JointVec, qdot: &JointVec) -> (Jo
 }
 
 /// Command the motors once: this tick's feedforward plus PD to the desired
-/// position/velocity. The single control task is the only caller, so locking
-/// here can never contend with another writer.
+/// position/velocity. The single control task is the only caller, so two ticks
+/// can never command concurrently; the shutdown disable hook (main.rs) is the
+/// one other motor writer, and the cancellation check below yields to it.
 fn command(io: &TickIo<'_>, q_des: &JointVec, dq_des: &JointVec) {
     let mut a = io.arm.lock().unwrap_or_else(|e| e.into_inner());
+    // Checked under the arm lock: the disable hook only runs after the token
+    // cancels and takes this lock to disable_all(), so a tick that observes the
+    // cancel here (or raced past the loop's token check) never re-energises the
+    // motors with one last MIT frame after they have been disabled.
+    if io.cancel.is_cancelled() {
+        return;
+    }
     a.mit_control(&io.cfg.kp, &io.cfg.kd, q_des, dq_des, &io.ff_tau);
 }
 

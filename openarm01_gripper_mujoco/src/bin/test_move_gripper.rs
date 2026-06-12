@@ -190,9 +190,18 @@ async fn fire_one(
     }
     info!("[{side}] goal accepted");
 
+    let token = runner.cancellation_token();
     let mut count = 0u32;
     loop {
-        let next = tokio::time::timeout(Duration::from_secs(2), handle.on_next_feedback()).await;
+        // Standalone mode doesn't race the setup fn against the token, so
+        // observe it here to keep a single Ctrl+C able to end an in-flight run.
+        let next = tokio::select! {
+            _ = token.cancelled() => {
+                info!("[{side}] shutdown requested — stopping feedback drain");
+                return false;
+            }
+            next = tokio::time::timeout(Duration::from_secs(2), handle.on_next_feedback()) => next,
+        };
         let fb_msg = match next {
             Ok(Ok(m)) => m,
             Ok(Err(e)) => {
@@ -261,15 +270,24 @@ fn main() -> peppylib::PeppyResult<()> {
         move |_params, runner: Arc<NodeRunner>| async move {
             let mut all_ok = true;
             for (side, instance_id) in args.instances() {
+                if runner.cancellation_token().is_cancelled() {
+                    all_ok = false;
+                    break;
+                }
                 let ok =
                     fire_one(&runner, side, instance_id, args.position, args.feedback_hz).await;
                 all_ok = all_ok && ok;
             }
             info!("OVERALL: {}", if all_ok { "PASS" } else { "FAIL" });
-            if !all_ok {
-                std::process::exit(1);
+            // One-shot harness: cancel the token so the standalone runtime
+            // tears down and exits instead of parking on the Ctrl+C wait; an
+            // Err return makes the process exit non-zero after teardown.
+            runner.cancellation_token().cancel();
+            if all_ok {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("move_gripper test failed").into())
             }
-            Ok(())
         },
     )
 }

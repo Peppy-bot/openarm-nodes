@@ -35,10 +35,11 @@ fn main() -> Result<()> {
             .await
             .expect("peppygen::clock::init");
 
-        // No shutdown handler — unlike the gripper we must NOT publish ctrl=0.0
-        // on exit: zeroing arm joint targets would command the arm into a hard
-        // self-collision pose. SIGINT cancels the token; the action loop exits
-        // with the arm holding its last commanded pose.
+        // No ctrl-zeroing on exit — unlike the gripper we must NOT publish
+        // ctrl=0.0: zeroing arm joint targets would command the arm into a hard
+        // self-collision pose. The shutdown hooks below only stop the bridge
+        // pipelines and finish an in-flight goal's completion dispatch; the arm
+        // holds its last commanded pose.
         let daemon_info = peppylib::info(&node_runner, None)
             .await
             .expect("peppylib::info");
@@ -66,18 +67,34 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // SimBridge is peppylib-free; this node hands it a peppylib-backed
-        // transport (telemetry::run bridges the cancel token internally).
+        // SimBridge is peppylib-free and watches a tokio_util token; cancel it
+        // from a hook (awaited before teardown) rather than a detached
+        // forwarder task, which would race the runtime drop and could leave
+        // the pipelines never observing cancellation.
+        let bridge_token = tokio_util::sync::CancellationToken::new();
+        {
+            let bridge_token = bridge_token.clone();
+            node_runner.on_shutdown(async move { bridge_token.cancel() });
+        }
         let transport = transport::PeppylibTransport::new(daemon.clone());
         tokio::spawn(pipeline::telemetry::run(
             node_runner.clone(),
             arm_id,
             shared.clone(),
             transport,
+            bridge_token,
         ));
 
         tokio::spawn(actions::move_arm::run(node_runner.clone(), token.clone()));
 
+        // Await an in-flight motion goal from a hook so its completion
+        // dispatch (notably complete_cancelled after the token fires) is
+        // guaranteed to reach the action client before the runtime tears down.
+        let inflight = actions::move_arm_joints::InflightMotion::default();
+        {
+            let inflight = inflight.clone();
+            node_runner.on_shutdown(async move { inflight.wait_idle().await });
+        }
         tokio::spawn(actions::move_arm_joints::run(
             node_runner.clone(),
             arm_id,
@@ -85,6 +102,7 @@ fn main() -> Result<()> {
             token.clone(),
             handle.clone(),
             daemon.clone(),
+            inflight,
         ));
 
         Ok(())

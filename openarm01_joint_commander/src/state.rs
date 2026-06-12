@@ -60,6 +60,9 @@ pub struct GripperTarget {
     pub position: f64,
     pub last_feedback: Option<Vec<f64>>,
     pub in_flight: bool,
+    // Cancelled only by the shutdown hook (a second fire while in flight is
+    // rejected, not preempted) so the in-flight goal is cancelled at backbone.
+    pub preempt: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl GripperTarget {
@@ -68,6 +71,7 @@ impl GripperTarget {
             position: GRIPPER_CLOSED_M,
             last_feedback: None,
             in_flight: false,
+            preempt: None,
         }
     }
 }
@@ -122,6 +126,23 @@ impl UiState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = message.into();
+    }
+
+    /// Preempt tokens of every goal currently in flight — the shutdown hook
+    /// cancels these to halt commander-initiated motion at backbone.
+    pub fn in_flight_preempts(&self) -> Vec<tokio_util::sync::CancellationToken> {
+        let mut preempts = Vec::new();
+        for arm in [&self.left_arm, &self.right_arm] {
+            if arm.in_flight {
+                preempts.extend(arm.preempt.clone());
+            }
+        }
+        for gripper in [&self.left_gripper, &self.right_gripper] {
+            if gripper.in_flight {
+                preempts.extend(gripper.preempt.clone());
+            }
+        }
+        preempts
     }
 }
 

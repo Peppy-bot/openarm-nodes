@@ -1,5 +1,8 @@
 // Spawned per o/c keypress when a gripper is focused. Same shape as
-// move_arm_joints — fire at backbone, stream feedback, write result.
+// move_arm_joints — fire at backbone, stream feedback, write result. The
+// preempt token only fires from the shutdown hook in main.rs (a second fire
+// while in flight is rejected, not preempted): it cancels the goal at
+// backbone and the hook awaits the resulting finalize via in_flight.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +11,6 @@ use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::backbone_move_gripper;
 use peppygen::consumed_actions::backbone_move_gripper::ResultOutcome;
-use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
 use crate::state::{SharedState, Side};
@@ -19,20 +21,20 @@ const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn spawn(
     runner: Arc<NodeRunner>,
     state: SharedState,
-    token: CancellationToken,
+    preempt: tokio_util::sync::CancellationToken,
     side: Side,
     position_m: f64,
     feedback_hz: u32,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, side, position_m, feedback_hz).await;
+        run(runner, state, preempt, side, position_m, feedback_hz).await;
     });
 }
 
 async fn run(
     runner: Arc<NodeRunner>,
     state: SharedState,
-    token: CancellationToken,
+    preempt: tokio_util::sync::CancellationToken,
     side: Side,
     position_m: f64,
     feedback_hz: u32,
@@ -67,11 +69,14 @@ async fn run(
         }
     };
 
+    let mut preempted = false;
     loop {
         tokio::select! {
-            _ = token.cancelled() => {
-                finalize(&state, side, false, "shutting down — feedback abandoned").await;
-                return;
+            _ = preempt.cancelled(), if !preempted => {
+                preempted = true;
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(side = side.label(), error = %e, "preempt cancel failed");
+                }
             }
             feedback = downstream.on_next_feedback_message() => match feedback {
                 Ok(f) => {
@@ -84,14 +89,19 @@ async fn run(
     }
 
     // v0.10 ResultResponse.outcome is a typed enum (Completed/Cancelled/
-    // Abandoned/Expired). Wrap in tokio::select! so a shutdown during the
-    // up-to-RESULT_TIMEOUT wait doesn't wedge the task.
-    let outcome = tokio::select! {
-        _ = token.cancelled() => {
-            finalize(&state, side, false, "shutting down — result abandoned").await;
-            return;
+    // Abandoned/Expired). Stay preempt-aware so a shutdown cancel arriving
+    // during the up-to-RESULT_TIMEOUT wait still reaches the gripper and the
+    // result lands through the normal path.
+    let outcome = loop {
+        tokio::select! {
+            _ = preempt.cancelled(), if !preempted => {
+                preempted = true;
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(side = side.label(), error = %e, "preempt cancel failed");
+                }
+            }
+            result = downstream.get_result(RESULT_TIMEOUT) => break result,
         }
-        result = downstream.get_result(RESULT_TIMEOUT) => result,
     };
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
@@ -125,6 +135,7 @@ async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl 
     let summary = summary.into();
     let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
     s.gripper_mut(side).in_flight = false;
+    s.gripper_mut(side).preempt = None;
     s.set_status(summary.clone());
     if success {
         info!(side = side.label(), %summary, "move_gripper done");

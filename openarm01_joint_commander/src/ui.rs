@@ -133,6 +133,10 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
 }
 
 async fn handle_command(text: &str, app: &AppState) {
+    // Shutting down: don't start new motion after the token has fired.
+    if app.token.is_cancelled() {
+        return;
+    }
     let cmd: Command = match serde_json::from_str(text) {
         Ok(c) => c,
         Err(e) => {
@@ -169,20 +173,28 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
     };
     if let Some(tok) = preempt {
         tok.cancel();
-        for _ in 0..100 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let clear = !app
-                .state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .arm(side)
-                .in_flight;
-            if clear {
-                break;
+        let gate_clear = async {
+            for _ in 0..100 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let clear = !app
+                    .state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .arm(side)
+                    .in_flight;
+                if clear {
+                    break;
+                }
             }
+            // Grace for the arm to release its busy gate after the result lands.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        tokio::select! {
+            // Shutdown: stop waiting and don't fire; the shutdown hook owns
+            // cancelling in-flight goals.
+            _ = app.token.cancelled() => return,
+            _ = gate_clear => {}
         }
-        // Grace for the arm to release its busy gate after the result lands.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let goal_preempt = tokio_util::sync::CancellationToken::new();
     {
@@ -202,7 +214,6 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
     move_arm_joints::spawn(
         app.runner.clone(),
         app.state.clone(),
-        app.token.clone(),
         goal_preempt,
         side,
         joints,
@@ -212,6 +223,7 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
 }
 
 async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
+    let goal_preempt = tokio_util::sync::CancellationToken::new();
     {
         let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.gripper(side).in_flight {
@@ -223,6 +235,7 @@ async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
         }
         s.gripper_mut(side).in_flight = true;
         s.gripper_mut(side).position = position_m;
+        s.gripper_mut(side).preempt = Some(goal_preempt.clone());
         s.set_status(format!(
             "{} gripper: firing move_gripper ({position_m:.4} m)",
             side.label()
@@ -231,7 +244,7 @@ async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
     move_gripper::spawn(
         app.runner.clone(),
         app.state.clone(),
-        app.token.clone(),
+        goal_preempt,
         side,
         position_m,
         FEEDBACK_HZ,

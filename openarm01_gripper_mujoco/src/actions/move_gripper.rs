@@ -14,7 +14,6 @@ use peppylib::runtime::CancellationToken;
 use peppylib::{MessengerHandle, Payload, TopicMessenger};
 use serde::Serialize;
 use sim_bridge_core::DaemonState;
-use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
 use crate::config::GripperId;
@@ -347,15 +346,12 @@ async fn publish_set_ctrl(
     .map_err(|e| e.to_string())
 }
 
-/// SIGINT/SIGTERM handler — cancels the control loop, publishes ctrl=0.0 over a
-/// short grace window, then exits. The cancel stops the action loop overwriting
-/// the zero; the repeats survive a best-effort drop on the bridge.
-pub async fn shutdown_handler(
-    handle: Arc<MessengerHandle>,
-    daemon: DaemonState,
-    gripper_id: GripperId,
-    token: CancellationToken,
-) {
+/// Shutdown-hook cleanup: publish ctrl=0.0 over a short grace window so the
+/// sim gripper does not keep its last commanded value. Runs as an
+/// `on_shutdown` hook, after the cancellation token has stopped the action
+/// loop overwriting the zero; the repeats survive a best-effort drop on the
+/// bridge (~50ms total, well inside the shutdown grace window).
+pub async fn zero_ctrl(handle: &MessengerHandle, daemon: &DaemonState, gripper_id: GripperId) {
     let side = gripper_id.side_word();
     let actuator_names = [
         format!("openarm_{side}_finger_joint1"),
@@ -364,24 +360,14 @@ pub async fn shutdown_handler(
     let set_ctrl_topic = format!("set_ctrl_gripper_{side}");
     let instance_id = format!("openarm01_gripper_{side}_shutdown_pub");
 
-    let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-    let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-    tokio::select! {
-        _ = sigint.recv() => {},
-        _ = sigterm.recv() => {},
-    }
-    info!(
-        "shutdown: cancelling action loop, zeroing ctrl for gripper_id={}",
-        gripper_id.as_u8()
-    );
-    token.cancel();
+    info!("shutdown: zeroing ctrl for gripper_id={}", gripper_id.as_u8());
 
     const GRACE_TICK: Duration = Duration::from_millis(10);
     const GRACE_REPEATS: u32 = 5;
     for _ in 0..GRACE_REPEATS {
         if let Err(e) = publish_set_ctrl(
-            &handle,
-            &daemon,
+            handle,
+            daemon,
             &set_ctrl_topic,
             &instance_id,
             &actuator_names,
@@ -393,5 +379,4 @@ pub async fn shutdown_handler(
         }
         tokio::time::sleep(GRACE_TICK).await;
     }
-    std::process::exit(0);
 }

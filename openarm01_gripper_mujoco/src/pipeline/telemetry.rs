@@ -77,14 +77,13 @@ pub async fn run(
     // sim_node = the publisher node name configured in
     // robot_initializer:mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
-    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
-    // the node's peppylib cancellation into it.
+    // sim_bridge_core is peppylib-free and takes a tokio_util token; cancel
+    // it from a shutdown hook (awaited before task teardown) rather than a
+    // forwarder task that would race runtime drop and might never be polled.
     let token = tokio_util::sync::CancellationToken::new();
     {
-        let node_token = runner.cancellation_token().clone();
         let lib_token = token.clone();
-        tokio::spawn(async move {
-            node_token.cancelled().await;
+        runner.on_shutdown(async move {
             lib_token.cancel();
         });
     }

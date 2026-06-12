@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use peppygen::exposed_actions::openarm01_arm::v1::{move_arm, move_arm_joints};
+use peppylib::runtime::CancellationToken;
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use tokio::sync::mpsc;
 use tracing::error;
@@ -46,37 +47,39 @@ pub async fn run_move_arm_joints(
     limits: [Limit; ARM_DOF],
     goals: mpsc::Sender<Goal>,
     busy: Arc<AtomicBool>,
+    token: CancellationToken,
 ) {
     loop {
-        let ctx = match handle
-            .handle_goal_next_request(|req| {
-                let data = &req.data;
-                // Reject targets outside this arm's joint limits (also rejects
-                // NaN/inf, which Limit::contains treats as out of range).
-                if !target_in_limits(&data.joint_positions, &limits) {
-                    return Ok(move_arm_joints::GoalResponse::reject(
-                        "target joint positions out of range",
-                    ));
-                }
-                if !(data.duration_s.is_finite() && data.duration_s >= 0.0) {
-                    return Ok(move_arm_joints::GoalResponse::reject(
-                        "duration_s must be finite and >= 0",
-                    ));
-                }
-                if claim(&busy) {
-                    Ok(move_arm_joints::GoalResponse::accept())
-                } else {
-                    Ok(move_arm_joints::GoalResponse::reject("arm is already executing a motion"))
-                }
-            })
-            .await
-        {
-            Ok(Some(ctx)) => ctx,
-            Ok(None) => break, // action closed (node shutting down)
-            Err(e) => {
-                error!("move_arm_joints goal: {e}");
-                continue;
+        let accept = handle.handle_goal_next_request(|req| {
+            let data = &req.data;
+            // Reject targets outside this arm's joint limits (also rejects
+            // NaN/inf, which Limit::contains treats as out of range).
+            if !target_in_limits(&data.joint_positions, &limits) {
+                return Ok(move_arm_joints::GoalResponse::reject(
+                    "target joint positions out of range",
+                ));
             }
+            if !(data.duration_s.is_finite() && data.duration_s >= 0.0) {
+                return Ok(move_arm_joints::GoalResponse::reject(
+                    "duration_s must be finite and >= 0",
+                ));
+            }
+            if claim(&busy) {
+                Ok(move_arm_joints::GoalResponse::accept())
+            } else {
+                Ok(move_arm_joints::GoalResponse::reject("arm is already executing a motion"))
+            }
+        });
+        let ctx = tokio::select! {
+            _ = token.cancelled() => break, // node shutting down
+            res = accept => match res {
+                Ok(Some(ctx)) => ctx,
+                Ok(None) => break, // action closed (node shutting down)
+                Err(e) => {
+                    error!("move_arm_joints goal: {e}");
+                    continue;
+                }
+            },
         };
 
         let req = &ctx.request().data;
@@ -98,35 +101,37 @@ pub async fn run_move_arm(
     mut handle: move_arm::ActionHandle,
     goals: mpsc::Sender<Goal>,
     busy: Arc<AtomicBool>,
+    token: CancellationToken,
 ) {
     loop {
-        let ctx = match handle
-            .handle_goal_next_request(|req| {
-                let data = &req.data;
-                if parse_target_pose(&data.position, &data.orientation).is_none() {
-                    return Ok(move_arm::GoalResponse::reject(
-                        "invalid target pose (non-finite position or degenerate quaternion)",
-                    ));
-                }
-                if !(data.duration_s.is_finite() && data.duration_s >= 0.0) {
-                    return Ok(move_arm::GoalResponse::reject(
-                        "duration_s must be finite and >= 0",
-                    ));
-                }
-                if claim(&busy) {
-                    Ok(move_arm::GoalResponse::accept())
-                } else {
-                    Ok(move_arm::GoalResponse::reject("arm is already executing a motion"))
-                }
-            })
-            .await
-        {
-            Ok(Some(ctx)) => ctx,
-            Ok(None) => break,
-            Err(e) => {
-                error!("move_arm goal: {e}");
-                continue;
+        let accept = handle.handle_goal_next_request(|req| {
+            let data = &req.data;
+            if parse_target_pose(&data.position, &data.orientation).is_none() {
+                return Ok(move_arm::GoalResponse::reject(
+                    "invalid target pose (non-finite position or degenerate quaternion)",
+                ));
             }
+            if !(data.duration_s.is_finite() && data.duration_s >= 0.0) {
+                return Ok(move_arm::GoalResponse::reject(
+                    "duration_s must be finite and >= 0",
+                ));
+            }
+            if claim(&busy) {
+                Ok(move_arm::GoalResponse::accept())
+            } else {
+                Ok(move_arm::GoalResponse::reject("arm is already executing a motion"))
+            }
+        });
+        let ctx = tokio::select! {
+            _ = token.cancelled() => break, // node shutting down
+            res = accept => match res {
+                Ok(Some(ctx)) => ctx,
+                Ok(None) => break, // action closed (node shutting down)
+                Err(e) => {
+                    error!("move_arm goal: {e}");
+                    continue;
+                }
+            },
         };
 
         let req = &ctx.request().data;

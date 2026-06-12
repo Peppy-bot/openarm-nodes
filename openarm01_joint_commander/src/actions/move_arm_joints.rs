@@ -1,7 +1,9 @@
 // Spawned per Enter keypress when an arm is focused. Fires move_arm_joints at
 // backbone, streams feedback back into the shared UiState, and writes the
-// result into the status line. Each goal is its own task — cancel-aware so a
-// shutdown can't wedge an in-flight goal.
+// result into the status line. Each goal is its own task, driven by its
+// preempt token: a new Send cancels it, and at shutdown the on_shutdown hook
+// in main.rs cancels it and awaits the resulting finalize (via in_flight),
+// so the goal is cancelled at backbone instead of abandoned.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +12,6 @@ use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::backbone_move_arm_joints;
 use peppygen::consumed_actions::backbone_move_arm_joints::ResultOutcome;
-use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
 use crate::state::{ARM_DOF, SharedState, Side};
@@ -21,7 +22,6 @@ const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub fn spawn(
     runner: Arc<NodeRunner>,
     state: SharedState,
-    token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
     side: Side,
     joint_positions: [f64; ARM_DOF],
@@ -29,15 +29,13 @@ pub fn spawn(
     feedback_hz: u32,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, preempt, side, joint_positions, duration_s, feedback_hz).await;
+        run(runner, state, preempt, side, joint_positions, duration_s, feedback_hz).await;
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run(
     runner: Arc<NodeRunner>,
     state: SharedState,
-    token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
     side: Side,
     joint_positions: [f64; ARM_DOF],
@@ -80,16 +78,13 @@ async fn run(
         }
     };
 
-    // Feedback loop — drain in-order until the stream closes, we're cancelled,
-    // or a new Send preempts this goal (cancel propagates to the arm, which
-    // stops and returns a cancelled result through the normal path).
+    // Feedback loop — drain in-order until the stream closes or this goal is
+    // preempted by a new Send or the shutdown hook (cancel propagates to the
+    // arm, which stops and returns a cancelled result through the normal
+    // path).
     let mut preempted = false;
     loop {
         tokio::select! {
-            _ = token.cancelled() => {
-                finalize(&state, side, false, "shutting down — feedback abandoned").await;
-                return;
-            }
             _ = preempt.cancelled(), if !preempted => {
                 preempted = true;
                 if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
@@ -107,14 +102,19 @@ async fn run(
     }
 
     // v0.10 ResultResponse.outcome is a typed enum (Completed/Cancelled/
-    // Abandoned/Expired). Wrap in tokio::select! so a shutdown during the
-    // up-to-RESULT_TIMEOUT wait doesn't wedge the task.
-    let outcome = tokio::select! {
-        _ = token.cancelled() => {
-            finalize(&state, side, false, "shutting down — result abandoned").await;
-            return;
+    // Abandoned/Expired). Stay preempt-aware so a cancel arriving during the
+    // up-to-RESULT_TIMEOUT wait (a new Send or the shutdown hook) still
+    // reaches the arm and the result lands through the normal path.
+    let outcome = loop {
+        tokio::select! {
+            _ = preempt.cancelled(), if !preempted => {
+                preempted = true;
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(side = side.label(), error = %e, "preempt cancel failed");
+                }
+            }
+            result = downstream.get_result(RESULT_TIMEOUT) => break result,
         }
-        result = downstream.get_result(RESULT_TIMEOUT) => result,
     };
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {

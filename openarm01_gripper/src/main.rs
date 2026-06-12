@@ -8,7 +8,6 @@ use peppygen::{NodeBuilder, Parameters, Result};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
 // Mirrors ROS2 v10_simple_hardware on_activate / on_deactivate sleep durations.
@@ -42,6 +41,17 @@ fn main() -> Result<()> {
             .open(&lock_path)
             .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
 
+        // Lock-release hook, registered first: hooks run in reverse registration
+        // order, so the lock is released last, after the motor-disable hook below.
+        {
+            let lock_path = lock_path.clone();
+            node_runner.on_shutdown(async move {
+                if let Err(e) = std::fs::remove_file(&lock_path) {
+                    warn!("failed to remove lock {lock_path}: {e}");
+                }
+            });
+        }
+
         // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
         let mut gripper = GripperCan::new(&can_interface, ENABLE_FD).expect("GripperCan::new");
@@ -64,52 +74,41 @@ fn main() -> Result<()> {
 
         let gripper = Arc::new(Mutex::new(gripper));
 
-        // Shutdown task: disables the motor and releases the lock. `peppy node
-        // stop` cancels in-band via the runtime cancellation token (not a unix
-        // signal), so observe that too or the motor would stay energised on a
-        // daemon stop.
+        // Motor-disable hook, registered second so it runs first at shutdown
+        // (before the lock-release hook above). The runtime fires it on every
+        // stop path (signals, `peppy node stop`, daemon loss) and awaits it
+        // before exiting, so the motor never stays energised.
         {
             let gripper = gripper.clone();
-            let node_runner = node_runner.clone();
-            let cancel = node_runner.cancellation_token().clone();
-            let lock_path = lock_path.clone();
-            tokio::spawn(async move {
-                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-                tokio::select! {
-                    _ = sigint.recv() => {},
-                    _ = sigterm.recv() => {},
-                    _ = cancel.cancelled() => {},
-                }
-                info!("shutdown: disabling motor, releasing lock");
+            node_runner.on_shutdown(async move {
+                info!("shutdown: disabling motor");
                 {
                     // unwrap_or_else: recover even if poisoned (panic in control loop)
                     // so disable_all() always runs and the motor doesn't stay energised.
                     let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
                     g.disable_all();
-                    std::thread::sleep(POST_DISABLE_SLEEP);
-                    g.recv_all(BRINGUP_RECV_US);
                 }
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
-                }
-                // process::exit: peppylib runtime has no clean shutdown path; the
-                // motor is already disabled above so this is safe.
-                std::process::exit(0);
+                tokio::time::sleep(POST_DISABLE_SLEEP).await;
+                let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
+                g.recv_all(BRINGUP_RECV_US);
             });
         }
 
         // get_gripper_id service.
         {
             let runner = node_runner.clone();
+            let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 loop {
-                    if let Err(e) = get_gripper_id::handle_next_request(&runner, |_req| {
-                        Ok(get_gripper_id::Response::new(gripper_id))
-                    })
-                    .await
-                    {
-                        error!("get_gripper_id: {e}");
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        res = get_gripper_id::handle_next_request(&runner, |_req| {
+                            Ok(get_gripper_id::Response::new(gripper_id))
+                        }) => {
+                            if let Err(e) = res {
+                                error!("get_gripper_id: {e}");
+                            }
+                        }
                     }
                 }
             });

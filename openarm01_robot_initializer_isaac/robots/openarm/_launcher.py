@@ -23,14 +23,19 @@ class SimLauncher:
         usd_path: Path,
         ready: threading.Event,
         stop: threading.Event,
+        torn_down: threading.Event,
     ) -> None:
         self._sim_app = sim_app
         self._usd_path = usd_path
         self._ready = ready
-        # `stop` is flipped by the NodeBuilder thread's finally when peppylib's
-        # shutdown service runs (peppy node stop, SIGTERM). The sim loop owns
-        # the main thread and won't see asyncio cancellation otherwise.
+        # `stop` is flipped by the node's on_shutdown hook (with the
+        # NodeBuilder thread's finally as a backstop). The sim loop owns the
+        # main thread and won't see asyncio cancellation otherwise.
         self._stop = stop
+        # Flipped once the bounded teardown (extension shutdown, timeline
+        # stop) finishes; the on_shutdown hook awaits it so that cleanup runs
+        # inside the shutdown grace window. sim_app.close() happens after.
+        self._torn_down = torn_down
         self._timeline = None
         self._world = None
         self._extension: Optional[IsaacBridgeExtension] = None
@@ -54,6 +59,8 @@ class SimLauncher:
             self._run_loop()
         except FileNotFoundError as exc:
             logger.error(str(exc))
+            # Nothing was brought up, so the bounded teardown is already done.
+            self._torn_down.set()
             self._sim_app.close()
         except Exception:
             logger.exception("SimLauncher.run failed")
@@ -84,6 +91,10 @@ class SimLauncher:
 
         self._world = World()
         for _ in range(_WARMUP_STEPS):
+            # A stop arriving mid-bringup should not pay for the remaining
+            # warmup steps before teardown can start.
+            if self._stop.is_set():
+                break
             self._sim_app.update()
 
     def _start_timeline(self) -> None:
@@ -114,5 +125,9 @@ class SimLauncher:
                     logger.exception("IsaacBridgeExtension shutdown failed")
             if self._timeline is not None:
                 self._timeline.stop()
+            # The bounded teardown the on_shutdown hook awaits ends here;
+            # sim_app.close() (extension unload, renderer/CUDA teardown) can
+            # exceed any grace window and is accepted as post-deadline work.
+            self._torn_down.set()
             self._sim_app.close()
             logger.info("Isaac Sim closed.")

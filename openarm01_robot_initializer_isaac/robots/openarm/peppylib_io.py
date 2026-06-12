@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 _CONNECT_TIMEOUT_S = 10.0
 _RECONNECT_MAX_BACKOFF_S = 30.0
 _SUBSCRIBE_MAX_BACKOFF_S = 30.0
+# stop() runs inside the node's shutdown hook phase, which shares one grace
+# window (default 3s) — the join must give up well before that elapses.
+_STOP_JOIN_TIMEOUT_S = 2.0
 _QOS_MAP: dict[str, QoSProfile] = {
     "sensor_data": QoSProfile.SensorData,
     "standard": QoSProfile.Standard,
@@ -63,6 +66,7 @@ class PeppylibIO:  # pylint: disable=R0902
         self._recv_tasks: list[asyncio.Task] = []
         self._ready = threading.Event()
         self._stop_future: Optional[asyncio.Future] = None
+        self._main_task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         self._ready.clear()
@@ -87,20 +91,26 @@ class PeppylibIO:  # pylint: disable=R0902
                 for task in self._recv_tasks:
                     if not task.done():
                         task.cancel()
+                # Wake _async_main even mid-connect or in reconnect backoff,
+                # where no stop future or recv task exists to cancel.
+                if self._main_task is not None and not self._main_task.done():
+                    self._main_task.cancel()
 
             self._loop.call_soon_threadsafe(_shutdown)
 
         if self._thread is not None:
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=_STOP_JOIN_TIMEOUT_S)
             if self._thread.is_alive():
                 # MessengerHandle has no explicit close; teardown relies on
-                # GC. If the I/O thread didn't observe the cancel within 5s,
+                # GC. If the I/O thread didn't observe the cancel in time,
                 # the daemon connection lingers until process exit.
                 logger.warning(
-                    "peppylib I/O thread still alive after 5s shutdown timeout"
+                    "peppylib I/O thread still alive after"
+                    f" {_STOP_JOIN_TIMEOUT_S:.0f}s shutdown timeout"
                     " — daemon connection may linger until process exit"
                 )
             self._thread = None
+            self._main_task = None
 
         self._handle = None
         self._ready.clear()
@@ -192,7 +202,10 @@ class PeppylibIO:  # pylint: disable=R0902
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            self._loop.run_until_complete(self._async_main())
+            self._main_task = self._loop.create_task(self._async_main())
+            self._loop.run_until_complete(self._main_task)
+        except asyncio.CancelledError:
+            pass
         except Exception as exc:
             logger.error(f"peppylib I/O loop exited with error: {exc}")
         finally:
