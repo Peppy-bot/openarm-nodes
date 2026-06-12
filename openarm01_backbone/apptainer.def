@@ -1,0 +1,13 @@
+Bootstrap: docker
+From: tuatini/peppy-rust-cargo-base:latest
+
+%files
+    . /opt/openarm01_backbone
+
+%post
+    cd /opt/openarm01_backbone
+    cargo build --release
+
+%runscript
+    cd /opt/openarm01_backbone
+    exec ./target/release/openarm01_backbone "$@"

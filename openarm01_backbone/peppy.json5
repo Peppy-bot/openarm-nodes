@@ -1,97 +1,114 @@
-// This node will expose actions to move the arms from openarm01_joint_commander and will ensure the arms do not collide with the `collisions_detection` node before transmiting them to either the isaac/mujoco variants or the real robot
+// openarm01_backbone — orchestrator. Receives motion commands from
+// openarm01_joint_commander, routes each to the correct openarm01_arm /
+// openarm01_gripper instance (left/right), and relays feedback + result upward.
+// Sim/real agnostic — component nodes own that abstraction.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_backbone",
-    tag: "0.1.0",
+    tag: "v1",
     depends_on: {
-      // We use generic nodes that can do ik/collision/pose estimation on any node here and we write the code specific to openarm01 here in this node
-      nodes: [
+      // Per-side link_ids make left/right dispatch a compile-time choice — no
+      // runtime get_arm_id/get_gripper_id discovery, no stack_list scan. The
+      // launcher picks the concrete impl per slot (real / mujoco / isaac).
+      interfaces: [
         {
-          name: "inverse_kinematic",
-          tag: "0.1.0",
-          local_id: "ik"
+          name: "openarm01_robot_initializer",
+          tag: "v1",
+          link_id: "robot_init"
         },
-        {
-          name: "collisions_detection",
-          tag: "0.1.0",
-          local_id: "colisions"
-        },
-        // Component nodes — must start first; backbone plugs into them
         {
           name: "openarm01_arm",
-          tag: "0.1.0",
-          local_id: "arm"
+          tag: "v1",
+          link_id: "left_arm"
+        },
+        {
+          name: "openarm01_arm",
+          tag: "v1",
+          link_id: "right_arm"
         },
         {
           name: "openarm01_gripper",
-          tag: "0.1.0",
-          local_id: "gripper"
+          tag: "v1",
+          link_id: "left_gripper"
         },
+        {
+          name: "openarm01_gripper",
+          tag: "v1",
+          link_id: "right_gripper"
+        }
       ]
-    },
-    variants: [
-      // If the backbone is abstracted away from real/sim because the other nodes already create this abstraction layer (`uvc_camera`/`openarm01_gripper`/`openarm01_arm`...),
-      // we might not need multiple variants here.
-      {
-        name: "default",
-        source: {
-          local: "./variants/real"
-        }
-      },
-      {
-        name: "mujoco",
-        source: {
-          local: "./variants/mujoco"
-        }
-      },
-      {
-        name: "isaac",
-        source: {
-          local: "./variants/isaac"
-        }
-      },
-    ]
+    }
   },
-  // Non exhaustive list of interfaces
   interfaces: {
     actions: {
       exposes: [
         {
-          name: "move_arm",
+          // Joint-space arm motion. arm_id selects the target arm instance (0 = left, 1 = right).
+          // Backbone resolves arm_id to a running instance and forwards to arm's move_arm_joints.
+          name: "move_arm_joints",
           goal_service: {
             request_message_format: {
-              // The frequency in hertz at which the feedback is being sent
+              arm_id: "u8",
+              // Feedback rate (Hz) the caller wants while the arm moves.
               feedback_frequency: "u32",
-              // x, y, z
-              desired_position: {
+              joint_positions: {
                 $type: "array",
                 $items: "f64",
-                $length: 3
+                $length: 7
               },
-              // quaternion x, y, z, w
-              desired_orientation: {
-                $type: "array",
-                $items: "f64",
-                $length: 4
-              }
+              // Requested trajectory duration (s), forwarded to the arm, which
+              // floors it at its per-joint velocity-limit duration. 0 = fastest.
+              duration_s: "f64"
             },
             response_message_format: {
               accepted: "bool"
             }
           },
-          // Streamed as the arm moves toward the goal
+          feedback_topic: {
+            qos_profile: "standard",
+            message_format: {
+              joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              },
+              action_time: "f64"
+            }
+          },
+          result_service: {
+            response_message_format: {
+              success: "bool",
+              message: "string",
+              final_joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              },
+              action_time: "f64"
+            }
+          }
+        },
+        {
+          // Gripper motion. gripper_id selects the target gripper instance (0 = left, 1 = right).
+          name: "move_gripper",
+          goal_service: {
+            request_message_format: {
+              gripper_id: "u8",
+              feedback_frequency: "u32",
+              // Target gripper opening in meters (0.0 = closed, 0.044 = fully open on V10).
+              position: "f64"
+            },
+            response_message_format: {
+              accepted: "bool"
+            }
+          },
           feedback_topic: {
             qos_profile: "standard",
             message_format: {
               joint_positions: {
                 $type: "array",
                 $items: "f64"
-              },
-              current_ee_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
               },
               action_time: "f64"
             }
@@ -104,29 +121,47 @@
                 $type: "array",
                 $items: "f64"
               },
-              final_ee_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
               action_time: "f64"
             }
           }
         }
+      ],
+      // Downstream actions backbone fires. Per-side link_ids: dispatch on goal.arm_id /
+      // goal.gripper_id selects the consumed module at compile time.
+      consumes: [
+        {
+          link_id: "left_arm",
+          name: "move_arm_joints"
+        },
+        {
+          link_id: "right_arm",
+          name: "move_arm_joints"
+        },
+        {
+          link_id: "left_gripper",
+          name: "move_gripper"
+        },
+        {
+          link_id: "right_gripper",
+          name: "move_gripper"
+        }
       ]
     },
     services: {
-      // Get the list of instances at runtime from the caller with https://app.plane.so/peppy/browse/PEPPYOS-76/ and get the instance of all arms/grippers at runtime
+      // is_ready gates startup. get_arm_id / get_gripper_id are gone — left/right identity
+      // is launcher-pinned via the link_ids above, so there is no runtime discovery to do.
       consumes: [
         {
-          local_node_id: "arm",
-          name: "get_arm_id",
-        },
-        {
-          local_node_id: "gripper",
-          name: "get_gripper_id",
-        },
+          link_id: "robot_init",
+          name: "is_ready"
+        }
       ]
     }
   },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    }
+  }
 }
