@@ -82,19 +82,24 @@ fn main() -> Result<()> {
         // runs before the bridge-token one above (reverse registration order),
         // while the rest of the node is still up.
         let inflight = actions::move_arm_joints::InflightMotion::default();
-        {
-            let inflight = inflight.clone();
-            node_runner.on_shutdown(async move { inflight.wait_idle().await });
-        }
-        tokio::spawn(actions::move_arm_joints::run(
+        let accept_loop = tokio::spawn(actions::move_arm_joints::run(
             node_runner.clone(),
             arm_id,
             shared.clone(),
             token.clone(),
             handle.clone(),
             daemon.clone(),
-            inflight,
+            inflight.clone(),
         ));
+        node_runner.on_shutdown(async move {
+            // The accept loop registers an accepted goal's motion task into
+            // the slot before re-entering its select, so the slot is only
+            // final once the loop has exited: join it first, then drain.
+            // Otherwise a goal accepted just as the token fired could be
+            // registered after wait_idle's take and never be awaited.
+            let _ = accept_loop.await;
+            inflight.wait_idle().await;
+        });
 
         Ok(())
     })

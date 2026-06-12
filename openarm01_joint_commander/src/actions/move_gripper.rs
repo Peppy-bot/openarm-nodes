@@ -40,6 +40,15 @@ async fn run(
     feedback_hz: u32,
 ) {
     let label = side.label();
+
+    // Shutdown can fire between the UI registering this goal as in-flight and
+    // this task's first poll; the hook cancels the freshly-registered preempt,
+    // so honour it here rather than firing a goal during shutdown.
+    if preempt.is_cancelled() {
+        finalize(&state, side, false, "shutdown before goal was fired").await;
+        return;
+    }
+
     info!(side = label, position_m, feedback_hz, "fire move_gripper");
 
     let goal = backbone_move_gripper::GoalRequest {
@@ -74,7 +83,11 @@ async fn run(
         tokio::select! {
             _ = preempt.cancelled(), if !preempted => {
                 preempted = true;
-                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                // At shutdown the wait is capped by the hook's remaining
+                // budget so this task finishes inside the grace window
+                // instead of being force-dropped mid-await at teardown.
+                let timeout = super::bounded_by_shutdown(&state, GOAL_TIMEOUT);
+                if let Err(e) = downstream.cancel_goal(timeout).await {
                     warn!(side = side.label(), error = %e, "preempt cancel failed");
                 }
             }
@@ -96,11 +109,15 @@ async fn run(
         tokio::select! {
             _ = preempt.cancelled(), if !preempted => {
                 preempted = true;
-                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                let timeout = super::bounded_by_shutdown(&state, GOAL_TIMEOUT);
+                if let Err(e) = downstream.cancel_goal(timeout).await {
                     warn!(side = side.label(), error = %e, "preempt cancel failed");
                 }
             }
-            result = downstream.get_result(RESULT_TIMEOUT) => break result,
+            // Re-evaluated each pass: before shutdown this is the full
+            // RESULT_TIMEOUT; after a shutdown preempt it shrinks to the
+            // hook's remaining budget.
+            result = downstream.get_result(super::bounded_by_shutdown(&state, RESULT_TIMEOUT)) => break result,
         }
     };
     let (success, summary) = match outcome {

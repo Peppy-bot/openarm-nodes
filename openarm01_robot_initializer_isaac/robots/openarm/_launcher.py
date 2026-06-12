@@ -41,10 +41,17 @@ class SimLauncher:
         self._extension: Optional[IsaacBridgeExtension] = None
 
     def run(self) -> None:
+        # Every exit path — clean stop, stop during bringup, or an exception
+        # at any stage — funnels through the finally so the bounded teardown
+        # always runs and _torn_down is always signalled.
         try:
             self._load_stage()
             self._setup_lighting()
             self._warmup()
+            if self._stop.is_set():
+                # A stop during warmup must not pay for timeline/extension
+                # startup only to tear them down again.
+                return
             self._start_timeline()
             self._extension = IsaacBridgeExtension()
             try:
@@ -59,12 +66,31 @@ class SimLauncher:
             self._run_loop()
         except FileNotFoundError as exc:
             logger.error(str(exc))
-            # Nothing was brought up, so the bounded teardown is already done.
-            self._torn_down.set()
-            self._sim_app.close()
+        except KeyboardInterrupt:
+            logger.info("Shutting down.")
         except Exception:
             logger.exception("SimLauncher.run failed")
             raise
+        finally:
+            self._teardown()
+
+    def _teardown(self) -> None:
+        self._ready.clear()
+        if self._extension is not None:
+            # An extension shutdown failure must not strand the Isaac process —
+            # timeline.stop + sim_app.close still need to run.
+            try:
+                self._extension.shutdown()
+            except Exception:
+                logger.exception("IsaacBridgeExtension shutdown failed")
+        if self._timeline is not None:
+            self._timeline.stop()
+        # The bounded teardown the on_shutdown hook awaits ends here;
+        # sim_app.close() (extension unload, renderer/CUDA teardown) can
+        # exceed any grace window and is accepted as post-deadline work.
+        self._torn_down.set()
+        self._sim_app.close()
+        logger.info("Isaac Sim closed.")
 
     def _load_stage(self) -> None:
         import omni.usd
@@ -104,30 +130,10 @@ class SimLauncher:
         self._timeline.play()
 
     def _run_loop(self) -> None:
-        try:
-            while self._sim_app.is_running() and not self._stop.is_set():
-                # Isaac advances physics inside update(); we then drive the
-                # bridge plugin loop on the same thread (Articulation reads
-                # require Isaac's main thread).
-                self._sim_app.update()
-                if self._extension is not None:
-                    self._extension.step()
-        except KeyboardInterrupt:
-            logger.info("Shutting down.")
-        finally:
-            self._ready.clear()
+        while self._sim_app.is_running() and not self._stop.is_set():
+            # Isaac advances physics inside update(); we then drive the
+            # bridge plugin loop on the same thread (Articulation reads
+            # require Isaac's main thread).
+            self._sim_app.update()
             if self._extension is not None:
-                # An extension shutdown failure must not strand the Isaac process —
-                # timeline.stop + sim_app.close still need to run.
-                try:
-                    self._extension.shutdown()
-                except Exception:
-                    logger.exception("IsaacBridgeExtension shutdown failed")
-            if self._timeline is not None:
-                self._timeline.stop()
-            # The bounded teardown the on_shutdown hook awaits ends here;
-            # sim_app.close() (extension unload, renderer/CUDA teardown) can
-            # exceed any grace window and is accepted as post-deadline work.
-            self._torn_down.set()
-            self._sim_app.close()
-            logger.info("Isaac Sim closed.")
+                self._extension.step()

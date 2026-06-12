@@ -196,6 +196,11 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
             _ = gate_clear => {}
         }
     }
+    // Re-check right before registering: shutdown may have fired since
+    // handle_command's entry guard (or during the preempt wait above).
+    if app.token.is_cancelled() {
+        return;
+    }
     let goal_preempt = tokio_util::sync::CancellationToken::new();
     {
         let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -223,6 +228,11 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
 }
 
 async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
+    // Re-check right before registering: shutdown may have fired since
+    // handle_command's entry guard.
+    if app.token.is_cancelled() {
+        return;
+    }
     let goal_preempt = tokio_util::sync::CancellationToken::new();
     {
         let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());

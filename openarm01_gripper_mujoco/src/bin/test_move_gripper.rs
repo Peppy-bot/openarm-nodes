@@ -229,9 +229,20 @@ async fn fire_one(
         }
     }
 
-    match ActionMessenger::request_result(runner.messenger(), &handle, Duration::from_secs(10))
-        .await
-    {
+    // The result wait can park for its full timeout; race it against the
+    // token (same as the feedback drain above) so Ctrl+C ends the run early.
+    let result = tokio::select! {
+        _ = token.cancelled() => {
+            info!("[{side}] shutdown requested — skipping result wait");
+            return false;
+        }
+        result = ActionMessenger::request_result(
+            runner.messenger(),
+            &handle,
+            Duration::from_secs(10),
+        ) => result,
+    };
+    match result {
         Ok(res) => match decode_result(res.body.as_ref()) {
             Ok((success, message, final_pos, t)) => {
                 info!(

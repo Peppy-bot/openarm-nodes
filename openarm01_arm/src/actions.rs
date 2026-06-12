@@ -71,6 +71,7 @@ pub async fn run_move_arm_joints(
             }
         });
         let ctx = tokio::select! {
+            biased; // shutdown wins over a simultaneously-ready accept
             _ = token.cancelled() => break, // node shutting down
             res = accept => match res {
                 Ok(Some(ctx)) => ctx,
@@ -123,6 +124,7 @@ pub async fn run_move_arm(
             }
         });
         let ctx = tokio::select! {
+            biased; // shutdown wins over a simultaneously-ready accept
             _ = token.cancelled() => break, // node shutting down
             res = accept => match res {
                 Ok(Some(ctx)) => ctx,

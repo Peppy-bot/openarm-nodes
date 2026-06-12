@@ -83,6 +83,10 @@ pub struct UiState {
     pub left_gripper: GripperTarget,
     pub right_gripper: GripperTarget,
     pub status: String,
+    // Set by the shutdown hook just before it cancels the in-flight preempts:
+    // goal tasks cap their remaining cancel_goal/get_result waits by this
+    // deadline so cleanup lands inside the hook's GOAL_CANCEL_WAIT window.
+    pub shutdown_deadline: Option<tokio::time::Instant>,
 }
 
 impl UiState {
@@ -93,6 +97,7 @@ impl UiState {
             left_gripper: GripperTarget::closed(),
             right_gripper: GripperTarget::closed(),
             status: "ready".to_string(),
+            shutdown_deadline: None,
         }
     }
 

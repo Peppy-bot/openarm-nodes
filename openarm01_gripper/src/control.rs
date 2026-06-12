@@ -31,6 +31,7 @@ pub struct ControlConfig {
 
 struct MotionResult {
     success: bool,
+    is_cancelled: bool,
     message: String,
     final_position_m: f64,
     action_time: f64,
@@ -38,15 +39,15 @@ struct MotionResult {
 
 impl MotionResult {
     fn reached(position_m: f64, action_time: f64) -> Self {
-        Self { success: true, message: "reached".into(), final_position_m: position_m, action_time }
+        Self { success: true, is_cancelled: false, message: "reached".into(), final_position_m: position_m, action_time }
     }
 
     fn timed_out(position_m: f64, action_time: f64) -> Self {
-        Self { success: false, message: "timeout".into(), final_position_m: position_m, action_time }
+        Self { success: false, is_cancelled: false, message: "timeout".into(), final_position_m: position_m, action_time }
     }
 
     fn cancelled(position_m: f64, action_time: f64) -> Self {
-        Self { success: false, message: "cancelled".into(), final_position_m: position_m, action_time }
+        Self { success: false, is_cancelled: true, message: "cancelled".into(), final_position_m: position_m, action_time }
     }
 }
 
@@ -112,15 +113,28 @@ pub async fn run_move_gripper(
         let token = token.clone();
         tokio::spawn(async move {
             let result = run_control_loop(&gripper, &ctx, &cfg, goal, &token).await;
-            if let Err(e) = ctx
-                .complete(
+            // A cancelled motion (client cancel_goal or node shutdown) must
+            // answer with the Cancelled status, not Completed(success=false):
+            // backbone's relay maps it to complete_cancelled upstream and the
+            // commander matches on ResultOutcome::Cancelled.
+            let dispatch = if result.is_cancelled {
+                ctx.complete_cancelled(
                     result.success,
                     result.message,
                     vec![result.final_position_m],
                     result.action_time,
                 )
                 .await
-            {
+            } else {
+                ctx.complete(
+                    result.success,
+                    result.message,
+                    vec![result.final_position_m],
+                    result.action_time,
+                )
+                .await
+            };
+            if let Err(e) = dispatch {
                 error!("move_gripper complete: {e}");
             }
             busy.store(false, Ordering::Release);
@@ -189,10 +203,13 @@ async fn run_control_loop(
 
         // Biased so a cancelled token always wins over an overrun (already-due)
         // tick: on shutdown stop commanding the motor and fail the goal; the
-        // on_shutdown hook in main.rs disables the hardware.
+        // on_shutdown hook in main.rs disables the hardware. A client
+        // cancel_goal (per-goal cancel signal) likewise stops the motion; the
+        // motor holds the last commanded setpoint.
         tokio::select! {
             biased;
             _ = token.cancelled() => return MotionResult::cancelled(position_m, elapsed_secs),
+            _ = ctx.cancel_signal() => return MotionResult::cancelled(position_m, elapsed_secs),
             _ = pace_to_deadline(&mut next_tick, cfg.cycle_period) => {}
         }
     }

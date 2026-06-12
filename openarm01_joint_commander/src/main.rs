@@ -33,6 +33,14 @@ fn main() -> Result<()> {
         let hook_state = shared.clone();
         node_runner.on_shutdown(async move {
             let deadline = tokio::time::Instant::now() + GOAL_CANCEL_WAIT;
+            // Publish the deadline before cancelling anything: preempted goal
+            // tasks cap their cancel_goal/get_result waits by it (see
+            // actions::bounded_by_shutdown) so their fixed 5s/60s timeouts
+            // cannot outlive this hook's window.
+            hook_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .shutdown_deadline = Some(deadline);
             loop {
                 let preempts = hook_state
                     .lock()
