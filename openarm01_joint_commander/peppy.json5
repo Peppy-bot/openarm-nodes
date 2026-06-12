@@ -1,70 +1,44 @@
-// This node sends controls for each arm of the OpenArm01 robot, those controls can emanate from the TUI or from a pose estimation algorithm
-// Since the controls are specific to the openarm01 robot, we prefix the node with `openarm01_*`
+// openarm01_joint_commander — operator entry point. Serves a browser-based
+// control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that fires
+// move_arm_joints / move_gripper goals at openarm01_backbone. MVP scope is
+// slider-driven joint-space; pose_estimation will land as a sibling node.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_joint_commander",
-    tag: "0.1.0",
+    tag: "v1",
     depends_on: {
+      // backbone has no variants and is not a conforming impl of any interface,
+      // so the dep is by node identity, not by interface.
       nodes: [
         {
           name: "openarm01_backbone",
-          tag: "0.1.0",
-          local_id: "openarm01_backbone"
-        },
-        // This dependency is only needed for the `pose_estimation` variant, so in the future we will introduce a `for_variant: "pose_estimation"` keyword
-        {
-          name: "uvc_camera",
-          tag: "0.1.0",
-          local_id: "uvc_camera"
+          tag: "v1",
+          link_id: "backbone"
         }
       ]
-    },
-    variants: [
-      // The variant to control the robot via the TUI
-      {
-        name: "default",
-        source: {
-          local: "./variants/keyboard"
+    }
+  },
+  interfaces: {
+    actions: {
+      // Goals fired by the operator land on backbone, which forwards to the
+      // arm / gripper instance whose id matches arm_id / gripper_id.
+      consumes: [
+        {
+          link_id: "backbone",
+          name: "move_arm_joints"
+        },
+        {
+          link_id: "backbone",
+          name: "move_gripper"
         }
-      },
-      // This variant turns feed from uvc_camera into cartesian positions
-      // Although the keyboard variant and the pose estimation variant are very distinct controls, they both share the same goal of "moving the robot arm"
-      {
-        name: "pose_estimation",
-        source: {
-          local: "./variants/pose_estimation"
-        }
-      },
-    ]
+      ]
+    }
   },
   execution: {
     language: "rust",
     container: {
       def_file: "apptainer.def"
     }
-  },
-  // Non exhaustive list of interfaces
-  interfaces: {
-    topics: {
-      consumes: [
-        {
-          local_node_id: "openarm01_backbone",
-          name: "joint_states"
-        },
-        {
-          local_node_id: "openarm01_backbone",
-          name: "controller/status"
-        },
-      ]
-    },
-    actions: {
-      consumes: [
-        {
-          local_node_id: "openarm01_backbone",
-          name: "move_arm"
-        }
-      ]
-    },
   }
 }

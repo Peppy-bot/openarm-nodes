@@ -1,0 +1,13 @@
+Bootstrap: docker
+From: tuatini/peppy-rust-cargo-base:latest
+
+%files
+    . /opt/openarm01_joint_commander
+
+%post
+    cd /opt/openarm01_joint_commander
+    cargo build --release
+
+%runscript
+    cd /opt/openarm01_joint_commander
+    exec ./target/release/openarm01_joint_commander "$@"
