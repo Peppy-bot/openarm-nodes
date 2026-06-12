@@ -1,0 +1,74 @@
+// MuJoCo sim implementation of openarm01_arm. Rust node talking to a running
+// MuJoCo sim via raw peppylib JSON channels published by
+// openarm01_robot_initializer_mujoco — engine-internal coupling, not part of
+// the openarm01_arm:v1 interface contract.
+{
+  peppy_schema: "node_v1",
+  manifest: {
+    name: "openarm01_arm_mujoco",
+    tag: "v1",
+    depends_on: {
+      nodes: [
+        { name: "openarm01_robot_initializer_mujoco", tag: "v1", link_id: "sim" },
+      ],
+    },
+  },
+  interfaces: {
+    conforms_to: [
+      { name: "openarm01_arm", tag: "v1" },
+    ],
+    // Engine-specific sim telemetry — NOT in openarm01_arm:v1 (shared interface
+    // is move_arm* + get_arm_id + get_joint_positions only). Sim emits these
+    // because it has cheap access to joint state, IMU, and the tf tree;
+    // real-hardware reports them via its own CAN/sensor channel.
+    topics: {
+      emits: [
+        {
+          name: "joint_states",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            joint_names: { $type: "array", $items: "string" },
+            positions: { $type: "array", $items: "f64" },
+            velocities: { $type: "array", $items: "f64" },
+            stamp: "f64",
+          },
+        },
+        {
+          name: "tf_tree",
+          qos_profile: "sensor_data",
+          message_format: {
+            robot: "string",
+            step: "u64",
+            frames: {
+              $type: "array",
+              $items: {
+                $type: "object",
+                name: "string",
+                parent: "string",
+                position: { $type: "array", $items: "f64", $length: 3 },
+                orientation: { $type: "array", $items: "f64", $length: 4 },
+              },
+            },
+            stamp: "f64",
+          },
+        },
+        // TODO: imu topic — declare here when robot_initializer_mujoco's
+        // bridge_extension publishes raw imu_<side> (sim_bridge.json5:38-39
+        // currently stubbed).
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
+    },
+    parameters: {
+      // The arm_id at runtime (0 = left, 1 = right). Two instances are
+      // expected; the bin's file-lock + arm_id guard rejects collisions.
+      arm_id: "u8",
+    },
+  },
+}

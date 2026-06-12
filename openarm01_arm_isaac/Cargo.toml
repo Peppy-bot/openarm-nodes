@@ -1,0 +1,20 @@
+[package]
+name = "openarm01_arm_isaac"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+peppygen = { path = ".peppy/libs/peppygen" }
+peppylib = { path = ".peppy/libs/peppylib" }
+capnp    = "0.25"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-util = "0.7"
+sim_bridge_core = { git = "https://github.com/Peppy-bot/nodes_shared_code", branch = "main" }
+
+[[bin]]
+name = "openarm01_arm_isaac"
+path = "src/main.rs"
