@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppylib::config::QoSProfile;
-use peppylib::messaging::SenderTarget;
+use peppylib::messaging::{ProducerRef, SenderTarget};
 use peppylib::runtime::{NodeBuilder, NodeRunner, StandaloneConfig};
 use peppylib::{ActionMessenger, Payload};
 use tracing::{error, info, warn};
@@ -156,14 +156,15 @@ async fn fire_one(
             return false;
         }
     };
+    let target_producer =
+        ProducerRef::new(runner.processor().bound_core_node(), target_instance);
     let mut handle = match ActionMessenger::send_goal(
         runner.messenger(),
         runner.processor().bound_core_node(),
         runner.processor().bound_instance_id(),
         to_target,
         ACTION_NAME,
-        None,
-        Some(target_instance),
+        Some(&target_producer),
         payload,
         QoSProfile::Standard,
         Duration::from_secs(5),

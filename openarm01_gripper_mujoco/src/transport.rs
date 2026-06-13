@@ -67,7 +67,6 @@ impl RawTransport for PeppylibTransport {
                 Some(target),
                 false,
                 topic,
-                None,
                 &ConsumerFilter::Any,
                 // Subscriptions are telemetry: latest-wins.
                 QoSProfile::SensorData,

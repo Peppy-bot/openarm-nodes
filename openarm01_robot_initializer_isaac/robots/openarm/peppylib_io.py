@@ -315,7 +315,6 @@ class PeppylibIO:  # pylint: disable=R0902
             SenderTarget.node(source_node, source_tag),
             topic,
             None,
-            None,
             qos_profile,
         )
 
