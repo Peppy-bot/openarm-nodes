@@ -63,16 +63,12 @@ pub async fn run(
     // robot_initializer_mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
 
-    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
-    // the node's peppylib cancellation into it.
+    // sim_bridge_core takes a tokio_util token; cancel it from an on_shutdown
+    // hook so the bridge tears down cleanly before the runtime drops.
     let token = tokio_util::sync::CancellationToken::new();
     {
-        let node_token = runner.cancellation_token().clone();
-        let lib_token = token.clone();
-        tokio::spawn(async move {
-            node_token.cancelled().await;
-            lib_token.cancel();
-        });
+        let bridge_token = token.clone();
+        runner.on_shutdown(async move { bridge_token.cancel() });
     }
 
     let joint_states_topic: Arc<str> = Arc::from("joint_states");
