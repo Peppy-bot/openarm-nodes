@@ -97,6 +97,25 @@ pub async fn run(
     // Single-flight gate, same as the real driver: a goal arriving mid-motion
     // is actively rejected rather than queued to run stale afterwards.
     let busy = Arc::new(AtomicBool::new(false));
+    // Notified when a motion clears the gate, so the shutdown hook can hold
+    // teardown until an in-flight goal has delivered its terminal result.
+    let idle = Arc::new(tokio::sync::Notify::new());
+
+    {
+        let busy = busy.clone();
+        let idle = idle.clone();
+        runner.on_shutdown(async move {
+            while busy.load(Ordering::Acquire) {
+                let notified = idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !busy.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        });
+    }
 
     loop {
         let state_for_decider = state.clone();
@@ -155,6 +174,7 @@ pub async fn run(
         let state = state.clone();
         let token = token.clone();
         let busy = busy.clone();
+        let idle = idle.clone();
         let actuator_names = actuator_names.clone();
         let set_ctrl_topic = set_ctrl_topic.clone();
         let instance_id = instance_id.clone();
@@ -194,6 +214,7 @@ pub async fn run(
                 error!("move_arm_joints complete: {e}");
             }
             busy.store(false, Ordering::Release);
+            idle.notify_waiters();
         });
     }
 }
