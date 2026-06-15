@@ -160,16 +160,17 @@ async fn handle_command(text: &str, app: &AppState) {
 }
 
 async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s: f64) {
-    // Preempt: a Send while a goal is in flight cancels it (the arm's
-    // single-flight gate would otherwise reject the new goal), then waits —
-    // bounded — for the cancelled goal's result before firing.
+    // Preempt: a Send while a goal is in flight cancels the old one (the arm's
+    // single-flight gate would otherwise reject the new goal) and waits for it
+    // to finalize before firing. The cancelled goal's feedback loop exits
+    // promptly, so in_flight clears within the cancel round-trip.
     let preempt = {
         let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.arm(side).in_flight { s.arm(side).preempt.clone() } else { None }
     };
     if let Some(tok) = preempt {
         tok.cancel();
-        for _ in 0..100 {
+        for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             let clear = !app
                 .state
@@ -188,10 +189,7 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
     {
         let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.arm(side).in_flight {
-            s.set_status(format!(
-                "{} arm: previous goal would not preempt; try again",
-                side.label()
-            ));
+            s.set_status(format!("{} arm: previous goal still finishing", side.label()));
             return;
         }
         s.arm_mut(side).in_flight = true;
