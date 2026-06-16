@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
@@ -11,10 +12,9 @@ use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
 use peppylib::config::QoSProfile;
 use peppylib::messaging::SenderTarget;
 use peppylib::runtime::CancellationToken;
-use peppylib::{MessengerHandle, Payload, TopicMessenger};
+use peppylib::{MessengerHandle, Payload, TopicMessenger, TopicPublisher};
 use serde::Serialize;
 use sim_bridge_core::DaemonState;
-use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
 use crate::config::GripperId;
@@ -38,6 +38,12 @@ const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
 const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = STALL_LOOKBACK_ITERS;
 
 const GRIPPER_NODE_NAME: &str = "openarm01_gripper";
+
+// Shutdown grace: zero ctrl for ~50ms after the action loop has exited so the
+// sim bridge sees a settled command before teardown. Survives a single
+// best-effort drop on the bridge.
+const SHUTDOWN_GRACE_TICK: Duration = Duration::from_millis(10);
+const SHUTDOWN_GRACE_REPEATS: u32 = 5;
 
 #[derive(Serialize)]
 struct SetCtrlPayload<'a> {
@@ -70,22 +76,84 @@ pub async fn run(
     daemon: DaemonState,
 ) {
     let side = gripper_id.side_word();
-    let actuator_names = [
+    let actuator_names: Arc<[String; 2]> = Arc::new([
         format!("openarm_{side}_finger_joint1"),
         format!("openarm_{side}_finger_joint2"),
-    ];
-    let set_ctrl_topic = format!("set_ctrl_gripper_{side}");
+    ]);
+    let set_ctrl_topic: Arc<str> = Arc::from(format!("set_ctrl_gripper_{side}").as_str());
     // Unique instance_id per gripper side so concurrent left+right grippers
     // don't collide on the peppylib publisher registry.
-    let instance_id = format!("openarm01_gripper_{side}_setctrl_pub");
+    let instance_id: Arc<str> =
+        Arc::from(format!("openarm01_gripper_{side}_setctrl_pub").as_str());
+
+    // Declare the set_ctrl publisher once; the per-tick control loop and the
+    // shutdown grace hook both publish on this same handle.
+    let target = match SenderTarget::node(GRIPPER_NODE_NAME, "v1") {
+        Ok(target) => target,
+        Err(e) => {
+            error!("invalid set_ctrl target: {e}");
+            return;
+        }
+    };
+    let set_ctrl_pub = match TopicMessenger::declare_publisher(
+        &handle,
+        &daemon.core_node_name,
+        &instance_id,
+        target,
+        None,
+        &set_ctrl_topic,
+        QoSProfile::Standard,
+    )
+    .await
+    {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare set_ctrl publisher: {e}");
+            return;
+        }
+    };
 
     let mut action_handle = move_gripper::ActionHandle::expose(&runner)
         .await
         .expect("expose move_gripper");
 
+    // Single-flight gate: a goal arriving mid-motion is actively rejected
+    // rather than queued. Mirrors arm's move_arm_joints flow.
+    let busy = Arc::new(AtomicBool::new(false));
+    // Notified when a motion clears the gate, so the shutdown hook can hold
+    // teardown until any in-flight goal has delivered its terminal result.
+    let idle = Arc::new(tokio::sync::Notify::new());
+
+    {
+        let busy = busy.clone();
+        let idle = idle.clone();
+        let set_ctrl_pub = set_ctrl_pub.clone();
+        let actuator_names = actuator_names.clone();
+        runner.on_shutdown(async move {
+            // Wait for any in-flight motion to deliver its terminal result so
+            // we don't race the action loop's last publish with our zeros.
+            while busy.load(Ordering::Acquire) {
+                let notified = idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !busy.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+            // Drive ctrl=0 over a short grace window so the sim sees a settled
+            // command before the runtime tears the publisher down. Repeats
+            // survive a single best-effort drop on the bridge.
+            for _ in 0..SHUTDOWN_GRACE_REPEATS {
+                if let Err(e) = publish_set_ctrl(&set_ctrl_pub, &actuator_names, 0.0).await {
+                    warn!("shutdown publish: {e}");
+                }
+                tokio::time::sleep(SHUTDOWN_GRACE_TICK).await;
+            }
+        });
+    }
+
     loop {
-        // Single-flight: the next handle_goal_next_request only resumes after
-        // the previous goal's GoalContext completes.
         let goal_request =
             action_handle.handle_goal_next_request(|req: &move_gripper::GoalRequest| {
                 let pos_m = req.data.position;
@@ -111,58 +179,67 @@ pub async fn run(
             }
         };
 
+        // Latch the busy gate now that we own the goal; releasing it lives in
+        // the spawned motion's cleanup so on_shutdown can observe it.
+        busy.store(true, Ordering::Release);
+
         let goal = AcceptedGoal {
             target_position_m: goal_ctx.request().data.position,
             feedback_period: feedback_period(goal_ctx.request().data.feedback_frequency),
         };
 
-        let result = run_control_loop(
-            &handle,
-            &daemon,
-            &state,
-            &set_ctrl_topic,
-            &instance_id,
-            &actuator_names,
-            &goal_ctx,
-            &token,
-            goal,
-        )
-        .await;
+        let set_ctrl_pub = set_ctrl_pub.clone();
+        let state = state.clone();
+        let token = token.clone();
+        let busy = busy.clone();
+        let idle = idle.clone();
+        let actuator_names = actuator_names.clone();
+        tokio::spawn(async move {
+            let result = run_control_loop(
+                &set_ctrl_pub,
+                &state,
+                &actuator_names,
+                &goal_ctx,
+                &token,
+                goal,
+            )
+            .await;
 
-        // complete() and complete_cancelled() take identical field sets; the
-        // difference is the client-visible status (Completed vs Cancelled).
-        let dispatch = if result.is_cancelled {
-            goal_ctx
-                .complete_cancelled(
-                    result.success,
-                    result.message,
-                    result.final_positions,
-                    result.action_time,
-                )
-                .await
-        } else {
-            goal_ctx
-                .complete(
-                    result.success,
-                    result.message,
-                    result.final_positions,
-                    result.action_time,
-                )
-                .await
-        };
-        if let Err(e) = dispatch {
-            error!("move_gripper complete: {e}");
-        }
+            // complete() and complete_cancelled() take identical field sets;
+            // the difference is the client-visible status (Completed vs
+            // Cancelled).
+            let dispatch = if result.is_cancelled {
+                goal_ctx
+                    .complete_cancelled(
+                        result.success,
+                        result.message,
+                        result.final_positions,
+                        result.action_time,
+                    )
+                    .await
+            } else {
+                goal_ctx
+                    .complete(
+                        result.success,
+                        result.message,
+                        result.final_positions,
+                        result.action_time,
+                    )
+                    .await
+            };
+            if let Err(e) = dispatch {
+                error!("move_gripper complete: {e}");
+            }
+            busy.store(false, Ordering::Release);
+            idle.notify_waiters();
+        });
     }
+    info!("move_gripper accept loop exited");
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_control_loop(
-    handle: &MessengerHandle,
-    daemon: &DaemonState,
+    set_ctrl_pub: &TopicPublisher,
     state: &Arc<SharedState>,
-    set_ctrl_topic: &str,
-    instance_id: &str,
     actuator_names: &[String; 2],
     goal_ctx: &move_gripper::GoalContext,
     token: &CancellationToken,
@@ -181,16 +258,7 @@ async fn run_control_loop(
         // Republish every tick: peppylib Standard is best-effort, so this is
         // the self-healing path. Idempotent. If it keeps failing, bail before
         // convergence/stall reports false success.
-        match publish_set_ctrl(
-            handle,
-            daemon,
-            set_ctrl_topic,
-            instance_id,
-            actuator_names,
-            per_finger,
-        )
-        .await
-        {
+        match publish_set_ctrl(set_ctrl_pub, actuator_names, per_finger).await {
             Ok(()) => consecutive_publish_failures = 0,
             Err(e) => {
                 consecutive_publish_failures += 1;
@@ -314,84 +382,19 @@ fn cancelled(action_time: f64, final_positions: Vec<f64>) -> MotionResult {
 }
 
 async fn publish_set_ctrl(
-    handle: &MessengerHandle,
-    daemon: &DaemonState,
-    topic: &str,
-    instance_id: &str,
+    publisher: &TopicPublisher,
     actuator_names: &[String; 2],
     value: f64,
 ) -> std::result::Result<(), String> {
-    let mut values: HashMap<&str, f64> = HashMap::new();
+    let mut values: HashMap<&str, f64> = HashMap::with_capacity(2);
     values.insert(actuator_names[0].as_str(), value);
     values.insert(actuator_names[1].as_str(), value);
     let payload = SetCtrlPayload {
         actuator_values: values,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-
-    // Publish as openarm01_gripper:v1 so real + sim instances look identical
-    // to consumers on the bus.
-    let target = SenderTarget::node(GRIPPER_NODE_NAME, "v1")
-        .map_err(|e| format!("invalid as_target: {e}"))?;
-
-    TopicMessenger::emit(
-        handle,
-        &daemon.core_node_name,
-        instance_id,
-        target,
-        topic,
-        QoSProfile::Standard,
-        Payload::from(bytes),
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-/// SIGINT/SIGTERM handler — cancels the control loop, publishes ctrl=0.0 over a
-/// short grace window, then exits. The cancel stops the action loop overwriting
-/// the zero; the repeats survive a best-effort drop on the bridge.
-pub async fn shutdown_handler(
-    handle: Arc<MessengerHandle>,
-    daemon: DaemonState,
-    gripper_id: GripperId,
-    token: CancellationToken,
-) {
-    let side = gripper_id.side_word();
-    let actuator_names = [
-        format!("openarm_{side}_finger_joint1"),
-        format!("openarm_{side}_finger_joint2"),
-    ];
-    let set_ctrl_topic = format!("set_ctrl_gripper_{side}");
-    let instance_id = format!("openarm01_gripper_{side}_shutdown_pub");
-
-    let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-    let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-    tokio::select! {
-        _ = sigint.recv() => {},
-        _ = sigterm.recv() => {},
-    }
-    info!(
-        "shutdown: cancelling action loop, zeroing ctrl for gripper_id={}",
-        gripper_id.as_u8()
-    );
-    token.cancel();
-
-    const GRACE_TICK: Duration = Duration::from_millis(10);
-    const GRACE_REPEATS: u32 = 5;
-    for _ in 0..GRACE_REPEATS {
-        if let Err(e) = publish_set_ctrl(
-            &handle,
-            &daemon,
-            &set_ctrl_topic,
-            &instance_id,
-            &actuator_names,
-            0.0,
-        )
+    publisher
+        .publish(Payload::from(bytes))
         .await
-        {
-            warn!("shutdown publish: {e}");
-        }
-        tokio::time::sleep(GRACE_TICK).await;
-    }
-    std::process::exit(0);
+        .map_err(|e| e.to_string())
 }

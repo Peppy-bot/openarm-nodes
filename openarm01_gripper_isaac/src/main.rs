@@ -33,9 +33,8 @@ fn main() -> Result<()> {
             .await
             .expect("peppygen::clock::init");
 
-        // peppylib daemon + messenger handle shared between the action
-        // handler (per-tick set_ctrl publish) and the shutdown handler
-        // (ctrl=0.0 on SIGINT/SIGTERM).
+        // peppylib daemon + messenger handle used by the action handler
+        // (per-tick set_ctrl publish + on_shutdown ctrl=0 grace).
         let daemon_info = peppylib::info(&node_runner, None)
             .await
             .expect("peppylib::info");
@@ -76,13 +75,6 @@ fn main() -> Result<()> {
             token.clone(),
             handle.clone(),
             daemon.clone(),
-        ));
-
-        tokio::spawn(actions::move_gripper::shutdown_handler(
-            handle.clone(),
-            daemon.clone(),
-            gripper_id,
-            token.clone(),
         ));
 
         Ok(())
