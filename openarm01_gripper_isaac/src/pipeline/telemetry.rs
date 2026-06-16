@@ -8,9 +8,10 @@ use peppygen::NodeRunner;
 use peppygen::emitted_topics::{
     contact_forces_finger1, contact_forces_finger2, ee_pose, gripper_state,
 };
+use peppylib::TopicPublisher;
 use serde::Deserialize;
 use sim_bridge_core::{BoxFuture, SimBridge};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::GripperId;
 use crate::state::{GripperStateLatest, SharedState};
@@ -77,16 +78,13 @@ pub async fn run(
     // sim_node = the publisher node name configured in
     // openarm01_robot_initializer_isaac's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
-    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
-    // the node's peppylib cancellation into it.
+
+    // sim_bridge_core takes a tokio_util token; cancel it from an on_shutdown
+    // hook so the bridge tears down cleanly before the runtime drops.
     let token = tokio_util::sync::CancellationToken::new();
     {
-        let node_token = runner.cancellation_token().clone();
-        let lib_token = token.clone();
-        tokio::spawn(async move {
-            node_token.cancelled().await;
-            lib_token.cancel();
-        });
+        let bridge_token = token.clone();
+        runner.on_shutdown(async move { bridge_token.cancel() });
     }
 
     let gripper_state_topic: Arc<str> = Arc::from(format!("gripper_state_{side}"));
@@ -99,13 +97,45 @@ pub async fn run(
     let finger1_prefix: Arc<str> = Arc::from(format!("openarm_{side}_right_finger").as_str());
     let finger2_prefix: Arc<str> = Arc::from(format!("openarm_{side}_left_finger").as_str());
 
+    // Declare each topic publisher once; the per-message closures clone the
+    // lock-free handle and publish on it.
+    let gs_pub = match gripper_state::declare_publisher(&runner).await {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare gripper_state publisher: {e}");
+            return;
+        }
+    };
+    let ee_pub = match ee_pose::declare_publisher(&runner).await {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare ee_pose publisher: {e}");
+            return;
+        }
+    };
+    let f1_pub = match contact_forces_finger1::declare_publisher(&runner).await {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare contact_forces_finger1 publisher: {e}");
+            return;
+        }
+    };
+    let f2_pub = match contact_forces_finger2::declare_publisher(&runner).await {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare contact_forces_finger2 publisher: {e}");
+            return;
+        }
+    };
+
     let state_for_gs = state.clone();
 
     let bridge = SimBridge::new(runner.clone(), transport, token, sim_node)
         .sim_to_os(
             gripper_state_topic,
-            move |runner, msg: GripperStateRaw| -> BoxFuture<std::result::Result<(), String>> {
+            move |_runner, msg: GripperStateRaw| -> BoxFuture<std::result::Result<(), String>> {
                 let state = state_for_gs.clone();
+                let publisher = gs_pub.clone();
                 Box::pin(async move {
                     // Cache for the action handler's feedback loop.
                     {
@@ -119,22 +149,27 @@ pub async fn run(
                             stamp: msg.stamp,
                         });
                     }
-                    emit_gripper_state(&runner, &msg).await
+                    emit_gripper_state(&publisher, &msg).await
                 })
             },
         )
         .sim_to_os(
             ee_pose_topic,
-            move |runner, msg: EePoseRaw| -> BoxFuture<std::result::Result<(), String>> {
-                Box::pin(async move { emit_ee_pose(&runner, &msg).await })
+            move |_runner, msg: EePoseRaw| -> BoxFuture<std::result::Result<(), String>> {
+                let publisher = ee_pub.clone();
+                Box::pin(async move { emit_ee_pose(&publisher, &msg).await })
             },
         )
         .sim_to_os(
             contact_topic,
-            move |runner, msg: ContactForcesRaw| -> BoxFuture<std::result::Result<(), String>> {
-                let f1 = finger1_prefix.clone();
-                let f2 = finger2_prefix.clone();
-                Box::pin(async move { emit_contact_forces(&runner, &msg, &f1, &f2).await })
+            move |_runner, msg: ContactForcesRaw| -> BoxFuture<std::result::Result<(), String>> {
+                let f1_prefix = finger1_prefix.clone();
+                let f2_prefix = finger2_prefix.clone();
+                let f1_pub = f1_pub.clone();
+                let f2_pub = f2_pub.clone();
+                Box::pin(async move {
+                    emit_contact_forces(&f1_pub, &f2_pub, &msg, &f1_prefix, &f2_prefix).await
+                })
             },
         );
 
@@ -153,39 +188,38 @@ fn stamp_now_secs() -> f64 {
 }
 
 async fn emit_gripper_state(
-    runner: &Arc<NodeRunner>,
+    publisher: &TopicPublisher,
     msg: &GripperStateRaw,
 ) -> std::result::Result<(), String> {
-    gripper_state::emit(
-        runner,
+    let payload = gripper_state::build_message(
         ROBOT_NAME.into(),
         msg.step,
         msg.joint_names.clone(),
         msg.positions.clone(),
         stamp_now_secs(),
     )
-    .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    publisher.publish(payload).await.map_err(|e| e.to_string())
 }
 
 async fn emit_ee_pose(
-    runner: &Arc<NodeRunner>,
+    publisher: &TopicPublisher,
     msg: &EePoseRaw,
 ) -> std::result::Result<(), String> {
-    ee_pose::emit(
-        runner,
+    let payload = ee_pose::build_message(
         ROBOT_NAME.into(),
         msg.step,
         msg.position,
         msg.orientation,
         stamp_now_secs(),
     )
-    .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    publisher.publish(payload).await.map_err(|e| e.to_string())
 }
 
 async fn emit_contact_forces(
-    runner: &Arc<NodeRunner>,
+    f1_pub: &TopicPublisher,
+    f2_pub: &TopicPublisher,
     msg: &ContactForcesRaw,
     finger1_prefix: &str,
     finger2_prefix: &str,
@@ -196,14 +230,16 @@ async fn emit_contact_forces(
     // 2 fingers, unconditional emit would flood subscribers with "contacts: []".
     let stamp = stamp_now_secs();
     if !f1.is_empty() {
-        contact_forces_finger1::emit(runner, ROBOT_NAME.into(), msg.step, to_f1(&f1), stamp)
-            .await
-            .map_err(|e| e.to_string())?;
+        let payload =
+            contact_forces_finger1::build_message(ROBOT_NAME.into(), msg.step, to_f1(&f1), stamp)
+                .map_err(|e| e.to_string())?;
+        f1_pub.publish(payload).await.map_err(|e| e.to_string())?;
     }
     if !f2.is_empty() {
-        contact_forces_finger2::emit(runner, ROBOT_NAME.into(), msg.step, to_f2(&f2), stamp)
-            .await
-            .map_err(|e| e.to_string())?;
+        let payload =
+            contact_forces_finger2::build_message(ROBOT_NAME.into(), msg.step, to_f2(&f2), stamp)
+                .map_err(|e| e.to_string())?;
+        f2_pub.publish(payload).await.map_err(|e| e.to_string())?;
     }
     Ok(())
 }
