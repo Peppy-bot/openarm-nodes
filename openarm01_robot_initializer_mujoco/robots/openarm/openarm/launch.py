@@ -47,10 +47,17 @@ async def _run_sim(_params, node_runner) -> list:
         try:
             await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready, _stop).run)
         finally:
-            # Signal the sim thread to exit; otherwise asyncio cancellation
-            # leaves the executor thread spinning, blocking process exit and
-            # starving peppylib's framework shutdown.
+            # Belt-and-braces against asyncio cancellation paths that race the
+            # on_shutdown hook below; idempotent.
             _stop.set()
+
+    async def _shutdown_hook() -> None:
+        # Drive the sim executor to exit inside the runtime grace window so
+        # SimLauncher's finally runs extension.shutdown() (which bounds
+        # peppylib_io.stop() to its own 5s thread.join).
+        _stop.set()
+
+    node_runner.on_shutdown(_shutdown_hook)
 
     return [
         asyncio.create_task(_run_sim_task()),
