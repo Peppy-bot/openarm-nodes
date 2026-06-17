@@ -15,7 +15,9 @@ use tracing::{info, warn};
 
 use crate::state::{ARM_DOF, SharedState, Side};
 
-const GOAL_TIMEOUT: Duration = Duration::from_secs(5);
+// Goal-accept round-trip to a pinned producer — answered directly, so this
+// only needs to cover the decider, not a discovery probe.
+const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn spawn(

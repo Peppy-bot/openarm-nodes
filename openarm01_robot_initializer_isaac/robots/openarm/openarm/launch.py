@@ -58,6 +58,13 @@ async def setup(_params, node_runner) -> list:
                 lambda _req: is_ready.Response(ready=_ready.is_set()),
             )
 
+    async def _shutdown_hook() -> None:
+        # Drive the Isaac main-thread sim loop to exit inside the runtime
+        # grace window; SimLauncher's finally bounds peppylib_io.stop().
+        _stop.set()
+
+    node_runner.on_shutdown(_shutdown_hook)
+
     return [asyncio.create_task(_is_ready_loop())]
 
 

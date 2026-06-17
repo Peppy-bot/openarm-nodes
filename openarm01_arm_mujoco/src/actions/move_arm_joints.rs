@@ -15,7 +15,7 @@ use peppygen::exposed_actions::openarm01_arm::v1::move_arm_joints;
 use peppylib::config::QoSProfile;
 use peppylib::messaging::SenderTarget;
 use peppylib::runtime::CancellationToken;
-use peppylib::{MessengerHandle, Payload, TopicMessenger};
+use peppylib::{MessengerHandle, Payload, TopicMessenger, TopicPublisher};
 use serde::Serialize;
 use sim_bridge_core::DaemonState;
 use tracing::{error, info, warn};
@@ -90,6 +90,32 @@ pub async fn run(
     // collide on the peppylib publisher registry.
     let instance_id: Arc<str> = Arc::from(format!("openarm01_arm_{side}_setctrl_pub").as_str());
 
+    // Declare the set_ctrl publisher once; the per-tick control loop reuses it.
+    let target = match SenderTarget::node(ARM_NODE_NAME, "v1") {
+        Ok(target) => target,
+        Err(e) => {
+            error!("invalid set_ctrl target: {e}");
+            return;
+        }
+    };
+    let set_ctrl_pub = match TopicMessenger::declare_publisher(
+        &handle,
+        &daemon.core_node_name,
+        &instance_id,
+        target,
+        None,
+        &set_ctrl_topic,
+        QoSProfile::Standard,
+    )
+    .await
+    {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare set_ctrl publisher: {e}");
+            return;
+        }
+    };
+
     let mut action_handle = move_arm_joints::ActionHandle::expose(&runner)
         .await
         .expect("expose move_arm_joints");
@@ -97,6 +123,25 @@ pub async fn run(
     // Single-flight gate, same as the real driver: a goal arriving mid-motion
     // is actively rejected rather than queued to run stale afterwards.
     let busy = Arc::new(AtomicBool::new(false));
+    // Notified when a motion clears the gate, so the shutdown hook can hold
+    // teardown until an in-flight goal has delivered its terminal result.
+    let idle = Arc::new(tokio::sync::Notify::new());
+
+    {
+        let busy = busy.clone();
+        let idle = idle.clone();
+        runner.on_shutdown(async move {
+            while busy.load(Ordering::Acquire) {
+                let notified = idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !busy.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        });
+    }
 
     loop {
         let state_for_decider = state.clone();
@@ -150,21 +195,16 @@ pub async fn run(
 
         // Spawn the motion so the accept loop keeps listening (and rejecting)
         // during execution — mirrors the real driver's structure.
-        let handle = handle.clone();
-        let daemon = daemon.clone();
+        let set_ctrl_pub = set_ctrl_pub.clone();
         let state = state.clone();
         let token = token.clone();
         let busy = busy.clone();
+        let idle = idle.clone();
         let actuator_names = actuator_names.clone();
-        let set_ctrl_topic = set_ctrl_topic.clone();
-        let instance_id = instance_id.clone();
         tokio::spawn(async move {
             let result = run_control_loop(
-                &handle,
-                &daemon,
+                &set_ctrl_pub,
                 &state,
-                &set_ctrl_topic,
-                &instance_id,
                 &actuator_names,
                 &goal_ctx,
                 &token,
@@ -194,17 +234,14 @@ pub async fn run(
                 error!("move_arm_joints complete: {e}");
             }
             busy.store(false, Ordering::Release);
+            idle.notify_waiters();
         });
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_control_loop(
-    handle: &MessengerHandle,
-    daemon: &DaemonState,
+    set_ctrl_pub: &TopicPublisher,
     state: &Arc<SharedState>,
-    set_ctrl_topic: &str,
-    instance_id: &str,
     actuator_names: &[String; DOF],
     goal_ctx: &move_arm_joints::GoalContext,
     token: &CancellationToken,
@@ -240,16 +277,7 @@ async fn run_control_loop(
         let cycle_start = Instant::now();
         let (q_des, dq_des) = trajectory.sample(cycle_start);
 
-        match publish_set_ctrl(
-            handle,
-            daemon,
-            set_ctrl_topic,
-            instance_id,
-            actuator_names,
-            &q_des,
-            &dq_des,
-        )
-        .await
+        match publish_set_ctrl(set_ctrl_pub, actuator_names, &q_des, &dq_des).await
         {
             Ok(()) => consecutive_publish_failures = 0,
             Err(e) => {
@@ -319,12 +347,8 @@ fn cancelled(action_time: f64, final_positions: JointVec) -> MotionResult {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn publish_set_ctrl(
-    handle: &MessengerHandle,
-    daemon: &DaemonState,
-    topic: &str,
-    instance_id: &str,
+    publisher: &TopicPublisher,
     actuator_names: &[String; DOF],
     q_des: &JointVec,
     dq_des: &JointVec,
@@ -340,20 +364,8 @@ async fn publish_set_ctrl(
         velocity_values: velocities,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-
-    // Publish as openarm01_arm:v1 so real + sim look identical to consumers.
-    let target =
-        SenderTarget::node(ARM_NODE_NAME, "v1").map_err(|e| format!("invalid as_target: {e}"))?;
-
-    TopicMessenger::emit(
-        handle,
-        &daemon.core_node_name,
-        instance_id,
-        target,
-        topic,
-        QoSProfile::Standard,
-        Payload::from(bytes),
-    )
-    .await
-    .map_err(|e| e.to_string())
+    publisher
+        .publish(Payload::from(bytes))
+        .await
+        .map_err(|e| e.to_string())
 }

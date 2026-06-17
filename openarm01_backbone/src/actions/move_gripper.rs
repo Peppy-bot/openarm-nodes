@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use peppygen::NodeRunner;
@@ -10,7 +11,9 @@ use peppygen::exposed_actions::move_gripper::{
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
-const GOAL_TIMEOUT: Duration = Duration::from_secs(5);
+// Goal-accept (and cancel) round-trip to a pinned producer — answered directly,
+// so this only needs to cover the decider, not a discovery probe.
+const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Outcome {
@@ -49,6 +52,26 @@ impl Outcome {
 pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen::Result<()> {
     let mut handle = ActionHandle::expose(&runner).await?;
 
+    // Track in-flight relays so a shutdown holds teardown until each goal has
+    // delivered its terminal result upstream, bounded by the grace window.
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let idle = Arc::new(tokio::sync::Notify::new());
+    {
+        let inflight = inflight.clone();
+        let idle = idle.clone();
+        runner.on_shutdown(async move {
+            while inflight.load(Ordering::Acquire) > 0 {
+                let notified = idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if inflight.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        });
+    }
+
     loop {
         let goal_ctx = tokio::select! {
             _ = token.cancelled() => break,
@@ -69,11 +92,14 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
             },
         };
 
-        // Spawn per goal so the accept loop returns immediately to await the
-        // next probe. Otherwise left+right move_gripper serialise through one
-        // task and the second goal sees the backbone instance as unreachable.
+        // Spawn per goal so the accept loop returns immediately to receive the
+        // next goal. Otherwise left+right move_gripper serialise through one
+        // task and the second goal can't be received until the first finishes.
         let runner_for_goal = Arc::clone(&runner);
         let token_for_goal = token.clone();
+        let inflight = inflight.clone();
+        let idle = idle.clone();
+        inflight.fetch_add(1, Ordering::AcqRel);
         tokio::spawn(async move {
             let outcome = forward(&runner_for_goal, &goal_ctx, &token_for_goal).await;
 
@@ -99,6 +125,8 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
             if let Err(e) = reply {
                 warn!(error = %e, "move_gripper: complete failed");
             }
+            inflight.fetch_sub(1, Ordering::AcqRel);
+            idle.notify_waiters();
         });
     }
     Ok(())

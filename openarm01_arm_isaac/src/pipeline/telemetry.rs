@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::{joint_states, tf_tree};
+use peppylib::TopicPublisher;
 use serde::Deserialize;
 use sim_bridge_core::{BoxFuture, SimBridge};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::ArmId;
 use crate::state::{JointStatesLatest, SharedState};
@@ -63,16 +64,12 @@ pub async fn run(
     // robot_initializer_mujoco's bridge_extension (defaults to "sim").
     let sim_node: Arc<str> = Arc::from("sim");
 
-    // sim_bridge_core is peppylib-free and takes a tokio_util token; forward
-    // the node's peppylib cancellation into it.
+    // sim_bridge_core takes a tokio_util token; cancel it from an on_shutdown
+    // hook so the bridge tears down cleanly before the runtime drops.
     let token = tokio_util::sync::CancellationToken::new();
     {
-        let node_token = runner.cancellation_token().clone();
-        let lib_token = token.clone();
-        tokio::spawn(async move {
-            node_token.cancelled().await;
-            lib_token.cancel();
-        });
+        let bridge_token = token.clone();
+        runner.on_shutdown(async move { bridge_token.cancel() });
     }
 
     let joint_states_topic: Arc<str> = Arc::from("joint_states");
@@ -94,21 +91,40 @@ pub async fn run(
     let state_for_js = state.clone();
     let arm_joints_js = arm_joints.clone();
 
+    // Declare each topic publisher once; the per-message closures clone the
+    // lock-free handle and publish on it.
+    let js_pub = match joint_states::declare_publisher(&runner).await {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare joint_states publisher: {e}");
+            return;
+        }
+    };
+    let tf_pub = match tf_tree::declare_publisher(&runner).await {
+        Ok(publisher) => publisher,
+        Err(e) => {
+            error!("declare tf_tree publisher: {e}");
+            return;
+        }
+    };
+
     let bridge = SimBridge::new(runner.clone(), transport, token, sim_node)
         .sim_to_os(
             joint_states_topic,
-            move |runner, msg: JointStatesRaw| -> BoxFuture<std::result::Result<(), String>> {
+            move |_runner, msg: JointStatesRaw| -> BoxFuture<std::result::Result<(), String>> {
                 let state = state_for_js.clone();
                 let names = arm_joints_js.clone();
-                Box::pin(async move { emit_joint_states(&runner, &state, &names, &msg).await })
+                let publisher = js_pub.clone();
+                Box::pin(async move { emit_joint_states(&publisher, &state, &names, &msg).await })
             },
         )
         .sim_to_os(
             tf_tree_topic,
-            move |runner, msg: TfTreeRaw| -> BoxFuture<std::result::Result<(), String>> {
+            move |_runner, msg: TfTreeRaw| -> BoxFuture<std::result::Result<(), String>> {
                 let include = arm_frame_prefix.clone();
                 let exclude = finger_frame_prefix.clone();
-                Box::pin(async move { emit_tf_tree(&runner, &msg, &include, &exclude).await })
+                let publisher = tf_pub.clone();
+                Box::pin(async move { emit_tf_tree(&publisher, &msg, &include, &exclude).await })
             },
         );
 
@@ -127,7 +143,7 @@ fn stamp_now_secs() -> f64 {
 }
 
 async fn emit_joint_states(
-    runner: &Arc<NodeRunner>,
+    publisher: &TopicPublisher,
     state: &Arc<SharedState>,
     expected: &[String; ARM_DOF],
     msg: &JointStatesRaw,
@@ -201,8 +217,7 @@ async fn emit_joint_states(
         );
     }
 
-    joint_states::emit(
-        runner,
+    let payload = joint_states::build_message(
         ROBOT_NAME.into(),
         msg.step,
         joint_names,
@@ -210,12 +225,12 @@ async fn emit_joint_states(
         velocities,
         stamp_now_secs(),
     )
-    .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    publisher.publish(payload).await.map_err(|e| e.to_string())
 }
 
 async fn emit_tf_tree(
-    runner: &Arc<NodeRunner>,
+    publisher: &TopicPublisher,
     msg: &TfTreeRaw,
     include_prefix: &str,
     exclude_prefix: &str,
@@ -232,13 +247,12 @@ async fn emit_tf_tree(
         })
         .collect();
 
-    tf_tree::emit(
-        runner,
+    let payload = tf_tree::build_message(
         ROBOT_NAME.into(),
         msg.step,
         frames,
         stamp_now_secs(),
     )
-    .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    publisher.publish(payload).await.map_err(|e| e.to_string())
 }

@@ -6,7 +6,7 @@ From: aaqibmahamood/openarm01-isaac-sim:5.1.0-9
     Version v1
 
 %environment
-    export PYTHONPATH="/opt/isaac_robot_initializer/.peppy/libs/peppygen:$HOME/.peppy/libs/python:$PYTHONPATH"
+    export PYTHONPATH="/opt/isaac_robot_initializer/.peppy/libs/peppygen:/opt/isaac_robot_initializer/.peppy/libs/peppylib:$PYTHONPATH"
     export PEPPYGEN_OUTPUT_PATH="/opt/isaac_robot_initializer/.peppy/libs/peppygen"
     export PEPPY_BRIDGE_NODE_NAME=sim
     export PEPPY_BRIDGE_HEADLESS=${PEPPY_BRIDGE_HEADLESS:-1}
@@ -17,6 +17,7 @@ From: aaqibmahamood/openarm01-isaac-sim:5.1.0-9
     peppy.json5 /opt/isaac_robot_initializer/peppy.json5
     robots /opt/isaac_robot_initializer/robots
     .peppy/libs/peppygen /opt/isaac_robot_initializer/.peppy/libs/peppygen
+    .peppy/libs/peppylib /opt/isaac_robot_initializer/.peppy/libs/peppylib
 
 %runscript
     cd /opt/isaac_robot_initializer

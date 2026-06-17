@@ -15,6 +15,7 @@ from peppylib import (  # pylint: disable=E0401
     MessengerHandle,
     QoSProfile,
     TopicMessenger,
+    TopicPublisher,
 )
 from peppylib.messaging import SenderTarget  # pylint: disable=E0401
 
@@ -63,6 +64,9 @@ class PeppylibIO:  # pylint: disable=R0902
         self._recv_tasks: list[asyncio.Task] = []
         self._ready = threading.Event()
         self._stop_future: Optional[asyncio.Future] = None
+        # Per-topic publisher cache; declare once, then publish lock-free.
+        # Touched only on the event-loop thread, so no lock needed.
+        self._publishers: dict[tuple[str, str, str], TopicPublisher] = {}
 
     def start(self) -> None:
         self._ready.clear()
@@ -226,6 +230,9 @@ class PeppylibIO:  # pylint: disable=R0902
         for task in list(self._recv_tasks):
             task.cancel()
         self._recv_tasks.clear()
+        # Publishers are tied to the previous handle — drop the cache so the
+        # next emit redeclares against the fresh handle.
+        self._publishers.clear()
 
         self._handle = await MessengerHandle.from_host_port(cfg.host, cfg.port)
 
@@ -302,7 +309,6 @@ class PeppylibIO:  # pylint: disable=R0902
             SenderTarget.node(source_node, source_tag),
             topic,
             None,
-            None,
             qos_profile,
         )
 
@@ -324,16 +330,28 @@ class PeppylibIO:  # pylint: disable=R0902
         qos: str,
         payload: bytes,
     ) -> None:
-        qos_profile = _QOS_MAP.get(qos, QoSProfile.Standard)
+        if self._handle is None:
+            return
+        key = (node_name, node_tag, topic)
+        publisher = self._publishers.get(key)
+        if publisher is None:
+            qos_profile = _QOS_MAP.get(qos, QoSProfile.Standard)
+            try:
+                publisher = await TopicMessenger.declare_publisher(
+                    self._handle,
+                    self._config.daemon_node,
+                    self._instance_id,
+                    SenderTarget.node(node_name, node_tag),
+                    topic,
+                    qos_profile,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to declare publisher for {node_name}:{node_tag}/{topic}: {exc}"
+                )
+                return
+            self._publishers[key] = publisher
         try:
-            await TopicMessenger.emit(
-                self._handle,
-                self._config.daemon_node,
-                self._instance_id,
-                SenderTarget.node(node_name, node_tag),
-                topic,
-                qos_profile,
-                payload,
-            )
+            await publisher.publish(payload)
         except Exception as exc:
-            logger.warning(f"Failed to emit {node_name}:{node_tag}/{topic}: {exc}")
+            logger.warning(f"Failed to publish {node_name}:{node_tag}/{topic}: {exc}")

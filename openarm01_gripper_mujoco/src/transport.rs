@@ -2,11 +2,12 @@
 // links peppylib (it is generated per node by `peppy node sync`), so each sim
 // node supplies this adapter and hands it to SimBridge.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use peppylib::config::QoSProfile;
 use peppylib::messaging::{ConsumerFilter, SenderTarget};
-use peppylib::{MessengerHandle, Payload, TopicMessenger};
+use peppylib::{MessengerHandle, Payload, TopicMessenger, TopicPublisher};
 use sim_bridge_core::{DaemonState, RawSubscription, RawTransport, TransportFuture};
 
 // Raw sim-bridge topics publish under this off-bus placeholder identity
@@ -17,6 +18,8 @@ pub struct PeppylibTransport {
     daemon: DaemonState,
     // Cached emit connection; dropped on failure so the next emit reconnects.
     handle: tokio::sync::Mutex<Option<MessengerHandle>>,
+    // Declare a publisher once per topic, then reuse it.
+    publishers: tokio::sync::Mutex<HashMap<String, TopicPublisher>>,
 }
 
 impl PeppylibTransport {
@@ -24,6 +27,7 @@ impl PeppylibTransport {
         Arc::new(Self {
             daemon,
             handle: tokio::sync::Mutex::new(None),
+            publishers: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 }
@@ -67,7 +71,6 @@ impl RawTransport for PeppylibTransport {
                 Some(target),
                 false,
                 topic,
-                None,
                 &ConsumerFilter::Any,
                 // Subscriptions are telemetry: latest-wins.
                 QoSProfile::SensorData,
@@ -88,6 +91,13 @@ impl RawTransport for PeppylibTransport {
         payload: Vec<u8>,
     ) -> TransportFuture<'a, std::result::Result<(), String>> {
         Box::pin(async move {
+            // Reuse the per-topic publisher; declare it once on first use.
+            if let Some(publisher) = self.publishers.lock().await.get(topic).cloned() {
+                return publisher
+                    .publish(Payload::from(payload))
+                    .await
+                    .map_err(|e| e.to_string());
+            }
             let mut guard = self.handle.lock().await;
             if guard.is_none() {
                 *guard = Some(
@@ -99,22 +109,27 @@ impl RawTransport for PeppylibTransport {
             let handle = guard.as_ref().expect("cached handle just set");
             let target = SenderTarget::node(BRIDGE_NODE_NAME, "v1")
                 .map_err(|e| format!("invalid bridge target: {e}"))?;
-            if let Err(e) = TopicMessenger::emit(
+            // Emits are commands: reliable delivery.
+            let publisher = TopicMessenger::declare_publisher(
                 handle,
                 &self.daemon.core_node_name,
                 instance_id,
                 target,
+                None,
                 topic,
-                // Emits are commands: reliable delivery.
                 QoSProfile::Standard,
-                Payload::from(payload),
             )
             .await
-            {
-                *guard = None;
-                return Err(e.to_string());
-            }
-            Ok(())
+            .map_err(|e| e.to_string())?;
+            drop(guard);
+            self.publishers
+                .lock()
+                .await
+                .insert(topic.to_string(), publisher.clone());
+            publisher
+                .publish(Payload::from(payload))
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 }
