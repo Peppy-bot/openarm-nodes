@@ -145,6 +145,11 @@ class MujocoBridgeExtension:
 
 
 def _validate_config(config: BridgeConfig) -> None:
+    if not config.daemon_node:
+        raise ValueError(
+            "core node name is empty — launch.py must resolve it via "
+            "peppylib.info before starting the bridge"
+        )
     for entry in config.publishers:
         if entry.type not in _PUBLISHER_REGISTRY:
             raise ValueError(

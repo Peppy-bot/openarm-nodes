@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from peppygen.exposed_services.openarm01_robot_initializer.v1 import is_ready
+from peppylib import info
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(
@@ -35,6 +36,12 @@ _stop = threading.Event()
 
 
 async def _run_sim(_params, node_runner) -> list:
+    # Resolve the core node identity and pass it to the bridge config via env.
+    # The sim runs in an executor task created below, so the env is set first.
+    daemon = await info(node_runner)
+    os.environ["PEPPY_BRIDGE_DAEMON_NODE"] = daemon.core_node_name
+    os.environ["PEPPY_BRIDGE_PORT"] = str(daemon.messaging_port)
+
     async def _is_ready_loop() -> None:
         while True:
             await is_ready.handle_next_request(
