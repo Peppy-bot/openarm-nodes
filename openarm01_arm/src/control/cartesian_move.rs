@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use peppygen::exposed_actions::openarm01_arm::v1::move_arm;
 use srs_model::ArmAnglePolicy;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use super::feedback::Feedback;
+use super::follow::Follow;
 use super::{Completion, Mode, TickIo, ZERO, command, fmt_joints, world_pose_arrays};
 use crate::JointVec;
-use crate::actions::CartesianGoal;
+use crate::actions::CartesianMoveGoal;
 use crate::trajectory::{CartesianTrajectory, plan_cartesian_duration};
 
 /// Slack the runtime per-tick velocity check allows over the planned limit before
@@ -23,7 +23,6 @@ const VELOCITY_GUARD_MARGIN: f64 = 1.5;
 pub(super) struct CartesianMove {
     trajectory: CartesianTrajectory,
     ctx: move_arm::GoalContext,
-    feedback: Feedback,
     /// Last solved configuration, seeding the next IK solve for branch/arm-angle
     /// continuity along the path.
     seed: JointVec,
@@ -44,7 +43,7 @@ impl CartesianMove {
     /// stay within their velocity limits, floored at the caller's request. On an
     /// unreachable path the goal is completed (failed) here and `None` is
     /// returned, releasing the single-flight claim.
-    pub(super) async fn start(g: CartesianGoal, io: &TickIo<'_>) -> Option<Self> {
+    pub(super) async fn start(g: CartesianMoveGoal, io: &TickIo<'_>) -> Option<Self> {
         let start_world = io.model.world_pose(&io.ee_base);
         let Some(duration) = plan_cartesian_duration(
             io.model,
@@ -74,7 +73,6 @@ impl CartesianMove {
         Some(Self {
             trajectory: CartesianTrajectory::new(start_world, g.target, duration),
             ctx: g.ctx,
-            feedback: Feedback::new(g.feedback_period),
             seed: io.q,
             prev_q_des: io.q,
             prev_sample_at: Instant::now(),
@@ -82,11 +80,12 @@ impl CartesianMove {
     }
 
     /// Sample the pose, solve IK for the joint setpoint (seeded for continuity),
-    /// and command it with finite-difference velocity feedforward. Completes into
-    /// `Hold` at the last commanded configuration when the trajectory finishes,
-    /// the caller cancels, the motion times out, or it aborts (IK failure or a
-    /// joint step grossly exceeding its velocity limit, the runtime backstop over
-    /// the up-front plan).
+    /// and command it with finite-difference velocity feedforward. Completes and
+    /// returns to `Follow` at the last commanded configuration when the trajectory
+    /// finishes, the caller cancels, or it aborts (IK failure or a joint step
+    /// grossly exceeding its velocity limit, the runtime backstop over the
+    /// up-front plan). A caller that judges the move too long observes progress on
+    /// the always-on state streams and cancels.
     pub(super) async fn tick(mut self, io: &mut TickIo<'_>) -> Mode {
         let elapsed = self.trajectory.motion_start.elapsed().as_secs_f64();
         if self.ctx.is_cancelled() {
@@ -133,26 +132,20 @@ impl CartesianMove {
         self.prev_sample_at = io.now;
         self.seed = sol.q;
 
-        if self.feedback.should_publish(io.now) {
-            let (pos, quat) = world_pose_arrays(&io.model.world_pose(&io.ee_base));
-            let result = self.ctx.publish_feedback(pos, quat, elapsed).await;
-            if let Some(e) = self.feedback.first_failure(result) {
-                warn!("move_arm feedback publish failing, suppressing repeats: {e}");
-            }
-        }
-
         if self.trajectory.is_complete(io.now) {
             self.finish(io, Completion::Done { success: true, message: "cartesian move complete" }, elapsed)
                 .await
-        } else if elapsed > io.cfg.motion_timeout.as_secs_f64() {
-            self.finish(io, Completion::Done { success: false, message: "timeout" }, elapsed).await
         } else {
             Mode::CartesianMove(self)
         }
     }
 
     /// Complete the goal per `completion`, release the single-flight claim, and
-    /// hold at the last commanded configuration.
+    /// return to `Follow` holding the last commanded configuration. `success`
+    /// reports that the planned trajectory ran without an internal abort (IK
+    /// failure or a velocity-guard trip), not that the measured pose reached the
+    /// target within a tolerance. The result carries the measured world pose at
+    /// exit for the caller to judge goal achievement.
     async fn finish(self, io: &TickIo<'_>, completion: Completion, elapsed: f64) -> Mode {
         let (pos, quat) = world_pose_arrays(&io.model.world_pose(&io.ee_base));
         let result = match completion {
@@ -167,7 +160,7 @@ impl CartesianMove {
             error!("move_arm complete: {e}");
         }
         io.busy.store(false, Ordering::Release);
-        Mode::Hold { setpoint: self.prev_q_des }
+        Mode::Follow(Follow::idle(self.prev_q_des))
     }
 }
 

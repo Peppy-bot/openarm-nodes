@@ -2,17 +2,19 @@ mod actions;
 mod control;
 mod friction;
 mod pacer;
+mod stream;
 mod trajectory;
 
 use openarm_can::{ArmCan, CallbackMode, v10};
 use control::ControlConfig;
-use peppygen::exposed_services::openarm01_arm::v1::{get_arm_id, get_joint_positions};
+use peppygen::exposed_services::openarm01_arm::v1::get_arm_id;
 use peppygen::{NodeBuilder, Parameters, Result};
 use srs_model::nalgebra::Isometry3;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 /// Degrees of freedom of the arm.
@@ -50,6 +52,11 @@ fn main() -> Result<()> {
         let can_interface = params.can_interface.clone();
 
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
+        assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        assert!(
+            params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
+            "stream_timeout_s must be a positive finite number"
+        );
         let max_joint_velocity_rad_s = [
             params.max_joint_velocity_rad_s_1,
             params.max_joint_velocity_rad_s_2,
@@ -62,6 +69,10 @@ fn main() -> Result<()> {
         assert!(
             max_joint_velocity_rad_s.iter().all(|v| *v > 0.0),
             "all max_joint_velocity_rad_s_N must be > 0"
+        );
+        assert!(
+            params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
+            "max_ee_velocity_m_s must be a positive finite number"
         );
         let side = side_label(arm_id);
 
@@ -99,9 +110,10 @@ fn main() -> Result<()> {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
             recv_timeout_us: i32::try_from(params.recv_timeout_us)
                 .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
-            motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             max_joint_velocity_rad_s,
+            max_ee_velocity_m_s: params.max_ee_velocity_m_s,
             limits: model.limits(),
+            stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
         };
 
         // Echo the resolved config so every run records exactly what it ran with.
@@ -111,6 +123,23 @@ fn main() -> Result<()> {
             cfg.recv_timeout_us,
         );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
+        info!(
+            "config: max_ee_velocity={} m/s, stream_timeout={}s",
+            params.max_ee_velocity_m_s, params.stream_timeout_s,
+        );
+
+        // Validate the static ready pose against the parsed joint limits here,
+        // during bringup, so a misconfigured pose aborts the whole process before
+        // any hardware is touched instead of panicking inside the spawned control
+        // task (which would leave a zombie node with motors enabled but no loop).
+        control::assert_ready_pose_in_limits(&cfg.limits);
+
+        // Register shutdown signal handlers before enabling motors: a failure here
+        // aborts bringup loudly on the main task rather than panicking inside the
+        // detached shutdown task, where it would silently delete the motor-disable
+        // path. Tokio buffers a signal that arrives before the task awaits it.
+        let mut sigint = signal(SignalKind::interrupt()).expect("register SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate()).expect("register SIGTERM handler");
 
         // Instance lock: check if another instance with the same arm_id is running.
         let lock_path = format!("/tmp/openarm_arm_{arm_id}.lock");
@@ -144,12 +173,9 @@ fn main() -> Result<()> {
         // also lets the process exit promptly instead of being force-killed.
         {
             let arm = arm.clone();
-            let node_runner = node_runner.clone();
             let cancel = node_runner.cancellation_token().clone();
             let lock_path = lock_path.clone();
             tokio::spawn(async move {
-                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
                 tokio::select! {
                     _ = sigint.recv() => {},
                     _ = sigterm.recv() => {},
@@ -191,30 +217,28 @@ fn main() -> Result<()> {
             });
         }
 
-        // get_joint_positions service.
-        {
-            let runner = node_runner.clone();
-            let arm = arm.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = get_joint_positions::handle_next_request(&runner, |_req| {
-                        let a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                        Ok(get_joint_positions::Response::new(a.get_state().positions))
-                    })
-                    .await
-                    {
-                        error!("get_joint_positions: {e}");
-                    }
-                }
-            });
-        }
+        // Bidirectional stream plumbing: the listener keeps the latest well-formed
+        // `joint_commands` setpoint for the control loop, and the publisher emits
+        // the measured joint state and end-effector pose on `joint_states` /
+        // `cartesian_states`, always on, at its own rate.
+        let (joint_command_tx, joint_command_rx) = watch::channel(None);
+        let (measured_tx, measured_rx) = watch::channel(None);
+        tokio::spawn(stream::run_joint_command_listener(node_runner.clone(), arm_id, joint_command_tx));
+        tokio::spawn(stream::run_state_publisher(
+            node_runner.clone(),
+            arm_id,
+            Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
+            measured_rx,
+        ));
+        let wiring = stream::StreamWiring { joint: joint_command_rx, measured: measured_tx };
 
         // Single control task (the only motor writer): eases to the ready pose on
-        // startup, holds with gravity-comp + PD between moves, and tracks joint or
-        // Cartesian trajectories while a goal runs. Its action handlers only admit
-        // goals and hand them over; both actions are exposed before anything spawns,
-        // so a failed registration fails bringup here.
-        control::spawn(&node_runner, arm.clone(), cfg, model).await?;
+        // startup, then follows the active command stream (or holds) between
+        // moves, preempting into a joint or Cartesian trajectory while a move goal
+        // runs. Its action handlers only admit goals and hand them over; both
+        // actions are exposed before anything spawns, so a failed registration
+        // fails bringup here.
+        control::spawn(&node_runner, arm.clone(), cfg, model, wiring).await?;
 
         Ok(())
     })
