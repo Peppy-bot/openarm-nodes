@@ -571,6 +571,7 @@ dependencies = [
  "capnp",
  "capnpc",
  "clap",
+ "const_format",
  "dirs",
  "indexmap 2.14.0",
  "proc-macro2",
@@ -2498,7 +2499,6 @@ dependencies = [
 name = "pmi"
 version = "0.0.1"
 dependencies = [
- "askama",
  "build-helpers",
  "bytes",
  "config",
