@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from peppygen.exposed_services.openarm01_robot_initializer.v1 import is_ready
+from peppylib import info
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(
@@ -48,9 +49,18 @@ from _launcher import SimLauncher
 
 _ready = threading.Event()
 _stop = threading.Event()
+# Set once the node thread has resolved the core node identity into env vars,
+# so the main-thread sim loop reads its config only after that.
+_daemon_resolved = threading.Event()
 
 
 async def setup(_params, node_runner) -> list:
+    # Resolve the core node identity and pass it to the bridge config via env.
+    daemon = await info(node_runner)
+    os.environ["PEPPY_BRIDGE_DAEMON_NODE"] = daemon.core_node_name
+    os.environ["PEPPY_BRIDGE_PORT"] = str(daemon.messaging_port)
+    _daemon_resolved.set()
+
     async def _is_ready_loop() -> None:
         while True:
             await is_ready.handle_next_request(
@@ -80,6 +90,8 @@ def _run_node_builder() -> None:
 
 def main() -> None:
     threading.Thread(target=_run_node_builder, daemon=True).start()
+    if not _daemon_resolved.wait(timeout=30):
+        raise RuntimeError("core node identity not resolved within 30s")
     SimLauncher(simulation_app, _USD_PATH, _ready, _stop).run()
 
 
