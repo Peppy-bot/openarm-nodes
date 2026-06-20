@@ -1,12 +1,13 @@
-// SimBridge pipelines for this arm side: slice whole-robot joint_states to
-// the 7 joints (cached for the action handler) and filter tf_tree by side
-// prefix. IMU stubbed until bridge_extension publishes imu_<side>. Stamps
-// via peppygen::clock so use_sim_time wins.
+// SimBridge pipeline for this arm side: slice the bridge's whole-robot
+// joint_states down to this arm's 7 joints, cache the latest pose + static
+// limits for move_arm_joints, and re-emit through the shared
+// openarm01_joint_state_source interface so sim and real arms publish state
+// identically (told apart by arm_id).
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::{joint_states, tf_tree};
+use peppygen::emitted_topics::openarm01_joint_state_source::v1::joint_states;
 use peppylib::TopicPublisher;
 use serde::Deserialize;
 use sim_bridge_core::{BoxFuture, SimBridge};
@@ -16,12 +17,10 @@ use crate::config::ArmId;
 use crate::state::{JointStatesLatest, SharedState};
 use crate::transport::PeppylibTransport;
 
-const ROBOT_NAME: &str = "openarm";
 const ARM_DOF: usize = 7;
 
 #[derive(Debug, Clone, Deserialize)]
 struct JointStatesRaw {
-    step: u64,
     joint_names: Vec<String>,
     positions: Vec<f64>,
     velocities: Vec<f64>,
@@ -33,20 +32,6 @@ struct JointStatesRaw {
     limits_upper: Vec<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct TfFrameRaw {
-    name: String,
-    parent: String,
-    position: [f64; 3],
-    orientation: [f64; 4],
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct TfTreeRaw {
-    step: u64,
-    frames: Vec<TfFrameRaw>,
-}
-
 pub async fn run(
     runner: Arc<NodeRunner>,
     arm_id: ArmId,
@@ -55,7 +40,7 @@ pub async fn run(
 ) {
     let side = arm_id.side_word();
     info!(
-        "telemetry: starting pipelines (arm_id={} side={})",
+        "telemetry: starting joint_states pipeline (arm_id={} side={})",
         arm_id.raw(),
         side
     );
@@ -73,26 +58,16 @@ pub async fn run(
     }
 
     let joint_states_topic: Arc<str> = Arc::from("joint_states");
-    let tf_tree_topic: Arc<str> = Arc::from("tf_tree");
-
-    // Filter tf_tree to this arm side. Both arm and gripper frames share the
-    // `openarm_<side>_` prefix; explicitly exclude `openarm_<side>_finger*` so
-    // gripper-owned frames don't leak into the arm topic.
-    let arm_frame_prefix: Arc<str> = Arc::from(format!("openarm_{side}_").as_str());
-    let finger_frame_prefix: Arc<str> = Arc::from(format!("openarm_{side}_finger").as_str());
 
     // Pre-build the 7 canonical arm joint names for this side; emit_joint_states
-    // looks each up by exact match so cache ordering doesn't depend on publisher
-    // joint order.
+    // looks each up by exact match so output order is joint1..joint7 regardless
+    // of the publisher's joint order.
     let arm_joints: Arc<[String; ARM_DOF]> = Arc::new(std::array::from_fn(|i| {
         format!("openarm_{side}_joint{}", i + 1)
     }));
 
-    let state_for_js = state.clone();
-    let arm_joints_js = arm_joints.clone();
-
-    // Declare each topic publisher once; the per-message closures clone the
-    // lock-free handle and publish on it.
+    // Declare the publisher once; the per-message closure clones the lock-free
+    // handle and publishes on it.
     let js_pub = match joint_states::declare_publisher(&runner).await {
         Ok(publisher) => publisher,
         Err(e) => {
@@ -100,50 +75,27 @@ pub async fn run(
             return;
         }
     };
-    let tf_pub = match tf_tree::declare_publisher(&runner).await {
-        Ok(publisher) => publisher,
-        Err(e) => {
-            error!("declare tf_tree publisher: {e}");
-            return;
-        }
-    };
 
-    let bridge = SimBridge::new(runner.clone(), transport, token, sim_node)
-        .sim_to_os(
-            joint_states_topic,
-            move |_runner, msg: JointStatesRaw| -> BoxFuture<std::result::Result<(), String>> {
-                let state = state_for_js.clone();
-                let names = arm_joints_js.clone();
-                let publisher = js_pub.clone();
-                Box::pin(async move { emit_joint_states(&publisher, &state, &names, &msg).await })
-            },
-        )
-        .sim_to_os(
-            tf_tree_topic,
-            move |_runner, msg: TfTreeRaw| -> BoxFuture<std::result::Result<(), String>> {
-                let include = arm_frame_prefix.clone();
-                let exclude = finger_frame_prefix.clone();
-                let publisher = tf_pub.clone();
-                Box::pin(async move { emit_tf_tree(&publisher, &msg, &include, &exclude).await })
-            },
-        );
+    let arm_id_raw = arm_id.raw();
+    let bridge = SimBridge::new(runner.clone(), transport, token, sim_node).sim_to_os(
+        joint_states_topic,
+        move |_runner, msg: JointStatesRaw| -> BoxFuture<std::result::Result<(), String>> {
+            let state = state.clone();
+            let names = arm_joints.clone();
+            let publisher = js_pub.clone();
+            Box::pin(async move {
+                emit_joint_states(&publisher, arm_id_raw, &state, &names, &msg).await
+            })
+        },
+    );
 
     bridge.run().await;
-    info!("telemetry: pipelines exited");
-}
-
-fn stamp_now_secs() -> f64 {
-    match peppygen::clock::now_ns() {
-        Ok(ns) => ns as f64 / 1e9,
-        Err(e) => {
-            warn!("peppygen::clock::now_ns failed ({e}); stamping with 0.0");
-            0.0
-        }
-    }
+    info!("telemetry: pipeline exited");
 }
 
 async fn emit_joint_states(
     publisher: &TopicPublisher,
+    arm_id: u8,
     state: &Arc<SharedState>,
     expected: &[String; ARM_DOF],
     msg: &JointStatesRaw,
@@ -171,7 +123,6 @@ async fn emit_joint_states(
     let have_limits =
         msg.limits_lower.len() == n_names && msg.limits_upper.len() == n_names;
 
-    let mut joint_names = Vec::with_capacity(ARM_DOF);
     let mut positions = Vec::with_capacity(ARM_DOF);
     let mut velocities = Vec::with_capacity(ARM_DOF);
     let mut limits_lower = Vec::with_capacity(ARM_DOF);
@@ -180,7 +131,6 @@ async fn emit_joint_states(
         let Some(&src) = by_name.get(name.as_str()) else {
             continue;
         };
-        joint_names.push(name.clone());
         positions.push(msg.positions[src]);
         velocities.push(msg.velocities[src]);
         if have_limits {
@@ -188,6 +138,22 @@ async fn emit_joint_states(
             limits_upper.push(msg.limits_upper[src]);
         }
     }
+
+    // The interface is fixed at 7 DOF: a partial sample can't be published and
+    // would corrupt the pose cache move_arm_joints anchors on, so drop it.
+    let Ok(positions): std::result::Result<[f64; ARM_DOF], _> =
+        positions.as_slice().try_into()
+    else {
+        warn!(
+            got = positions.len(),
+            "joint_states: incomplete arm sample (expected {ARM_DOF}); skipping"
+        );
+        return Ok(());
+    };
+    let velocities: [f64; ARM_DOF] = velocities
+        .as_slice()
+        .try_into()
+        .expect("velocities length matches positions");
 
     // Limits are static — cache once so move_arm_joints can clamp targets.
     if have_limits && limits_lower.len() == ARM_DOF {
@@ -203,56 +169,15 @@ async fn emit_joint_states(
         }
     }
 
-    // Only cache complete 7-DOF samples — a partial payload would corrupt the
-    // pose snapshot move_arm_joints + get_joint_positions read on each tick.
-    if positions.len() == ARM_DOF {
+    // Cache the latest pose for move_arm_joints' trajectory anchor.
+    {
         let mut latest = state.joint_states.lock().unwrap_or_else(|p| p.into_inner());
         *latest = Some(JointStatesLatest {
-            positions: positions.clone(),
+            positions: positions.to_vec(),
         });
-    } else {
-        warn!(
-            got = positions.len(),
-            "joint_states: incomplete arm sample (expected {ARM_DOF}); not caching"
-        );
     }
 
-    let payload = joint_states::build_message(
-        ROBOT_NAME.into(),
-        msg.step,
-        joint_names,
-        positions,
-        velocities,
-        stamp_now_secs(),
-    )
-    .map_err(|e| e.to_string())?;
-    publisher.publish(payload).await.map_err(|e| e.to_string())
-}
-
-async fn emit_tf_tree(
-    publisher: &TopicPublisher,
-    msg: &TfTreeRaw,
-    include_prefix: &str,
-    exclude_prefix: &str,
-) -> std::result::Result<(), String> {
-    let frames: Vec<tf_tree::MessageFramesItem> = msg
-        .frames
-        .iter()
-        .filter(|f| f.name.starts_with(include_prefix) && !f.name.starts_with(exclude_prefix))
-        .map(|f| tf_tree::MessageFramesItem {
-            name: f.name.clone(),
-            parent: f.parent.clone(),
-            position: f.position,
-            orientation: f.orientation,
-        })
-        .collect();
-
-    let payload = tf_tree::build_message(
-        ROBOT_NAME.into(),
-        msg.step,
-        frames,
-        stamp_now_secs(),
-    )
-    .map_err(|e| e.to_string())?;
+    let payload = joint_states::build_message(arm_id, positions, velocities)
+        .map_err(|e| e.to_string())?;
     publisher.publish(payload).await.map_err(|e| e.to_string())
 }

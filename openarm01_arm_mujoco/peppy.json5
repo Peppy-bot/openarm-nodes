@@ -16,49 +16,8 @@
   interfaces: {
     conforms_to: [
       { name: "openarm01_arm", tag: "v1" },
+      { name: "openarm01_joint_state_source", tag: "v1" },
     ],
-    // Engine-specific sim telemetry — NOT in openarm01_arm:v1 (shared interface
-    // is move_arm* + get_arm_id + get_joint_positions only). Sim emits these
-    // because it has cheap access to joint state, IMU, and the tf tree;
-    // real-hardware reports them via its own CAN/sensor channel.
-    topics: {
-      emits: [
-        {
-          name: "joint_states",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step: "u64",
-            joint_names: { $type: "array", $items: "string" },
-            positions: { $type: "array", $items: "f64" },
-            velocities: { $type: "array", $items: "f64" },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "tf_tree",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step: "u64",
-            frames: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                name: "string",
-                parent: "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                orientation: { $type: "array", $items: "f64", $length: 4 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-        // TODO: imu topic — declare here when robot_initializer_mujoco's
-        // bridge_extension publishes raw imu_<side> (sim_bridge.json5:38-39
-        // currently stubbed).
-      ],
-    },
   },
   execution: {
     language: "rust",

@@ -29,12 +29,6 @@ fn main() -> Result<()> {
             arm_id.raw()
         );
 
-        // Stamps must come from peppy's wall/sim clock (per launcher's
-        // framework.use_sim_time), not the monolith's time.time() in raw payloads.
-        peppygen::clock::init(&node_runner)
-            .await
-            .expect("peppygen::clock::init");
-
         // No shutdown handler — unlike the gripper we must NOT publish ctrl=0.0
         // on exit: zeroing arm joint targets would command the arm into a hard
         // self-collision pose. SIGINT cancels the token; the action loop exits
@@ -57,12 +51,6 @@ fn main() -> Result<()> {
         tokio::spawn(services::get_arm_id::run(
             node_runner.clone(),
             arm_id,
-            token.clone(),
-        ));
-
-        tokio::spawn(services::get_joint_positions::run(
-            node_runner.clone(),
-            shared.clone(),
             token.clone(),
         ));
 
