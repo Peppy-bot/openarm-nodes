@@ -19,8 +19,11 @@
       can_interface: "string",
       // URDF describing the robot (must include the world->base mount tree) and
       // the link where this arm's SRS chain starts. Used to build the rigid-body
-      // model for the in-process gravity/Coriolis feedforward.
-      urdf_path: "string",
+      // model for the in-process gravity/Coriolis feedforward. The default is the
+      // V1.0 description baked into this container (vendored from the repo-root
+      // `description/`, since the build context is the node dir); override only to
+      // point at a different description.
+      urdf_path: { $type: "string", $default: "/opt/openarm01_arm/openarm_v10.urdf" },
       base_link: "string", // e.g. "openarm_left_link0"
       // Hardware-loop rate (Hz). 500 Hz matches the OpenArm reference; the
       // feedforward is computed in-process (microseconds), so the loop is no

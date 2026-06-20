@@ -5,6 +5,11 @@ load at runtime to build the `srs_model` kinematics/dynamics in-process (gravity
 and Coriolis in the arm, IK in the tester). Point each node's `urdf_path` here and
 select the side with `base_link` (`openarm_left_link0` / `openarm_right_link0`).
 
+This file is the canonical copy. Because each node builds from its own directory
+as the container context, `openarm01_arm` vendors a build copy at
+`openarm01_arm/openarm_v10.urdf` (baked to `/opt/openarm01_arm/openarm_v10.urdf`,
+the `urdf_path` default). Keep the two in sync when editing the description.
+
 It is a flat, self-contained URDF (no xacro) that includes the
 `world -> openarm_body -> {left,right}_link0` mount tree, so gravity resolves in
 the world frame. Structurally identical to enactic's
