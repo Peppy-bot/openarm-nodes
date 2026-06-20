@@ -55,6 +55,10 @@ struct MotionResult {
     action_time: f64,
 }
 
+fn feedback_period(freq_hz: u32) -> Duration {
+    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
+}
+
 // Mirrors the real driver's target_in_limits: every joint inside the model's
 // range, non-finite rejected. Limits come from telemetry (MJCF / USD ranges).
 fn target_in_limits(target: &JointVec, limits: &[(f64, f64)]) -> bool {
@@ -243,6 +247,7 @@ async fn run_control_loop(
     token: &CancellationToken,
 ) -> MotionResult {
     let target = goal_ctx.request().data.joint_positions;
+    let feedback_period = feedback_period(goal_ctx.request().data.feedback_frequency);
     // Trajectory::new floors the requested duration at the per-joint
     // velocity-limit duration — a too-fast request (or 0 = no preference) is
     // slowed to the fastest safe move rather than rejected (interface contract).
@@ -265,6 +270,7 @@ async fn run_control_loop(
     );
     let trajectory = Trajectory::new(q_start, target, MAX_JOINT_VELOCITY_RAD_S, duration_s);
     let start = trajectory.motion_start;
+    let mut last_feedback = Instant::now();
     let mut consecutive_publish_failures: u32 = 0;
 
     loop {
@@ -292,6 +298,13 @@ async fn run_control_loop(
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
         let positions = snapshot_positions(state).unwrap_or(q_start);
+
+        if last_feedback.elapsed() >= feedback_period {
+            if let Err(e) = goal_ctx.publish_feedback(positions, elapsed_secs).await {
+                warn!("feedback: {e}");
+            }
+            last_feedback = Instant::now();
+        }
 
         // Time-based completion, exactly like the real driver: the trajectory
         // has played out and the servo holds the final setpoint. No

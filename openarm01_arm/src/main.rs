@@ -51,6 +51,9 @@ fn main() -> Result<()> {
         let arm_id = params.arm_id;
         let can_interface = params.can_interface.clone();
 
+        // Rates feed `Duration::from_micros(1_000_000 / rate)`, so a rate above
+        // 1 MHz would round to a 0 µs period; no real deployment approaches that,
+        // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
         assert!(
