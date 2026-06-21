@@ -6,35 +6,32 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use peppygen::exposed_actions::openarm01_arm::v1::{move_arm, move_arm_joints};
+use srs_model::Limit;
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::{ARM_DOF, JointVec};
-use srs_model::Limit;
 
-/// An accepted goal, handed from an action handler to the single control task.
-/// One channel carries both motion kinds so the control task selects on a single
-/// point and the same `busy` flag serialises every move.
+/// An accepted move goal, handed from an action handler to the single control
+/// task. One channel carries both move kinds so the control task selects on a
+/// single point and the same `busy` flag serialises them.
 pub enum Goal {
-    Joints(JointGoal),
-    Cartesian(CartesianGoal),
+    JointMove(JointMoveGoal),
+    CartesianMove(CartesianMoveGoal),
 }
 
-pub struct JointGoal {
+pub struct JointMoveGoal {
     pub target: JointVec,
     pub duration_s: f64,
-    pub feedback_period: Duration,
     pub ctx: move_arm_joints::GoalContext,
 }
 
-pub struct CartesianGoal {
+pub struct CartesianMoveGoal {
     pub target: Isometry3<f64>,
     pub duration_s: f64,
-    pub feedback_period: Duration,
     pub ctx: move_arm::GoalContext,
 }
 
@@ -48,6 +45,7 @@ pub async fn run_move_arm_joints(
     busy: Arc<AtomicBool>,
 ) {
     loop {
+        let claimed = AtomicBool::new(false);
         let ctx = match handle
             .handle_goal_next_request(|req| {
                 let data = &req.data;
@@ -58,12 +56,10 @@ pub async fn run_move_arm_joints(
                         "target joint positions out of range",
                     ));
                 }
-                if !(data.duration_s.is_finite() && data.duration_s >= 0.0) {
-                    return Ok(move_arm_joints::GoalResponse::reject(
-                        "duration_s must be finite and >= 0",
-                    ));
+                if let Err(reason) = check_duration(data.duration_s) {
+                    return Ok(move_arm_joints::GoalResponse::reject(reason));
                 }
-                if claim(&busy) {
+                if claim(&busy, &claimed) {
                     Ok(move_arm_joints::GoalResponse::accept())
                 } else {
                     Ok(move_arm_joints::GoalResponse::reject("arm is already executing a motion"))
@@ -75,15 +71,15 @@ pub async fn run_move_arm_joints(
             Ok(None) => break, // action closed (node shutting down)
             Err(e) => {
                 error!("move_arm_joints goal: {e}");
+                release_if_claimed(&busy, &claimed);
                 continue;
             }
         };
 
         let req = &ctx.request().data;
-        let goal = Goal::Joints(JointGoal {
+        let goal = Goal::JointMove(JointMoveGoal {
             target: req.joint_positions,
             duration_s: req.duration_s,
-            feedback_period: feedback_period(req.feedback_frequency),
             ctx,
         });
         send_or_release(&goals, goal, &busy).await;
@@ -91,15 +87,16 @@ pub async fn run_move_arm_joints(
 }
 
 /// Serves `move_arm` on its pre-exposed action: validates the world-frame pose
-/// (finite, non-degenerate quaternion) and duration, admits one goal at a time,
-/// and forwards it. Whether the pose is reachable is decided by the control task,
-/// which holds the live joint state needed to seed the IK solve.
+/// (finite, non-degenerate quaternion) and the duration, admits one goal at a
+/// time, and forwards it. Whether the pose is reachable is decided by the control
+/// task, which holds the live joint state needed to seed the IK solve.
 pub async fn run_move_arm(
     mut handle: move_arm::ActionHandle,
     goals: mpsc::Sender<Goal>,
     busy: Arc<AtomicBool>,
 ) {
     loop {
+        let claimed = AtomicBool::new(false);
         let ctx = match handle
             .handle_goal_next_request(|req| {
                 let data = &req.data;
@@ -108,12 +105,10 @@ pub async fn run_move_arm(
                         "invalid target pose (non-finite position or degenerate quaternion)",
                     ));
                 }
-                if !(data.duration_s.is_finite() && data.duration_s >= 0.0) {
-                    return Ok(move_arm::GoalResponse::reject(
-                        "duration_s must be finite and >= 0",
-                    ));
+                if let Err(reason) = check_duration(data.duration_s) {
+                    return Ok(move_arm::GoalResponse::reject(reason));
                 }
-                if claim(&busy) {
+                if claim(&busy, &claimed) {
                     Ok(move_arm::GoalResponse::accept())
                 } else {
                     Ok(move_arm::GoalResponse::reject("arm is already executing a motion"))
@@ -125,6 +120,7 @@ pub async fn run_move_arm(
             Ok(None) => break,
             Err(e) => {
                 error!("move_arm goal: {e}");
+                release_if_claimed(&busy, &claimed);
                 continue;
             }
         };
@@ -132,22 +128,37 @@ pub async fn run_move_arm(
         let req = &ctx.request().data;
         let target = parse_target_pose(&req.position, &req.orientation)
             .expect("pose validated at admission");
-        let goal = Goal::Cartesian(CartesianGoal {
+        let goal = Goal::CartesianMove(CartesianMoveGoal {
             target,
             duration_s: req.duration_s,
-            feedback_period: feedback_period(req.feedback_frequency),
             ctx,
         });
         send_or_release(&goals, goal, &busy).await;
     }
 }
 
-/// Atomically claim the single-flight slot shared by both actions; the control
-/// task clears it when the motion finishes. Returns true if the slot was free (the
-/// goal may be accepted), false if a motion is already running.
-fn claim(busy: &AtomicBool) -> bool {
-    busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+/// Try to take the single-flight slot shared by both move actions, recording the
+/// outcome in `claimed` so the admission loop's error path releases exactly what
+/// this iteration claimed. The control task clears the slot when the accepted
+/// motion finishes. Returns true if the slot was free (the goal may be accepted).
+fn claim(busy: &AtomicBool, claimed: &AtomicBool) -> bool {
+    let acquired = busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    claimed.store(acquired, Ordering::Relaxed);
+    acquired
+}
+
+/// Release the slot only if this admission iteration claimed it. The generated
+/// `handle_goal_next_request` can return `Err` after the decider accepted (the
+/// accept reply can fail to serialise or send), which would otherwise strand
+/// `busy` set with no `GoalContext` to ever clear it and wedge all admission. A
+/// reject-reply failure during a live motion takes the same path, so a blind
+/// release would steal the running move's claim; gating on `claimed` avoids both.
+fn release_if_claimed(busy: &AtomicBool, claimed: &AtomicBool) {
+    if claimed.load(Ordering::Relaxed) {
+        busy.store(false, Ordering::Release);
+    }
 }
 
 /// Forward an accepted goal to the control task, releasing the single-flight slot
@@ -160,9 +171,29 @@ async fn send_or_release(goals: &mpsc::Sender<Goal>, goal: Goal, busy: &AtomicBo
     }
 }
 
-/// Build a world-frame pose from the request arrays, or `None` if the position is
-/// non-finite or the quaternion is degenerate (near-zero norm). The quaternion is
-/// `[x, y, z, w]` (matches the kinematics interface) and is normalized.
+/// Reject a duration that is not a non-negative finite number, which the
+/// trajectory timing and `Duration::from_secs_f64` require. How long a move may
+/// take is the caller's concern, not the arm's: the caller observes progress on
+/// the always-on state streams and cancels the action if the move runs longer than
+/// it wants.
+fn check_duration(duration_s: f64) -> Result<(), &'static str> {
+    if duration_s.is_finite() && duration_s >= 0.0 {
+        Ok(())
+    } else {
+        Err("duration_s must be finite and >= 0")
+    }
+}
+
+/// True if every joint target lies within this arm's position limits. Non-finite
+/// values (NaN/inf) fall outside any range, so they are rejected too.
+fn target_in_limits(target: &JointVec, limits: &[Limit; ARM_DOF]) -> bool {
+    limits.iter().zip(target).all(|(limit, &q)| limit.contains(q))
+}
+
+/// Build a world-frame pose from a `move_arm` goal's `(position, quaternion)`
+/// arrays, or `None` if the position is non-finite or the quaternion is degenerate
+/// (near-zero norm). The quaternion is `[x, y, z, w]` (matches the kinematics
+/// interface) and is normalized.
 fn parse_target_pose(position: &[f64; 3], orientation: &[f64; 4]) -> Option<Isometry3<f64>> {
     if position.iter().chain(orientation).any(|v| !v.is_finite()) {
         return None;
@@ -177,25 +208,9 @@ fn parse_target_pose(position: &[f64; 3], orientation: &[f64; 4]) -> Option<Isom
     Some(Isometry3::from_parts(translation, rotation))
 }
 
-/// True if every joint target lies within this arm's position limits. Non-finite
-/// values (NaN/inf) fall outside any range, so they are rejected too.
-fn target_in_limits(target: &JointVec, limits: &[Limit; ARM_DOF]) -> bool {
-    limits.iter().zip(target).all(|(limit, &q)| limit.contains(q))
-}
-
-/// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
-fn feedback_period(freq_hz: u32) -> Duration {
-    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn feedback_period_floors_zero_freq() {
-        assert_eq!(feedback_period(0), Duration::from_secs(1));
-    }
 
     #[test]
     fn target_in_limits_accepts_home_and_rejects_out_of_range() {
@@ -219,6 +234,35 @@ mod tests {
         let mut inf = [0.0; ARM_DOF];
         inf[0] = f64::INFINITY;
         assert!(!target_in_limits(&inf, &limits));
+    }
+
+    #[test]
+    fn check_duration_rejects_non_finite_and_negative() {
+        assert!(check_duration(0.0).is_ok());
+        assert!(check_duration(30.0).is_ok());
+        assert!(check_duration(-0.1).is_err());
+        assert!(check_duration(f64::NAN).is_err());
+        assert!(check_duration(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn claim_takes_the_slot_once_and_records_it() {
+        let busy = AtomicBool::new(false);
+        let first = AtomicBool::new(false);
+        assert!(claim(&busy, &first)); // slot was free
+        assert!(first.load(Ordering::Relaxed));
+
+        // Second claim fails and records the failure (so its error path won't
+        // release the first claimant's slot).
+        let second = AtomicBool::new(false);
+        assert!(!claim(&busy, &second));
+        assert!(!second.load(Ordering::Relaxed));
+
+        // Only a recorded claim releases.
+        release_if_claimed(&busy, &second);
+        assert!(busy.load(Ordering::Acquire)); // still held
+        release_if_claimed(&busy, &first);
+        assert!(!busy.load(Ordering::Acquire)); // released
     }
 
     #[test]

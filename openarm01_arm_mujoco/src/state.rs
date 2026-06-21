@@ -1,6 +1,6 @@
-// Shared state between the telemetry pipeline (writer) and the action handlers
-// + get_joint_positions service (readers). move_arm_joints reads this on each
-// feedback tick for convergence + stall detection.
+// Shared state between the telemetry pipeline (writer) and move_arm_joints
+// (reader): the latest measured pose anchors each trajectory, and the cached
+// per-joint limits clamp goal targets.
 
 use std::sync::Arc;
 

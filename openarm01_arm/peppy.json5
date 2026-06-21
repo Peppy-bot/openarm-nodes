@@ -1,13 +1,32 @@
 // One arm of the openarm01 robot; instantiate twice, one per side, with a
 // distinct `arm_id`. A root component node: openarm01_backbone depends on it.
 // It owns the hardware control loop: gravity/Coriolis/friction feedforward
-// (gravity and Coriolis from the in-process srs_model) for compliant float, plus
-// trajectory tracking for accepted move_arm_joints goals.
+// (gravity and Coriolis from the in-process srs_model) for compliant float,
+// quintic trajectory tracking for accepted move_arm / move_arm_joints goals,
+// and ambient following of a streamed joint setpoint the rest of the time,
+// bidirectional with the always-on `joint_states` stream. A move preempts the
+// stream and the arm resumes following when it ends. The arm is a joint-space
+// servo: task-space commanders solve IK upstream.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_arm",
     tag: "v1",
+    depends_on: {
+      interfaces: [
+        // Streamed joint setpoints the arm follows between moves: optional and
+        // wildcard (`from_any`), so the arm boots with no producer bound and
+        // accepts any conforming one (teleop leader, planner, IK-solving
+        // commander). Task-space intent stays upstream: the producer solves IK
+        // and streams joints.
+        {
+          name: "openarm01_joint_command_source",
+          tag: "v1",
+          link_id: "commander",
+          from_any: true
+        },
+      ],
+    },
   },
   execution: {
     language: "rust",
@@ -25,13 +44,12 @@
       // point at a different description.
       urdf_path: { $type: "string", $default: "/opt/openarm01_arm/openarm_v10.urdf" },
       base_link: "string", // e.g. "openarm_left_link0"
-      // Hardware-loop rate (Hz). 500 Hz matches the OpenArm reference; the
-      // feedforward is computed in-process (microseconds), so the loop is no
-      // longer poll-bound. Confirm `overruns=0` at the target rate during bring-up.
-      control_rate_hz: { $type: "u32", $default: 100 },
+      // Hardware-loop rate (Hz). Required: pick deliberately per deployment
+      // (500 Hz matches the OpenArm reference) and confirm `overruns=0` at the
+      // target rate during bring-up.
+      control_rate_hz: "u32",
       // Per-cycle CAN read deadline (μs). Must fit the cycle budget (2 ms at 500 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
-      motion_timeout_s: { $type: "f64", $default: 30.0 },
       // Per-joint peak velocity (rad/s) used to size the quintic trajectory
       // duration. Defaults are the OpenArm V1.0 URDF joint velocity limits.
       max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
@@ -41,8 +59,17 @@
       max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.943946 },
       max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.943946 },
       max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
-      // MIT-control gains for trajectory mode, one per joint (1-indexed).
-      // Match the openarm teleop config (Kp/Kd in config/leader.yaml).
+      // End-effector linear-speed cap (m/s) for the Follow chase. The chase step
+      // is scaled so the hand never translates faster than this, so a first
+      // command or a producer hiccup far from the current pose eases over instead
+      // of lunging. Bounds hand speed regardless of which joints move (a shoulder
+      // sweep and a wrist twist that move the hand equally are capped equally); a
+      // step that does not move the hand runs at the motor rate. Raise it for a
+      // fast teleoperator; keep it gentle for bring-up.
+      max_ee_velocity_m_s: { $type: "f64", $default: 0.25 },
+      // MIT-control gains applied every control tick (startup, follow, and
+      // moves), one per joint (1-indexed). Match the openarm teleop config
+      // (Kp/Kd, identical in config/leader.yaml and follower.yaml).
       kp1: { $type: "f64", $default: 240.0 },
       kp2: { $type: "f64", $default: 240.0 },
       kp3: { $type: "f64", $default: 240.0 },
@@ -57,6 +84,14 @@
       kd5: { $type: "f64", $default: 0.2 },
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
+      // Rate (Hz) of the always-on measured-state stream (`joint_states`).
+      // Required: consumers' needs vary too much for a default to be meaningful.
+      state_rate_hz: "u32",
+      // How long (s) the arm keeps following a command stream after its last
+      // message before releasing the lock and holding. The watchdog that stops
+      // the arm when a producer dies, so it is a safety value with no universal
+      // default: pick it per producer rate. Required.
+      stream_timeout_s: "f64",
     }
   },
   interfaces: {
@@ -64,7 +99,19 @@
       {
         name: "openarm01_arm",
         tag: "v1"
+      },
+      {
+        name: "openarm01_joint_state_source",
+        tag: "v1"
       }
     ],
+    topics: {
+      consumes: [
+        {
+          name: "joint_commands",
+          link_id: "commander"
+        }
+      ],
+    },
   },
 }

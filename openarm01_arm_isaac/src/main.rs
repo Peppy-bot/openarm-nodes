@@ -29,10 +29,6 @@ fn main() -> Result<()> {
             arm_id.raw()
         );
 
-        peppygen::clock::init(&node_runner)
-            .await
-            .expect("peppygen::clock::init");
-
         let daemon_info = peppylib::info(&node_runner, None)
             .await
             .expect("peppylib::info");
@@ -51,12 +47,6 @@ fn main() -> Result<()> {
         tokio::spawn(services::get_arm_id::run(
             node_runner.clone(),
             arm_id,
-            token.clone(),
-        ));
-
-        tokio::spawn(services::get_joint_positions::run(
-            node_runner.clone(),
-            shared.clone(),
             token.clone(),
         ));
 
