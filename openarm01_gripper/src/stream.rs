@@ -26,7 +26,7 @@ pub async fn run(
         Ok(p) => p,
         Err(e) => return error!("declare gripper_states publisher: {e}"),
     };
-    let period = Duration::from_micros(1_000_000 / state_rate_hz.max(1) as u64);
+    let period = Duration::from_micros(1_000_000 / state_rate_hz as u64);
     let mut failing = false;
     loop {
         tokio::select! {

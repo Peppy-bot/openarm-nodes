@@ -1,6 +1,6 @@
-// Spawned per o/c keypress when a gripper is focused. Same shape as
-// move_arm_joints: fire at backbone, await the result, write it to the status
-// line. Live progress comes from the gripper_states stream (gripper_states.rs).
+// Spawned per o/c keypress when a gripper is focused: fire move_gripper at the
+// backbone, await the result, and write it to the status line. Live progress
+// comes from the gripper_states stream (gripper_states.rs).
 
 use std::sync::Arc;
 use std::time::Duration;
