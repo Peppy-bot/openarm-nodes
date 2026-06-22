@@ -16,6 +16,18 @@
           tag: "v1",
           link_id: "backbone"
         }
+      ],
+      interfaces: [
+        // Measured joint state of both arms, for live UI progress. Wildcard
+        // (`from_any`) so the panel binds to whatever arms are running and tells
+        // them apart by `arm_id`; optional, so the commander still boots with no
+        // arm up. This replaces reading move progress off the action feedback.
+        {
+          name: "openarm01_joint_state_source",
+          tag: "v1",
+          link_id: "arm_states",
+          from_any: true
+        }
       ]
     }
   },
@@ -31,6 +43,14 @@
         {
           link_id: "backbone",
           name: "move_gripper"
+        }
+      ]
+    },
+    topics: {
+      consumes: [
+        {
+          name: "joint_states",
+          link_id: "arm_states"
         }
       ]
     }
