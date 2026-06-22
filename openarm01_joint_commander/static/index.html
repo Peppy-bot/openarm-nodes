@@ -77,6 +77,21 @@
   .joint .target { text-align: right; font-weight: 500; }
   .joint .fb, .gripper .fb { text-align: right; color: var(--ink-50); }
 
+  /* Slider + actual-position shadow overlay. The caret marks the measured value
+     on the same track as the commanded thumb, so a commanded/actual gap reads at
+     a glance. Inset by the thumb radius so 0% and 100% line up with the thumb. */
+  .srow { position: relative; display: flex; align-items: center; }
+  .ghost {
+    position: absolute; left: 10px; right: 10px; top: 50%; height: 8px;
+    transform: translateY(-50%); pointer-events: none;
+  }
+  .ghost::after {
+    content: ''; position: absolute; top: -3px; width: 3px; height: 14px;
+    border-radius: 2px; background: var(--warn);
+    left: var(--at, 0%); transform: translateX(-50%); transition: left 0.08s linear;
+  }
+  .ghost.off::after { display: none; }
+
   .gripper {
     display: grid; grid-template-columns: 1fr 84px 130px; gap: 10px;
     align-items: center; margin: 10px 0 4px; font-variant-numeric: tabular-nums;
@@ -191,8 +206,11 @@ function build_arm(side, label) {
     row.className = 'joint';
     row.innerHTML = `
       <span class="name">j${i+1}</span>
-      <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
-             oninput="on_joint_input('${side}', ${i})" />
+      <div class="srow">
+        <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
+               oninput="on_joint_input('${side}', ${i})" />
+        <div class="ghost off" id="${side}_sh${i}"></div>
+      </div>
       <span class="target" id="${side}_t${i}">+0.000</span>
       <span class="fb" id="${side}_f${i}">---</span>`;
     joints.appendChild(row);
@@ -295,11 +313,20 @@ function apply_snapshot(snap) {
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
       // Slider bounds come from the server's joint_limits config.
+      const [lo, hi] = a.limits ? a.limits[i] : [-PI, PI];
       if (a.limits) {
         const el = $(`${side}_j${i}`);
-        const [lo, hi] = a.limits[i];
         if (el.min != lo) el.min = lo;
         if (el.max != hi) el.max = hi;
+      }
+      // Actual-position caret: place it on the track at the measured value.
+      const sh = $(`${side}_sh${i}`);
+      if (a.feedback && hi > lo) {
+        const pct = Math.max(0, Math.min(1, (a.feedback[i] - lo) / (hi - lo)));
+        sh.style.setProperty('--at', (pct * 100) + '%');
+        sh.classList.remove('off');
+      } else {
+        sh.classList.add('off');
       }
     }
 
