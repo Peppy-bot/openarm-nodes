@@ -16,75 +16,10 @@
   interfaces: {
     conforms_to: [
       { name: "openarm01_gripper", tag: "v1" },
+      // Always-on measured opening, mirroring the arm; consumers tell grippers
+      // apart by gripper_id.
+      { name: "openarm01_gripper_state_source", tag: "v1" },
     ],
-    // Engine-specific sim telemetry — NOT in openarm01_gripper:v1 (shared
-    // interface is move_gripper + get_gripper_id only). Sim emits these because
-    // it has cheap access to joint state, EE pose, and per-finger contacts;
-    // real-hardware has no per-finger force sensor and reports via its own channel.
-    topics: {
-      emits: [
-        {
-          name: "gripper_state",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step: "u64",
-            joint_names: { $type: "array", $items: "string" },
-            positions: { $type: "array", $items: "f64" },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "ee_pose",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step: "u64",
-            position: { $type: "array", $items: "f64", $length: 3 },
-            orientation: { $type: "array", $items: "f64", $length: 4 },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "contact_forces_finger1",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step: "u64",
-            contacts: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                body1: "string",
-                body2: "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                force: { $type: "array", $items: "f64", $length: 3 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-        {
-          name: "contact_forces_finger2",
-          qos_profile: "sensor_data",
-          message_format: {
-            robot: "string",
-            step: "u64",
-            contacts: {
-              $type: "array",
-              $items: {
-                $type: "object",
-                body1: "string",
-                body2: "string",
-                position: { $type: "array", $items: "f64", $length: 3 },
-                force: { $type: "array", $items: "f64", $length: 3 },
-              },
-            },
-            stamp: "f64",
-          },
-        },
-      ],
-    },
   },
   execution: {
     language: "rust",

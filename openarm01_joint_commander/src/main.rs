@@ -1,5 +1,6 @@
 mod actions;
 mod error;
+mod gripper_states;
 mod joint_states;
 mod state;
 mod ui;
@@ -20,9 +21,14 @@ fn main() -> Result<()> {
         let token = node_runner.cancellation_token().clone();
         let shared = state::new_shared();
 
-        // Feed the UI live arm joint state off the always-on joint_states stream
-        // (replaces move-progress relayed through the action feedback topic).
+        // Feed the UI live arm + gripper state off the always-on state streams
+        // (replaces move-progress relayed through the action feedback topics).
         tokio::spawn(joint_states::run(
+            node_runner.clone(),
+            shared.clone(),
+            token.clone(),
+        ));
+        tokio::spawn(gripper_states::run(
             node_runner.clone(),
             shared.clone(),
             token.clone(),

@@ -262,8 +262,8 @@ function apply_snapshot(snap) {
     const gs = $(`${side}_g`);
     if (gs.min != g.min) gs.min = g.min;
     if (gs.max != g.max) gs.max = g.max;
-    $(`${side}_gf`).textContent = g.feedback && g.feedback.length
-      ? g.feedback.map(x => x.toFixed(4)).join(', ')
+    $(`${side}_gf`).textContent = g.feedback != null
+      ? g.feedback.toFixed(4)
       : '---';
   }
   $('status').textContent = snap.status;

@@ -27,6 +27,15 @@
           tag: "v1",
           link_id: "arm_states",
           from_any: true
+        },
+        // Measured opening of both grippers, for live UI progress. Same wildcard
+        // optional pattern as the arms; told apart by `gripper_id`. Replaces
+        // reading gripper move progress off the action feedback.
+        {
+          name: "openarm01_gripper_state_source",
+          tag: "v1",
+          link_id: "gripper_states",
+          from_any: true
         }
       ]
     }
@@ -51,6 +60,10 @@
         {
           name: "joint_states",
           link_id: "arm_states"
+        },
+        {
+          name: "gripper_states",
+          link_id: "gripper_states"
         }
       ]
     }

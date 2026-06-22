@@ -152,11 +152,10 @@ async fn dispatch_left(
     goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
-    let mut downstream = match left_gripper_move_gripper::ActionHandle::fire_goal(
+    let downstream = match left_gripper_move_gripper::ActionHandle::fire_goal(
         runner,
         GOAL_TIMEOUT,
         left_gripper_move_gripper::GoalRequest {
-            feedback_frequency: req.feedback_frequency,
             position: req.position,
         },
         QoSProfile::SensorData,
@@ -177,7 +176,7 @@ async fn dispatch_left(
     };
     info!("move_gripper: forwarded to left gripper");
 
-    relay_left(&mut downstream, goal_ctx, token).await
+    relay_left(&downstream, goal_ctx, token).await
 }
 
 async fn dispatch_right(
@@ -186,11 +185,10 @@ async fn dispatch_right(
     goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
-    let mut downstream = match right_gripper_move_gripper::ActionHandle::fire_goal(
+    let downstream = match right_gripper_move_gripper::ActionHandle::fire_goal(
         runner,
         GOAL_TIMEOUT,
         right_gripper_move_gripper::GoalRequest {
-            feedback_frequency: req.feedback_frequency,
             position: req.position,
         },
         QoSProfile::SensorData,
@@ -211,20 +209,25 @@ async fn dispatch_right(
     };
     info!("move_gripper: forwarded to right gripper");
 
-    relay_right(&mut downstream, goal_ctx, token).await
+    relay_right(&downstream, goal_ctx, token).await
 }
 
 // The two relay_* helpers below are byte-equivalent except for the consumed-action
 // module path. Macros would deduplicate but obscure the call sites; two short
 // functions are clearer at the cost of mild repetition.
 async fn relay_left(
-    downstream: &mut left_gripper_move_gripper::ActionHandle,
+    downstream: &left_gripper_move_gripper::ActionHandle,
     goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
     let mut upstream_cancelled = false;
 
-    loop {
+    // Await the move result directly. Progress is observed on the gripper_states
+    // stream (consumed by the commander), so there is no feedback to relay; this
+    // loop only propagates cancel/shutdown downward while the goal runs.
+    let result_fut = downstream.get_result(RESULT_TIMEOUT);
+    tokio::pin!(result_fut);
+    let result = loop {
         tokio::select! {
             _ = token.cancelled() => {
                 // Propagate shutdown to the in-flight left gripper goal so it
@@ -240,23 +243,11 @@ async fn relay_left(
                 }
                 upstream_cancelled = true;
             }
-            feedback = downstream.on_next_feedback_message() => match feedback {
-                Ok(f) => {
-                    let action_time = f.action_time;
-                    if let Err(e) = goal_ctx.publish_feedback(f.joint_positions, action_time).await {
-                        warn!(
-                            error = %e,
-                            action_time,
-                            "move_gripper: upstream publish_feedback failed; continuing"
-                        );
-                    }
-                }
-                Err(_) => break,
-            }
+            r = &mut result_fut => break r,
         }
-    }
+    };
 
-    match downstream.get_result(RESULT_TIMEOUT).await {
+    match result {
         Ok(result) => match result.outcome {
             left_gripper_move_gripper::ResultOutcome::Completed(data) => Outcome {
                 success: data.success,
@@ -290,13 +281,18 @@ async fn relay_left(
 }
 
 async fn relay_right(
-    downstream: &mut right_gripper_move_gripper::ActionHandle,
+    downstream: &right_gripper_move_gripper::ActionHandle,
     goal_ctx: &GoalContext,
     token: &CancellationToken,
 ) -> Outcome {
     let mut upstream_cancelled = false;
 
-    loop {
+    // Await the move result directly. Progress is observed on the gripper_states
+    // stream (consumed by the commander), so there is no feedback to relay; this
+    // loop only propagates cancel/shutdown downward while the goal runs.
+    let result_fut = downstream.get_result(RESULT_TIMEOUT);
+    tokio::pin!(result_fut);
+    let result = loop {
         tokio::select! {
             _ = token.cancelled() => {
                 // Propagate shutdown to the in-flight right gripper goal so it
@@ -312,23 +308,11 @@ async fn relay_right(
                 }
                 upstream_cancelled = true;
             }
-            feedback = downstream.on_next_feedback_message() => match feedback {
-                Ok(f) => {
-                    let action_time = f.action_time;
-                    if let Err(e) = goal_ctx.publish_feedback(f.joint_positions, action_time).await {
-                        warn!(
-                            error = %e,
-                            action_time,
-                            "move_gripper: upstream publish_feedback failed; continuing"
-                        );
-                    }
-                }
-                Err(_) => break,
-            }
+            r = &mut result_fut => break r,
         }
-    }
+    };
 
-    match downstream.get_result(RESULT_TIMEOUT).await {
+    match result {
         Ok(result) => match result.outcome {
             right_gripper_move_gripper::ResultOutcome::Completed(data) => Outcome {
                 success: data.success,

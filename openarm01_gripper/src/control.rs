@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
-use tracing::{error, warn};
+use tracing::error;
 
 use openarm_can::GripperCan;
 
@@ -17,7 +17,6 @@ pub const KD: f64 = 0.2;
 
 struct AcceptedGoal {
     target_position_m: f64,
-    feedback_period: Duration,
 }
 
 #[derive(Clone)]
@@ -95,14 +94,13 @@ pub async fn run_move_gripper(
 
         let goal = AcceptedGoal {
             target_position_m: ctx.request().data.position,
-            feedback_period: feedback_period(ctx.request().data.feedback_frequency),
         };
 
         let gripper = Arc::clone(&gripper);
         let cfg = cfg.clone();
         let busy = Arc::clone(&busy);
         tokio::spawn(async move {
-            let result = run_control_loop(&gripper, &ctx, &cfg, goal).await;
+            let result = run_control_loop(&gripper, &cfg, goal).await;
             if let Err(e) = ctx
                 .complete(
                     result.success,
@@ -121,7 +119,6 @@ pub async fn run_move_gripper(
 
 async fn run_control_loop(
     gripper: &Arc<Mutex<GripperCan>>,
-    ctx: &move_gripper::GoalContext,
     cfg: &ControlConfig,
     goal: AcceptedGoal,
 ) -> MotionResult {
@@ -131,8 +128,6 @@ async fn run_control_loop(
     // The motor speaks radians; we keep all user-facing units in meters and convert at the FFI.
     let target_motor_rad = geometry::meters_to_motor_rad(goal.target_position_m);
     let start = Instant::now();
-    let mut last_feedback = Instant::now();
-    let mut feedback_failures: u32 = 0;
     // Absolute timeline the loop paces against, so per-cycle sleep overshoot does
     // not accumulate (matches the arm loop and the openarm teleop reference).
     let mut next_tick = tokio::time::Instant::now();
@@ -150,18 +145,6 @@ async fn run_control_loop(
         let elapsed = start.elapsed();
         let elapsed_secs = elapsed.as_secs_f64();
         let done = (position_m - goal.target_position_m).abs() < cfg.position_tolerance_m;
-
-        if last_feedback.elapsed() >= goal.feedback_period {
-            // Feedback is best-effort (QoS Standard); a drop must not stall the
-            // loop. Warn once per motion if it starts failing, then stay quiet.
-            if let Err(e) = ctx.publish_feedback(vec![position_m], elapsed_secs).await {
-                feedback_failures += 1;
-                if feedback_failures == 1 {
-                    warn!("move_gripper feedback publish failing, suppressing repeats: {e}");
-                }
-            }
-            last_feedback = Instant::now();
-        }
 
         if done {
             return MotionResult::reached(position_m, elapsed_secs);
@@ -185,21 +168,5 @@ async fn pace_to_deadline(next_tick: &mut tokio::time::Instant, period: Duration
         *next_tick = now;
     } else {
         tokio::time::sleep_until(*next_tick).await;
-    }
-}
-
-/// Convert a feedback frequency in Hz to a Duration. Floors at 1 Hz to avoid divide-by-zero.
-fn feedback_period(freq_hz: u32) -> Duration {
-    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn feedback_period_floors_zero_freq() {
-        // 0 Hz would otherwise divide by zero; we floor at 1 Hz.
-        assert_eq!(feedback_period(0), Duration::from_secs(1));
     }
 }
