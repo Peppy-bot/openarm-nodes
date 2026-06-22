@@ -23,13 +23,22 @@
       recv_timeout_us: { $type: "u32", $default: 1000 },
       // Error threshold (m) for goal completion.
       position_tolerance: { $type: "f64", $default: 0.001 },
-      motion_timeout_s: { $type: "f64", $default: 10.0 }
+      motion_timeout_s: { $type: "f64", $default: 10.0 },
+      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`).
+      // Required: consumers' needs vary too much for a default to be meaningful.
+      state_rate_hz: "u32"
     }
   },
   interfaces: {
     conforms_to: [
       {
         name: "openarm01_gripper",
+        tag: "v1"
+      },
+      // Always-on measured opening, mirroring the arm's joint_state_source so
+      // teleop/monitoring consume sim and real grippers identically (by gripper_id).
+      {
+        name: "openarm01_gripper_state_source",
         tag: "v1"
       }
     ]

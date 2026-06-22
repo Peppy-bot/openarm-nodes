@@ -1,5 +1,6 @@
-// Spawned per o/c keypress when a gripper is focused. Same shape as
-// move_arm_joints — fire at backbone, stream feedback, write result.
+// Spawned per o/c keypress when a gripper is focused: fire move_gripper at the
+// backbone, await the result, and write it to the status line. Live progress
+// comes from the gripper_states stream (gripper_states.rs).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +25,9 @@ pub fn spawn(
     token: CancellationToken,
     side: Side,
     position_m: f64,
-    feedback_hz: u32,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, side, position_m, feedback_hz).await;
+        run(runner, state, token, side, position_m).await;
     });
 }
 
@@ -37,20 +37,18 @@ async fn run(
     token: CancellationToken,
     side: Side,
     position_m: f64,
-    feedback_hz: u32,
 ) {
     let label = side.label();
-    info!(side = label, position_m, feedback_hz, "fire move_gripper");
+    info!(side = label, position_m, "fire move_gripper");
 
     let goal = backbone_move_gripper::GoalRequest {
         gripper_id: side.gripper_id(),
-        feedback_frequency: feedback_hz,
         position: position_m,
     };
 
     // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
     // targeting moved from call-site args to launcher-pinned link_id bindings.
-    let mut downstream = match backbone_move_gripper::ActionHandle::fire_goal(
+    let downstream = match backbone_move_gripper::ActionHandle::fire_goal(
         &runner,
         GOAL_TIMEOUT,
         goal,
@@ -69,25 +67,11 @@ async fn run(
         }
     };
 
-    loop {
-        tokio::select! {
-            _ = token.cancelled() => {
-                finalize(&state, side, false, "shutting down — feedback abandoned").await;
-                return;
-            }
-            feedback = downstream.on_next_feedback_message() => match feedback {
-                Ok(f) => {
-                    let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-                    s.gripper_mut(side).last_feedback = Some(f.joint_positions);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
+    // Await the move result, honoring shutdown. There is no feedback to drain:
+    // live progress is shown from the gripper_states stream (see gripper_states.rs).
     // v0.10 ResultResponse.outcome is a typed enum (Completed/Cancelled/
-    // Abandoned/Expired). Wrap in tokio::select! so a shutdown during the
-    // up-to-RESULT_TIMEOUT wait doesn't wedge the task.
+    // Abandoned/Expired); the select keeps a shutdown during the up-to-
+    // RESULT_TIMEOUT wait from wedging the task.
     let outcome = tokio::select! {
         _ = token.cancelled() => {
             finalize(&state, side, false, "shutting down — result abandoned").await;

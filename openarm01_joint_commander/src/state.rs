@@ -27,6 +27,14 @@ impl Side {
         }
     }
 
+    pub fn from_gripper_id(gripper_id: u8) -> Option<Self> {
+        match gripper_id {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            _ => None,
+        }
+    }
+
     pub fn gripper_id(self) -> u8 {
         match self {
             Self::Left => 0,
@@ -66,7 +74,8 @@ impl ArmTarget {
 #[derive(Clone, Debug)]
 pub struct GripperTarget {
     pub position: f64,
-    pub last_feedback: Option<Vec<f64>>,
+    // Measured gripper opening (m) from the gripper_states stream.
+    pub last_feedback: Option<f64>,
     pub in_flight: bool,
 }
 

@@ -6,9 +6,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct GripperStateLatest {
-    pub step: u64,
     pub positions: Vec<f64>,
-    pub stamp: f64,
 }
 
 #[derive(Debug, Default)]

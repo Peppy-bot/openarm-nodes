@@ -52,7 +52,6 @@ struct SetCtrlPayload<'a> {
 
 struct AcceptedGoal {
     target_position_m: f64,
-    feedback_period: Duration,
 }
 
 struct MotionResult {
@@ -61,10 +60,6 @@ struct MotionResult {
     message: String,
     final_positions: Vec<f64>,
     action_time: f64,
-}
-
-fn feedback_period(freq_hz: u32) -> Duration {
-    Duration::from_micros(1_000_000 / freq_hz.max(1) as u64)
 }
 
 pub async fn run(
@@ -185,7 +180,6 @@ pub async fn run(
 
         let goal = AcceptedGoal {
             target_position_m: goal_ctx.request().data.position,
-            feedback_period: feedback_period(goal_ctx.request().data.feedback_frequency),
         };
 
         let set_ctrl_pub = set_ctrl_pub.clone();
@@ -249,7 +243,6 @@ async fn run_control_loop(
     let per_finger = goal.target_position_m / 2.0;
 
     let start = Instant::now();
-    let mut last_feedback = Instant::now();
     let mut window_anchor: Option<f64> = None;
     let mut iter: u32 = 0;
     let mut consecutive_publish_failures: u32 = 0;
@@ -324,16 +317,6 @@ async fn run_control_loop(
         } else {
             false
         };
-
-        if last_feedback.elapsed() >= goal.feedback_period {
-            if let Err(e) = goal_ctx
-                .publish_feedback(snap.positions.clone(), elapsed_secs)
-                .await
-            {
-                warn!("feedback: {e}");
-            }
-            last_feedback = Instant::now();
-        }
 
         if within_tolerance {
             return MotionResult {

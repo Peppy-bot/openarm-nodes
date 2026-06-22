@@ -1,5 +1,6 @@
 mod control;
 mod geometry;
+mod stream;
 
 use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
@@ -24,7 +25,11 @@ fn main() -> Result<()> {
         let gripper_id = params.gripper_id;
         let can_interface = params.can_interface.clone();
 
+        // Rates feed `Duration::from_micros(1_000_000 / rate)`, so a rate above
+        // 1 MHz would round to a 0 µs period; no real deployment approaches that,
+        // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
+        assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
 
         let cfg = ControlConfig {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
@@ -63,6 +68,17 @@ fn main() -> Result<()> {
         info!("gripper ready");
 
         let gripper = Arc::new(Mutex::new(gripper));
+
+        // Always-on gripper_states publisher: reads the motor's cached state at
+        // state_rate_hz and emits the opening. It issues no CAN traffic of its
+        // own, so it never contends with the move control loop for the bus.
+        tokio::spawn(stream::run(
+            node_runner.clone(),
+            gripper_id,
+            params.state_rate_hz,
+            gripper.clone(),
+            node_runner.cancellation_token().clone(),
+        ));
 
         // Shutdown task: disables the motor and releases the lock. `peppy node
         // stop` cancels in-band via the runtime cancellation token (not a unix

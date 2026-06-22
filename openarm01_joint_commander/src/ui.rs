@@ -24,7 +24,6 @@ use crate::state::{ARM_DOF, ArmTarget, GripperTarget, SharedState, Side, UiState
 
 const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
-const FEEDBACK_HZ: u32 = 20;
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
 // Joint + gripper ranges from the robot model — the single source for slider
@@ -231,7 +230,6 @@ async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
         app.token.clone(),
         side,
         position_m,
-        FEEDBACK_HZ,
     );
 }
 
@@ -258,7 +256,8 @@ struct ArmView {
 #[derive(Serialize)]
 struct GripperView {
     position: f64,
-    feedback: Option<Vec<f64>>,
+    // Measured opening (m) from the gripper_states stream.
+    feedback: Option<f64>,
     in_flight: bool,
     min: f64,
     max: f64,
@@ -289,7 +288,7 @@ fn gripper_view(g: &GripperTarget) -> GripperView {
     let [min, max] = joint_limits().gripper;
     GripperView {
         position: g.position,
-        feedback: g.last_feedback.clone(),
+        feedback: g.last_feedback,
         in_flight: g.in_flight,
         min,
         max,
