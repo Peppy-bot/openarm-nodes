@@ -1,5 +1,5 @@
-// Always-on joint_commands publisher. For each armed arm, streams its target
-// joint setpoint at command_rate_hz so the arm follows it; a disarmed arm emits
+// Always-on joint_commands publisher. For each enabled arm, streams its target
+// joint setpoint at command_rate_hz so the arm follows it; a disabled arm emits
 // nothing, so the arm's stream timeout lapses and it holds. Re-publishing every
 // tick (even an unchanged target) keeps the arm's producer lock alive between
 // operator inputs. The arm clamps and rate-limits what it receives, so this only
@@ -35,7 +35,7 @@ pub async fn run(
         for side in [Side::Left, Side::Right] {
             let target = {
                 let s = state.lock().unwrap_or_else(|p| p.into_inner());
-                if !s.arm(side).armed {
+                if !s.arm(side).enabled {
                     continue;
                 }
                 s.arm(side).joints

@@ -40,7 +40,7 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // Stream operator joint setpoints to the armed arms (deadman in UiState).
+        // Stream operator joint setpoints to the enabled arms (deadman in UiState).
         tokio::spawn(command_stream::run(
             node_runner.clone(),
             shared.clone(),

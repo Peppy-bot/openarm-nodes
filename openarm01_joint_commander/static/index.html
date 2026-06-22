@@ -66,7 +66,7 @@
   }
   .badge.flight { color: var(--w); background: var(--warn); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
   .badge.stream { color: var(--w); background: var(--ok); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
-  button.armed { color: var(--w); background: var(--err); box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0,0,0,0.35); }
+  button.enabled { color: var(--w); background: var(--err); box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0,0,0,0.35); }
   button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .joint {
@@ -178,7 +178,7 @@ const GRIPPER_MAX = 0.044;
 const HOME_DURATION_S = 3;
 let ws = null;
 let latestSnap = null;
-const armed = { left: false, right: false };
+const enabled = { left: false, right: false };
 
 function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
 function $(id) { return document.getElementById(id); }
@@ -190,7 +190,7 @@ function build_arm(side, label) {
     <div id="${side}_arm_joints"></div>
     <div class="actions">
       <button onclick="reset_arm('${side}')">Home</button>
-      <button class="primary" id="${side}_arm_btn" onclick="arm_toggle('${side}')">Arm</button>
+      <button class="primary" id="${side}_arm_btn" onclick="toggle_enable('${side}')">Enable</button>
     </div>`;
   const joints = $(`${side}_arm_joints`);
   for (let i = 0; i < ARM_DOF; i++) {
@@ -235,10 +235,10 @@ function read_joints(side) {
   return joints;
 }
 
-// Slider moved: update the readout, and while armed stream the new setpoint.
+// Slider moved: update the readout, and while enabled stream the new setpoint.
 function on_joint_input(side, i) {
   $(`${side}_t${i}`).textContent = fmt(parseFloat($(`${side}_j${i}`).value));
-  if (armed[side]) send_arm_target(side);
+  if (enabled[side]) send_arm_target(side);
 }
 
 function send_arm_target(side) {
@@ -246,11 +246,11 @@ function send_arm_target(side) {
   ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side)}));
 }
 
-// Arm: snap sliders to the measured pose first so streaming starts where the arm
-// already is, then flip the deadman. Disarm just flips it back.
-function arm_toggle(side) {
+// Enable: snap sliders to the measured pose first so streaming starts where the
+// arm already is, then flip the deadman. Disable just flips it back.
+function toggle_enable(side) {
   if (!ws || ws.readyState !== 1) return;
-  const next = !armed[side];
+  const next = !enabled[side];
   if (next) {
     const fb = latestSnap && latestSnap[`${side}_arm`].feedback;
     if (fb) for (let i = 0; i < ARM_DOF; i++) {
@@ -258,13 +258,13 @@ function arm_toggle(side) {
       $(`${side}_t${i}`).textContent = fmt(fb[i]);
     }
   }
-  ws.send(JSON.stringify({cmd: 'set_armed', side, on: next}));
+  ws.send(JSON.stringify({cmd: 'set_enabled', side, on: next}));
 }
 
 function reset_arm(side) {
-  // Home parks the arm: disarm so the stream stops, then drive to all-zeros as a
+  // Home parks the arm: disable so the stream stops, then drive to all-zeros as a
   // discrete, time-bounded move.
-  if (armed[side]) ws.send(JSON.stringify({cmd: 'set_armed', side, on: false}));
+  if (enabled[side]) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = 0;
     $(`${side}_t${i}`).textContent = '+0.000';
@@ -293,13 +293,13 @@ function apply_snapshot(snap) {
   latestSnap = snap;
   for (const side of ['left', 'right']) {
     const a = snap[`${side}_arm`];
-    armed[side] = a.armed;
+    enabled[side] = a.enabled;
     const b = $(`${side}_arm_badge`);
-    b.textContent = a.armed ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
-    b.className = 'badge' + (a.armed ? ' stream' : (a.in_flight ? ' flight' : ''));
+    b.textContent = a.enabled ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
+    b.className = 'badge' + (a.enabled ? ' stream' : (a.in_flight ? ' flight' : ''));
     const armBtn = $(`${side}_arm_btn`);
-    armBtn.textContent = a.armed ? 'Disarm' : 'Arm';
-    armBtn.classList.toggle('armed', a.armed);
+    armBtn.textContent = a.enabled ? 'Disable' : 'Enable';
+    armBtn.classList.toggle('enabled', a.enabled);
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
       // Slider bounds + the visible min/max readout come from joint_limits.
@@ -311,9 +311,9 @@ function apply_snapshot(snap) {
         $(`${side}_lo${i}`).textContent = fmt(lo);
         $(`${side}_hi${i}`).textContent = fmt(hi);
       }
-      // While disarmed the slider mirrors the measured pose (you must arm to
-      // move), so the thumb shows where the arm is and arming never jumps.
-      if (!a.armed && a.feedback) {
+      // While disabled the slider mirrors the measured pose (you must enable to
+      // move), so the thumb shows where the arm is and enabling never jumps.
+      if (!a.enabled && a.feedback) {
         el.value = a.feedback[i];
         $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
       }

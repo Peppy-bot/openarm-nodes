@@ -59,8 +59,8 @@ pub struct ArmTarget {
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
     // Deadman for streaming: while false the commander emits no joint_commands
-    // and `joints` tracks the measured pose, so arming never steps the arm.
-    pub armed: bool,
+    // and `joints` tracks the measured pose, so enabling never steps the arm.
+    pub enabled: bool,
 }
 
 impl ArmTarget {
@@ -70,7 +70,7 @@ impl ArmTarget {
             last_feedback: None,
             in_flight: false,
             preempt: None,
-            armed: false,
+            enabled: false,
         }
     }
 }

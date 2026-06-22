@@ -129,12 +129,12 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             }
         }
     }
-    // The operator's connection is the streaming deadman: once it drops, disarm
+    // The operator's connection is the streaming deadman: once it drops, disable
     // both arms so command_stream stops emitting and each arm's stream timeout
     // releases it to hold.
     let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-    s.arm_mut(Side::Left).armed = false;
-    s.arm_mut(Side::Right).armed = false;
+    s.arm_mut(Side::Left).enabled = false;
+    s.arm_mut(Side::Right).enabled = false;
 }
 
 async fn handle_command(text: &str, app: &AppState) {
@@ -148,12 +148,12 @@ async fn handle_command(text: &str, app: &AppState) {
     match cmd {
         Command::FireArm { side, mut joints, duration_s } => {
             let side: Side = side.into();
-            // A discrete move preempts the live stream, so refuse one while armed
+            // A discrete move preempts the live stream, so refuse one while enabled
             // rather than relying on the UI to hide the button.
             {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                if s.arm(side).armed {
-                    s.set_status(format!("{} arm: disarm before a discrete move", side.label()));
+                if s.arm(side).enabled {
+                    s.set_status(format!("{} arm: disable before a discrete move", side.label()));
                     return;
                 }
             }
@@ -167,31 +167,31 @@ async fn handle_command(text: &str, app: &AppState) {
             let [lo, hi] = joint_limits().gripper;
             fire_gripper(app, side.into(), position.clamp(lo, hi)).await;
         }
-        Command::SetArmed { side, on } => {
+        Command::SetEnabled { side, on } => {
             let side: Side = side.into();
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             if on {
-                // Refuse to arm until a measured pose exists, then seed the target
+                // Refuse to enable until a measured pose exists, then seed the target
                 // on it so the first emitted command holds position instead of
                 // streaming the stale default.
                 let Some(measured) = s.arm(side).last_feedback else {
-                    s.set_status(format!("{} arm: no measured pose yet, not arming", side.label()));
+                    s.set_status(format!("{} arm: no measured pose yet, not enabling", side.label()));
                     return;
                 };
                 s.arm_mut(side).joints = measured;
             }
-            s.arm_mut(side).armed = on;
+            s.arm_mut(side).enabled = on;
             s.set_status(format!(
                 "{} arm: {}",
                 side.label(),
-                if on { "ARMED, streaming" } else { "disarmed" }
+                if on { "ENABLED, streaming" } else { "disabled" }
             ));
         }
         Command::SetArmTarget { side, mut joints } => {
             let side: Side = side.into();
             clamp_to_limits(&mut joints, side);
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.arm(side).armed {
+            if s.arm(side).enabled {
                 s.arm_mut(side).joints = joints;
             }
         }
@@ -297,7 +297,7 @@ struct ArmView {
     joints: [f64; ARM_DOF],
     feedback: Option<[f64; ARM_DOF]>,
     in_flight: bool,
-    armed: bool,
+    enabled: bool,
     // Per-joint [min, max] (rad) — the browser bounds its sliders with these.
     limits: [[f64; 2]; ARM_DOF],
 }
@@ -329,7 +329,7 @@ fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
         joints: a.joints,
         feedback: a.last_feedback,
         in_flight: a.in_flight,
-        armed: a.armed,
+        enabled: a.enabled,
         limits: *joint_limits().arm(side),
     }
 }
@@ -358,15 +358,15 @@ enum Command {
         side: SideWire,
         position: f64,
     },
-    // Toggle the streaming deadman for one arm. While armed, command_stream emits
-    // this arm's target on joint_commands; while disarmed it tracks the measured
+    // Toggle the streaming deadman for one arm. While enabled, command_stream emits
+    // this arm's target on joint_commands; while disabled it tracks the measured
     // pose and emits nothing.
-    SetArmed {
+    SetEnabled {
         side: SideWire,
         on: bool,
     },
-    // Update an armed arm's streamed target. Ignored while disarmed, where the
-    // target follows the measured pose so arming never steps the arm.
+    // Update an enabled arm's streamed target. Ignored while disabled, where the
+    // target follows the measured pose so enabling never steps the arm.
     SetArmTarget {
         side: SideWire,
         joints: [f64; ARM_DOF],
