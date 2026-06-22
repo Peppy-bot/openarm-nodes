@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
 use crate::config::ControlParams;
@@ -38,10 +39,15 @@ pub async fn run(
     let mut setpoint: Option<JointVec> = None;
     let mut failing = false;
 
+    // interval (not sleep) so the chase cadence holds at control_rate_hz instead
+    // of drifting by the per-tick work time; Delay avoids a catch-up burst.
+    let mut ticker = tokio::time::interval(params.control_period);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             _ = token.cancelled() => return,
-            _ = tokio::time::sleep(params.control_period) => {}
+            _ = ticker.tick() => {}
         }
 
         // A move owns the arm: yield and keep the anchor on the measured pose so
