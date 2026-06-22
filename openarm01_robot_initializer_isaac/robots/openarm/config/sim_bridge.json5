@@ -1,7 +1,12 @@
 // Bridge plugin registry for the Isaac openarm scene. `prim` paths must match
 // the USD stage — verify against openarm_bimanual.usd on first build.
 {
-  // Publishers emit raw peppylib JSON each tick.
+  // Telemetry publishers emit at this rate (Hz), decoupled from the physics
+  // tick so per-step JSON serialization does not saturate the sim thread.
+  // Read by bridge_extension; align with the consumer/real-arm rate.
+  telemetry_rate_hz: 100,
+
+  // Publishers emit raw peppylib JSON at telemetry_rate_hz (not every step).
   publishers: [
     // Whole-robot joint state. Arm Rust runtime subscribes and filters by
     // joint_names prefix (`openarm_<side>_joint`) to slice its 7-DOF set.

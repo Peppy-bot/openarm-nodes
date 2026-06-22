@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import gc
 import logging
+import time
 from pathlib import Path
 from typing import Optional
+
+import pyjson5
 
 from sim_ext_core import (
     ActuatorCtrlBridge,
@@ -70,7 +73,10 @@ class IsaacBridgeExtension:
         self._plugins: list = []
         self._sim_articulation: Optional[IsaacArticulation] = None
         self._sim_control: Optional[IsaacSimControl] = None
+        self._readers: list = []
         self._step: int = 0
+        self._last_publish_s: float = 0.0
+        self._telemetry_period_s: float = 0.0
 
     def startup(self) -> None:
         """Load config, build plugins, register subscriptions, start I/O."""
@@ -79,6 +85,16 @@ class IsaacBridgeExtension:
             default_node_name=_DEFAULT_NODE_NAME,
         )
         _validate_config(self._config)
+
+        # Telemetry publishers emit at telemetry_rate_hz (from sim_bridge.json5),
+        # decoupled from the physics tick: serializing every reader per step
+        # saturates the single sim thread and starves the I/O thread feeding
+        # set_ctrl. BridgeConfig (base image) doesn't carry this field, so read it
+        # directly. Writers and the physics step still run every tick.
+        raw = pyjson5.loads(_DEFAULT_CONFIG_PATH.read_text())
+        rate_hz = float(raw.get("telemetry_rate_hz", 100.0))
+        self._telemetry_period_s = 1.0 / rate_hz if rate_hz > 0 else 0.0
+
         self._io = PeppylibIO(self._config)
         self._plugins = _build_plugins(self._config)
 
@@ -99,6 +115,10 @@ class IsaacBridgeExtension:
             for source_node, topic, qos in plugin.subscriptions():
                 self._io.register_subscription(source_node, topic, qos)
 
+        # Publishers (no subscriptions) are throttled in step(); writers run
+        # every tick. Mirrors the MuJoCo bridge's writer/reader split.
+        self._readers = [p for p in self._plugins if not p.subscriptions()]
+
         self._io.start()
         self._step = 0
         logger.info(
@@ -116,8 +136,17 @@ class IsaacBridgeExtension:
             return
 
         self._step += 1
+        # Throttle publishers to telemetry_rate_hz (sim_bridge.json5); writers and
+        # SimControl run every tick. Decouples per-step JSON serialization from
+        # the physics tick so the sim thread stops saturating.
+        now = time.monotonic()
+        publish_now = now - self._last_publish_s >= self._telemetry_period_s
+        if publish_now:
+            self._last_publish_s = now
         for plugin in self._plugins:
             if not plugin.is_ready and not plugin.try_setup():
+                continue
+            if not publish_now and plugin in self._readers:
                 continue
             plugin.on_step(self._step, self._io)
 

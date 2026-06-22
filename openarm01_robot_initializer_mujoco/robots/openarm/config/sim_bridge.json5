@@ -2,7 +2,12 @@
 // (`<topic>_left` / `<topic>_right`) lines up with the typed peppygen topic
 // names on the gripper/arm Rust side.
 {
-  // Publishers emit raw peppylib JSON each tick.
+  // Telemetry publishers emit at this rate (Hz), decoupled from the ~500 Hz
+  // physics tick so per-step JSON serialization does not saturate the sim
+  // thread. Read by bridge_extension; align with the consumer/real-arm rate.
+  telemetry_rate_hz: 100,
+
+  // Publishers emit raw peppylib JSON at telemetry_rate_hz (not every step).
   publishers: [
     // Whole-robot joint state. Consumers slice by joint name on their side.
     { type: "joint_states", topic: "joint_states", robot_name: "openarm" },
