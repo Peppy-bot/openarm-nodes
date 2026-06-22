@@ -63,7 +63,7 @@ async fn run(
 
     // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
     // targeting moved from call-site args to launcher-pinned link_id bindings.
-    let mut downstream = match backbone_move_arm_joints::ActionHandle::fire_goal(
+    let downstream = match backbone_move_arm_joints::ActionHandle::fire_goal(
         &runner,
         GOAL_TIMEOUT,
         goal,
@@ -82,14 +82,17 @@ async fn run(
         }
     };
 
-    // Feedback loop — drain in-order until the stream closes, we're cancelled,
-    // or a new Send preempts this goal (cancel propagates to the arm, which
-    // stops and returns a cancelled result through the normal path).
+    // Await the move result, honoring preempt (a new Send cancels this goal) and
+    // shutdown. There is no feedback to drain: live progress is shown from the
+    // joint_states stream (see joint_states.rs). v0.10 ResultResponse.outcome is
+    // a typed enum (Completed/Cancelled/Abandoned/Expired).
+    let result_fut = downstream.get_result(RESULT_TIMEOUT);
+    tokio::pin!(result_fut);
     let mut preempted = false;
-    loop {
+    let outcome = loop {
         tokio::select! {
             _ = token.cancelled() => {
-                finalize(&state, side, false, "shutting down — feedback abandoned").await;
+                finalize(&state, side, false, "shutting down — result abandoned").await;
                 return;
             }
             _ = preempt.cancelled(), if !preempted => {
@@ -98,25 +101,8 @@ async fn run(
                     warn!(side = side.label(), error = %e, "preempt cancel failed");
                 }
             }
-            feedback = downstream.on_next_feedback_message() => match feedback {
-                Ok(f) => {
-                    let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-                    s.arm_mut(side).last_feedback = Some(f.joint_positions);
-                }
-                Err(_) => break,
-            }
+            result = &mut result_fut => break result,
         }
-    }
-
-    // v0.10 ResultResponse.outcome is a typed enum (Completed/Cancelled/
-    // Abandoned/Expired). Wrap in tokio::select! so a shutdown during the
-    // up-to-RESULT_TIMEOUT wait doesn't wedge the task.
-    let outcome = tokio::select! {
-        _ = token.cancelled() => {
-            finalize(&state, side, false, "shutting down — result abandoned").await;
-            return;
-        }
-        result = downstream.get_result(RESULT_TIMEOUT) => result,
     };
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
