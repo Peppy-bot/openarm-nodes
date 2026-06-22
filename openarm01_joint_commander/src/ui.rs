@@ -145,31 +145,40 @@ async fn handle_command(text: &str, app: &AppState) {
             return;
         }
     };
-    let limits = joint_limits();
     match cmd {
         Command::FireArm { side, mut joints, duration_s } => {
             let side: Side = side.into();
-            for (j, &[lo, hi]) in joints.iter_mut().zip(limits.arm(side).iter()) {
-                *j = j.clamp(lo, hi);
+            // A discrete move preempts the live stream, so refuse one while armed
+            // rather than relying on the UI to hide the button.
+            {
+                let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                if s.arm(side).armed {
+                    s.set_status(format!("{} arm: disarm before a discrete move", side.label()));
+                    return;
+                }
             }
+            clamp_to_limits(&mut joints, side);
             // The arm floors the duration at its velocity-limit minimum; this
             // guard only catches garbage input (NaN, negative, absurd).
             let duration_s = if duration_s.is_finite() { duration_s.clamp(0.0, 30.0) } else { 0.0 };
             fire_arm(app, side, joints, duration_s).await;
         }
         Command::FireGripper { side, position } => {
-            let position = position.clamp(limits.gripper[0], limits.gripper[1]);
-            fire_gripper(app, side.into(), position).await;
+            let [lo, hi] = joint_limits().gripper;
+            fire_gripper(app, side.into(), position.clamp(lo, hi)).await;
         }
         Command::SetArmed { side, on } => {
             let side: Side = side.into();
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            // Seed the streamed target at the measured pose on arming so the first
-            // emitted command holds position regardless of the browser's snap.
             if on {
-                if let Some(measured) = s.arm(side).last_feedback {
-                    s.arm_mut(side).joints = measured;
-                }
+                // Refuse to arm until a measured pose exists, then seed the target
+                // on it so the first emitted command holds position instead of
+                // streaming the stale default.
+                let Some(measured) = s.arm(side).last_feedback else {
+                    s.set_status(format!("{} arm: no measured pose yet, not arming", side.label()));
+                    return;
+                };
+                s.arm_mut(side).joints = measured;
             }
             s.arm_mut(side).armed = on;
             s.set_status(format!(
@@ -180,14 +189,20 @@ async fn handle_command(text: &str, app: &AppState) {
         }
         Command::SetArmTarget { side, mut joints } => {
             let side: Side = side.into();
-            for (j, &[lo, hi]) in joints.iter_mut().zip(limits.arm(side).iter()) {
-                *j = j.clamp(lo, hi);
-            }
+            clamp_to_limits(&mut joints, side);
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             if s.arm(side).armed {
                 s.arm_mut(side).joints = joints;
             }
         }
+    }
+}
+
+// Clamp each joint setpoint into its configured [min, max]. The single clamp
+// path for every operator-driven arm command; the arm clamps again on its side.
+fn clamp_to_limits(joints: &mut [f64; ARM_DOF], side: Side) {
+    for (j, &[lo, hi]) in joints.iter_mut().zip(joint_limits().arm(side).iter()) {
+        *j = j.clamp(lo, hi);
     }
 }
 
@@ -336,9 +351,7 @@ enum Command {
     FireArm {
         side: SideWire,
         joints: [f64; ARM_DOF],
-        // Requested move duration (s); 0 = fastest safe. Default keeps older
-        // clients without the field working.
-        #[serde(default)]
+        // Requested move duration (s); 0 = fastest safe.
         duration_s: f64,
     },
     FireGripper {
@@ -373,5 +386,53 @@ impl From<SideWire> for Side {
             SideWire::Left => Side::Left,
             SideWire::Right => Side::Right,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_pins_each_joint_into_its_range() {
+        for side in [Side::Left, Side::Right] {
+            let limits = joint_limits().arm(side);
+
+            let mut high = [f64::INFINITY; ARM_DOF];
+            clamp_to_limits(&mut high, side);
+            for (v, &[_, hi]) in high.iter().zip(limits.iter()) {
+                assert_eq!(*v, hi);
+            }
+
+            let mut low = [f64::NEG_INFINITY; ARM_DOF];
+            clamp_to_limits(&mut low, side);
+            for (v, &[lo, _]) in low.iter().zip(limits.iter()) {
+                assert_eq!(*v, lo);
+            }
+        }
+    }
+
+    #[test]
+    fn clamp_leaves_in_range_values_untouched() {
+        let limits = joint_limits().arm(Side::Left);
+        let mut mid = [0.0; ARM_DOF];
+        for (m, &[lo, hi]) in mid.iter_mut().zip(limits.iter()) {
+            *m = (lo + hi) / 2.0;
+        }
+        let before = mid;
+        clamp_to_limits(&mut mid, Side::Left);
+        assert_eq!(mid, before);
+    }
+
+    #[test]
+    fn config_joint_limits_are_well_formed() {
+        // Each range must be non-empty so clamp and the slider bounds are valid.
+        for side in [Side::Left, Side::Right] {
+            for &[lo, hi] in joint_limits().arm(side).iter() {
+                assert!(lo < hi, "joint range [{lo}, {hi}] must be non-empty");
+            }
+        }
+        let [lo, hi] = joint_limits().gripper;
+        assert!(lo < hi, "gripper range [{lo}, {hi}] must be non-empty");
     }
 }
