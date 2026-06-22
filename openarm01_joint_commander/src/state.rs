@@ -58,6 +58,9 @@ pub struct ArmTarget {
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
+    // Deadman for streaming: while false the commander emits no joint_commands
+    // and `joints` tracks the measured pose, so arming never steps the arm.
+    pub armed: bool,
 }
 
 impl ArmTarget {
@@ -67,6 +70,7 @@ impl ArmTarget {
             last_feedback: None,
             in_flight: false,
             preempt: None,
+            armed: false,
         }
     }
 }

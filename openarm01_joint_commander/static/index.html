@@ -65,6 +65,9 @@
     box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
   }
   .badge.flight { color: var(--w); background: var(--warn); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+  .badge.stream { color: var(--w); background: var(--ok); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+  button.armed { color: var(--w); background: var(--err); box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0,0,0,0.35); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .joint {
     display: grid; grid-template-columns: 30px 1fr 66px 66px; gap: 10px;
@@ -163,6 +166,8 @@ const PI = Math.PI;
 const ARM_DOF = 7;
 const GRIPPER_MAX = 0.044;
 let ws = null;
+let latestSnap = null;
+const armed = { left: false, right: false };
 
 function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
 function $(id) { return document.getElementById(id); }
@@ -176,8 +181,9 @@ function build_arm(side, label) {
       <label class="dur" title="move duration in seconds; 0 = fastest safe move">
         duration <input type="number" id="${side}_dur" value="2" min="0" max="30" step="0.5"> s
       </label>
+      <button id="${side}_arm_btn" onclick="arm_toggle('${side}')">Arm</button>
       <button onclick="reset_arm('${side}')">Home</button>
-      <button class="primary" onclick="fire_arm('${side}')">Send</button>
+      <button class="primary" id="${side}_send_btn" onclick="fire_arm('${side}')">Send</button>
     </div>`;
   const joints = $(`${side}_arm_joints`);
   for (let i = 0; i < ARM_DOF; i++) {
@@ -186,7 +192,7 @@ function build_arm(side, label) {
     row.innerHTML = `
       <span class="name">j${i+1}</span>
       <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
-             oninput="document.getElementById('${side}_t${i}').textContent = fmt(parseFloat(this.value))" />
+             oninput="on_joint_input('${side}', ${i})" />
       <span class="target" id="${side}_t${i}">+0.000</span>
       <span class="fb" id="${side}_f${i}">---</span>`;
     joints.appendChild(row);
@@ -210,20 +216,53 @@ function build_gripper(side, label) {
     </div>`;
 }
 
+function read_joints(side) {
+  const joints = [];
+  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
+  return joints;
+}
+
+// Slider moved: update the readout, and while armed stream the new setpoint.
+function on_joint_input(side, i) {
+  $(`${side}_t${i}`).textContent = fmt(parseFloat($(`${side}_j${i}`).value));
+  if (armed[side]) send_arm_target(side);
+}
+
+function send_arm_target(side) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side)}));
+}
+
+// Arm: snap sliders to the measured pose first so streaming starts where the arm
+// already is, then flip the deadman. Disarm just flips it back.
+function arm_toggle(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const next = !armed[side];
+  if (next) {
+    const fb = latestSnap && latestSnap[`${side}_arm`].feedback;
+    if (fb) for (let i = 0; i < ARM_DOF; i++) {
+      $(`${side}_j${i}`).value = fb[i];
+      $(`${side}_t${i}`).textContent = fmt(fb[i]);
+    }
+  }
+  ws.send(JSON.stringify({cmd: 'set_armed', side, on: next}));
+}
+
 function reset_arm(side) {
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = 0;
     $(`${side}_t${i}`).textContent = '+0.000';
   }
-  fire_arm(side);  // Home is a motion: send the all-zeros goal at the panel's duration
+  // Armed: stream to home and let the arm slew there. Disarmed: fire the
+  // all-zeros move goal at the panel's duration.
+  if (armed[side]) send_arm_target(side);
+  else fire_arm(side);
 }
 
 function fire_arm(side) {
   if (!ws || ws.readyState !== 1) return;
-  const joints = [];
-  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
   const duration_s = Math.max(0, parseFloat($(`${side}_dur`).value) || 0);
-  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints, duration_s}));
+  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: read_joints(side), duration_s}));
 }
 
 function set_gripper(side, m) {
@@ -239,11 +278,20 @@ function fire_gripper(side) {
 }
 
 function apply_snapshot(snap) {
+  latestSnap = snap;
   for (const side of ['left', 'right']) {
     const a = snap[`${side}_arm`];
+    armed[side] = a.armed;
     const b = $(`${side}_arm_badge`);
-    b.textContent = a.in_flight ? 'in flight' : 'idle';
-    b.className = 'badge' + (a.in_flight ? ' flight' : '');
+    b.textContent = a.armed ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
+    b.className = 'badge' + (a.armed ? ' stream' : (a.in_flight ? ' flight' : ''));
+    const armBtn = $(`${side}_arm_btn`);
+    armBtn.textContent = a.armed ? 'Disarm' : 'Arm';
+    armBtn.classList.toggle('armed', a.armed);
+    // While armed the slider stream owns the arm; the discrete move + duration
+    // would preempt it, so lock them out.
+    $(`${side}_send_btn`).disabled = a.armed;
+    $(`${side}_dur`).disabled = a.armed;
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
       // Slider bounds come from the server's joint_limits config.

@@ -129,6 +129,12 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             }
         }
     }
+    // The operator's connection is the streaming deadman: once it drops, disarm
+    // both arms so command_stream stops emitting and each arm's stream timeout
+    // releases it to hold.
+    let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+    s.arm_mut(Side::Left).armed = false;
+    s.arm_mut(Side::Right).armed = false;
 }
 
 async fn handle_command(text: &str, app: &AppState) {
@@ -154,6 +160,33 @@ async fn handle_command(text: &str, app: &AppState) {
         Command::FireGripper { side, position } => {
             let position = position.clamp(limits.gripper[0], limits.gripper[1]);
             fire_gripper(app, side.into(), position).await;
+        }
+        Command::SetArmed { side, on } => {
+            let side: Side = side.into();
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            // Seed the streamed target at the measured pose on arming so the first
+            // emitted command holds position regardless of the browser's snap.
+            if on {
+                if let Some(measured) = s.arm(side).last_feedback {
+                    s.arm_mut(side).joints = measured;
+                }
+            }
+            s.arm_mut(side).armed = on;
+            s.set_status(format!(
+                "{} arm: {}",
+                side.label(),
+                if on { "ARMED, streaming" } else { "disarmed" }
+            ));
+        }
+        Command::SetArmTarget { side, mut joints } => {
+            let side: Side = side.into();
+            for (j, &[lo, hi]) in joints.iter_mut().zip(limits.arm(side).iter()) {
+                *j = j.clamp(lo, hi);
+            }
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            if s.arm(side).armed {
+                s.arm_mut(side).joints = joints;
+            }
         }
     }
 }
@@ -249,6 +282,7 @@ struct ArmView {
     joints: [f64; ARM_DOF],
     feedback: Option<[f64; ARM_DOF]>,
     in_flight: bool,
+    armed: bool,
     // Per-joint [min, max] (rad) — the browser bounds its sliders with these.
     limits: [[f64; 2]; ARM_DOF],
 }
@@ -280,6 +314,7 @@ fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
         joints: a.joints,
         feedback: a.last_feedback,
         in_flight: a.in_flight,
+        armed: a.armed,
         limits: *joint_limits().arm(side),
     }
 }
@@ -309,6 +344,19 @@ enum Command {
     FireGripper {
         side: SideWire,
         position: f64,
+    },
+    // Toggle the streaming deadman for one arm. While armed, command_stream emits
+    // this arm's target on joint_commands; while disarmed it tracks the measured
+    // pose and emits nothing.
+    SetArmed {
+        side: SideWire,
+        on: bool,
+    },
+    // Update an armed arm's streamed target. Ignored while disarmed, where the
+    // target follows the measured pose so arming never steps the arm.
+    SetArmTarget {
+        side: SideWire,
+        joints: [f64; ARM_DOF],
     },
 }
 
