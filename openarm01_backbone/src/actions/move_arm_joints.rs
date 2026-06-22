@@ -159,7 +159,6 @@ async fn dispatch_left(
         runner,
         GOAL_TIMEOUT,
         left_arm_move_arm_joints::GoalRequest {
-            feedback_frequency: req.feedback_frequency,
             joint_positions: req.joint_positions,
             duration_s: req.duration_s,
         },
@@ -194,7 +193,6 @@ async fn dispatch_right(
         runner,
         GOAL_TIMEOUT,
         right_arm_move_arm_joints::GoalRequest {
-            feedback_frequency: req.feedback_frequency,
             joint_positions: req.joint_positions,
             duration_s: req.duration_s,
         },

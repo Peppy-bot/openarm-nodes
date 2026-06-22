@@ -28,10 +28,9 @@ pub fn spawn(
     side: Side,
     joint_positions: [f64; ARM_DOF],
     duration_s: f64,
-    feedback_hz: u32,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, preempt, side, joint_positions, duration_s, feedback_hz).await;
+        run(runner, state, token, preempt, side, joint_positions, duration_s).await;
     });
 }
 
@@ -44,19 +43,12 @@ async fn run(
     side: Side,
     joint_positions: [f64; ARM_DOF],
     duration_s: f64,
-    feedback_hz: u32,
 ) {
     let label = side.label();
-    info!(
-        side = label,
-        ?joint_positions,
-        feedback_hz,
-        "fire move_arm_joints"
-    );
+    info!(side = label, ?joint_positions, "fire move_arm_joints");
 
     let goal = backbone_move_arm_joints::GoalRequest {
         arm_id: side.arm_id(),
-        feedback_frequency: feedback_hz,
         joint_positions,
         duration_s,
     };
