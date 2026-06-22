@@ -414,14 +414,16 @@ mod tests {
 
     #[test]
     fn clamp_leaves_in_range_values_untouched() {
-        let limits = joint_limits().arm(Side::Left);
-        let mut mid = [0.0; ARM_DOF];
-        for (m, &[lo, hi]) in mid.iter_mut().zip(limits.iter()) {
-            *m = (lo + hi) / 2.0;
+        for side in [Side::Left, Side::Right] {
+            let limits = joint_limits().arm(side);
+            let mut mid = [0.0; ARM_DOF];
+            for (m, &[lo, hi]) in mid.iter_mut().zip(limits.iter()) {
+                *m = (lo + hi) / 2.0;
+            }
+            let before = mid;
+            clamp_to_limits(&mut mid, side);
+            assert_eq!(mid, before);
         }
-        let before = mid;
-        clamp_to_limits(&mut mid, Side::Left);
-        assert_eq!(mid, before);
     }
 
     #[test]

@@ -45,7 +45,11 @@ pub fn clamp_to_limits(state: &Arc<SharedState>, target: JointVec) -> Option<Joi
         .filter(|l| l.len() == DOF)?;
     let mut clamped = target;
     for (q, &(lo, hi)) in clamped.iter_mut().zip(limits.iter()) {
-        *q = q.clamp(lo, hi);
+        // Skip a malformed tuple (NaN, inf, or lo > hi) rather than let
+        // f64::clamp panic; a bad model range degrades to no clamp, not a crash.
+        if lo.is_finite() && hi.is_finite() && lo <= hi {
+            *q = q.clamp(lo, hi);
+        }
     }
     Some(clamped)
 }

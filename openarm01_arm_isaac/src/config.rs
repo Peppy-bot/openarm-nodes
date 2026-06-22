@@ -34,8 +34,8 @@ impl ControlParams {
             p.max_joint_velocity_rad_s_7,
         ];
         assert!(
-            max_joint_velocity.iter().all(|v| *v > 0.0),
-            "all max_joint_velocity_rad_s_N must be > 0"
+            max_joint_velocity.iter().all(|v| v.is_finite() && *v > 0.0),
+            "all max_joint_velocity_rad_s_N must be finite and > 0"
         );
         Self {
             control_period: Duration::from_micros(1_000_000 / p.control_rate_hz as u64),
