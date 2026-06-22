@@ -205,7 +205,6 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
         side,
         joints,
         duration_s,
-        FEEDBACK_HZ,
     );
 }
 
