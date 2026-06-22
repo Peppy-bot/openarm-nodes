@@ -86,7 +86,7 @@
       // Rate (Hz) at which an armed arm's target setpoint is re-published on
       // joint_commands. Must stay comfortably above 1 / the arm's stream_timeout_s
       // so the producer lock survives between operator inputs.
-      command_rate_hz: { $type: "u32", $default: 50 }
+      command_rate_hz: { $type: "u32", $default: 100 }
     }
   }
 }

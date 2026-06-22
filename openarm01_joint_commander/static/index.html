@@ -83,11 +83,12 @@
   .srow { position: relative; display: flex; align-items: center; }
   .ghost {
     position: absolute; left: 10px; right: 10px; top: 50%; height: 8px;
-    transform: translateY(-50%); pointer-events: none;
+    transform: translateY(-50%); pointer-events: none; z-index: 2;
   }
   .ghost::after {
-    content: ''; position: absolute; top: -3px; width: 3px; height: 14px;
+    content: ''; position: absolute; top: -4px; width: 3px; height: 16px;
     border-radius: 2px; background: var(--warn);
+    box-shadow: 0 0 0 1px var(--hi);
     left: var(--at, 0%); transform: translateX(-50%); transition: left 0.08s linear;
   }
   .ghost.off::after { display: none; }
@@ -118,20 +119,14 @@
   .actions {
     display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; align-items: center;
   }
-  .dur {
-    display: flex; align-items: center; gap: 7px; margin-right: auto;
-    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--ink-50);
+  /* Slider column: the track (with its actual-position caret) over a faint
+     min/max readout, so the joint's limits are always visible. */
+  .scol { display: flex; flex-direction: column; gap: 3px; }
+  .lim {
+    display: flex; justify-content: space-between;
+    font: 500 10px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
+    color: var(--ink-50);
   }
-  .dur input {
-    width: 64px; padding: 7px 9px; border: none; border-radius: 10px;
-    font: 500 13px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
-    color: var(--ink); text-align: right;
-    background: var(--bg-soft);
-    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
-    outline: none;
-  }
-  .dur input:focus { box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi), 0 0 0 2px var(--ink-15); }
 
   button {
     font: 600 12px/1 'Inter Tight', sans-serif; letter-spacing: 0.05em; text-transform: uppercase;
@@ -180,6 +175,7 @@
 const PI = Math.PI;
 const ARM_DOF = 7;
 const GRIPPER_MAX = 0.044;
+const HOME_DURATION_S = 3;
 let ws = null;
 let latestSnap = null;
 const armed = { left: false, right: false };
@@ -193,12 +189,8 @@ function build_arm(side, label) {
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
     <div id="${side}_arm_joints"></div>
     <div class="actions">
-      <label class="dur" title="move duration in seconds; 0 = fastest safe move">
-        duration <input type="number" id="${side}_dur" value="2" min="0" max="30" step="0.5"> s
-      </label>
-      <button id="${side}_arm_btn" onclick="arm_toggle('${side}')">Arm</button>
       <button onclick="reset_arm('${side}')">Home</button>
-      <button class="primary" id="${side}_send_btn" onclick="fire_arm('${side}')">Send</button>
+      <button class="primary" id="${side}_arm_btn" onclick="arm_toggle('${side}')">Arm</button>
     </div>`;
   const joints = $(`${side}_arm_joints`);
   for (let i = 0; i < ARM_DOF; i++) {
@@ -206,10 +198,13 @@ function build_arm(side, label) {
     row.className = 'joint';
     row.innerHTML = `
       <span class="name">j${i+1}</span>
-      <div class="srow">
-        <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
-               oninput="on_joint_input('${side}', ${i})" />
-        <div class="ghost off" id="${side}_sh${i}"></div>
+      <div class="scol">
+        <div class="srow">
+          <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
+                 oninput="on_joint_input('${side}', ${i})" />
+          <div class="ghost off" id="${side}_sh${i}"></div>
+        </div>
+        <div class="lim"><span id="${side}_lo${i}">--</span><span id="${side}_hi${i}">--</span></div>
       </div>
       <span class="target" id="${side}_t${i}">+0.000</span>
       <span class="fb" id="${side}_f${i}">---</span>`;
@@ -267,19 +262,18 @@ function arm_toggle(side) {
 }
 
 function reset_arm(side) {
+  // Home parks the arm: disarm so the stream stops, then drive to all-zeros as a
+  // discrete, time-bounded move.
+  if (armed[side]) ws.send(JSON.stringify({cmd: 'set_armed', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = 0;
     $(`${side}_t${i}`).textContent = '+0.000';
   }
-  // Armed: stream to home and let the arm slew there. Disarmed: fire the
-  // all-zeros move goal at the panel's duration.
-  if (armed[side]) send_arm_target(side);
-  else fire_arm(side);
+  fire_arm(side, HOME_DURATION_S);
 }
 
-function fire_arm(side) {
+function fire_arm(side, duration_s) {
   if (!ws || ws.readyState !== 1) return;
-  const duration_s = Math.max(0, parseFloat($(`${side}_dur`).value) || 0);
   ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: read_joints(side), duration_s}));
 }
 
@@ -306,20 +300,24 @@ function apply_snapshot(snap) {
     const armBtn = $(`${side}_arm_btn`);
     armBtn.textContent = a.armed ? 'Disarm' : 'Arm';
     armBtn.classList.toggle('armed', a.armed);
-    // While armed the slider stream owns the arm; the discrete move + duration
-    // would preempt it, so lock them out.
-    $(`${side}_send_btn`).disabled = a.armed;
-    $(`${side}_dur`).disabled = a.armed;
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
-      // Slider bounds come from the server's joint_limits config.
+      // Slider bounds + the visible min/max readout come from joint_limits.
       const [lo, hi] = a.limits ? a.limits[i] : [-PI, PI];
+      const el = $(`${side}_j${i}`);
       if (a.limits) {
-        const el = $(`${side}_j${i}`);
         if (el.min != lo) el.min = lo;
         if (el.max != hi) el.max = hi;
+        $(`${side}_lo${i}`).textContent = fmt(lo);
+        $(`${side}_hi${i}`).textContent = fmt(hi);
       }
-      // Actual-position caret: place it on the track at the measured value.
+      // While disarmed the slider mirrors the measured pose (you must arm to
+      // move), so the thumb shows where the arm is and arming never jumps.
+      if (!a.armed && a.feedback) {
+        el.value = a.feedback[i];
+        $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
+      }
+      // Actual-position caret on the track.
       const sh = $(`${side}_sh${i}`);
       if (a.feedback && hi > lo) {
         const pct = Math.max(0, Math.min(1, (a.feedback[i] - lo) / (hi - lo)));
