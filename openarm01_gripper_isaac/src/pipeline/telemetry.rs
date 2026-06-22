@@ -32,7 +32,6 @@ struct GripperStateRaw {
     #[serde(default)]
     #[allow(dead_code)]
     applied_forces: Vec<f64>,
-    stamp: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,7 +41,6 @@ struct EePoseRaw {
     step: u64,
     position: [f64; 3],
     orientation: [f64; 4],
-    stamp: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,7 +57,6 @@ struct ContactForcesRaw {
     robot: String,
     step: u64,
     contacts: Vec<ContactRaw>,
-    stamp: f64,
 }
 
 pub async fn run(
@@ -144,9 +141,7 @@ pub async fn run(
                             .lock()
                             .unwrap_or_else(|p| p.into_inner());
                         *latest = Some(GripperStateLatest {
-                            step: msg.step,
                             positions: msg.positions.clone(),
-                            stamp: msg.stamp,
                         });
                     }
                     emit_gripper_state(&publisher, &msg).await
