@@ -3,7 +3,7 @@
 // mirrored across sides. Gripper is total aperture [closed, open] in meters.
 // Keep in sync with the robot assets when they change.
 {
-  // [min, max] aperture (m) — same for both sides.
+  // [min, max] aperture (m), same for both sides.
   gripper: [0.0, 0.044],
   left: [
     [-3.490659, 1.396263],

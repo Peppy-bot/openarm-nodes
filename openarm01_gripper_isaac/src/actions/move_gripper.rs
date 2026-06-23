@@ -2,22 +2,18 @@
 // and republish set_ctrl_gripper_<side> every tick to survive best-effort
 // QoS drops. Convergence on worst-finger error; stall on per-window motion.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
-use peppylib::config::QoSProfile;
-use peppylib::messaging::SenderTarget;
+use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
-use peppylib::{MessengerHandle, Payload, TopicMessenger, TopicPublisher};
-use serde::Serialize;
-use sim_bridge_core::DaemonState;
 use tracing::{error, info, warn};
 
-use crate::config::GripperId;
+use crate::config::GRIPPER_OPEN_M;
+use crate::setctrl;
 use crate::state::SharedState;
 
 // Per-finger tolerance (meters) for "reached target". `position` is the
@@ -33,22 +29,15 @@ const STALL_EPSILON_M: f64 = 5e-4;
 const FEEDBACK_LOOP_TICK: Duration = Duration::from_millis(5);
 
 // If set_ctrl publishing fails for this many consecutive ticks (one full stall
-// window, ~500ms), the gripper isn't being commanded at all — fail the motion
+// window, ~500ms), the gripper isn't being commanded at all, so fail the motion
 // instead of letting the stall detector report a false "physical limit".
 const MAX_CONSECUTIVE_PUBLISH_FAILURES: u32 = STALL_LOOKBACK_ITERS;
-
-const GRIPPER_NODE_NAME: &str = "openarm01_gripper";
 
 // Shutdown grace: zero ctrl for ~50ms after the action loop has exited so the
 // sim bridge sees a settled command before teardown. Survives a single
 // best-effort drop on the bridge.
 const SHUTDOWN_GRACE_TICK: Duration = Duration::from_millis(10);
 const SHUTDOWN_GRACE_REPEATS: u32 = 5;
-
-#[derive(Serialize)]
-struct SetCtrlPayload<'a> {
-    actuator_values: HashMap<&'a str, f64>,
-}
 
 struct AcceptedGoal {
     target_position_m: f64,
@@ -64,59 +53,21 @@ struct MotionResult {
 
 pub async fn run(
     runner: Arc<NodeRunner>,
-    gripper_id: GripperId,
     state: Arc<SharedState>,
     token: CancellationToken,
-    handle: Arc<MessengerHandle>,
-    daemon: DaemonState,
+    set_ctrl_pub: TopicPublisher,
+    actuator_names: Arc<[String; 2]>,
+    busy: Arc<AtomicBool>,
 ) {
-    let side = gripper_id.side_word();
-    let actuator_names: Arc<[String; 2]> = Arc::new([
-        format!("openarm_{side}_finger_joint1"),
-        format!("openarm_{side}_finger_joint2"),
-    ]);
-    let set_ctrl_topic: Arc<str> = Arc::from(format!("set_ctrl_gripper_{side}").as_str());
-    // Unique instance_id per gripper side so concurrent left+right grippers
-    // don't collide on the peppylib publisher registry.
-    let instance_id: Arc<str> =
-        Arc::from(format!("openarm01_gripper_{side}_setctrl_pub").as_str());
-
-    // Declare the set_ctrl publisher once; the per-tick control loop and the
-    // shutdown grace hook both publish on this same handle.
-    let target = match SenderTarget::node(GRIPPER_NODE_NAME, "v1") {
-        Ok(target) => target,
-        Err(e) => {
-            error!("invalid set_ctrl target: {e}");
-            return;
-        }
-    };
-    let set_ctrl_pub = match TopicMessenger::declare_publisher(
-        &handle,
-        &daemon.core_node_name,
-        &instance_id,
-        target,
-        None,
-        &set_ctrl_topic,
-        QoSProfile::Standard,
-    )
-    .await
-    {
-        Ok(publisher) => publisher,
-        Err(e) => {
-            error!("declare set_ctrl publisher: {e}");
-            return;
-        }
-    };
-
     let mut action_handle = move_gripper::ActionHandle::expose(&runner)
         .await
         .expect("expose move_gripper");
 
-    // Single-flight gate: a goal arriving mid-motion is actively rejected
-    // rather than queued. Mirrors arm's move_arm_joints flow.
-    let busy = Arc::new(AtomicBool::new(false));
-    // Notified when a motion clears the gate, so the shutdown hook can hold
-    // teardown until any in-flight goal has delivered its terminal result.
+    // The single-flight busy gate is shared with the follow loop (created in
+    // main), so a goal and the stream never both drive the gripper; a goal
+    // arriving mid-motion is actively rejected rather than queued. Notified when
+    // a motion clears the gate, so the shutdown hook can hold teardown until any
+    // in-flight goal has delivered its terminal result.
     let idle = Arc::new(tokio::sync::Notify::new());
 
     {
@@ -140,7 +91,7 @@ pub async fn run(
             // command before the runtime tears the publisher down. Repeats
             // survive a single best-effort drop on the bridge.
             for _ in 0..SHUTDOWN_GRACE_REPEATS {
-                if let Err(e) = publish_set_ctrl(&set_ctrl_pub, &actuator_names, 0.0).await {
+                if let Err(e) = setctrl::publish(&set_ctrl_pub, &actuator_names, 0.0).await {
                     warn!("shutdown publish: {e}");
                 }
                 tokio::time::sleep(SHUTDOWN_GRACE_TICK).await;
@@ -152,9 +103,21 @@ pub async fn run(
         let goal_request =
             action_handle.handle_goal_next_request(|req: &move_gripper::GoalRequest| {
                 let pos_m = req.data.position;
-                if !(0.0..=0.044).contains(&pos_m) {
+                if !(0.0..=GRIPPER_OPEN_M).contains(&pos_m) {
+                    return Ok(move_gripper::GoalResponse::reject(format!(
+                        "position out of range [0.0, {GRIPPER_OPEN_M}]"
+                    )));
+                }
+                // Single-flight: claim the shared gate in the decider so a goal
+                // arriving mid-motion is rejected rather than spawning a second
+                // worker that would fight the first (and the follow loop) over
+                // set_ctrl. The spawned motion's cleanup releases it.
+                if busy
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
                     return Ok(move_gripper::GoalResponse::reject(
-                        "position out of range [0.0, 0.044]",
+                        "gripper is already executing a motion",
                     ));
                 }
                 Ok(move_gripper::GoalResponse::accept())
@@ -174,10 +137,8 @@ pub async fn run(
             }
         };
 
-        // Latch the busy gate now that we own the goal; releasing it lives in
-        // the spawned motion's cleanup so on_shutdown can observe it.
-        busy.store(true, Ordering::Release);
-
+        // The decider already claimed the busy gate; releasing it lives in the
+        // spawned motion's cleanup so on_shutdown can observe it.
         let goal = AcceptedGoal {
             target_position_m: goal_ctx.request().data.position,
         };
@@ -251,7 +212,7 @@ async fn run_control_loop(
         // Republish every tick: peppylib Standard is best-effort, so this is
         // the self-healing path. Idempotent. If it keeps failing, bail before
         // convergence/stall reports false success.
-        match publish_set_ctrl(set_ctrl_pub, actuator_names, per_finger).await {
+        match setctrl::publish(set_ctrl_pub, actuator_names, per_finger).await {
             Ok(()) => consecutive_publish_failures = 0,
             Err(e) => {
                 consecutive_publish_failures += 1;
@@ -260,7 +221,7 @@ async fn run_control_loop(
                     return MotionResult {
                         success: false,
                         is_cancelled: false,
-                        message: "set_ctrl publish failing — gripper not commandable".into(),
+                        message: "set_ctrl publish failing: gripper not commandable".into(),
                         final_positions: vec![],
                         action_time: start.elapsed().as_secs_f64(),
                     };
@@ -279,7 +240,7 @@ async fn run_control_loop(
         let snap = match latest {
             Some(s) if !s.positions.is_empty() => s,
             _ => {
-                // No usable telemetry yet — empty positions must not reach the
+                // No usable telemetry yet: empty positions must not reach the
                 // convergence math, where worst_err would fold to 0.0 and falsely
                 // report "reached". Wait, but honour timeout.
                 if elapsed > MOTION_TIMEOUT {
@@ -362,22 +323,4 @@ fn cancelled(action_time: f64, final_positions: Vec<f64>) -> MotionResult {
         final_positions,
         action_time,
     }
-}
-
-async fn publish_set_ctrl(
-    publisher: &TopicPublisher,
-    actuator_names: &[String; 2],
-    value: f64,
-) -> std::result::Result<(), String> {
-    let mut values: HashMap<&str, f64> = HashMap::with_capacity(2);
-    values.insert(actuator_names[0].as_str(), value);
-    values.insert(actuator_names[1].as_str(), value);
-    let payload = SetCtrlPayload {
-        actuator_values: values,
-    };
-    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
-    publisher
-        .publish(Payload::from(bytes))
-        .await
-        .map_err(|e| e.to_string())
 }

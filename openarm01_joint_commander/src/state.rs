@@ -58,9 +58,6 @@ pub struct ArmTarget {
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
-    // Deadman for streaming: while false the commander emits no joint_commands
-    // and `joints` tracks the measured pose, so enabling never steps the arm.
-    pub enabled: bool,
 }
 
 impl ArmTarget {
@@ -70,7 +67,6 @@ impl ArmTarget {
             last_feedback: None,
             in_flight: false,
             preempt: None,
-            enabled: false,
         }
     }
 }
@@ -80,7 +76,6 @@ pub struct GripperTarget {
     pub position: f64,
     // Measured gripper opening (m) from the gripper_states stream.
     pub last_feedback: Option<f64>,
-    pub in_flight: bool,
 }
 
 impl GripperTarget {
@@ -88,7 +83,6 @@ impl GripperTarget {
         Self {
             position: GRIPPER_CLOSED_M,
             last_feedback: None,
-            in_flight: false,
         }
     }
 }
@@ -99,6 +93,12 @@ pub struct UiState {
     pub right_arm: ArmTarget,
     pub left_gripper: GripperTarget,
     pub right_gripper: GripperTarget,
+    // Streaming deadman, one per side: while false the commander emits no
+    // commands for that side's arm or gripper and both targets track the measured
+    // pose, so enabling never steps the robot. The arm and gripper share the
+    // deadman because the operator enables a whole side at once.
+    pub left_enabled: bool,
+    pub right_enabled: bool,
     pub status: String,
 }
 
@@ -109,7 +109,23 @@ impl UiState {
             right_arm: ArmTarget::home(),
             left_gripper: GripperTarget::closed(),
             right_gripper: GripperTarget::closed(),
+            left_enabled: false,
+            right_enabled: false,
             status: "ready".to_string(),
+        }
+    }
+
+    pub fn enabled(&self, side: Side) -> bool {
+        match side {
+            Side::Left => self.left_enabled,
+            Side::Right => self.right_enabled,
+        }
+    }
+
+    pub fn set_enabled(&mut self, side: Side, on: bool) {
+        match side {
+            Side::Left => self.left_enabled = on,
+            Side::Right => self.right_enabled = on,
         }
     }
 

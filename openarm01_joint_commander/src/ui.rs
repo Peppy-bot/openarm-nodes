@@ -1,5 +1,5 @@
 // HTTP+WS UI on 127.0.0.1:PEPPY_JC_PORT (default 8765). Loopback only because
-// the WS exposes unauthenticated motion control — set PEPPY_JC_BIND_IP for a
+// the WS exposes unauthenticated motion control; set PEPPY_JC_BIND_IP for a
 // remote operator on a trusted network.
 
 use std::env;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-use crate::actions::{move_arm_joints, move_gripper};
+use crate::actions::move_arm_joints;
 use crate::error::Result;
 use crate::state::{ARM_DOF, ArmTarget, GripperTarget, SharedState, Side, UiState};
 
@@ -26,7 +26,7 @@ const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
-// Joint + gripper ranges from the robot model — the single source for slider
+// Joint + gripper ranges from the robot model; the single source for slider
 // bounds (via the WS snapshot) and for clamping incoming commands.
 const JOINT_LIMITS_SRC: &str = include_str!("../config/joint_limits.json5");
 
@@ -130,11 +130,12 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
         }
     }
     // The operator's connection is the streaming deadman: once it drops, disable
-    // both arms so command_stream stops emitting and each arm's stream timeout
-    // releases it to hold.
+    // every arm and gripper so command_stream stops emitting and each node's
+    // stream timeout releases it to hold.
     let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-    s.arm_mut(Side::Left).enabled = false;
-    s.arm_mut(Side::Right).enabled = false;
+    for side in [Side::Left, Side::Right] {
+        s.set_enabled(side, false);
+    }
 }
 
 async fn handle_command(text: &str, app: &AppState) {
@@ -152,7 +153,7 @@ async fn handle_command(text: &str, app: &AppState) {
             // rather than relying on the UI to hide the button.
             {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                if s.arm(side).enabled {
+                if s.enabled(side) {
                     s.set_status(format!("{} arm: disable before a discrete move", side.label()));
                     return;
                 }
@@ -163,36 +164,45 @@ async fn handle_command(text: &str, app: &AppState) {
             let duration_s = if duration_s.is_finite() { duration_s.clamp(0.0, 30.0) } else { 0.0 };
             fire_arm(app, side, joints, duration_s).await;
         }
-        Command::FireGripper { side, position } => {
-            let [lo, hi] = joint_limits().gripper;
-            fire_gripper(app, side.into(), position.clamp(lo, hi)).await;
-        }
         Command::SetEnabled { side, on } => {
             let side: Side = side.into();
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             if on {
-                // Refuse to enable until a measured pose exists, then seed the target
-                // on it so the first emitted command holds position instead of
-                // streaming the stale default.
-                let Some(measured) = s.arm(side).last_feedback else {
-                    s.set_status(format!("{} arm: no measured pose yet, not enabling", side.label()));
+                // Enabling streams both the arm and the gripper for this side, so
+                // seed each target on its measured value first; refuse until both
+                // exist so the first emitted command holds position instead of
+                // streaming a stale default.
+                let (Some(arm_measured), Some(gripper_measured)) =
+                    (s.arm(side).last_feedback, s.gripper(side).last_feedback)
+                else {
+                    s.set_status(format!("{}: no measured pose yet, not enabling", side.label()));
                     return;
                 };
-                s.arm_mut(side).joints = measured;
+                s.arm_mut(side).joints = arm_measured;
+                s.gripper_mut(side).position = gripper_measured;
             }
-            s.arm_mut(side).enabled = on;
+            s.set_enabled(side, on);
             s.set_status(format!(
-                "{} arm: {}",
+                "{}: {}",
                 side.label(),
-                if on { "ENABLED, streaming" } else { "disabled" }
+                if on { "ENABLED, streaming arm + gripper" } else { "disabled" }
             ));
         }
         Command::SetArmTarget { side, mut joints } => {
             let side: Side = side.into();
             clamp_to_limits(&mut joints, side);
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.arm(side).enabled {
+            if s.enabled(side) {
                 s.arm_mut(side).joints = joints;
+            }
+        }
+        Command::SetGripperTarget { side, position } => {
+            let side: Side = side.into();
+            let [lo, hi] = joint_limits().gripper;
+            let position = position.clamp(lo, hi);
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            if s.enabled(side) {
+                s.gripper_mut(side).position = position;
             }
         }
     }
@@ -255,32 +265,6 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
     );
 }
 
-async fn fire_gripper(app: &AppState, side: Side, position_m: f64) {
-    {
-        let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-        if s.gripper(side).in_flight {
-            s.set_status(format!(
-                "{} gripper: previous goal still in flight",
-                side.label()
-            ));
-            return;
-        }
-        s.gripper_mut(side).in_flight = true;
-        s.gripper_mut(side).position = position_m;
-        s.set_status(format!(
-            "{} gripper: firing move_gripper ({position_m:.4} m)",
-            side.label()
-        ));
-    }
-    move_gripper::spawn(
-        app.runner.clone(),
-        app.state.clone(),
-        app.token.clone(),
-        side,
-        position_m,
-    );
-}
-
 // --------------------------- wire protocol ---------------------------
 
 #[derive(Serialize)]
@@ -289,6 +273,9 @@ struct Snapshot {
     right_arm: ArmView,
     left_gripper: GripperView,
     right_gripper: GripperView,
+    // Streaming deadman per side, shared by that side's arm and gripper.
+    left_enabled: bool,
+    right_enabled: bool,
     status: String,
 }
 
@@ -297,8 +284,7 @@ struct ArmView {
     joints: [f64; ARM_DOF],
     feedback: Option<[f64; ARM_DOF]>,
     in_flight: bool,
-    enabled: bool,
-    // Per-joint [min, max] (rad) — the browser bounds its sliders with these.
+    // Per-joint [min, max] (rad); the browser bounds its sliders with these.
     limits: [[f64; 2]; ARM_DOF],
 }
 
@@ -307,7 +293,6 @@ struct GripperView {
     position: f64,
     // Measured opening (m) from the gripper_states stream.
     feedback: Option<f64>,
-    in_flight: bool,
     min: f64,
     max: f64,
 }
@@ -319,6 +304,8 @@ impl From<&UiState> for Snapshot {
             right_arm: arm_view(&s.right_arm, Side::Right),
             left_gripper: gripper_view(&s.left_gripper),
             right_gripper: gripper_view(&s.right_gripper),
+            left_enabled: s.left_enabled,
+            right_enabled: s.right_enabled,
             status: s.status.clone(),
         }
     }
@@ -329,7 +316,6 @@ fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
         joints: a.joints,
         feedback: a.last_feedback,
         in_flight: a.in_flight,
-        enabled: a.enabled,
         limits: *joint_limits().arm(side),
     }
 }
@@ -339,7 +325,6 @@ fn gripper_view(g: &GripperTarget) -> GripperView {
     GripperView {
         position: g.position,
         feedback: g.last_feedback,
-        in_flight: g.in_flight,
         min,
         max,
     }
@@ -354,13 +339,10 @@ enum Command {
         // Requested move duration (s); 0 = fastest safe.
         duration_s: f64,
     },
-    FireGripper {
-        side: SideWire,
-        position: f64,
-    },
-    // Toggle the streaming deadman for one arm. While enabled, command_stream emits
-    // this arm's target on joint_commands; while disabled it tracks the measured
-    // pose and emits nothing.
+    // Toggle the streaming deadman for one side. While enabled, command_stream
+    // emits that side's arm target on joint_commands and gripper opening on
+    // gripper_commands; while disabled both track the measured pose and emit
+    // nothing.
     SetEnabled {
         side: SideWire,
         on: bool,
@@ -370,6 +352,11 @@ enum Command {
     SetArmTarget {
         side: SideWire,
         joints: [f64; ARM_DOF],
+    },
+    // Update an enabled gripper's streamed opening. Ignored while disabled.
+    SetGripperTarget {
+        side: SideWire,
+        position: f64,
     },
 }
 

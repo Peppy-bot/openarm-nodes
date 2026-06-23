@@ -1,4 +1,6 @@
+mod command_stream;
 mod control;
+mod follow;
 mod geometry;
 mod stream;
 
@@ -7,9 +9,11 @@ use control::{ControlConfig, run_move_gripper};
 use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::{NodeBuilder, Parameters, Result};
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 // Mirrors ROS2 v10_simple_hardware on_activate / on_deactivate sleep durations.
@@ -30,6 +34,10 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        assert!(
+            params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
+            "stream_timeout_s must be a positive finite number"
+        );
 
         let cfg = ControlConfig {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
@@ -37,6 +45,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
             position_tolerance_m: params.position_tolerance,
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
+            stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
         };
 
         // Instance lock: crash if another instance with the same gripper_id is running.
@@ -131,8 +140,30 @@ fn main() -> Result<()> {
             });
         }
 
+        // One busy gate, shared by the move action and the follow loop so only one
+        // drives the CAN bus at a time.
+        let busy = Arc::new(AtomicBool::new(false));
+
+        // Stream listener -> follow loop: the listener keeps the latest streamed
+        // opening addressed to this gripper, the follow loop drives the motor
+        // toward it between moves.
+        let (cmd_tx, cmd_rx) = watch::channel(None);
+        tokio::spawn(command_stream::run(
+            node_runner.clone(),
+            gripper_id,
+            cmd_tx,
+            node_runner.cancellation_token().clone(),
+        ));
+        tokio::spawn(follow::run(
+            gripper.clone(),
+            busy.clone(),
+            cmd_rx,
+            cfg.clone(),
+            node_runner.cancellation_token().clone(),
+        ));
+
         // move_gripper: direct-setpoint control loop.
-        tokio::spawn(run_move_gripper(node_runner, gripper, cfg));
+        tokio::spawn(run_move_gripper(node_runner, gripper, cfg, busy));
 
         Ok(())
     })
