@@ -9,10 +9,10 @@ import logging
 import os
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from peppygen.exposed_services.openarm01_robot_initializer.v1 import is_ready
-from peppylib import info
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(
@@ -26,40 +26,49 @@ _ASSETS_DIR = Path(
 _USD_PATH = _ASSETS_DIR / "openarm_bimanual.usd"
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
 
-# Must be set before SimulationApp initialises.
-os.environ["PEPPY_BRIDGE_NODE_NAME"] = "sim"
-
-from isaacsim import SimulationApp
-
-_headless = os.environ.get("PEPPY_BRIDGE_HEADLESS", "1") == "1"
-_launch_config = {
-    "headless": _headless,
-    "renderer": os.environ.get("PEPPY_ISAAC_RENDERER", "RayTracedLighting"),
-}
-if _headless:
-    simulation_app = SimulationApp(
-        _launch_config,
-        experience="/isaac-sim/apps/isaacsim.exp.full.streaming.kit",
-    )
-else:
-    simulation_app = SimulationApp(_launch_config)
-
-sys.path.insert(0, str(_ROBOTS_DIR))
-from _launcher import SimLauncher
-
 _ready = threading.Event()
 _stop = threading.Event()
-# Set once the node thread has resolved the core node identity into env vars,
-# so the main-thread sim loop reads its config only after that.
-_daemon_resolved = threading.Event()
 
 
-async def setup(_params, node_runner) -> list:
-    # Resolve the core node identity and pass it to the bridge config via env.
-    daemon = await info(node_runner)
-    os.environ["PEPPY_BRIDGE_DAEMON_NODE"] = daemon.core_node_name
-    os.environ["PEPPY_BRIDGE_PORT"] = str(daemon.messaging_port)
-    _daemon_resolved.set()
+@dataclass
+class _SimHandoff:
+    """The node loop resolves these and hands them to the main-thread sim loop.
+
+    SimulationApp must be constructed on the main thread before any omni.*
+    import, but its headless flag comes from the node parameters, which are only
+    available once the node runner calls setup(). The node thread stashes the
+    resolved IO + params here and flips `ready` so main() can proceed.
+    """
+
+    io: object
+    state_rate_hz: int
+    headless: bool
+    viewer_host: str
+    viewer_port: int
+
+
+_handoff: dict[str, _SimHandoff] = {}
+_handoff_ready = threading.Event()
+
+
+async def setup(params, node_runner) -> list:
+    # Typed peppygen pub/sub lives on this loop; declare publishers and start the
+    # command-consume tasks before the sim thread starts reading from them.
+    sys.path.insert(0, str(_ROBOTS_DIR))
+    from sim_topics import SimTopicIO
+
+    loop = asyncio.get_running_loop()
+    io = SimTopicIO(node_runner, loop)
+    await io.start()
+
+    _handoff["value"] = _SimHandoff(
+        io=io,
+        state_rate_hz=params.state_rate_hz,
+        headless=params.headless,
+        viewer_host=params.viewer_host,
+        viewer_port=params.viewer_port,
+    )
+    _handoff_ready.set()
 
     async def _is_ready_loop() -> None:
         while True:
@@ -69,9 +78,11 @@ async def setup(_params, node_runner) -> list:
             )
 
     async def _shutdown_hook() -> None:
-        # Drive the Isaac main-thread sim loop to exit inside the runtime
-        # grace window; SimLauncher's finally bounds peppylib_io.stop().
+        # Drive the Isaac main-thread sim loop to exit inside the runtime grace
+        # window; SimLauncher's finally bounds extension.shutdown(), then cancel
+        # the consume tasks.
         _stop.set()
+        await io.stop()
 
     node_runner.on_shutdown(_shutdown_hook)
 
@@ -90,9 +101,41 @@ def _run_node_builder() -> None:
 
 def main() -> None:
     threading.Thread(target=_run_node_builder, daemon=True).start()
-    if not _daemon_resolved.wait(timeout=30):
-        raise RuntimeError("core node identity not resolved within 30s")
-    SimLauncher(simulation_app, _USD_PATH, _ready, _stop).run()
+    if not _handoff_ready.wait(timeout=30):
+        raise RuntimeError("node parameters not resolved within 30s")
+    handoff = _handoff["value"]
+
+    # SimulationApp must initialise before any omni.* import. Its headless flag
+    # comes from the resolved node parameters; the renderer is a container-level
+    # knob.
+    from isaacsim import SimulationApp
+
+    launch_config = {
+        "headless": handoff.headless,
+        "renderer": os.environ.get("PEPPY_ISAAC_RENDERER", "RayTracedLighting"),
+    }
+    if handoff.headless:
+        simulation_app = SimulationApp(
+            launch_config,
+            experience="/isaac-sim/apps/isaacsim.exp.full.streaming.kit",
+        )
+    else:
+        simulation_app = SimulationApp(launch_config)
+
+    sys.path.insert(0, str(_ROBOTS_DIR))
+    from _launcher import SimLauncher
+
+    SimLauncher(
+        simulation_app,
+        _USD_PATH,
+        _ready,
+        _stop,
+        handoff.io,
+        handoff.state_rate_hz,
+        handoff.headless,
+        handoff.viewer_host,
+        handoff.viewer_port,
+    ).run()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-# pylint: disable=R0902,R0903,C0413
-"""IsaacBridgeExtension drives per-step bridge plugins for the openarm Isaac
-scene. Isaac's sim_app.update() advances physics; this extension only runs
-the plugin loop.
+# pylint: disable=R0902,C0413
+"""IsaacBridgeExtension owns the per-step bridge for the openarm Isaac scene.
+Isaac's sim_app.update() advances physics on the main thread; each step this
+extension applies the latest sim-passthrough setpoint per side, reads the
+measured joint and gripper state, and (throttled to state_rate_hz) publishes it.
+Transport is typed peppygen via SimTopicIO; there is no JSON and no raw
+peppylib on the path.
 """
 from __future__ import annotations
 
@@ -10,230 +13,167 @@ import gc
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import pyjson5
 
-from sim_ext_core import (
-    ActuatorCtrlBridge,
-    BridgeConfig,
-    ClockBridge,
-    ContactForcesBridge,
-    EePoseBridge,
-    GripperStateBridge,
-    ImuBridge,
-    JointStatesBridge,
-    SimControlBridge,
-    TfTreeBridge,
-    WrenchBridge,
-)
-from peppylib_io import PeppylibIO
-from exts import (
-    IsaacActuatorCtrl,
-    IsaacArticulation,
-    IsaacClockSensor,
-    IsaacContactSensor,
-    IsaacEePoseSensor,
-    IsaacGripperSensor,
-    IsaacImuSensor,
-    IsaacSimControl,
-    IsaacTransformTree,
-    IsaacWrenchSensor,
-)
+from sim_topics import SimTopicIO
+from exts import IsaacActuatorCtrl, IsaacArticulation, IsaacGripperSensor
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_NODE_NAME = "sim"
-_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
+_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
+# The articulation root prim in the loaded USD stage. Every ext (state read,
+# actuator write, gripper sensor) targets this one articulation.
 _ROOT_ARTICULATION_PRIM = "/World/openarm"
-
-# Split by direction so a misplaced sim_bridge.json5 entry fails validation:
-# a single registry would let "joint_states" in subscribers instantiate as a
-# subscriber and silently publish.
-_PUBLISHER_REGISTRY: dict = {
-    "joint_states": JointStatesBridge,
-    "imu": ImuBridge,
-    "tf_tree": TfTreeBridge,
-    "clock": ClockBridge,
-    "ee_pose": EePoseBridge,
-    "wrench": WrenchBridge,
-    "contact_forces": ContactForcesBridge,
-    "gripper_state": GripperStateBridge,
-}
-_SUBSCRIBER_REGISTRY: dict = {
-    "actuator_ctrl": ActuatorCtrlBridge,
-}
 
 
 class IsaacBridgeExtension:
+    """Drives the engine from the typed command streams and publishes state.
 
-    def __init__(self) -> None:
-        self._config: Optional[BridgeConfig] = None
-        self._io: Optional[PeppylibIO] = None
-        self._plugins: list = []
-        self._sim_articulation: Optional[IsaacArticulation] = None
-        self._sim_control: Optional[IsaacSimControl] = None
-        self._readers: list = []
-        self._step: int = 0
-        self._last_publish_s: float = 0.0
-        self._telemetry_period_s: float = 0.0
+    Articulation setup is deferred to the first step() that succeeds: the
+    Articulation views cannot initialise until the USD stage has loaded and the
+    timeline is playing, which races the bridge's construction. Until every ext
+    is ready, step() is a no-op except for the setup retry.
+    """
 
-    def startup(self) -> None:
-        """Load config, build plugins, register subscriptions, start I/O."""
-        self._config = BridgeConfig.from_file(
-            path=_DEFAULT_CONFIG_PATH,
-            default_node_name=_DEFAULT_NODE_NAME,
-        )
-        _validate_config(self._config)
+    def __init__(self, io: SimTopicIO, state_rate_hz: int) -> None:
+        self._io = io
+        # Telemetry is throttled to state_rate_hz: serializing every reader at
+        # the physics tick saturates the single sim thread. Writers and the
+        # physics step still run every tick.
+        self._telemetry_period_s = 1.0 / state_rate_hz if state_rate_hz > 0 else 0.0
+        self._last_publish_s = 0.0
 
-        # Telemetry publishers emit at telemetry_rate_hz (from sim_bridge.json5),
-        # decoupled from the physics tick: serializing every reader per step
-        # saturates the single sim thread and starves the I/O thread feeding
-        # set_ctrl. BridgeConfig (base image) doesn't carry this field, so read it
-        # directly. Writers and the physics step still run every tick.
-        raw = pyjson5.loads(_DEFAULT_CONFIG_PATH.read_text())
-        rate_hz = float(raw.get("telemetry_rate_hz", 100.0))
-        self._telemetry_period_s = 1.0 / rate_hz if rate_hz > 0 else 0.0
+        cfg = pyjson5.loads(_CONFIG_PATH.read_text())
+        self._arms: list[dict] = cfg["arms"]
+        self._grippers: list[dict] = cfg["grippers"]
+        self._gains: dict = cfg.get("arm_gains", {})
 
-        self._io = PeppylibIO(self._config)
-        self._plugins = _build_plugins(self._config)
+        self._articulation = IsaacArticulation(_ROOT_ARTICULATION_PRIM)
+        # One actuator controller per arm side: the MIT gains and torque caps
+        # are applied to that side's PhysX drives at setup, and the side's
+        # commands are written through it. Fingers keep their USD drive defaults
+        # and are written through a gainless controller.
+        self._arm_actuators: dict[int, IsaacActuatorCtrl] = {
+            arm["arm_id"]: IsaacActuatorCtrl(
+                _ROOT_ARTICULATION_PRIM,
+                joint_names=arm["joints"],
+                params=self._actuator_params(arm["joints"]),
+            )
+            for arm in self._arms
+        }
+        self._gripper_actuators: dict[int, IsaacActuatorCtrl] = {
+            gripper["gripper_id"]: IsaacActuatorCtrl(
+                _ROOT_ARTICULATION_PRIM,
+                joint_names=gripper["fingers"],
+            )
+            for gripper in self._grippers
+        }
+        self._gripper_sensors: dict[int, IsaacGripperSensor] = {
+            gripper["gripper_id"]: IsaacGripperSensor(
+                _ROOT_ARTICULATION_PRIM, finger_joints=gripper["fingers"]
+            )
+            for gripper in self._grippers
+        }
+        self._joint_index: dict[str, int] = {}
+        self._ready: bool = False
 
-        # SimControl is always present (not config-driven). Articulation
-        # setup is deferred to first set_joint_positions call to avoid racing
-        # the USD stage load. omni.timeline is imported lazily because
-        # top-level omni.* breaks before SimulationApp initialises.
-        import omni.timeline  # pylint: disable=E0401,C0415
+    def _actuator_params(self, joints: list[str]) -> dict:
+        return {
+            "joint_names": joints,
+            "kp": list(self._gains.get("kp", [])),
+            "kd": list(self._gains.get("kd", [])),
+            "max_efforts": list(self._gains.get("max_efforts", [])),
+            "gravity_compensation": self._gains.get("gravity_compensation", False),
+        }
 
-        self._sim_articulation = IsaacArticulation(_ROOT_ARTICULATION_PRIM)
-        self._sim_control = IsaacSimControl(
-            articulation=self._sim_articulation,
-            timeline=omni.timeline.get_timeline_interface(),
-        )
-        self._plugins.append(SimControlBridge(self._sim_control, self._config))
+    def _all_exts(self) -> list:
+        return [
+            self._articulation,
+            *self._arm_actuators.values(),
+            *self._gripper_actuators.values(),
+            *self._gripper_sensors.values(),
+        ]
 
-        for plugin in self._plugins:
-            for source_node, topic, qos in plugin.subscriptions():
-                self._io.register_subscription(source_node, topic, qos)
-
-        # Publishers (no subscriptions) are throttled in step(); writers run
-        # every tick. Mirrors the MuJoCo bridge's writer/reader split.
-        self._readers = [p for p in self._plugins if not p.subscriptions()]
-
-        self._io.start()
-        self._step = 0
+    def _try_setup(self) -> bool:
+        """Attempt to initialise every ext against the live stage. Returns True
+        once all are ready; safe to call every step until it succeeds."""
+        if self._ready:
+            return True
+        if not all(ext.setup() for ext in self._all_exts()):
+            return False
+        self._joint_index = {
+            name: i for i, name in enumerate(self._articulation.get_joint_names())
+        }
+        self._ready = True
         logger.info(
-            f"IsaacBridgeExtension ready — {len(self._plugins)} plugin(s) "
-            f"daemon_node='{self._config.daemon_node}' node='{self._config.node_name}'"
+            f"IsaacBridgeExtension ready — {len(self._arms)} arm(s), "
+            f"{len(self._grippers)} gripper(s)"
         )
+        return True
 
     def step(self) -> None:
-        """Drive the plugin loop. When paused, only SimControlBridge runs so
-        unpause/step/reset can still be processed."""
-        if self._sim_control and self._sim_control.is_paused:
-            for plugin in self._plugins:
-                if isinstance(plugin, SimControlBridge):
-                    plugin.on_step(self._step, self._io)
+        """Physics has already advanced in sim_app.update(); apply the latest
+        commands and (throttled) publish measured state."""
+        if not self._try_setup():
             return
 
-        self._step += 1
-        # Throttle publishers to telemetry_rate_hz (sim_bridge.json5); writers and
-        # SimControl run every tick. Decouples per-step JSON serialization from
-        # the physics tick so the sim thread stops saturating.
+        self._apply_commands()
+
         now = time.monotonic()
-        publish_now = now - self._last_publish_s >= self._telemetry_period_s
-        if publish_now:
-            self._last_publish_s = now
-        for plugin in self._plugins:
-            if not plugin.is_ready and not plugin.try_setup():
+        if now - self._last_publish_s < self._telemetry_period_s:
+            return
+        self._last_publish_s = now
+        self._publish_state()
+
+    def _apply_commands(self) -> None:
+        for arm in self._arms:
+            command = self._io.latest_arm_command(arm["arm_id"])
+            if command is None:
                 continue
-            if not publish_now and plugin in self._readers:
+            positions, velocities = command
+            joints = arm["joints"]
+            if len(positions) != len(joints):
                 continue
-            plugin.on_step(self._step, self._io)
+            velocity_values = (
+                dict(zip(joints, velocities)) if len(velocities) == len(joints) else None
+            )
+            self._arm_actuators[arm["arm_id"]].write_targets(
+                dict(zip(joints, positions)), velocity_values
+            )
+
+        for gripper in self._grippers:
+            opening = self._io.latest_gripper_command(gripper["gripper_id"])
+            if opening is None:
+                continue
+            # Both fingers hold half the aperture.
+            per_finger = opening / 2.0
+            self._gripper_actuators[gripper["gripper_id"]].write_targets(
+                {f: per_finger for f in gripper["fingers"]}
+            )
+
+    def _publish_state(self) -> None:
+        states = self._articulation.get_joint_states()
+        if states is not None:
+            positions, velocities = states
+            for arm in self._arms:
+                indices = [self._joint_index.get(name) for name in arm["joints"]]
+                if any(i is None for i in indices):
+                    continue
+                self._io.publish_joint_states(
+                    arm["arm_id"],
+                    [positions[i] for i in indices],
+                    [velocities[i] for i in indices],
+                )
+
+        for gripper_id, sensor in self._gripper_sensors.items():
+            data = sensor.get_gripper_state()
+            if data and data["positions"]:
+                # Opening = total aperture = sum of finger positions.
+                self._io.publish_gripper_states(gripper_id, float(sum(data["positions"])))
 
     def shutdown(self) -> None:
         logger.info("IsaacBridgeExtension shutting down.")
-        for plugin in self._plugins:
-            plugin.teardown()
-        if self._sim_articulation is not None:
-            self._sim_articulation.teardown()
-        if self._io is not None:
-            self._io.stop()
+        for ext in self._all_exts():
+            ext.teardown()
         gc.collect()
-
-
-def _validate_config(config: BridgeConfig) -> None:
-    if not config.daemon_node:
-        raise ValueError(
-            "core node name is empty — launch.py must resolve it via "
-            "peppylib.info before starting the bridge"
-        )
-    for entry in config.publishers:
-        if entry.type not in _PUBLISHER_REGISTRY:
-            raise ValueError(
-                f"Unknown publisher type '{entry.type}' in sim_bridge.json5. "
-                f"Supported publishers: {sorted(_PUBLISHER_REGISTRY)}"
-            )
-    for entry in config.subscribers:
-        if entry.type not in _SUBSCRIBER_REGISTRY:
-            raise ValueError(
-                f"Unknown subscriber type '{entry.type}' in sim_bridge.json5. "
-                f"Supported subscribers: {sorted(_SUBSCRIBER_REGISTRY)}"
-            )
-
-
-def _make_sensor(entry):  # pylint: disable=R0911
-    """Return the right Isaac wrapper for a given entry. `entry.prim` is the
-    USD prim path; for sensors that need extra params, read entry.params.
-    """
-    prim = entry.prim or ""
-    if entry.type == "joint_states":
-        return IsaacArticulation(prim)
-    if entry.type == "imu":
-        return IsaacImuSensor(prim)
-    if entry.type == "tf_tree":
-        return IsaacTransformTree(prim)
-    if entry.type == "clock":
-        return IsaacClockSensor()
-    if entry.type == "ee_pose":
-        return IsaacEePoseSensor(prim)
-    if entry.type == "wrench":
-        return IsaacWrenchSensor(prim)
-    if entry.type == "contact_forces":
-        return IsaacContactSensor(prim)
-    if entry.type == "gripper_state":
-        finger_joints = (
-            entry.params.get("finger_joints", []) if hasattr(entry, "params") else []
-        )
-        return IsaacGripperSensor(prim, finger_joints=finger_joints)
-    if entry.type == "actuator_ctrl":
-        joint_names = (
-            entry.params.get("joint_names", []) if hasattr(entry, "params") else []
-        )
-        params = entry.params if hasattr(entry, "params") else {}
-        return IsaacActuatorCtrl(prim, joint_names=joint_names, params=params)
-    return IsaacArticulation(prim)
-
-
-def _build_plugins(config: BridgeConfig) -> list:
-    plugins: list = []
-    for entry in config.publishers:
-        cls = _PUBLISHER_REGISTRY[entry.type]
-        sensor = _make_sensor(entry)
-        plugins.append(cls(sensor, config, entry))
-        logger.info(f"Registered publisher: {entry.type} → topic='{entry.topic}'")
-
-    seen_subscribers: set = set()
-    for entry in config.subscribers:
-        key = (entry.type, entry.prim, entry.topic)
-        if key in seen_subscribers:
-            logger.debug(
-                f"Skipping duplicate subscriber: {entry.type} → topic='{entry.topic}'"
-            )
-            continue
-        seen_subscribers.add(key)
-        cls = _SUBSCRIBER_REGISTRY[entry.type]
-        sensor = _make_sensor(entry)
-        plugins.append(cls(sensor, config, entry))
-        logger.info(f"Registered subscriber: {entry.type} → topic='{entry.topic}'")
-
-    return plugins
