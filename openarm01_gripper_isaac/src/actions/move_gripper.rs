@@ -108,6 +108,18 @@ pub async fn run(
                         "position out of range [0.0, {GRIPPER_OPEN_M}]"
                     )));
                 }
+                // Single-flight: claim the shared gate in the decider so a goal
+                // arriving mid-motion is rejected rather than spawning a second
+                // worker that would fight the first (and the follow loop) over
+                // set_ctrl. The spawned motion's cleanup releases it.
+                if busy
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return Ok(move_gripper::GoalResponse::reject(
+                        "gripper is already executing a motion",
+                    ));
+                }
                 Ok(move_gripper::GoalResponse::accept())
             });
 
@@ -125,10 +137,8 @@ pub async fn run(
             }
         };
 
-        // Latch the busy gate now that we own the goal; releasing it lives in
-        // the spawned motion's cleanup so on_shutdown can observe it.
-        busy.store(true, Ordering::Release);
-
+        // The decider already claimed the busy gate; releasing it lives in the
+        // spawned motion's cleanup so on_shutdown can observe it.
         let goal = AcceptedGoal {
             target_position_m: goal_ctx.request().data.position,
         };
