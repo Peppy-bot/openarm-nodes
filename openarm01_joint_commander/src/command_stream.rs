@@ -1,23 +1,23 @@
-// Always-on joint_commands publisher. For each enabled arm, streams its target
-// joint setpoint at command_rate_hz so the arm follows it; a disabled arm emits
-// nothing, so the arm's stream timeout lapses and it holds. Re-publishing every
-// tick (even an unchanged target) keeps the arm's producer lock alive between
-// operator inputs. The arm clamps and rate-limits what it receives, so this only
-// has to deliver the latest setpoint.
+// Always-on command publisher. For each enabled arm and gripper, streams its
+// target setpoint at command_rate_hz so the node follows it; a disabled side
+// emits nothing, so the node's stream timeout lapses and it holds. Re-publishing
+// every tick (even an unchanged target) keeps the node's producer lock alive
+// between operator inputs. The arm/gripper clamps and rate-limits what it
+// receives, so this only has to deliver the latest setpoint.
 //
-// Each arm runs its own publish task on its own interval: a single shared loop
-// published Left then Right every tick, and because zenoh's publish resolves
-// synchronously the two never overlapped, leaving Right permanently second and
-// visibly less smooth whenever Left was also streaming. Independent tasks share
-// the cloneable, lock-free publisher (one zenoh session) with no fixed order.
+// Each side+channel runs its own publish task on its own interval, sharing a
+// cloneable lock-free publisher per topic (one zenoh session). A single shared
+// loop publishing Left then Right would leave Right permanently second (zenoh
+// publish resolves synchronously), so independent tasks avoid that bias.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
+use peppygen::emitted_topics::openarm01_gripper_command_source::v1::gripper_commands;
 use peppygen::emitted_topics::openarm01_joint_command_source::v1::joint_commands;
-use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
+use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, warn};
 
@@ -29,28 +29,71 @@ pub async fn run(
     command_rate_hz: u32,
     token: CancellationToken,
 ) {
-    let publisher = match joint_commands::declare_publisher(&runner).await {
+    let arm_pub = match joint_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare joint_commands publisher: {e}"),
     };
-    let left = tokio::spawn(stream_arm(
-        publisher.clone(),
-        state.clone(),
-        Side::Left,
-        command_rate_hz,
-        token.clone(),
-    ));
-    let right = tokio::spawn(stream_arm(publisher, state, Side::Right, command_rate_hz, token));
-    let _ = tokio::join!(left, right);
+    let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => return error!("declare gripper_commands publisher: {e}"),
+    };
+
+    let mut tasks = Vec::new();
+    for side in [Side::Left, Side::Right] {
+        // Arm: stream the 7-joint setpoint while enabled.
+        let arm_state = state.clone();
+        tasks.push(tokio::spawn(stream_setpoints(
+            arm_pub.clone(),
+            command_rate_hz,
+            token.clone(),
+            format!("{} arm", side.label()),
+            move || {
+                let target = {
+                    let s = arm_state.lock().unwrap_or_else(|p| p.into_inner());
+                    if !s.enabled(side) {
+                        return None;
+                    }
+                    s.arm(side).joints
+                };
+                Some(joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string()))
+            },
+        )));
+        // Gripper: stream the opening setpoint while enabled.
+        let gripper_state = state.clone();
+        tasks.push(tokio::spawn(stream_setpoints(
+            gripper_pub.clone(),
+            command_rate_hz,
+            token.clone(),
+            format!("{} gripper", side.label()),
+            move || {
+                let target = {
+                    let s = gripper_state.lock().unwrap_or_else(|p| p.into_inner());
+                    if !s.enabled(side) {
+                        return None;
+                    }
+                    s.gripper(side).position
+                };
+                Some(
+                    gripper_commands::build_message(side.gripper_id(), target)
+                        .map_err(|e| e.to_string()),
+                )
+            },
+        )));
+    }
+    for task in tasks {
+        let _ = task.await;
+    }
 }
 
-// Publish one arm's latest setpoint at command_rate_hz while it is enabled.
-async fn stream_arm(
+// Publish the latest setpoint from `next_message` at command_rate_hz, skipping a
+// tick whenever it returns None (the side is disabled). Failures latch so a
+// stuck side warns once, not every tick.
+async fn stream_setpoints(
     publisher: TopicPublisher,
-    state: SharedState,
-    side: Side,
     command_rate_hz: u32,
     token: CancellationToken,
+    label: String,
+    mut next_message: impl FnMut() -> Option<Result<Payload, String>>,
 ) {
     let period = Duration::from_micros(1_000_000 / command_rate_hz as u64);
     // interval (not sleep) so the publish cadence holds at command_rate_hz
@@ -66,27 +109,18 @@ async fn stream_arm(
             _ = ticker.tick() => {}
         }
 
-        let target = {
-            let s = state.lock().unwrap_or_else(|p| p.into_inner());
-            if !s.arm(side).enabled {
-                continue;
-            }
-            s.arm(side).joints
+        let Some(built) = next_message() else {
+            continue;
         };
-        let result = async {
-            let msg =
-                joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string())?;
-            publisher.publish(msg).await.map_err(|e| e.to_string())
-        }
-        .await;
+        let result = match built {
+            Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
         match result {
             Ok(()) => failing = false,
             Err(e) if !failing => {
                 failing = true;
-                warn!(
-                    "joint_commands publish failing for {} arm, suppressing repeats: {e}",
-                    side.label()
-                );
+                warn!("{label} command publish failing, suppressing repeats: {e}");
             }
             Err(_) => {}
         }

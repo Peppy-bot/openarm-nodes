@@ -1,6 +1,6 @@
 // Spawned per Enter keypress when an arm is focused. Fires move_arm_joints at
 // backbone, streams feedback back into the shared UiState, and writes the
-// result into the status line. Each goal is its own task — cancel-aware so a
+// result into the status line. Each goal is its own task; cancel-aware so a
 // shutdown can't wedge an in-flight goal.
 
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::state::{ARM_DOF, SharedState, Side};
 
-// Goal-accept round-trip to a pinned producer — answered directly, so this
+// Goal-accept round-trip to a pinned producer; answered directly, so this
 // only needs to cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -84,7 +84,7 @@ async fn run(
     let outcome = loop {
         tokio::select! {
             _ = token.cancelled() => {
-                finalize(&state, side, false, "shutting down — result abandoned").await;
+                finalize(&state, side, false, "shutting down; result abandoned").await;
                 return;
             }
             _ = preempt.cancelled(), if !preempted => {

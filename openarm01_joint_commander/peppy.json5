@@ -1,7 +1,8 @@
-// openarm01_joint_commander — operator entry point. Serves a browser-based
-// control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that fires
-// move_arm_joints / move_gripper goals at openarm01_backbone. MVP scope is
-// slider-driven joint-space; pose_estimation will land as a sibling node.
+// openarm01_joint_commander: operator entry point. Serves a browser-based
+// control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that streams
+// operator setpoints to the arms and grippers and fires move_arm_joints goals at
+// openarm01_backbone. MVP scope is slider-driven joint-space; pose_estimation
+// will land as a sibling node.
 {
   peppy_schema: "node_v1",
   manifest: {
@@ -41,12 +42,17 @@
     }
   },
   interfaces: {
-    // Streams operator joint setpoints to the arms. Producing this interface is
-    // what lets the panel drive an armed arm continuously instead of one move at
-    // a time; the arm clamps, rate-limits, and times out the stream on its side.
+    // Streams operator setpoints to the arms (joint_commands) and grippers
+    // (gripper_commands). Producing these is what lets the panel drive an enabled
+    // arm/gripper continuously instead of one move at a time; each node clamps,
+    // rate-limits, and times out the stream on its side.
     conforms_to: [
       {
         name: "openarm01_joint_command_source",
+        tag: "v1"
+      },
+      {
+        name: "openarm01_gripper_command_source",
         tag: "v1"
       }
     ],
@@ -57,10 +63,6 @@
         {
           link_id: "backbone",
           name: "move_arm_joints"
-        },
-        {
-          link_id: "backbone",
-          name: "move_gripper"
         }
       ]
     },

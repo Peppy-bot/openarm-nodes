@@ -178,6 +178,7 @@ const GRIPPER_MAX = 0.044;
 const HOME_DURATION_S = 3;
 let ws = null;
 let latestSnap = null;
+// One streaming deadman per side, shared by that side's arm and gripper.
 const enabled = { left: false, right: false };
 
 function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
@@ -213,19 +214,20 @@ function build_arm(side, label) {
 }
 
 function build_gripper(side, label) {
+  // No discrete buttons: the gripper is driven entirely by the streamed slider
+  // (closed at 0, open at the max), and the side's single Enable lives on the arm
+  // card. The slider carries the same measured-position caret as the arm joints.
   const root = $(`${side}_gripper`);
   root.innerHTML = `
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_g_badge">idle</span></div>
     <div class="gripper">
-      <input type="range" min="0" max="${GRIPPER_MAX}" step="0.0005" value="0" id="${side}_g"
-             oninput="document.getElementById('${side}_gt').textContent = parseFloat(this.value).toFixed(4) + ' m'" />
+      <div class="srow">
+        <input type="range" min="0" max="${GRIPPER_MAX}" step="0.0005" value="0" id="${side}_g"
+               oninput="on_gripper_input('${side}')" />
+        <div class="ghost off" id="${side}_gh"></div>
+      </div>
       <span class="target" id="${side}_gt">0.0000 m</span>
       <span class="fb" id="${side}_gf">---</span>
-    </div>
-    <div class="actions">
-      <button onclick="set_gripper('${side}', 0)">Close</button>
-      <button onclick="set_gripper('${side}', ${GRIPPER_MAX})">Open</button>
-      <button class="primary" onclick="fire_gripper('${side}')">Send</button>
     </div>`;
 }
 
@@ -246,16 +248,22 @@ function send_arm_target(side) {
   ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side)}));
 }
 
-// Enable: snap sliders to the measured pose first so streaming starts where the
-// arm already is, then flip the deadman. Disable just flips it back.
+// Enable: snap both the arm sliders and the gripper slider to the measured pose
+// first so streaming starts where the side already is, then flip the deadman.
+// Disable just flips it back. One deadman per side drives arm + gripper together.
 function toggle_enable(side) {
   if (!ws || ws.readyState !== 1) return;
   const next = !enabled[side];
-  if (next) {
-    const fb = latestSnap && latestSnap[`${side}_arm`].feedback;
-    if (fb) for (let i = 0; i < ARM_DOF; i++) {
-      $(`${side}_j${i}`).value = fb[i];
-      $(`${side}_t${i}`).textContent = fmt(fb[i]);
+  if (next && latestSnap) {
+    const armFb = latestSnap[`${side}_arm`].feedback;
+    if (armFb) for (let i = 0; i < ARM_DOF; i++) {
+      $(`${side}_j${i}`).value = armFb[i];
+      $(`${side}_t${i}`).textContent = fmt(armFb[i]);
+    }
+    const gFb = latestSnap[`${side}_gripper`].feedback;
+    if (gFb != null) {
+      $(`${side}_g`).value = gFb;
+      $(`${side}_gt`).textContent = gFb.toFixed(4) + ' m';
     }
   }
   ws.send(JSON.stringify({cmd: 'set_enabled', side, on: next}));
@@ -277,29 +285,29 @@ function fire_arm(side, duration_s) {
   ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: read_joints(side), duration_s}));
 }
 
-function set_gripper(side, m) {
-  $(`${side}_g`).value = m;
-  $(`${side}_gt`).textContent = parseFloat(m).toFixed(4) + ' m';
-  fire_gripper(side);
+// Slider moved: update the readout, and while enabled stream the new opening.
+function on_gripper_input(side) {
+  $(`${side}_gt`).textContent = parseFloat($(`${side}_g`).value).toFixed(4) + ' m';
+  if (enabled[side]) send_gripper_target(side);
 }
 
-function fire_gripper(side) {
+function send_gripper_target(side) {
   if (!ws || ws.readyState !== 1) return;
-  const position = parseFloat($(`${side}_g`).value);
-  ws.send(JSON.stringify({cmd: 'fire_gripper', side, position}));
+  ws.send(JSON.stringify({cmd: 'set_gripper_target', side, position: parseFloat($(`${side}_g`).value)}));
 }
 
 function apply_snapshot(snap) {
   latestSnap = snap;
   for (const side of ['left', 'right']) {
+    const on = snap[`${side}_enabled`];
+    enabled[side] = on;
     const a = snap[`${side}_arm`];
-    enabled[side] = a.enabled;
     const b = $(`${side}_arm_badge`);
-    b.textContent = a.enabled ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
-    b.className = 'badge' + (a.enabled ? ' stream' : (a.in_flight ? ' flight' : ''));
+    b.textContent = on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
+    b.className = 'badge' + (on ? ' stream' : (a.in_flight ? ' flight' : ''));
     const armBtn = $(`${side}_arm_btn`);
-    armBtn.textContent = a.enabled ? 'Disable' : 'Enable';
-    armBtn.classList.toggle('enabled', a.enabled);
+    armBtn.textContent = on ? 'Disable' : 'Enable';
+    armBtn.classList.toggle('enabled', on);
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
       // Slider bounds + the visible min/max readout come from joint_limits.
@@ -313,7 +321,7 @@ function apply_snapshot(snap) {
       }
       // While disabled the slider mirrors the measured pose (you must enable to
       // move), so the thumb shows where the arm is and enabling never jumps.
-      if (!a.enabled && a.feedback) {
+      if (!on && a.feedback) {
         el.value = a.feedback[i];
         $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
       }
@@ -330,14 +338,28 @@ function apply_snapshot(snap) {
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);
-    gb.textContent = g.in_flight ? 'in flight' : 'idle';
-    gb.className = 'badge' + (g.in_flight ? ' flight' : '');
+    gb.textContent = on ? 'streaming' : 'idle';
+    gb.className = 'badge' + (on ? ' stream' : '');
     const gs = $(`${side}_g`);
     if (gs.min != g.min) gs.min = g.min;
     if (gs.max != g.max) gs.max = g.max;
+    // While disabled the slider mirrors the measured opening so enabling never jumps.
+    if (!on && g.feedback != null) {
+      gs.value = g.feedback;
+      $(`${side}_gt`).textContent = g.feedback.toFixed(4) + ' m';
+    }
     $(`${side}_gf`).textContent = g.feedback != null
       ? g.feedback.toFixed(4)
       : '---';
+    // Measured-opening caret on the track, matching the arm joints.
+    const gsh = $(`${side}_gh`);
+    if (g.feedback != null && g.max > g.min) {
+      const pct = Math.max(0, Math.min(1, (g.feedback - g.min) / (g.max - g.min)));
+      gsh.style.setProperty('--at', (pct * 100) + '%');
+      gsh.classList.remove('off');
+    } else {
+      gsh.classList.add('off');
+    }
   }
   $('status').textContent = snap.status;
 }
