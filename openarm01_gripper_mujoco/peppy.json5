@@ -1,6 +1,6 @@
 // MuJoCo sim implementation of openarm01_gripper. Rust node talking to a
 // running MuJoCo sim via raw peppylib JSON channels published by
-// openarm01_robot_initializer_mujoco — engine-internal coupling, not part of
+// openarm01_robot_initializer_mujoco; engine-internal coupling, not part of
 // the openarm01_gripper:v1 interface contract.
 {
   peppy_schema: "node_v1",
@@ -11,15 +11,29 @@
       nodes: [
         { name: "openarm01_robot_initializer_mujoco", tag: "v1", link_id: "sim" },
       ],
+      interfaces: [
+        // Streamed opening setpoints the gripper follows between moves: optional
+        // and wildcard (`from_any`) so it binds to any conforming producer.
+        {
+          name: "openarm01_gripper_command_source",
+          tag: "v1",
+          link_id: "commander",
+          from_any: true,
+        },
+      ],
     },
   },
   interfaces: {
     conforms_to: [
       { name: "openarm01_gripper", tag: "v1" },
-      // Always-on measured opening, mirroring the arm; consumers tell grippers
-      // apart by gripper_id.
+      // Always-on measured opening; consumers tell grippers apart by gripper_id.
       { name: "openarm01_gripper_state_source", tag: "v1" },
     ],
+    topics: {
+      consumes: [
+        { name: "gripper_commands", link_id: "commander" },
+      ],
+    },
   },
   execution: {
     language: "rust",
@@ -30,6 +44,11 @@
       // The gripper_id at runtime (0 = left, 1 = right). Two instances are
       // expected; the bin's file-lock + gripper_id guard rejects collisions.
       gripper_id: "u8",
+      // Control-loop rate (Hz) for the follow loop.
+      control_rate_hz: "u32",
+      // How long (s) the gripper keeps following a stream after its last message
+      // before holding. Safety watchdog.
+      stream_timeout_s: "f64",
     },
   },
 }

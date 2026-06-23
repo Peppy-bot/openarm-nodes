@@ -1,18 +1,23 @@
 mod actions;
 mod config;
+mod follow;
 mod pipeline;
 mod services;
+mod setctrl;
 mod state;
+mod stream;
 mod transport;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::MessengerHandle;
 use sim_bridge_core::DaemonState;
+use tokio::sync::watch;
 use tracing::info;
 
-use crate::config::GripperId;
+use crate::config::{ControlParams, GripperId};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -56,7 +61,7 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // Telemetry pipelines — SimBridge gets its own cancel token from
+        // Telemetry pipelines; SimBridge gets its own cancel token from
         // node_runner internally.
         // SimBridge is peppylib-free; this node hands it a peppylib-backed
         // transport (telemetry::run bridges the cancel token internally).
@@ -68,13 +73,41 @@ fn main() -> Result<()> {
             transport,
         ));
 
-        tokio::spawn(actions::move_gripper::run(
+        // One set_ctrl publisher and one busy gate, shared by the move action and
+        // the follow loop so only one drives the sim at a time.
+        let side = gripper_id.side_word();
+        let set_ctrl_pub = setctrl::declare_publisher(&handle, &daemon, side)
+            .await
+            .expect("declare set_ctrl publisher");
+        let actuator_names = Arc::new(setctrl::actuator_names(side));
+        let busy = Arc::new(AtomicBool::new(false));
+        let control = ControlParams::from_params(&params);
+
+        // Stream listener -> follow loop: the listener keeps the latest streamed
+        // opening, the follow loop drives it between moves.
+        let (cmd_tx, cmd_rx) = watch::channel(None);
+        tokio::spawn(stream::run(
             node_runner.clone(),
             gripper_id,
+            cmd_tx,
+            token.clone(),
+        ));
+        tokio::spawn(follow::run(
+            set_ctrl_pub.clone(),
+            actuator_names.clone(),
+            busy.clone(),
+            cmd_rx,
+            control,
+            token.clone(),
+        ));
+
+        tokio::spawn(actions::move_gripper::run(
+            node_runner.clone(),
             shared.clone(),
             token.clone(),
-            handle.clone(),
-            daemon.clone(),
+            set_ctrl_pub,
+            actuator_names,
+            busy,
         ));
 
         Ok(())

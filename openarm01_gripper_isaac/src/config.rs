@@ -1,3 +1,33 @@
+use std::time::Duration;
+
+use peppygen::Parameters;
+
+/// Aperture (m) at full open; closed is 0. Bounds both the move target and the
+/// streamed follow setpoint.
+pub const GRIPPER_OPEN_M: f64 = 0.044;
+
+// Follow-loop timing for streamed gripper_commands, parsed from the node
+// parameters. No velocity cap: the gripper streams the latest opening directly.
+#[derive(Copy, Clone, Debug)]
+pub struct ControlParams {
+    pub control_period: Duration,
+    pub stream_timeout: Duration,
+}
+
+impl ControlParams {
+    pub fn from_params(p: &Parameters) -> Self {
+        assert!(p.control_rate_hz > 0, "control_rate_hz must be > 0");
+        assert!(
+            p.stream_timeout_s.is_finite() && p.stream_timeout_s > 0.0,
+            "stream_timeout_s must be a positive finite number"
+        );
+        Self {
+            control_period: Duration::from_micros(1_000_000 / p.control_rate_hz as u64),
+            stream_timeout: Duration::from_secs_f64(p.stream_timeout_s),
+        }
+    }
+}
+
 // GripperId is constructed only via `new(0|1)`. The private field stops callers
 // from minting an arbitrary value and bypassing validation, so side_word /
 // instance_id can rely on the invariant instead of carrying "unknown" arms.
