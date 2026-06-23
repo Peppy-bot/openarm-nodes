@@ -50,7 +50,17 @@ async def _run_sim(params, node_runner) -> list:
     async def _run_sim_task() -> None:
         try:
             await loop.run_in_executor(
-                None, SimLauncher(_XML_PATH, _ready, _stop, io, params.state_rate_hz).run
+                None,
+                SimLauncher(
+                    _XML_PATH,
+                    _ready,
+                    _stop,
+                    io,
+                    params.state_rate_hz,
+                    params.headless,
+                    params.viewer_host,
+                    params.viewer_port,
+                ).run,
             )
         finally:
             # Belt-and-braces against asyncio cancellation paths that race the
