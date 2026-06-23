@@ -19,14 +19,14 @@ use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
 use crate::config::ControlParams;
-use crate::setctrl;
+use crate::passthrough;
 use crate::state::{self, SharedState};
 use crate::stream::JointCommand;
 use crate::trajectory::{ARM_DOF as DOF, JointVec};
 
 pub async fn run(
-    set_ctrl_pub: TopicPublisher,
-    actuator_names: Arc<[String; DOF]>,
+    passthrough_pub: TopicPublisher,
+    arm_id: u8,
     busy: Arc<AtomicBool>,
     state: Arc<SharedState>,
     cmd: watch::Receiver<Option<JointCommand>>,
@@ -71,26 +71,24 @@ pub async fn run(
             setpoint = state::snapshot_positions(&state);
             continue;
         };
-        let Some(target) = state::clamp_to_limits(&state, target) else {
-            setpoint = state::snapshot_positions(&state);
-            continue;
-        };
 
+        // No node-level clamp: the sim engine enforces joint limits, so the
+        // chased setpoint is published as-is.
         let next = chase_step(from, target, &params.max_joint_velocity, dt);
         let dq = velocity(from, next, dt);
 
         // Advance the local setpoint only after a successful publish: on a
-        // transient set_ctrl outage the sim holds its last delivered setpoint,
+        // transient passthrough outage the sim holds its last delivered setpoint,
         // so resuming the chase from there keeps the per-tick velocity cap
         // instead of jumping the whole accumulated distance on recovery.
-        match setctrl::publish(&set_ctrl_pub, &actuator_names, &next, &dq).await {
+        match passthrough::publish(&passthrough_pub, arm_id, &next, &dq).await {
             Ok(()) => {
                 failing = false;
                 setpoint = Some(next);
             }
             Err(e) if !failing => {
                 failing = true;
-                warn!("follow set_ctrl publish failing, suppressing repeats: {e}");
+                warn!("follow passthrough publish failing, suppressing repeats: {e}");
             }
             Err(_) => {}
         }

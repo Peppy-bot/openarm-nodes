@@ -1,20 +1,17 @@
 mod actions;
 mod config;
 mod follow;
-mod pipeline;
+mod passthrough;
 mod services;
-mod setctrl;
 mod state;
+mod state_stream;
 mod stream;
 mod trajectory;
-mod transport;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use peppygen::{NodeBuilder, Parameters, Result};
-use peppylib::MessengerHandle;
-use sim_bridge_core::DaemonState;
 use tokio::sync::watch;
 use tracing::info;
 
@@ -32,18 +29,10 @@ fn main() -> Result<()> {
             arm_id.raw()
         );
 
-        let daemon_info = peppylib::info(&node_runner, None)
-            .await
-            .expect("peppylib::info");
-        let daemon = DaemonState {
-            core_node_name: daemon_info.core_node_name,
-            messaging_port: daemon_info.messaging_port,
-        };
-        let handle = Arc::new(
-            MessengerHandle::from_host_port("localhost", daemon.messaging_port)
-                .await
-                .expect("peppylib connect"),
-        );
+        // No shutdown handler — unlike the gripper we must NOT publish ctrl=0.0
+        // on exit: zeroing arm joint targets would command the arm into a hard
+        // self-collision pose. SIGINT cancels the token; the action loop exits
+        // with the arm holding its last commanded pose.
 
         let shared = state::new_shared();
         let control = ControlParams::from_params(&params);
@@ -54,25 +43,22 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // SimBridge is peppylib-free; this node hands it a peppylib-backed
-        // transport (telemetry::run bridges the cancel token internally).
-        let transport = transport::PeppylibTransport::new(daemon.clone());
-        tokio::spawn(pipeline::telemetry::run(
+        // Consume the sim's measured joint state (joint_states) to anchor moves
+        // and re-anchor the follow chase.
+        tokio::spawn(state_stream::run(
             node_runner.clone(),
             arm_id,
             shared.clone(),
-            transport,
+            token.clone(),
         ));
 
         tokio::spawn(actions::move_arm::run(node_runner.clone(), token.clone()));
 
-        // One set_ctrl publisher and one busy gate, shared by the move action and
-        // the follow loop so only one drives the sim at a time.
-        let side = arm_id.side_word();
-        let set_ctrl_pub = setctrl::declare_publisher(&handle, &daemon, side)
+        // One passthrough publisher and one busy gate, shared by the move action
+        // and the follow loop so only one drives the sim at a time.
+        let passthrough_pub = passthrough::declare_publisher(&node_runner)
             .await
-            .expect("declare set_ctrl publisher");
-        let actuator_names = Arc::new(setctrl::actuator_names(side));
+            .expect("declare passthrough publisher");
         let busy = Arc::new(AtomicBool::new(false));
 
         // Stream listener -> follow loop: the listener keeps the latest streamed
@@ -85,8 +71,8 @@ fn main() -> Result<()> {
             token.clone(),
         ));
         tokio::spawn(follow::run(
-            set_ctrl_pub.clone(),
-            actuator_names.clone(),
+            passthrough_pub.clone(),
+            arm_id.raw(),
             busy.clone(),
             shared.clone(),
             cmd_rx,
@@ -98,8 +84,8 @@ fn main() -> Result<()> {
             node_runner.clone(),
             shared.clone(),
             token.clone(),
-            set_ctrl_pub,
-            actuator_names,
+            passthrough_pub,
+            arm_id.raw(),
             busy,
             control,
         ));
