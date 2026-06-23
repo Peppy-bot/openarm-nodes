@@ -1,9 +1,9 @@
 // Ambient following of a streamed gripper opening. While no move is running
-// (busy gate clear), publish set_ctrl toward the latest fresh command; when the
-// stream goes stale, hold by publishing nothing so the sim keeps its last
-// setpoint. The move action and this loop share the busy gate, so they never
-// both drive the gripper. The opening is published directly; the sim servo eases
-// to it.
+// (busy gate clear), publish the latest fresh opening to the sim; when the stream
+// goes stale, hold by publishing nothing so the sim keeps its last setpoint. The
+// move action and this loop share the busy gate, so they never both drive the
+// gripper. The opening is published directly; the sim splits it across the
+// fingers and its servo eases to it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,12 +15,12 @@ use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
 use crate::config::{ControlParams, GRIPPER_OPEN_M};
-use crate::setctrl;
+use crate::passthrough;
 use crate::stream::GripperCommand;
 
 pub async fn run(
-    set_ctrl_pub: TopicPublisher,
-    actuator_names: Arc<[String; 2]>,
+    passthrough_pub: TopicPublisher,
+    gripper_id: u8,
     busy: Arc<AtomicBool>,
     cmd: watch::Receiver<Option<GripperCommand>>,
     params: ControlParams,
@@ -53,15 +53,15 @@ pub async fn run(
         let Some(position) = position else {
             continue;
         };
-        // Clamp defensively (a producer could stream out of range), then split
-        // the aperture across the two fingers.
-        let per_finger = position.clamp(0.0, GRIPPER_OPEN_M) / 2.0;
+        // Clamp defensively (a producer could stream out of range); the sim
+        // splits the aperture across the two fingers.
+        let opening = position.clamp(0.0, GRIPPER_OPEN_M);
 
-        match setctrl::publish(&set_ctrl_pub, &actuator_names, per_finger).await {
+        match passthrough::publish(&passthrough_pub, gripper_id, opening).await {
             Ok(()) => failing = false,
             Err(e) if !failing => {
                 failing = true;
-                warn!("follow set_ctrl publish failing, suppressing repeats: {e}");
+                warn!("follow passthrough publish failing, suppressing repeats: {e}");
             }
             Err(_) => {}
         }
