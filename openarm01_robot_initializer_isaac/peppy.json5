@@ -59,13 +59,10 @@
     parameters: {
       // Rate (Hz) of the measured-state streams (joint_states / gripper_states).
       state_rate_hz: "u32",
-      // Run without the viewer window (the deployment default); set false for a
-      // local debugging session that opens the Isaac viewer.
+      // Run headless (the deployment default); set false to open the Isaac
+      // viewer. Isaac's livestream host/port are handled by the streaming kit,
+      // so there are no viewer_host/viewer_port params here (unlike mujoco).
       headless: { $type: "bool", $default: true },
-      // Viewer bind address + port, used only when headless is false. Loopback
-      // by default so the viewer is not exposed by accident.
-      viewer_host: { $type: "string", $default: "127.0.0.1" },
-      viewer_port: { $type: "u32", $default: 8080 },
     },
   },
 }

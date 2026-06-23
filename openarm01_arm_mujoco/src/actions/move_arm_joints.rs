@@ -38,7 +38,6 @@ struct MotionResult {
     action_time: f64,
 }
 
-
 pub async fn run(
     runner: Arc<NodeRunner>,
     state: Arc<SharedState>,
@@ -207,7 +206,7 @@ async fn run_control_loop(
                     return MotionResult {
                         success: false,
                         is_cancelled: false,
-                        message: "passthrough publish failing — arm not commandable".into(),
+                        message: "passthrough publish failing: arm not commandable".into(),
                         final_positions: state::snapshot_positions(state).unwrap_or([0.0; DOF]),
                         action_time: start.elapsed().as_secs_f64(),
                     };

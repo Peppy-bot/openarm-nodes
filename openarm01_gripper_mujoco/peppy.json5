@@ -1,7 +1,7 @@
-// MuJoCo sim implementation of openarm01_gripper. Rust node talking to a
-// running MuJoCo sim via raw peppylib JSON channels published by
-// openarm01_robot_initializer_mujoco; engine-internal coupling, not part of
-// the openarm01_gripper:v1 interface contract.
+// MuJoCo sim implementation of openarm01_gripper. Follows streamed
+// gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
+// the sim to actuate; consumes the sim's gripper_states for move-action feedback.
+// Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node_v1",
   manifest: {

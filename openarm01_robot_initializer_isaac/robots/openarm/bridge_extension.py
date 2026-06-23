@@ -107,12 +107,26 @@ class IsaacBridgeExtension:
         self._joint_index = {
             name: i for i, name in enumerate(self._articulation.get_joint_names())
         }
+        # Fail loudly on a sim_bridge.json5 typo: a joint the articulation doesn't
+        # have would otherwise silently drop that side's commands + telemetry.
+        configured = [j for arm in self._arms for j in arm["joints"]] + [
+            f for g in self._grippers for f in g["fingers"]
+        ]
+        missing = sorted({n for n in configured if n not in self._joint_index})
+        if missing:
+            raise RuntimeError(
+                f"sim_bridge.json5 references joints not in the Isaac articulation: {missing}"
+            )
         self._ready = True
         logger.info(
-            f"IsaacBridgeExtension ready — {len(self._arms)} arm(s), "
+            f"IsaacBridgeExtension ready with {len(self._arms)} arm(s), "
             f"{len(self._grippers)} gripper(s)"
         )
         return True
+
+    @property
+    def is_ready(self) -> bool:
+        return self._ready
 
     def step(self) -> None:
         """Physics has already advanced in sim_app.update(); apply the latest

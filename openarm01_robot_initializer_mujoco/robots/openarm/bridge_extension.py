@@ -66,6 +66,16 @@ class MujocoBridgeExtension:
         self._joint_index = {
             name: i for i, name in enumerate(self._articulation.get_joint_names())
         }
+        # Fail loudly on a sim_bridge.json5 typo: a joint the model doesn't have
+        # would otherwise silently drop that side's commands + telemetry.
+        configured = [j for arm in self._arms for j in arm["joints"]] + [
+            f for g in self._grippers for f in g["fingers"]
+        ]
+        missing = sorted({n for n in configured if n not in self._joint_index})
+        if missing:
+            raise RuntimeError(
+                f"sim_bridge.json5 references joints not in the MuJoCo model: {missing}"
+            )
         if not self._actuator.setup():
             raise RuntimeError("MujocoActuatorCtrl setup failed")
         for gripper in self._grippers:
@@ -78,7 +88,7 @@ class MujocoBridgeExtension:
                 )
             self._gripper_sensors[gripper["gripper_id"]] = sensor
         logger.info(
-            f"MujocoBridgeExtension ready — {len(self._arms)} arm(s), "
+            f"MujocoBridgeExtension ready with {len(self._arms)} arm(s), "
             f"{len(self._grippers)} gripper(s)"
         )
 

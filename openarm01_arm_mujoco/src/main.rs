@@ -29,7 +29,7 @@ fn main() -> Result<()> {
             arm_id.raw()
         );
 
-        // No shutdown handler — unlike the gripper we must NOT publish ctrl=0.0
+        // No shutdown handler. Unlike the gripper we must NOT publish ctrl=0.0
         // on exit: zeroing arm joint targets would command the arm into a hard
         // self-collision pose. SIGINT cancels the token; the action loop exits
         // with the arm holding its last commanded pose.

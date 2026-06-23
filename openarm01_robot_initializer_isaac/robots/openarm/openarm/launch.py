@@ -43,8 +43,6 @@ class _SimHandoff:
     io: object
     state_rate_hz: int
     headless: bool
-    viewer_host: str
-    viewer_port: int
 
 
 _handoff: dict[str, _SimHandoff] = {}
@@ -65,8 +63,6 @@ async def setup(params, node_runner) -> list:
         io=io,
         state_rate_hz=params.state_rate_hz,
         headless=params.headless,
-        viewer_host=params.viewer_host,
-        viewer_port=params.viewer_port,
     )
     _handoff_ready.set()
 
@@ -132,9 +128,6 @@ def main() -> None:
         _stop,
         handoff.io,
         handoff.state_rate_hz,
-        handoff.headless,
-        handoff.viewer_host,
-        handoff.viewer_port,
     ).run()
 
 

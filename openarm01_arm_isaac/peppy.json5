@@ -1,7 +1,7 @@
-// Isaac sim implementation of openarm01_arm. Rust node talking to a running
-// Isaac Sim via raw peppylib JSON channels published by
-// openarm01_robot_initializer_isaac — engine-internal coupling, not part of
-// the openarm01_arm:v1 interface contract.
+// Isaac sim implementation of openarm01_arm. Follows streamed joint_commands and
+// emits the resolved (q_des, dq_des) on arm_sim_passthrough for the sim to
+// actuate; consumes the sim's joint_states for the trajectory anchor + follow
+// re-anchor. Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node_v1",
   manifest: {

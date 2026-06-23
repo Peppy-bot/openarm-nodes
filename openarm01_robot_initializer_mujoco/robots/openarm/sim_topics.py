@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 from typing import Optional
 
@@ -69,6 +70,8 @@ class SimTopicIO:
     async def stop(self) -> None:
         for task in self._tasks:
             task.cancel()
+        # Let the cancellations land so the consume loops exit before teardown.
+        await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _consume_arm(self) -> None:
         while True:
@@ -78,6 +81,12 @@ class SimTopicIO:
                 return
             except Exception as exc:
                 logger.warning(f"arm command consume error: {exc}")
+                continue
+            # Drop a poisoned command rather than writing NaN/Inf into the sim.
+            if not all(math.isfinite(v) for v in msg.positions) or not all(
+                math.isfinite(v) for v in msg.velocities
+            ):
+                logger.warning(f"dropping non-finite arm command for arm_id={msg.arm_id}")
                 continue
             slot = self._arm_cmd.get(msg.arm_id)
             if slot is not None:
@@ -91,6 +100,11 @@ class SimTopicIO:
                 return
             except Exception as exc:
                 logger.warning(f"gripper command consume error: {exc}")
+                continue
+            if not math.isfinite(msg.position):
+                logger.warning(
+                    f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
+                )
                 continue
             slot = self._gripper_cmd.get(msg.gripper_id)
             if slot is not None:
