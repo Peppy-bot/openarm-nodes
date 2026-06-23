@@ -264,7 +264,7 @@ function toggle_enable(side) {
 function reset_arm(side) {
   // Home parks the arm: disable so the stream stops, then drive to all-zeros as a
   // discrete, time-bounded move.
-  if (enabled[side]) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
+  if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = 0;
     $(`${side}_t${i}`).textContent = '+0.000';
