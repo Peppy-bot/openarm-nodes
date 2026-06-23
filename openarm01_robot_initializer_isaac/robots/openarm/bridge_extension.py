@@ -43,7 +43,9 @@ class IsaacBridgeExtension:
         # Telemetry is throttled to state_rate_hz: serializing every reader at
         # the physics tick saturates the single sim thread. Writers and the
         # physics step still run every tick.
-        self._telemetry_period_s = 1.0 / state_rate_hz if state_rate_hz > 0 else 0.0
+        if state_rate_hz <= 0:
+            raise ValueError(f"state_rate_hz must be positive, got {state_rate_hz}")
+        self._telemetry_period_s = 1.0 / state_rate_hz
         self._last_publish_s = 0.0
 
         cfg = pyjson5.loads(_CONFIG_PATH.read_text())
