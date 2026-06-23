@@ -78,10 +78,16 @@ pub async fn run(
 
         let next = chase_step(from, target, &params.max_joint_velocity, dt);
         let dq = velocity(from, next, dt);
-        setpoint = Some(next);
 
+        // Advance the local setpoint only after a successful publish: on a
+        // transient set_ctrl outage the sim holds its last delivered setpoint,
+        // so resuming the chase from there keeps the per-tick velocity cap
+        // instead of jumping the whole accumulated distance on recovery.
         match setctrl::publish(&set_ctrl_pub, &actuator_names, &next, &dq).await {
-            Ok(()) => failing = false,
+            Ok(()) => {
+                failing = false;
+                setpoint = Some(next);
+            }
             Err(e) if !failing => {
                 failing = true;
                 warn!("follow set_ctrl publish failing, suppressing repeats: {e}");
