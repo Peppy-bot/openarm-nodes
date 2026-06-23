@@ -32,5 +32,10 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
         };
         let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
         s.arm_mut(side).last_feedback = Some(msg.positions);
+        // While disabled, hold the target on the measured pose so the first
+        // streamed setpoint on enabling equals where the arm already is.
+        if !s.arm(side).enabled {
+            s.arm_mut(side).joints = msg.positions;
+        }
     }
 }

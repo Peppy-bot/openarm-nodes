@@ -1,24 +1,27 @@
 mod actions;
 mod config;
+mod follow;
 mod pipeline;
 mod services;
+mod setctrl;
 mod state;
+mod stream;
 mod trajectory;
 mod transport;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::MessengerHandle;
 use sim_bridge_core::DaemonState;
+use tokio::sync::watch;
 use tracing::info;
 
-use crate::config::ArmId;
+use crate::config::{ArmId, ControlParams};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let arm_id = ArmId::new(params.arm_id).expect("arm_id must be 0 (left) or 1 (right)");
@@ -43,6 +46,7 @@ fn main() -> Result<()> {
         );
 
         let shared = state::new_shared();
+        let control = ControlParams::from_params(&params);
 
         tokio::spawn(services::get_arm_id::run(
             node_runner.clone(),
@@ -62,13 +66,42 @@ fn main() -> Result<()> {
 
         tokio::spawn(actions::move_arm::run(node_runner.clone(), token.clone()));
 
-        tokio::spawn(actions::move_arm_joints::run(
+        // One set_ctrl publisher and one busy gate, shared by the move action and
+        // the follow loop so only one drives the sim at a time.
+        let side = arm_id.side_word();
+        let set_ctrl_pub = setctrl::declare_publisher(&handle, &daemon, side)
+            .await
+            .expect("declare set_ctrl publisher");
+        let actuator_names = Arc::new(setctrl::actuator_names(side));
+        let busy = Arc::new(AtomicBool::new(false));
+
+        // Stream listener -> follow loop: the listener keeps the latest streamed
+        // setpoint, the follow loop drives it between moves.
+        let (cmd_tx, cmd_rx) = watch::channel(None);
+        tokio::spawn(stream::run(
             node_runner.clone(),
             arm_id,
+            cmd_tx,
+            token.clone(),
+        ));
+        tokio::spawn(follow::run(
+            set_ctrl_pub.clone(),
+            actuator_names.clone(),
+            busy.clone(),
+            shared.clone(),
+            cmd_rx,
+            control,
+            token.clone(),
+        ));
+
+        tokio::spawn(actions::move_arm_joints::run(
+            node_runner.clone(),
             shared.clone(),
             token.clone(),
-            handle.clone(),
-            daemon.clone(),
+            set_ctrl_pub,
+            actuator_names,
+            busy,
+            control,
         ));
 
         Ok(())

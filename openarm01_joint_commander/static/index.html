@@ -65,6 +65,9 @@
     box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
   }
   .badge.flight { color: var(--w); background: var(--warn); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+  .badge.stream { color: var(--w); background: var(--ok); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+  button.enabled { color: var(--w); background: var(--err); box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0,0,0,0.35); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .joint {
     display: grid; grid-template-columns: 30px 1fr 66px 66px; gap: 10px;
@@ -73,6 +76,22 @@
   .joint .name { color: var(--ink-50); font-weight: 600; font-size: 12px; }
   .joint .target { text-align: right; font-weight: 500; }
   .joint .fb, .gripper .fb { text-align: right; color: var(--ink-50); }
+
+  /* Slider + actual-position shadow overlay. The caret marks the measured value
+     on the same track as the commanded thumb, so a commanded/actual gap reads at
+     a glance. Inset by the thumb radius so 0% and 100% line up with the thumb. */
+  .srow { position: relative; display: flex; align-items: center; }
+  .ghost {
+    position: absolute; left: 10px; right: 10px; top: 50%; height: 8px;
+    transform: translateY(-50%); pointer-events: none; z-index: 2;
+  }
+  .ghost::after {
+    content: ''; position: absolute; top: -4px; width: 3px; height: 16px;
+    border-radius: 2px; background: var(--warn);
+    box-shadow: 0 0 0 1px var(--hi);
+    left: var(--at, 0%); transform: translateX(-50%); transition: left 0.08s linear;
+  }
+  .ghost.off::after { display: none; }
 
   .gripper {
     display: grid; grid-template-columns: 1fr 84px 130px; gap: 10px;
@@ -100,20 +119,14 @@
   .actions {
     display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; align-items: center;
   }
-  .dur {
-    display: flex; align-items: center; gap: 7px; margin-right: auto;
-    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em;
-    text-transform: uppercase; color: var(--ink-50);
+  /* Slider column: the track (with its actual-position caret) over a faint
+     min/max readout, so the joint's limits are always visible. */
+  .scol { display: flex; flex-direction: column; gap: 3px; }
+  .lim {
+    display: flex; justify-content: space-between;
+    font: 500 10px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
+    color: var(--ink-50);
   }
-  .dur input {
-    width: 64px; padding: 7px 9px; border: none; border-radius: 10px;
-    font: 500 13px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
-    color: var(--ink); text-align: right;
-    background: var(--bg-soft);
-    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
-    outline: none;
-  }
-  .dur input:focus { box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi), 0 0 0 2px var(--ink-15); }
 
   button {
     font: 600 12px/1 'Inter Tight', sans-serif; letter-spacing: 0.05em; text-transform: uppercase;
@@ -162,7 +175,10 @@
 const PI = Math.PI;
 const ARM_DOF = 7;
 const GRIPPER_MAX = 0.044;
+const HOME_DURATION_S = 3;
 let ws = null;
+let latestSnap = null;
+const enabled = { left: false, right: false };
 
 function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
 function $(id) { return document.getElementById(id); }
@@ -173,11 +189,8 @@ function build_arm(side, label) {
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
     <div id="${side}_arm_joints"></div>
     <div class="actions">
-      <label class="dur" title="move duration in seconds; 0 = fastest safe move">
-        duration <input type="number" id="${side}_dur" value="2" min="0" max="30" step="0.5"> s
-      </label>
       <button onclick="reset_arm('${side}')">Home</button>
-      <button class="primary" onclick="fire_arm('${side}')">Send</button>
+      <button class="primary" id="${side}_arm_btn" onclick="toggle_enable('${side}')">Enable</button>
     </div>`;
   const joints = $(`${side}_arm_joints`);
   for (let i = 0; i < ARM_DOF; i++) {
@@ -185,8 +198,14 @@ function build_arm(side, label) {
     row.className = 'joint';
     row.innerHTML = `
       <span class="name">j${i+1}</span>
-      <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
-             oninput="document.getElementById('${side}_t${i}').textContent = fmt(parseFloat(this.value))" />
+      <div class="scol">
+        <div class="srow">
+          <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
+                 oninput="on_joint_input('${side}', ${i})" />
+          <div class="ghost off" id="${side}_sh${i}"></div>
+        </div>
+        <div class="lim"><span id="${side}_lo${i}">--</span><span id="${side}_hi${i}">--</span></div>
+      </div>
       <span class="target" id="${side}_t${i}">+0.000</span>
       <span class="fb" id="${side}_f${i}">---</span>`;
     joints.appendChild(row);
@@ -210,20 +229,52 @@ function build_gripper(side, label) {
     </div>`;
 }
 
+function read_joints(side) {
+  const joints = [];
+  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
+  return joints;
+}
+
+// Slider moved: update the readout, and while enabled stream the new setpoint.
+function on_joint_input(side, i) {
+  $(`${side}_t${i}`).textContent = fmt(parseFloat($(`${side}_j${i}`).value));
+  if (enabled[side]) send_arm_target(side);
+}
+
+function send_arm_target(side) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side)}));
+}
+
+// Enable: snap sliders to the measured pose first so streaming starts where the
+// arm already is, then flip the deadman. Disable just flips it back.
+function toggle_enable(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const next = !enabled[side];
+  if (next) {
+    const fb = latestSnap && latestSnap[`${side}_arm`].feedback;
+    if (fb) for (let i = 0; i < ARM_DOF; i++) {
+      $(`${side}_j${i}`).value = fb[i];
+      $(`${side}_t${i}`).textContent = fmt(fb[i]);
+    }
+  }
+  ws.send(JSON.stringify({cmd: 'set_enabled', side, on: next}));
+}
+
 function reset_arm(side) {
+  // Home parks the arm: disable so the stream stops, then drive to all-zeros as a
+  // discrete, time-bounded move.
+  if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = 0;
     $(`${side}_t${i}`).textContent = '+0.000';
   }
-  fire_arm(side);  // Home is a motion: send the all-zeros goal at the panel's duration
+  fire_arm(side, HOME_DURATION_S);
 }
 
-function fire_arm(side) {
+function fire_arm(side, duration_s) {
   if (!ws || ws.readyState !== 1) return;
-  const joints = [];
-  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
-  const duration_s = Math.max(0, parseFloat($(`${side}_dur`).value) || 0);
-  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints, duration_s}));
+  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: read_joints(side), duration_s}));
 }
 
 function set_gripper(side, m) {
@@ -239,19 +290,41 @@ function fire_gripper(side) {
 }
 
 function apply_snapshot(snap) {
+  latestSnap = snap;
   for (const side of ['left', 'right']) {
     const a = snap[`${side}_arm`];
+    enabled[side] = a.enabled;
     const b = $(`${side}_arm_badge`);
-    b.textContent = a.in_flight ? 'in flight' : 'idle';
-    b.className = 'badge' + (a.in_flight ? ' flight' : '');
+    b.textContent = a.enabled ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
+    b.className = 'badge' + (a.enabled ? ' stream' : (a.in_flight ? ' flight' : ''));
+    const armBtn = $(`${side}_arm_btn`);
+    armBtn.textContent = a.enabled ? 'Disable' : 'Enable';
+    armBtn.classList.toggle('enabled', a.enabled);
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
-      // Slider bounds come from the server's joint_limits config.
+      // Slider bounds + the visible min/max readout come from joint_limits.
+      const [lo, hi] = a.limits ? a.limits[i] : [-PI, PI];
+      const el = $(`${side}_j${i}`);
       if (a.limits) {
-        const el = $(`${side}_j${i}`);
-        const [lo, hi] = a.limits[i];
         if (el.min != lo) el.min = lo;
         if (el.max != hi) el.max = hi;
+        $(`${side}_lo${i}`).textContent = fmt(lo);
+        $(`${side}_hi${i}`).textContent = fmt(hi);
+      }
+      // While disabled the slider mirrors the measured pose (you must enable to
+      // move), so the thumb shows where the arm is and enabling never jumps.
+      if (!a.enabled && a.feedback) {
+        el.value = a.feedback[i];
+        $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
+      }
+      // Actual-position caret on the track.
+      const sh = $(`${side}_sh${i}`);
+      if (a.feedback && hi > lo) {
+        const pct = Math.max(0, Math.min(1, (a.feedback[i] - lo) / (hi - lo)));
+        sh.style.setProperty('--at', (pct * 100) + '%');
+        sh.classList.remove('off');
+      } else {
+        sh.classList.add('off');
       }
     }
 

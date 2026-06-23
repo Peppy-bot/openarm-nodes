@@ -1,4 +1,5 @@
 mod actions;
+mod command_stream;
 mod error;
 mod gripper_states;
 mod joint_states;
@@ -17,9 +18,14 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    NodeBuilder::new().run(|_params: Parameters, node_runner| async move {
+    NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let token = node_runner.cancellation_token().clone();
         let shared = state::new_shared();
+
+        // Rate feeds `Duration::from_micros(1_000_000 / rate)`, so a rate above
+        // 1 MHz would round to a 0 µs period; no real deployment approaches that,
+        // so just guard against zero.
+        assert!(params.command_rate_hz > 0, "command_rate_hz must be > 0");
 
         // Feed the UI live arm + gripper state off the always-on state streams
         // (replaces move-progress relayed through the action feedback topics).
@@ -31,6 +37,14 @@ fn main() -> Result<()> {
         tokio::spawn(gripper_states::run(
             node_runner.clone(),
             shared.clone(),
+            token.clone(),
+        ));
+
+        // Stream operator joint setpoints to the enabled arms (deadman in UiState).
+        tokio::spawn(command_stream::run(
+            node_runner.clone(),
+            shared.clone(),
+            params.command_rate_hz,
             token.clone(),
         ));
 

@@ -11,6 +11,17 @@
       nodes: [
         { name: "openarm01_robot_initializer_mujoco", tag: "v1", link_id: "sim" },
       ],
+      interfaces: [
+        // Streamed joint setpoints the arm follows between moves: optional and
+        // wildcard (`from_any`), so it binds to any conforming producer (the
+        // commander). Mirrors the real arm so both follow the same contract.
+        {
+          name: "openarm01_joint_command_source",
+          tag: "v1",
+          link_id: "commander",
+          from_any: true,
+        },
+      ],
     },
   },
   interfaces: {
@@ -18,6 +29,11 @@
       { name: "openarm01_arm", tag: "v1" },
       { name: "openarm01_joint_state_source", tag: "v1" },
     ],
+    topics: {
+      consumes: [
+        { name: "joint_commands", link_id: "commander" },
+      ],
+    },
   },
   execution: {
     language: "rust",
@@ -28,6 +44,22 @@
       // The arm_id at runtime (0 = left, 1 = right). Two instances are
       // expected; the bin's file-lock + arm_id guard rejects collisions.
       arm_id: "u8",
+      // Control-loop rate (Hz) for moves and follow. Required, mirroring the
+      // real arm (which exposes the same param rather than hiding a default).
+      control_rate_hz: "u32",
+      // How long (s) the arm keeps following a command stream after its last
+      // message before holding. Safety watchdog, required like the real arm.
+      stream_timeout_s: "f64",
+      // Per-joint peak velocity (rad/s) sizing both the quintic move duration
+      // and the follow chase. Defaults are the OpenArm V1.0 URDF velocity limits,
+      // identical to the real arm's defaults.
+      max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
+      max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.754666 },
+      max_joint_velocity_rad_s_3: { $type: "f64", $default: 5.445426 },
+      max_joint_velocity_rad_s_4: { $type: "f64", $default: 5.445426 },
+      max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.943946 },
+      max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.943946 },
+      max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
     },
   },
 }

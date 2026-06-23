@@ -129,6 +129,12 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             }
         }
     }
+    // The operator's connection is the streaming deadman: once it drops, disable
+    // both arms so command_stream stops emitting and each arm's stream timeout
+    // releases it to hold.
+    let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+    s.arm_mut(Side::Left).enabled = false;
+    s.arm_mut(Side::Right).enabled = false;
 }
 
 async fn handle_command(text: &str, app: &AppState) {
@@ -139,22 +145,64 @@ async fn handle_command(text: &str, app: &AppState) {
             return;
         }
     };
-    let limits = joint_limits();
     match cmd {
         Command::FireArm { side, mut joints, duration_s } => {
             let side: Side = side.into();
-            for (j, &[lo, hi]) in joints.iter_mut().zip(limits.arm(side).iter()) {
-                *j = j.clamp(lo, hi);
+            // A discrete move preempts the live stream, so refuse one while enabled
+            // rather than relying on the UI to hide the button.
+            {
+                let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                if s.arm(side).enabled {
+                    s.set_status(format!("{} arm: disable before a discrete move", side.label()));
+                    return;
+                }
             }
+            clamp_to_limits(&mut joints, side);
             // The arm floors the duration at its velocity-limit minimum; this
             // guard only catches garbage input (NaN, negative, absurd).
             let duration_s = if duration_s.is_finite() { duration_s.clamp(0.0, 30.0) } else { 0.0 };
             fire_arm(app, side, joints, duration_s).await;
         }
         Command::FireGripper { side, position } => {
-            let position = position.clamp(limits.gripper[0], limits.gripper[1]);
-            fire_gripper(app, side.into(), position).await;
+            let [lo, hi] = joint_limits().gripper;
+            fire_gripper(app, side.into(), position.clamp(lo, hi)).await;
         }
+        Command::SetEnabled { side, on } => {
+            let side: Side = side.into();
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            if on {
+                // Refuse to enable until a measured pose exists, then seed the target
+                // on it so the first emitted command holds position instead of
+                // streaming the stale default.
+                let Some(measured) = s.arm(side).last_feedback else {
+                    s.set_status(format!("{} arm: no measured pose yet, not enabling", side.label()));
+                    return;
+                };
+                s.arm_mut(side).joints = measured;
+            }
+            s.arm_mut(side).enabled = on;
+            s.set_status(format!(
+                "{} arm: {}",
+                side.label(),
+                if on { "ENABLED, streaming" } else { "disabled" }
+            ));
+        }
+        Command::SetArmTarget { side, mut joints } => {
+            let side: Side = side.into();
+            clamp_to_limits(&mut joints, side);
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            if s.arm(side).enabled {
+                s.arm_mut(side).joints = joints;
+            }
+        }
+    }
+}
+
+// Clamp each joint setpoint into its configured [min, max]. The single clamp
+// path for every operator-driven arm command; the arm clamps again on its side.
+fn clamp_to_limits(joints: &mut [f64; ARM_DOF], side: Side) {
+    for (j, &[lo, hi]) in joints.iter_mut().zip(joint_limits().arm(side).iter()) {
+        *j = j.clamp(lo, hi);
     }
 }
 
@@ -249,6 +297,7 @@ struct ArmView {
     joints: [f64; ARM_DOF],
     feedback: Option<[f64; ARM_DOF]>,
     in_flight: bool,
+    enabled: bool,
     // Per-joint [min, max] (rad) — the browser bounds its sliders with these.
     limits: [[f64; 2]; ARM_DOF],
 }
@@ -280,6 +329,7 @@ fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
         joints: a.joints,
         feedback: a.last_feedback,
         in_flight: a.in_flight,
+        enabled: a.enabled,
         limits: *joint_limits().arm(side),
     }
 }
@@ -301,14 +351,25 @@ enum Command {
     FireArm {
         side: SideWire,
         joints: [f64; ARM_DOF],
-        // Requested move duration (s); 0 = fastest safe. Default keeps older
-        // clients without the field working.
-        #[serde(default)]
+        // Requested move duration (s); 0 = fastest safe.
         duration_s: f64,
     },
     FireGripper {
         side: SideWire,
         position: f64,
+    },
+    // Toggle the streaming deadman for one arm. While enabled, command_stream emits
+    // this arm's target on joint_commands; while disabled it tracks the measured
+    // pose and emits nothing.
+    SetEnabled {
+        side: SideWire,
+        on: bool,
+    },
+    // Update an enabled arm's streamed target. Ignored while disabled, where the
+    // target follows the measured pose so enabling never steps the arm.
+    SetArmTarget {
+        side: SideWire,
+        joints: [f64; ARM_DOF],
     },
 }
 
@@ -325,5 +386,55 @@ impl From<SideWire> for Side {
             SideWire::Left => Side::Left,
             SideWire::Right => Side::Right,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_pins_each_joint_into_its_range() {
+        for side in [Side::Left, Side::Right] {
+            let limits = joint_limits().arm(side);
+
+            let mut high = [f64::INFINITY; ARM_DOF];
+            clamp_to_limits(&mut high, side);
+            for (v, &[_, hi]) in high.iter().zip(limits.iter()) {
+                assert_eq!(*v, hi);
+            }
+
+            let mut low = [f64::NEG_INFINITY; ARM_DOF];
+            clamp_to_limits(&mut low, side);
+            for (v, &[lo, _]) in low.iter().zip(limits.iter()) {
+                assert_eq!(*v, lo);
+            }
+        }
+    }
+
+    #[test]
+    fn clamp_leaves_in_range_values_untouched() {
+        for side in [Side::Left, Side::Right] {
+            let limits = joint_limits().arm(side);
+            let mut mid = [0.0; ARM_DOF];
+            for (m, &[lo, hi]) in mid.iter_mut().zip(limits.iter()) {
+                *m = (lo + hi) / 2.0;
+            }
+            let before = mid;
+            clamp_to_limits(&mut mid, side);
+            assert_eq!(mid, before);
+        }
+    }
+
+    #[test]
+    fn config_joint_limits_are_well_formed() {
+        // Each range must be non-empty so clamp and the slider bounds are valid.
+        for side in [Side::Left, Side::Right] {
+            for &[lo, hi] in joint_limits().arm(side).iter() {
+                assert!(lo < hi, "joint range [{lo}, {hi}] must be non-empty");
+            }
+        }
+        let [lo, hi] = joint_limits().gripper;
+        assert!(lo < hi, "gripper range [{lo}, {hi}] must be non-empty");
     }
 }

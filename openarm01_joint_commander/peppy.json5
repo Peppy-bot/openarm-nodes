@@ -41,6 +41,15 @@
     }
   },
   interfaces: {
+    // Streams operator joint setpoints to the arms. Producing this interface is
+    // what lets the panel drive an armed arm continuously instead of one move at
+    // a time; the arm clamps, rate-limits, and times out the stream on its side.
+    conforms_to: [
+      {
+        name: "openarm01_joint_command_source",
+        tag: "v1"
+      }
+    ],
     actions: {
       // Goals fired by the operator land on backbone, which forwards to the
       // arm / gripper instance whose id matches arm_id / gripper_id.
@@ -72,6 +81,12 @@
     language: "rust",
     container: {
       def_file: "apptainer.def"
+    },
+    parameters: {
+      // Rate (Hz) at which an armed arm's target setpoint is re-published on
+      // joint_commands. Must stay comfortably above 1 / the arm's stream_timeout_s
+      // so the producer lock survives between operator inputs.
+      command_rate_hz: { $type: "u32", $default: 100 }
     }
   }
 }

@@ -70,8 +70,8 @@ fn main() -> Result<()> {
             params.max_joint_velocity_rad_s_7,
         ];
         assert!(
-            max_joint_velocity_rad_s.iter().all(|v| *v > 0.0),
-            "all max_joint_velocity_rad_s_N must be > 0"
+            max_joint_velocity_rad_s.iter().all(|v| v.is_finite() && *v > 0.0),
+            "all max_joint_velocity_rad_s_N must be finite and > 0"
         );
         assert!(
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,

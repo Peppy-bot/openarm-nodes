@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import gc
 import logging
+import time
 from pathlib import Path
 from typing import Optional
+
+import pyjson5
 
 from sim_ext_core import (
     ActuatorCtrlBridge,
@@ -73,6 +76,8 @@ class MujocoBridgeExtension:
         self._readers: list = []
         self._sim_control: Optional[MujocoSimControl] = None
         self._step: int = 0
+        self._last_publish_s: float = 0.0
+        self._telemetry_period_s: float = 0.0
 
     def startup(self) -> None:
         """Load config, build plugins, register subscriptions, start I/O."""
@@ -81,6 +86,16 @@ class MujocoBridgeExtension:
             default_node_name=_DEFAULT_NODE_NAME,
         )
         _validate_config(self._config)
+
+        # Telemetry publishers emit at telemetry_rate_hz (from sim_bridge.json5),
+        # decoupled from the ~500 Hz physics tick: serializing every reader per
+        # step saturates the single sim thread and starves the I/O thread feeding
+        # set_ctrl. BridgeConfig (base image) doesn't carry this field, so read it
+        # directly. Writers and the physics step still run every tick.
+        raw = pyjson5.loads(_DEFAULT_CONFIG_PATH.read_text())
+        rate_hz = float(raw.get("telemetry_rate_hz", 100.0))
+        self._telemetry_period_s = 1.0 / rate_hz if rate_hz > 0 else 0.0
+
         self._io = PeppylibIO(self._config)
         self._plugins = _build_plugins(self._config, self._model, self._data)
 
@@ -128,8 +143,14 @@ class MujocoBridgeExtension:
         mujoco.mj_step(self._model, self._data)
         self._step += 1
 
-        # Readers (publishers) after mj_step: state-emitting plugins read
-        # the post-step world.
+        # Readers (publishers) after mj_step: state-emitting plugins read the
+        # post-step world. Throttled to telemetry_rate_hz (sim_bridge.json5) so
+        # per-step JSON serialization stops saturating the sim thread; a skipped
+        # tick just publishes slightly later, never stale-by-a-step.
+        now = time.monotonic()
+        if now - self._last_publish_s < self._telemetry_period_s:
+            return
+        self._last_publish_s = now
         for plugin in self._readers:
             if not plugin.is_ready and not plugin.try_setup():
                 continue
