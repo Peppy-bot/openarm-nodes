@@ -25,6 +25,8 @@ pub struct ControlConfig {
     pub recv_timeout_us: i32,
     pub position_tolerance_m: f64,
     pub motion_timeout: Duration,
+    /// How long a streamed command stays fresh before the follow loop holds.
+    pub stream_timeout: Duration,
 }
 
 struct MotionResult {
@@ -44,24 +46,23 @@ impl MotionResult {
     }
 }
 
-/// Spawn-and-loop entry for the move_gripper action. Mirrors the pattern in the arm node:
-/// accept goal → run control loop → complete the goal. Re-enters afterwards. A goal arriving
-/// mid-motion is rejected (single-flight); the instance lock in main.rs enforces single-instance.
+/// Spawn-and-loop entry for the move_gripper action: accept goal → run control loop
+/// → complete the goal, then re-enter. A goal arriving mid-motion is rejected
+/// (single-flight); the instance lock in main.rs enforces single-instance.
 pub async fn run_move_gripper(
     runner: Arc<NodeRunner>,
     gripper: Arc<Mutex<GripperCan>>,
     cfg: ControlConfig,
+    busy: Arc<AtomicBool>,
 ) {
     let mut handle = move_gripper::ActionHandle::expose(&runner)
         .await
         .expect("expose move_gripper");
 
-    // Single-flight gate: reject a new goal while one is still executing. The
-    // motion runs in a spawned task so the loop keeps listening (and rejecting)
-    // rather than silently queueing a goal that would run stale once the
-    // current one finishes.
-    let busy = Arc::new(AtomicBool::new(false));
-
+    // Single-flight gate shared with the follow loop (created in main): a move
+    // and the stream never both drive the gripper, and a new goal arriving while
+    // a motion runs is rejected rather than queued (it would run stale). The
+    // motion runs in a spawned task so the loop keeps listening (and rejecting).
     loop {
         let ctx = match handle
             .handle_goal_next_request(|req| {
@@ -129,7 +130,7 @@ async fn run_control_loop(
     let target_motor_rad = geometry::meters_to_motor_rad(goal.target_position_m);
     let start = Instant::now();
     // Absolute timeline the loop paces against, so per-cycle sleep overshoot does
-    // not accumulate (matches the arm loop and the openarm teleop reference).
+    // not accumulate (as in the openarm teleop reference).
     let mut next_tick = tokio::time::Instant::now();
 
     loop {

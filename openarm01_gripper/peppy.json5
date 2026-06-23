@@ -1,11 +1,23 @@
 // This node represents a single gripper in the openarm01 robot, the user will instanciate two different gripper, each with a different `gripper_id` input parameter.
-// This is a root component node — openarm01_backbone depends on it, not the other way around.
+// This is a root component node; openarm01_backbone depends on it, not the other way around.
 // It is a "stupid" node that relays gripper commands from openarm01_backbone to either the real robot or the sims.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_gripper",
-    tag: "v1"
+    tag: "v1",
+    depends_on: {
+      interfaces: [
+        // Streamed opening setpoints the gripper follows between moves: optional
+        // and wildcard (`from_any`) so it binds to any conforming producer.
+        {
+          name: "openarm01_gripper_command_source",
+          tag: "v1",
+          link_id: "commander",
+          from_any: true,
+        },
+      ],
+    },
   },
   execution: {
     language: "rust",
@@ -15,18 +27,20 @@
     parameters: {
       gripper_id: "u8",
       can_interface: "string",
-      // Hardware-loop rate (Hz). Required: pick deliberately per deployment
-      // (the OpenArm teleop reference drives the gripper in the same 500 Hz
-      // loop as the arm).
+      // Hardware-loop rate (Hz). Pick deliberately per deployment; the OpenArm
+      // teleop reference runs the gripper in a 500 Hz loop.
       control_rate_hz: "u32",
       // Per-cycle CAN read deadline (μs). Must fit the cycle budget (2 ms at 500 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
       // Error threshold (m) for goal completion.
       position_tolerance: { $type: "f64", $default: 0.001 },
       motion_timeout_s: { $type: "f64", $default: 10.0 },
-      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`).
-      // Required: consumers' needs vary too much for a default to be meaningful.
-      state_rate_hz: "u32"
+      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
+      // consumers' needs vary too much for a default to be meaningful.
+      state_rate_hz: "u32",
+      // How long (s) the gripper keeps following a stream after its last message
+      // before holding. Safety watchdog.
+      stream_timeout_s: "f64"
     }
   },
   interfaces: {
@@ -35,12 +49,17 @@
         name: "openarm01_gripper",
         tag: "v1"
       },
-      // Always-on measured opening, mirroring the arm's joint_state_source so
-      // teleop/monitoring consume sim and real grippers identically (by gripper_id).
+      // Always-on measured opening so teleop/monitoring consume sim and real
+      // grippers identically (by gripper_id).
       {
         name: "openarm01_gripper_state_source",
         tag: "v1"
       }
-    ]
+    ],
+    topics: {
+      consumes: [
+        { name: "gripper_commands", link_id: "commander" }
+      ]
+    }
   },
 }

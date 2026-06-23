@@ -1,6 +1,6 @@
 // Always-on gripper_states publisher: emits the measured opening at
-// state_rate_hz regardless of mode, mirroring the arm's joint_states stream.
-// Reads the motor's already-cached state (no CAN traffic of its own), so it
+// state_rate_hz regardless of mode. Reads the motor's already-cached state (no
+// CAN traffic of its own), so it
 // never contends with the move control loop for the bus; between moves the
 // gripper holds position, so the last cached reading stays correct.
 
