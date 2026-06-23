@@ -25,6 +25,8 @@ class SimLauncher:
         xml_path: Path,
         ready: threading.Event,
         stop: threading.Event,
+        io,
+        state_rate_hz: int,
     ) -> None:
         self._xml_path = xml_path
         self._ready = ready
@@ -32,6 +34,8 @@ class SimLauncher:
         # sim loop runs in run_in_executor and cannot observe asyncio
         # cancellation directly — this Event is the only stop path.
         self._stop = stop
+        self._io = io
+        self._state_rate_hz = state_rate_hz
         self._headless = os.environ.get(_HEADLESS_ENV, "1").strip() == "1"
 
     def run(self) -> None:
@@ -49,7 +53,7 @@ class SimLauncher:
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
-        extension = MujocoBridgeExtension(model, data)
+        extension = MujocoBridgeExtension(model, data, self._io, self._state_rate_hz)
         try:
             extension.startup()
             self._ready.set()
