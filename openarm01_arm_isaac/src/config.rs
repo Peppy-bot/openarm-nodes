@@ -67,14 +67,6 @@ impl ArmId {
         }
     }
 
-    pub fn side_word(self) -> &'static str {
-        match self.0 {
-            0 => "left",
-            1 => "right",
-            _ => unreachable!("ArmId({}) bypassed new()", self.0),
-        }
-    }
-
     pub fn instance_id(self) -> &'static str {
         match self.0 {
             0 => "left_arm",

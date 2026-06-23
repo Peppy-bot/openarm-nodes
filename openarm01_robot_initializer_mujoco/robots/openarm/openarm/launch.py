@@ -12,7 +12,6 @@ import threading
 from pathlib import Path
 
 from peppygen.exposed_services.openarm01_robot_initializer.v1 import is_ready
-from peppylib import info
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(
@@ -26,21 +25,20 @@ _ASSETS_DIR = Path(
 _XML_PATH = _ASSETS_DIR / "openarm_bimanual.xml"
 _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 
-os.environ["PEPPY_BRIDGE_NODE_NAME"] = "sim"
-
 sys.path.insert(0, str(_MUJOCO_DIR))
 from _launcher import SimLauncher
+from sim_topics import SimTopicIO
 
 _ready = threading.Event()
 _stop = threading.Event()
 
 
-async def _run_sim(_params, node_runner) -> list:
-    # Resolve the core node identity and pass it to the bridge config via env.
-    # The sim runs in an executor task created below, so the env is set first.
-    daemon = await info(node_runner)
-    os.environ["PEPPY_BRIDGE_DAEMON_NODE"] = daemon.core_node_name
-    os.environ["PEPPY_BRIDGE_PORT"] = str(daemon.messaging_port)
+async def _run_sim(params, node_runner) -> list:
+    # Typed peppygen pub/sub lives on this loop; declare publishers and start the
+    # command-consume tasks before the sim thread starts reading from them.
+    loop = asyncio.get_running_loop()
+    io = SimTopicIO(node_runner, loop)
+    await io.start()
 
     async def _is_ready_loop() -> None:
         while True:
@@ -50,9 +48,20 @@ async def _run_sim(_params, node_runner) -> list:
             )
 
     async def _run_sim_task() -> None:
-        loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, SimLauncher(_XML_PATH, _ready, _stop).run)
+            await loop.run_in_executor(
+                None,
+                SimLauncher(
+                    _XML_PATH,
+                    _ready,
+                    _stop,
+                    io,
+                    params.state_rate_hz,
+                    params.headless,
+                    params.viewer_host,
+                    params.viewer_port,
+                ).run,
+            )
         finally:
             # Belt-and-braces against asyncio cancellation paths that race the
             # on_shutdown hook below; idempotent.
@@ -60,9 +69,10 @@ async def _run_sim(_params, node_runner) -> list:
 
     async def _shutdown_hook() -> None:
         # Drive the sim executor to exit inside the runtime grace window so
-        # SimLauncher's finally runs extension.shutdown() (which bounds
-        # peppylib_io.stop() to its own 5s thread.join).
+        # SimLauncher's finally runs extension.shutdown(), then cancel the
+        # consume tasks.
         _stop.set()
+        await io.stop()
 
     node_runner.on_shutdown(_shutdown_hook)
 

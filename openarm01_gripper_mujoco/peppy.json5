@@ -1,16 +1,13 @@
-// MuJoCo sim implementation of openarm01_gripper. Rust node talking to a
-// running MuJoCo sim via raw peppylib JSON channels published by
-// openarm01_robot_initializer_mujoco; engine-internal coupling, not part of
-// the openarm01_gripper:v1 interface contract.
+// MuJoCo sim implementation of openarm01_gripper. Follows streamed
+// gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
+// the sim to actuate; consumes the sim's gripper_states for move-action feedback.
+// Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_gripper_mujoco",
     tag: "v1",
     depends_on: {
-      nodes: [
-        { name: "openarm01_robot_initializer_mujoco", tag: "v1", link_id: "sim" },
-      ],
       interfaces: [
         // Streamed opening setpoints the gripper follows between moves: optional
         // and wildcard (`from_any`) so it binds to any conforming producer.
@@ -20,18 +17,27 @@
           link_id: "commander",
           from_any: true,
         },
+        // Measured opening from the sim, used by the move action for convergence
+        // feedback. from_any: the sim is the producer.
+        {
+          name: "openarm01_gripper_state_source",
+          tag: "v1",
+          link_id: "state",
+          from_any: true,
+        },
       ],
     },
   },
   interfaces: {
     conforms_to: [
       { name: "openarm01_gripper", tag: "v1" },
-      // Always-on measured opening; consumers tell grippers apart by gripper_id.
-      { name: "openarm01_gripper_state_source", tag: "v1" },
+      // The resolved aperture handed to the sim engine (sim-internal passthrough).
+      { name: "openarm01_gripper_sim_passthrough", tag: "v1" },
     ],
     topics: {
       consumes: [
         { name: "gripper_commands", link_id: "commander" },
+        { name: "gripper_states", link_id: "state" },
       ],
     },
   },

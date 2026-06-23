@@ -23,6 +23,8 @@ class SimLauncher:
         usd_path: Path,
         ready: threading.Event,
         stop: threading.Event,
+        io,
+        state_rate_hz: int,
     ) -> None:
         self._sim_app = sim_app
         self._usd_path = usd_path
@@ -31,6 +33,8 @@ class SimLauncher:
         # shutdown service runs (peppy node stop, SIGTERM). The sim loop owns
         # the main thread and won't see asyncio cancellation otherwise.
         self._stop = stop
+        self._io = io
+        self._state_rate_hz = state_rate_hz
         self._timeline = None
         self._world = None
         self._extension: Optional[IsaacBridgeExtension] = None
@@ -41,16 +45,8 @@ class SimLauncher:
             self._setup_lighting()
             self._warmup()
             self._start_timeline()
-            self._extension = IsaacBridgeExtension()
-            try:
-                self._extension.startup()
-            except Exception:
-                # Otherwise the exception is captured by the thread and the
-                # process exits silently with the sim still running.
-                logger.exception("IsaacBridgeExtension startup failed")
-                raise
-            self._ready.set()
-            logger.info("Scene loaded — is_ready: true")
+            self._extension = IsaacBridgeExtension(self._io, self._state_rate_hz)
+            logger.info("Scene loaded — waiting for bridge setup")
             self._run_loop()
         except FileNotFoundError as exc:
             logger.error(str(exc))
@@ -96,11 +92,18 @@ class SimLauncher:
         try:
             while self._sim_app.is_running() and not self._stop.is_set():
                 # Isaac advances physics inside update(); we then drive the
-                # bridge plugin loop on the same thread (Articulation reads
-                # require Isaac's main thread).
+                # bridge step on the same thread (Articulation reads require
+                # Isaac's main thread). The extension defers its own setup until
+                # the stage is live, so early steps are cheap no-ops.
                 self._sim_app.update()
                 if self._extension is not None:
                     self._extension.step()
+                    # Only signal readiness once the deferred ext setup has
+                    # actually succeeded, so the backbone doesn't proceed while
+                    # the articulation is still initialising.
+                    if self._extension.is_ready and not self._ready.is_set():
+                        self._ready.set()
+                        logger.info("Scene loaded — is_ready: true")
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:

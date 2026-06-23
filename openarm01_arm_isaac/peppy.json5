@@ -1,16 +1,13 @@
-// Isaac sim implementation of openarm01_arm. Rust node talking to a running
-// Isaac Sim via raw peppylib JSON channels published by
-// openarm01_robot_initializer_isaac — engine-internal coupling, not part of
-// the openarm01_arm:v1 interface contract.
+// Isaac sim implementation of openarm01_arm. Follows streamed joint_commands and
+// emits the resolved (q_des, dq_des) on arm_sim_passthrough for the sim to
+// actuate; consumes the sim's joint_states for the trajectory anchor + follow
+// re-anchor. Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node_v1",
   manifest: {
     name: "openarm01_arm_isaac",
     tag: "v1",
     depends_on: {
-      nodes: [
-        { name: "openarm01_robot_initializer_isaac", tag: "v1", link_id: "sim" },
-      ],
       interfaces: [
         // Streamed joint setpoints the arm follows between moves: optional and
         // wildcard (`from_any`), so it binds to any conforming producer (the
@@ -21,17 +18,28 @@
           link_id: "commander",
           from_any: true,
         },
+        // Measured joint state from the sim, used by the move action to anchor
+        // trajectories and by the follow loop to re-anchor its chase. from_any:
+        // the sim is the producer.
+        {
+          name: "openarm01_joint_state_source",
+          tag: "v1",
+          link_id: "state",
+          from_any: true,
+        },
       ],
     },
   },
   interfaces: {
     conforms_to: [
       { name: "openarm01_arm", tag: "v1" },
-      { name: "openarm01_joint_state_source", tag: "v1" },
+      // The resolved joint setpoint handed to the sim engine (sim-internal passthrough).
+      { name: "openarm01_arm_sim_passthrough", tag: "v1" },
     ],
     topics: {
       consumes: [
         { name: "joint_commands", link_id: "commander" },
+        { name: "joint_states", link_id: "state" },
       ],
     },
   },

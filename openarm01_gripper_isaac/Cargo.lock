@@ -2191,14 +2191,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "openarm01_gripper_isaac"
 version = "0.1.0"
 dependencies = [
- "capnp",
  "peppygen",
  "peppylib",
- "serde",
- "serde_json",
- "sim_bridge_core",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3354,18 +3349,6 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "sim_bridge_core"
-version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/nodes_shared_code?branch=main#672e57b7263ce2195295a39f97e5299f39387b1a"
-dependencies = [
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

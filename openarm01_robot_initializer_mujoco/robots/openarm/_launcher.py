@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -14,10 +13,6 @@ from bridge_extension import MujocoBridgeExtension
 
 logger = logging.getLogger(__name__)
 
-_HEADLESS_ENV = "PEPPY_BRIDGE_HEADLESS"
-_VIEWER_HOST_ENV = "PEPPY_BRIDGE_VIEWER_HOST"
-_VIEWER_PORT_ENV = "PEPPY_BRIDGE_VIEWER_PORT"
-
 
 class SimLauncher:
     def __init__(
@@ -25,6 +20,11 @@ class SimLauncher:
         xml_path: Path,
         ready: threading.Event,
         stop: threading.Event,
+        io,
+        state_rate_hz: int,
+        headless: bool,
+        viewer_host: str,
+        viewer_port: int,
     ) -> None:
         self._xml_path = xml_path
         self._ready = ready
@@ -32,7 +32,11 @@ class SimLauncher:
         # sim loop runs in run_in_executor and cannot observe asyncio
         # cancellation directly — this Event is the only stop path.
         self._stop = stop
-        self._headless = os.environ.get(_HEADLESS_ENV, "1").strip() == "1"
+        self._io = io
+        self._state_rate_hz = state_rate_hz
+        self._headless = headless
+        self._viewer_host = viewer_host
+        self._viewer_port = viewer_port
 
     def run(self) -> None:
         import mujoco
@@ -49,7 +53,7 @@ class SimLauncher:
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
-        extension = MujocoBridgeExtension(model, data)
+        extension = MujocoBridgeExtension(model, data, self._io, self._state_rate_hz)
         try:
             extension.startup()
             self._ready.set()
@@ -80,10 +84,10 @@ class SimLauncher:
 
         server = None
         try:
-            # Loopback by default; env opt-in for binding to all interfaces
-            # avoids accidentally exposing the viewer in headed mode.
-            host = os.environ.get(_VIEWER_HOST_ENV, "127.0.0.1")
-            port = int(os.environ.get(_VIEWER_PORT_ENV, "8080"))
+            # Loopback by default (viewer_host param); binding to all interfaces
+            # is an explicit opt-in so the viewer is not exposed by accident.
+            host = self._viewer_host
+            port = self._viewer_port
             server = viser.ViserServer(host=host, port=port)
             viewer = mjviser.Viewer(model, data, server=server, step_fn=_step_fn)
 

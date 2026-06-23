@@ -1,11 +1,12 @@
-// Joint-space 7-DOF control mirroring the real driver: reject out-of-limit
-// targets, anchor a quintic minimum-jerk trajectory at the current pose, and
-// stream (q_des, dq_des) setpoints at the control rate. The sim-side actuator
+// Joint-space 7-DOF control mirroring the real driver: anchor a quintic
+// minimum-jerk trajectory at the current pose and stream (q_des, dq_des)
+// setpoints at the control rate. Joint limits are enforced by the sim engine, so
+// an out-of-range target just settles against the model's stop. The sim-side actuator
 // plugin applies the same MIT gains the real motors run, so motion timing,
 // gravity sag, and completion semantics match hardware. Completion is time-based
 // (trajectory elapsed), exactly like the real driver — no convergence check.
 //
-// The set_ctrl publisher and the single-flight busy gate are owned by main and
+// The passthrough publisher and the single-flight busy gate are owned by main and
 // shared with the follow loop, so a move and the streamed-command follower never
 // drive the sim at once.
 
@@ -20,7 +21,7 @@ use peppylib::runtime::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::ControlParams;
-use crate::setctrl;
+use crate::passthrough;
 use crate::state::{self, SharedState};
 use crate::trajectory::{ARM_DOF as DOF, JointVec, Trajectory};
 
@@ -37,21 +38,12 @@ struct MotionResult {
     action_time: f64,
 }
 
-// Mirrors the real driver's target_in_limits: every joint inside the model's
-// range, non-finite rejected. Limits come from telemetry (MJCF / USD ranges).
-fn target_in_limits(target: &JointVec, limits: &[(f64, f64)]) -> bool {
-    target
-        .iter()
-        .zip(limits.iter())
-        .all(|(&q, &(lo, hi))| q.is_finite() && q >= lo && q <= hi)
-}
-
 pub async fn run(
     runner: Arc<NodeRunner>,
     state: Arc<SharedState>,
     token: CancellationToken,
-    set_ctrl_pub: TopicPublisher,
-    actuator_names: Arc<[String; DOF]>,
+    passthrough_pub: TopicPublisher,
+    arm_id: u8,
     busy: Arc<AtomicBool>,
     params: ControlParams,
 ) {
@@ -84,19 +76,18 @@ pub async fn run(
         let busy_for_decider = busy.clone();
         let goal_request =
             action_handle.handle_goal_next_request(move |req: &move_arm_joints::GoalRequest| {
-                let limits = state_for_decider
-                    .joint_limits
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                let Some(limits) = limits.filter(|l| l.len() == DOF) else {
+                // Readiness: the trajectory anchors on the measured pose, so a
+                // goal is only acceptable once joint_states telemetry has arrived.
+                if state::snapshot_positions(&state_for_decider).is_none() {
                     return Ok(move_arm_joints::GoalResponse::reject(
                         "arm telemetry not ready",
                     ));
-                };
-                if !target_in_limits(&req.data.joint_positions, &limits) {
+                }
+                // The sim enforces joint limits; reject only a non-finite target
+                // (which would corrupt the trajectory) and a bad duration.
+                if !req.data.joint_positions.iter().all(|q| q.is_finite()) {
                     return Ok(move_arm_joints::GoalResponse::reject(
-                        "target joint positions out of range",
+                        "target joint positions must be finite",
                     ));
                 }
                 if !(req.data.duration_s.is_finite() && req.data.duration_s >= 0.0) {
@@ -133,15 +124,14 @@ pub async fn run(
 
         // Spawn the motion so the accept loop keeps listening (and rejecting)
         // during execution — mirrors the real driver's structure.
-        let set_ctrl_pub = set_ctrl_pub.clone();
+        let passthrough_pub = passthrough_pub.clone();
         let state = state.clone();
         let token = token.clone();
         let busy = busy.clone();
         let idle = idle.clone();
-        let actuator_names = actuator_names.clone();
         tokio::spawn(async move {
             let result =
-                run_control_loop(&set_ctrl_pub, &state, &actuator_names, &goal_ctx, &token, &params)
+                run_control_loop(&passthrough_pub, arm_id, &state, &goal_ctx, &token, &params)
                     .await;
 
             let dispatch = if result.is_cancelled {
@@ -173,9 +163,9 @@ pub async fn run(
 }
 
 async fn run_control_loop(
-    set_ctrl_pub: &TopicPublisher,
+    passthrough_pub: &TopicPublisher,
+    arm_id: u8,
     state: &Arc<SharedState>,
-    actuator_names: &[String; DOF],
     goal_ctx: &move_arm_joints::GoalContext,
     token: &CancellationToken,
     params: &ControlParams,
@@ -207,16 +197,16 @@ async fn run_control_loop(
         let cycle_start = Instant::now();
         let (q_des, dq_des) = trajectory.sample(cycle_start);
 
-        match setctrl::publish(set_ctrl_pub, actuator_names, &q_des, &dq_des).await {
+        match passthrough::publish(passthrough_pub, arm_id, &q_des, &dq_des).await {
             Ok(()) => consecutive_publish_failures = 0,
             Err(e) => {
                 consecutive_publish_failures += 1;
-                warn!("set_ctrl publish failed ({consecutive_publish_failures}): {e}");
+                warn!("passthrough publish failed ({consecutive_publish_failures}): {e}");
                 if consecutive_publish_failures >= MAX_CONSECUTIVE_PUBLISH_FAILURES {
                     return MotionResult {
                         success: false,
                         is_cancelled: false,
-                        message: "set_ctrl publish failing — arm not commandable".into(),
+                        message: "passthrough publish failing: arm not commandable".into(),
                         final_positions: state::snapshot_positions(state).unwrap_or([0.0; DOF]),
                         action_time: start.elapsed().as_secs_f64(),
                     };

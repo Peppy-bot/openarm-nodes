@@ -1,235 +1,156 @@
 #!/usr/bin/env python3
-# pylint: disable=R0902,R0903,C0413
-"""MujocoBridgeExtension owns the physics tick and the per-step bridge plugin
-loop for the openarm scene. startup() loads config/sim_bridge.json5 and builds
-the plugin set; step() advances physics and drives every plugin on each tick.
+# pylint: disable=C0413
+"""MujocoBridgeExtension owns the physics tick for the openarm scene. Each step
+it applies the latest sim-passthrough setpoint per side, advances physics, and
+(throttled to state_rate_hz) publishes the measured joint and gripper state.
+Transport is typed peppygen via SimTopicIO; there is no JSON and no raw
+peppylib on the path.
 """
 from __future__ import annotations
 
-import gc
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 import pyjson5
 
-from sim_ext_core import (
-    ActuatorCtrlBridge,
-    BridgeConfig,
-    ClockBridge,
-    ContactForcesBridge,
-    EePoseBridge,
-    GripperStateBridge,
-    ImuBridge,
-    JointStatesBridge,
-    SimControlBridge,
-    TfTreeBridge,
-    WrenchBridge,
-)
-from peppylib_io import PeppylibIO
-from exts import (
-    MujocoActuatorCtrl,
-    MujocoArticulation,
-    MujocoClockSensor,
-    MujocoContactSensor,
-    MujocoEePoseSensor,
-    MujocoGripperSensor,
-    MujocoImuSensor,
-    MujocoSimControl,
-    MujocoTransformTree,
-    MujocoWrenchSensor,
-)
+from sim_topics import SimTopicIO
+from exts import MujocoActuatorCtrl, MujocoArticulation, MujocoGripperSensor
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_NODE_NAME = "sim"
-_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
-
-# Split by direction so a misplaced sim_bridge.json5 entry fails validation:
-# a single registry would let "joint_states" in subscribers instantiate as a
-# subscriber and silently publish.
-_PUBLISHER_REGISTRY: dict = {
-    "joint_states": JointStatesBridge,
-    "imu": ImuBridge,
-    "tf_tree": TfTreeBridge,
-    "clock": ClockBridge,
-    "ee_pose": EePoseBridge,
-    "wrench": WrenchBridge,
-    "contact_forces": ContactForcesBridge,
-    "gripper_state": GripperStateBridge,
-}
-_SUBSCRIBER_REGISTRY: dict = {
-    "actuator_ctrl": ActuatorCtrlBridge,
-}
+_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
 
 
 class MujocoBridgeExtension:
+    """Drives the engine from the typed command streams and publishes state."""
 
-    def __init__(self, model, data) -> None:
+    def __init__(self, model, data, io: SimTopicIO, state_rate_hz: int) -> None:
         self._model = model
         self._data = data
-        self._config: Optional[BridgeConfig] = None
-        self._io: Optional[PeppylibIO] = None
-        self._plugins: list = []
-        self._writers: list = []
-        self._readers: list = []
-        self._sim_control: Optional[MujocoSimControl] = None
-        self._step: int = 0
-        self._last_publish_s: float = 0.0
-        self._telemetry_period_s: float = 0.0
+        self._io = io
+        # Telemetry is throttled to state_rate_hz: serializing every reader at
+        # the ~500 Hz physics tick saturates the single sim thread. Writers and
+        # the physics step still run every tick.
+        if state_rate_hz <= 0:
+            raise ValueError(f"state_rate_hz must be positive, got {state_rate_hz}")
+        self._telemetry_period_s = 1.0 / state_rate_hz
+        self._last_publish_s = 0.0
+
+        cfg = pyjson5.loads(_CONFIG_PATH.read_text())
+        self._arms: list[dict] = cfg["arms"]
+        self._grippers: list[dict] = cfg["grippers"]
+        self._gains: dict = cfg.get("arm_gains", {})
+
+        self._articulation = MujocoArticulation(model, data)
+        # One actuator controller for the whole robot: it resolves every actuator
+        # by joint name, applies the MIT gains to the arm joints, and leaves the
+        # finger joints on their MJCF defaults.
+        self._actuator = MujocoActuatorCtrl(model, data, params=self._actuator_params())
+        self._gripper_sensors: dict[int, MujocoGripperSensor] = {}
+        self._joint_index: dict[str, int] = {}
+
+    def _actuator_params(self) -> dict:
+        arm_joints = [name for arm in self._arms for name in arm["joints"]]
+        # Same per-joint gains for each arm (j1..j7), repeated per side.
+        kp = list(self._gains.get("kp", [])) * len(self._arms)
+        kd = list(self._gains.get("kd", [])) * len(self._arms)
+        return {
+            "joint_names": arm_joints,
+            "kp": kp,
+            "kd": kd,
+            "gravity_compensation": self._gains.get("gravity_compensation", False),
+        }
 
     def startup(self) -> None:
-        """Load config, build plugins, register subscriptions, start I/O."""
-        self._config = BridgeConfig.from_file(
-            path=_DEFAULT_CONFIG_PATH,
-            default_node_name=_DEFAULT_NODE_NAME,
-        )
-        _validate_config(self._config)
-
-        # Telemetry publishers emit at telemetry_rate_hz (from sim_bridge.json5),
-        # decoupled from the ~500 Hz physics tick: serializing every reader per
-        # step saturates the single sim thread and starves the I/O thread feeding
-        # set_ctrl. BridgeConfig (base image) doesn't carry this field, so read it
-        # directly. Writers and the physics step still run every tick.
-        raw = pyjson5.loads(_DEFAULT_CONFIG_PATH.read_text())
-        rate_hz = float(raw.get("telemetry_rate_hz", 100.0))
-        self._telemetry_period_s = 1.0 / rate_hz if rate_hz > 0 else 0.0
-
-        self._io = PeppylibIO(self._config)
-        self._plugins = _build_plugins(self._config, self._model, self._data)
-
-        # SimControl is always present — not config-driven.
-        self._sim_control = MujocoSimControl(self._model, self._data)
-        self._plugins.append(SimControlBridge(self._sim_control, self._config))
-
-        for plugin in self._plugins:
-            for source_node, topic, qos in plugin.subscriptions():
-                self._io.register_subscription(source_node, topic, qos)
-
-        # Writers (subscribers) run before mj_step; readers (publishers) after.
-        # SimControlBridge has subscriptions, so its set_joint_positions writes
-        # qpos on the writer side before the step consumes it.
-        self._writers = [p for p in self._plugins if p.subscriptions()]
-        self._readers = [p for p in self._plugins if not p.subscriptions()]
-
-        self._io.start()
-        self._step = 0
+        if not self._articulation.setup():
+            raise RuntimeError("MujocoArticulation setup failed")
+        self._joint_index = {
+            name: i for i, name in enumerate(self._articulation.get_joint_names())
+        }
+        # Fail loudly on a sim_bridge.json5 typo: a joint the model doesn't have
+        # would otherwise silently drop that side's commands + telemetry.
+        configured = [j for arm in self._arms for j in arm["joints"]] + [
+            f for g in self._grippers for f in g["fingers"]
+        ]
+        missing = sorted({n for n in configured if n not in self._joint_index})
+        if missing:
+            raise RuntimeError(
+                f"sim_bridge.json5 references joints not in the MuJoCo model: {missing}"
+            )
+        if not self._actuator.setup():
+            raise RuntimeError("MujocoActuatorCtrl setup failed")
+        for gripper in self._grippers:
+            sensor = MujocoGripperSensor(
+                self._model, self._data, finger_joints=gripper["fingers"]
+            )
+            if not sensor.setup():
+                raise RuntimeError(
+                    f"MujocoGripperSensor setup failed for gripper_id={gripper['gripper_id']}"
+                )
+            self._gripper_sensors[gripper["gripper_id"]] = sensor
         logger.info(
-            f"MujocoBridgeExtension ready — {len(self._plugins)} plugin(s) "
-            f"daemon_node='{self._config.daemon_node}' node='{self._config.node_name}'"
+            f"MujocoBridgeExtension ready with {len(self._arms)} arm(s), "
+            f"{len(self._grippers)} gripper(s)"
         )
 
     def step(self) -> None:
-        """Drive subscriber plugins, advance physics, drive publisher plugins.
-        When paused, only SimControlBridge runs so unpause/step/reset can still
-        be processed."""
-        if self._sim_control and self._sim_control.is_paused:
-            for plugin in self._plugins:
-                if isinstance(plugin, SimControlBridge):
-                    plugin.on_step(self._step, self._io)
-            return
-
         import mujoco  # pylint: disable=C0415
 
-        # Writers (subscribers) first: actuator_ctrl writes ctrl[] and
-        # sim_control's set_joint_positions writes qpos before mj_step
-        # consumes them — otherwise the values land one tick late.
-        for plugin in self._writers:
-            if not plugin.is_ready and not plugin.try_setup():
-                continue
-            plugin.on_step(self._step, self._io)
-
+        self._apply_commands()
         mujoco.mj_step(self._model, self._data)
-        self._step += 1
 
-        # Readers (publishers) after mj_step: state-emitting plugins read the
-        # post-step world. Throttled to telemetry_rate_hz (sim_bridge.json5) so
-        # per-step JSON serialization stops saturating the sim thread; a skipped
-        # tick just publishes slightly later, never stale-by-a-step.
         now = time.monotonic()
         if now - self._last_publish_s < self._telemetry_period_s:
             return
         self._last_publish_s = now
-        for plugin in self._readers:
-            if not plugin.is_ready and not plugin.try_setup():
+        self._publish_state()
+
+    def _apply_commands(self) -> None:
+        for arm in self._arms:
+            command = self._io.latest_arm_command(arm["arm_id"])
+            if command is None:
                 continue
-            plugin.on_step(self._step, self._io)
+            positions, velocities = command
+            joints = arm["joints"]
+            if len(positions) != len(joints):
+                continue
+            velocity_values = (
+                dict(zip(joints, velocities)) if len(velocities) == len(joints) else None
+            )
+            self._actuator.write_targets(dict(zip(joints, positions)), velocity_values)
+
+        for gripper in self._grippers:
+            opening = self._io.latest_gripper_command(gripper["gripper_id"])
+            if opening is None:
+                continue
+            # Both fingers hold half the aperture.
+            per_finger = opening / 2.0
+            self._actuator.write_targets({f: per_finger for f in gripper["fingers"]})
+
+    def _publish_state(self) -> None:
+        states = self._articulation.get_joint_states()
+        if states is not None:
+            positions, velocities = states
+            for arm in self._arms:
+                indices = [self._joint_index.get(name) for name in arm["joints"]]
+                if any(i is None for i in indices):
+                    continue
+                self._io.publish_joint_states(
+                    arm["arm_id"],
+                    [positions[i] for i in indices],
+                    [velocities[i] for i in indices],
+                )
+
+        for gripper_id, sensor in self._gripper_sensors.items():
+            data = sensor.get_gripper_state()
+            if data and data["positions"]:
+                # Opening = total aperture = sum of finger positions.
+                self._io.publish_gripper_states(gripper_id, float(sum(data["positions"])))
 
     def shutdown(self) -> None:
         logger.info("MujocoBridgeExtension shutting down.")
-        for plugin in self._plugins:
-            plugin.teardown()
-        if self._io is not None:
-            self._io.stop()
-        gc.collect()
-
-
-def _validate_config(config: BridgeConfig) -> None:
-    if not config.daemon_node:
-        raise ValueError(
-            "core node name is empty — launch.py must resolve it via "
-            "peppylib.info before starting the bridge"
-        )
-    for entry in config.publishers:
-        if entry.type not in _PUBLISHER_REGISTRY:
-            raise ValueError(
-                f"Unknown publisher type '{entry.type}' in sim_bridge.json5. "
-                f"Supported publishers: {sorted(_PUBLISHER_REGISTRY)}"
-            )
-    for entry in config.subscribers:
-        if entry.type not in _SUBSCRIBER_REGISTRY:
-            raise ValueError(
-                f"Unknown subscriber type '{entry.type}' in sim_bridge.json5. "
-                f"Supported subscribers: {sorted(_SUBSCRIBER_REGISTRY)}"
-            )
-
-
-def _make_sensor(entry, model, data):  # pylint: disable=R0911
-    body_name = entry.prim.split("/")[-1] if entry.prim else ""
-    if entry.type == "imu":
-        return MujocoImuSensor(model, data, body_name)
-    if entry.type == "tf_tree":
-        return MujocoTransformTree(model, data)
-    if entry.type == "clock":
-        return MujocoClockSensor(model, data)
-    if entry.type == "ee_pose":
-        return MujocoEePoseSensor(model, data, body_name)
-    if entry.type == "wrench":
-        return MujocoWrenchSensor(model, data, body_name)
-    if entry.type == "contact_forces":
-        return MujocoContactSensor(model, data, body_name)
-    if entry.type == "gripper_state":
-        finger_joints = (
-            entry.params.get("finger_joints", []) if hasattr(entry, "params") else []
-        )
-        return MujocoGripperSensor(model, data, finger_joints=finger_joints)
-    if entry.type == "actuator_ctrl":
-        params = entry.params if hasattr(entry, "params") else {}
-        return MujocoActuatorCtrl(model, data, params=params)
-    return MujocoArticulation(model, data)  # joint_states default
-
-
-def _build_plugins(config: BridgeConfig, model, data) -> list:
-    plugins: list = []
-    for entry in config.publishers:
-        cls = _PUBLISHER_REGISTRY[entry.type]
-        sensor = _make_sensor(entry, model, data)
-        plugins.append(cls(sensor, config, entry))
-        logger.info(f"Registered publisher: {entry.type} → topic='{entry.topic}'")
-
-    seen_subscribers: set = set()
-    for entry in config.subscribers:
-        key = (entry.type, entry.prim, entry.topic)
-        if key in seen_subscribers:
-            logger.debug(
-                f"Skipping duplicate subscriber: {entry.type} → topic='{entry.topic}'"
-            )
-            continue
-        seen_subscribers.add(key)
-        cls = _SUBSCRIBER_REGISTRY[entry.type]
-        sensor = _make_sensor(entry, model, data)
-        plugins.append(cls(sensor, config, entry))
-        logger.info(f"Registered subscriber: {entry.type} → topic='{entry.topic}'")
-
-    return plugins
+        self._articulation.teardown()
+        self._actuator.teardown()
+        for sensor in self._gripper_sensors.values():
+            sensor.teardown()

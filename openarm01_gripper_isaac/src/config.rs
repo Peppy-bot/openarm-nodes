@@ -29,8 +29,8 @@ impl ControlParams {
 }
 
 // GripperId is constructed only via `new(0|1)`. The private field stops callers
-// from minting an arbitrary value and bypassing validation, so side_word /
-// instance_id can rely on the invariant instead of carrying "unknown" arms.
+// from minting an arbitrary value and bypassing validation, so instance_id can
+// rely on the invariant instead of carrying "unknown" arms.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct GripperId(u8);
 
@@ -59,14 +59,6 @@ impl GripperId {
 
     pub fn as_u8(self) -> u8 {
         self.0
-    }
-
-    pub fn side_word(self) -> &'static str {
-        match self.0 {
-            0 => "left",
-            1 => "right",
-            _ => unreachable!("GripperId validated at construction"),
-        }
     }
 
     pub fn instance_id(self) -> &'static str {
