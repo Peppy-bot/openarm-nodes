@@ -4,6 +4,7 @@
 // that re-emitted state; the sim now emits gripper_states directly.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::state_gripper_states;
@@ -37,6 +38,7 @@ pub async fn run(
         let mut latest = state.gripper_state.lock().unwrap_or_else(|p| p.into_inner());
         *latest = Some(GripperStateLatest {
             opening: msg.position,
+            recv_at: Instant::now(),
         });
     }
 }

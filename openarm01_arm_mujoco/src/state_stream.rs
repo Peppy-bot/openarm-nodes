@@ -4,6 +4,7 @@
 // pipeline that re-emitted state; the sim now emits joint_states directly.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::state_joint_states;
@@ -42,6 +43,7 @@ pub async fn run(
         let mut latest = state.joint_states.lock().unwrap_or_else(|p| p.into_inner());
         *latest = Some(JointStatesLatest {
             positions: msg.positions.to_vec(),
+            recv_at: Instant::now(),
         });
     }
 }

@@ -21,6 +21,11 @@ use crate::state::SharedState;
 const POSITION_TOLERANCE_M: f64 = 0.002;
 const MOTION_TIMEOUT: Duration = Duration::from_secs(30);
 
+// Telemetry older than this counts as no telemetry: the sim streams gripper_states
+// continuously, so a gap this long means the stream has stopped, and convergence
+// or stall must not be judged from a frozen value.
+const STALE_TELEMETRY: Duration = Duration::from_millis(500);
+
 // Opening change over a 500ms window; below STALL_EPSILON_M -> stalled.
 const STALL_LOOKBACK_ITERS: u32 = 100;
 const STALL_EPSILON_M: f64 = 5e-4;
@@ -226,11 +231,11 @@ async fn run_control_loop(
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let opening = match latest {
-            Some(s) => s.opening,
-            None => {
-                // No telemetry yet: wait, but honour timeout. An empty cache must
-                // not reach the convergence math, where a zero error would falsely
-                // report "reached".
+            Some(s) if s.recv_at.elapsed() <= STALE_TELEMETRY => s.opening,
+            _ => {
+                // No fresh telemetry (none yet, or the stream stalled): wait, but
+                // honour timeout. A missing or stale sample must not reach the
+                // convergence math, where it would falsely report reached/stall.
                 if elapsed > MOTION_TIMEOUT {
                     return MotionResult {
                         success: false,
