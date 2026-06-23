@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
 # The articulation root prim in the loaded USD stage. Every ext (state read,
-# actuator write, gripper sensor) targets this one articulation.
-_ROOT_ARTICULATION_PRIM = "/World/openarm"
+# actuator write, gripper sensor) targets this one articulation. The robot USD's
+# defaultPrim is /openarm (the launcher only adds /World/defaultDomeLight at
+# runtime; the robot itself is not reparented under /World).
+_ROOT_ARTICULATION_PRIM = "/openarm"
 
 
 class IsaacBridgeExtension:
