@@ -8,11 +8,11 @@ use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
 use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::{NodeBuilder, Parameters, Result};
+use peppylib::datastore::{self, Encoding};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
@@ -21,6 +21,7 @@ const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 2000;
 const ENABLE_FD: bool = true;
+const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
@@ -48,13 +49,37 @@ fn main() -> Result<()> {
             stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
         };
 
-        // Instance lock: crash if another instance with the same gripper_id is running.
-        let lock_path = format!("/tmp/openarm_gripper_{gripper_id}.lock");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
+        // Instance lock: crash if another instance with the same gripper_id is
+        // running. Held in the core-node datastore (released from the on_shutdown
+        // hook below), so a lock leaked by a hard crash clears with the stack
+        // instead of lingering like a /tmp file. get-then-store is not atomic; two
+        // simultaneous starts can race (single-writer in practice). Same scheme as
+        // openarm01_arm.
+        let lock_key = format!("openarm01_gripper_{gripper_id}_instance_lock");
+        if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
+            panic!("instance lock {lock_key} held by {}", held.last_modified_by);
+        }
+        datastore::store(
+            &node_runner,
+            lock_key.as_str(),
+            b"locked".to_vec(),
+            Encoding::TEXT_PLAIN,
+            DATASTORE_TIMEOUT,
+        )
+        .await?;
+
+        // Lock-release hook, registered first so it runs last (after the
+        // motor-disable hook below). The runtime fires it on every stop path with
+        // the messenger still connected, so the key never outlives the process.
+        {
+            let runner = node_runner.clone();
+            let lock_key = lock_key.clone();
+            node_runner.on_shutdown(async move {
+                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
+                    warn!("failed to remove lock {lock_key}: {e}");
+                }
+            });
+        }
 
         // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
@@ -89,38 +114,23 @@ fn main() -> Result<()> {
             node_runner.cancellation_token().clone(),
         ));
 
-        // Shutdown task: disables the motor and releases the lock. `peppy node
-        // stop` cancels in-band via the runtime cancellation token (not a unix
-        // signal), so observe that too or the motor would stay energised on a
-        // daemon stop.
+        // Motor-disable hook, registered second so it runs first at shutdown
+        // (before the lock-release hook above). The runtime fires it on every stop
+        // path (signals, `peppy node stop`, daemon loss) and awaits it before
+        // exiting, so the motor never stays energised.
         {
             let gripper = gripper.clone();
-            let node_runner = node_runner.clone();
-            let cancel = node_runner.cancellation_token().clone();
-            let lock_path = lock_path.clone();
-            tokio::spawn(async move {
-                let mut sigint = signal(SignalKind::interrupt()).expect("sigint");
-                let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-                tokio::select! {
-                    _ = sigint.recv() => {},
-                    _ = sigterm.recv() => {},
-                    _ = cancel.cancelled() => {},
-                }
-                info!("shutdown: disabling motor, releasing lock");
+            node_runner.on_shutdown(async move {
+                info!("shutdown: disabling motor");
                 {
                     // unwrap_or_else: recover even if poisoned (panic in control loop)
                     // so disable_all() always runs and the motor doesn't stay energised.
                     let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
                     g.disable_all();
-                    std::thread::sleep(POST_DISABLE_SLEEP);
-                    g.recv_all(BRINGUP_RECV_US);
                 }
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
-                }
-                // process::exit: peppylib runtime has no clean shutdown path; the
-                // motor is already disabled above so this is safe.
-                std::process::exit(0);
+                tokio::time::sleep(POST_DISABLE_SLEEP).await;
+                let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
+                g.recv_all(BRINGUP_RECV_US);
             });
         }
 

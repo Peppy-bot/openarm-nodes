@@ -9,12 +9,12 @@ use openarm_can::{ArmCan, CallbackMode, v10};
 use control::ControlConfig;
 use peppygen::exposed_services::openarm01_arm::v1::get_arm_id;
 use peppygen::{NodeBuilder, Parameters, Result};
+use peppylib::datastore::{self, Encoding};
 use srs_model::nalgebra::Isometry3;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{error, info, warn};
 
 /// Degrees of freedom of the arm.
@@ -40,9 +40,9 @@ fn side_label(arm_id: u8) -> &'static str {
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
 const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
-const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 500;
 const ENABLE_FD: bool = true;
+const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
@@ -137,20 +137,23 @@ fn main() -> Result<()> {
         // task (which would leave a zombie node with motors enabled but no loop).
         control::assert_ready_pose_in_limits(&cfg.limits);
 
-        // Register shutdown signal handlers before enabling motors: a failure here
-        // aborts bringup loudly on the main task rather than panicking inside the
-        // detached shutdown task, where it would silently delete the motor-disable
-        // path. Tokio buffers a signal that arrives before the task awaits it.
-        let mut sigint = signal(SignalKind::interrupt()).expect("register SIGINT handler");
-        let mut sigterm = signal(SignalKind::terminate()).expect("register SIGTERM handler");
-
-        // Instance lock: check if another instance with the same arm_id is running.
-        let lock_path = format!("/tmp/openarm_arm_{arm_id}.lock");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .unwrap_or_else(|e| panic!("instance lock {lock_path} held: {e}"));
+        // Instance lock: crash if another instance with the same arm_id is
+        // running. Held in the core-node datastore (released from the on_shutdown
+        // hook below), so a lock leaked by a hard crash clears with the stack
+        // instead of lingering like a /tmp file. get-then-store is not atomic; two
+        // simultaneous starts can race (single-writer in practice).
+        let lock_key = format!("openarm01_arm_{arm_id}_instance_lock");
+        if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
+            panic!("instance lock {lock_key} held by {}", held.last_modified_by);
+        }
+        datastore::store(
+            &node_runner,
+            lock_key.as_str(),
+            b"locked".to_vec(),
+            Encoding::TEXT_PLAIN,
+            DATASTORE_TIMEOUT,
+        )
+        .await?;
 
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
@@ -168,39 +171,22 @@ fn main() -> Result<()> {
 
         let arm = Arc::new(Mutex::new(arm));
 
-        // Shutdown task: disables motors and releases the lock on shutdown.
-        // `peppy node stop` shuts a daemon node down in-band over messaging by
-        // cancelling the runtime's cancellation token, not by sending a unix
-        // signal, so the SIGINT/SIGTERM arms alone never fire on a stop and the
-        // motors would stay energised. Observing the token closes that gap and
-        // also lets the process exit promptly instead of being force-killed.
+        // Shutdown: the control task eases the arm to the ready pose and disables
+        // the motors (the sole motor writer), signalling `shutdown_tx` when done.
+        // This hook waits for that park + disable, then releases the datastore
+        // instance lock. Registered before the control task spawns so it runs last,
+        // after the in-control-task disable. The runtime fires it on every stop
+        // path (signals, `peppy node stop`, daemon loss) with the messenger still
+        // connected, and awaits it before exiting.
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         {
-            let arm = arm.clone();
-            let cancel = node_runner.cancellation_token().clone();
-            let lock_path = lock_path.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = sigint.recv() => {},
-                    _ = sigterm.recv() => {},
-                    _ = cancel.cancelled() => {},
+            let runner = node_runner.clone();
+            let lock_key = lock_key.clone();
+            node_runner.on_shutdown(async move {
+                let _ = shutdown_rx.await;
+                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
+                    warn!("failed to remove lock {lock_key}: {e}");
                 }
-                info!("shutdown: disabling motors, releasing lock");
-                // unwrap_or_else: recover even if poisoned (panic in control loop)
-                // so disable_all() always runs and motors don't stay energised.
-                // Hold the lock from here through process exit so an in-flight
-                // control loop can neither command mid-shutdown nor re-command the
-                // motors after they have been disabled.
-                let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-                a.disable_all();
-                // ROS2 reference: sleep before recv to let motors acknowledge.
-                std::thread::sleep(POST_DISABLE_SLEEP);
-                a.recv_all(BRINGUP_RECV_US);
-                if let Err(e) = std::fs::remove_file(&lock_path) {
-                    warn!("failed to remove lock {lock_path}: {e}");
-                }
-                // exit() does not run destructors, so the guard is never released;
-                // the motors stay disabled as the process dies.
-                std::process::exit(0);
             });
         }
 
@@ -241,7 +227,7 @@ fn main() -> Result<()> {
         // runs. Its action handlers only admit goals and hand them over; both
         // actions are exposed before anything spawns, so a failed registration
         // fails bringup here.
-        control::spawn(&node_runner, arm.clone(), cfg, model, wiring).await?;
+        control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx).await?;
 
         Ok(())
     })
