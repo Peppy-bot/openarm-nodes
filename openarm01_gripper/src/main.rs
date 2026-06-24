@@ -22,6 +22,9 @@ const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 2000;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Tighter bound for shutdown lock removal so disable + drain + removal stays
+/// inside the default 5 s shutdown grace window.
+const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
@@ -75,7 +78,7 @@ fn main() -> Result<()> {
             let runner = node_runner.clone();
             let lock_key = lock_key.clone();
             node_runner.on_shutdown(async move {
-                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
+                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), LOCK_REMOVE_TIMEOUT).await {
                     warn!("failed to remove lock {lock_key}: {e}");
                 }
             });
@@ -122,14 +125,15 @@ fn main() -> Result<()> {
             let gripper = gripper.clone();
             node_runner.on_shutdown(async move {
                 info!("shutdown: disabling motor");
-                {
-                    // unwrap_or_else: recover even if poisoned (panic in control loop)
-                    // so disable_all() always runs and the motor doesn't stay energised.
-                    let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
-                    g.disable_all();
-                }
-                tokio::time::sleep(POST_DISABLE_SLEEP).await;
+                // Hold the lock across the whole disable -> settle -> drain so a
+                // still-live follow/move loop can't interleave CAN traffic before
+                // the disable ACKs are drained. Blocking sleep (not tokio) keeps the
+                // guard held, which it could not be across an await.
+                // unwrap_or_else: recover even if poisoned (panic in control loop)
+                // so disable_all() always runs and the motor doesn't stay energised.
                 let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
+                g.disable_all();
+                std::thread::sleep(POST_DISABLE_SLEEP);
                 g.recv_all(BRINGUP_RECV_US);
             });
         }

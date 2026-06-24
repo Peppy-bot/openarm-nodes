@@ -43,6 +43,10 @@ const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 500;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Tighter bound for shutdown lock removal so the return-to-ready park
+/// (`control::PARK_DURATION_S`) + motor disable + removal stays inside the
+/// default 5 s shutdown grace window.
+const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
@@ -155,6 +159,25 @@ fn main() -> Result<()> {
         )
         .await?;
 
+        // Shutdown: register the lock-release hook right after acquiring the lock,
+        // so a panic during bringup still releases the key (dropping `shutdown_tx`
+        // completes `shutdown_rx`, so the hook runs). On a normal stop the control
+        // task eases to the ready pose and disables the motors (the sole motor
+        // writer), signalling `shutdown_tx` when done; this hook waits for that,
+        // then removes the datastore lock. The runtime fires it on every stop path
+        // with the messenger connected and awaits it before exit.
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        {
+            let runner = node_runner.clone();
+            let lock_key = lock_key.clone();
+            node_runner.on_shutdown(async move {
+                let _ = shutdown_rx.await;
+                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), LOCK_REMOVE_TIMEOUT).await {
+                    warn!("failed to remove lock {lock_key}: {e}");
+                }
+            });
+        }
+
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
         let mut arm = ArmCan::new(&can_interface, ENABLE_FD).expect("ArmCan::new");
@@ -170,25 +193,6 @@ fn main() -> Result<()> {
         info!("arm ready");
 
         let arm = Arc::new(Mutex::new(arm));
-
-        // Shutdown: the control task eases the arm to the ready pose and disables
-        // the motors (the sole motor writer), signalling `shutdown_tx` when done.
-        // This hook waits for that park + disable, then releases the datastore
-        // instance lock. Registered before the control task spawns so it runs last,
-        // after the in-control-task disable. The runtime fires it on every stop
-        // path (signals, `peppy node stop`, daemon loss) with the messenger still
-        // connected, and awaits it before exiting.
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        {
-            let runner = node_runner.clone();
-            let lock_key = lock_key.clone();
-            node_runner.on_shutdown(async move {
-                let _ = shutdown_rx.await;
-                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), DATASTORE_TIMEOUT).await {
-                    warn!("failed to remove lock {lock_key}: {e}");
-                }
-            });
-        }
 
         // get_arm_id service.
         {
