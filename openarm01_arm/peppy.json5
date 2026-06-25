@@ -103,6 +103,12 @@
       {
         name: "openarm01_joint_state_source",
         tag: "v1"
+      },
+      // Per-component readiness the real robot_initializer aggregates: ready once
+      // motors are enabled and the control loop is serving.
+      {
+        name: "openarm01_hardware_ready",
+        tag: "v1"
       }
     ],
     topics: {

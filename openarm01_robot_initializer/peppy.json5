@@ -1,16 +1,53 @@
-// Real-hardware robot_initializer: is_ready returns true immediately (no
-// scene-loaded gate). Conforms to openarm01_robot_initializer:v1 alongside
-// the _mujoco / _isaac siblings.
+// Real-hardware robot_initializer: aggregates the per-component
+// openarm01_hardware_ready signals from both arms and grippers and exposes the
+// robot-level is_ready backbone gates on. Returns ready:true only once every
+// bound component has enabled its motors and started serving. Conforms to
+// openarm01_robot_initializer:v1 alongside the _mujoco / _isaac siblings, which
+// gate on scene load instead.
 {
   peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_robot_initializer",
     tag: "v1",
+    depends_on: {
+      // Per-side link_ids mirror backbone: the launcher pins each to the concrete
+      // arm/gripper instance whose readiness this node aggregates.
+      interfaces: [
+        {
+          name: "openarm01_hardware_ready",
+          tag: "v1",
+          link_id: "left_arm"
+        },
+        {
+          name: "openarm01_hardware_ready",
+          tag: "v1",
+          link_id: "right_arm"
+        },
+        {
+          name: "openarm01_hardware_ready",
+          tag: "v1",
+          link_id: "left_gripper"
+        },
+        {
+          name: "openarm01_hardware_ready",
+          tag: "v1",
+          link_id: "right_gripper"
+        }
+      ]
+    }
   },
   interfaces: {
     conforms_to: [
       { name: "openarm01_robot_initializer", tag: "v1" },
     ],
+    services: {
+      consumes: [
+        { link_id: "left_arm", name: "is_ready" },
+        { link_id: "right_arm", name: "is_ready" },
+        { link_id: "left_gripper", name: "is_ready" },
+        { link_id: "right_gripper", name: "is_ready" }
+      ]
+    }
   },
   execution: {
     language: "rust",

@@ -8,10 +8,12 @@ mod trajectory;
 use openarm_can::{ArmCan, CallbackMode, v10};
 use control::ControlConfig;
 use peppygen::exposed_services::openarm01_arm::v1::get_arm_id;
+use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
 use srs_model::nalgebra::Isometry3;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
@@ -210,6 +212,26 @@ fn main() -> Result<()> {
             });
         }
 
+        // is_ready service: false until bringup and control wiring complete, then
+        // true. The real robot_initializer polls this (openarm01_hardware_ready) to
+        // gate the whole robot.
+        let ready = Arc::new(AtomicBool::new(false));
+        {
+            let runner = node_runner.clone();
+            let ready = ready.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
+                        Ok(is_ready::Response::new(ready.load(Ordering::SeqCst)))
+                    })
+                    .await
+                    {
+                        error!("is_ready: {e}");
+                    }
+                }
+            });
+        }
+
         // Bidirectional stream plumbing: the listener keeps the latest well-formed
         // `joint_commands` setpoint for the control loop, and the publisher emits
         // the measured joint state and end-effector pose on `joint_states` /
@@ -232,6 +254,10 @@ fn main() -> Result<()> {
         // actions are exposed before anything spawns, so a failed registration
         // fails bringup here.
         control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx).await?;
+
+        // Motors enabled, initial state populated, control loop running, actions
+        // registered: report ready so the robot_initializer can release the gate.
+        ready.store(true, Ordering::SeqCst);
 
         Ok(())
     })
