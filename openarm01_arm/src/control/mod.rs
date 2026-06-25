@@ -19,15 +19,17 @@ use std::time::{Duration, Instant};
 
 use peppygen::exposed_actions::openarm01_arm::v1::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
+use peppylib::runtime::CancellationToken;
 use srs_model::nalgebra::Isometry3;
 use srs_model::{Jacobian, Limit};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::info;
 
 use crate::actions::{self, Goal};
 use crate::friction;
 use crate::pacer::Pacer;
 use crate::stream::{JointCommand, StreamWiring};
+use crate::trajectory::JointTrajectory;
 use crate::{ARM_DOF, JointVec};
 use cartesian_move::CartesianMove;
 use follow::Follow;
@@ -40,6 +42,22 @@ pub(crate) use startup::assert_ready_pose_in_limits;
 /// All-zero joint vector, the zero desired velocity sent alongside a held or
 /// commanded position.
 const ZERO: JointVec = [0.0; ARM_DOF];
+
+/// Non-singular rest configuration the arm eases to: once on startup (from the
+/// measured power-on pose, before admitting goals) and again on shutdown (before
+/// the motors disable). The arm powers off wherever it hung, often on the
+/// straight-arm singularity, so this is a known, well-conditioned pose. The elbow
+/// (J4) is bent a hair above its URDF lower limit; every other joint rests at 0.
+pub(super) const READY_POSE: JointVec = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
+
+/// Requested duration (s) of the shutdown return-to-ready move, floored at the
+/// joint velocity limits like any joint move. Sized to fit inside the shutdown
+/// grace window alongside the motor disable and lock release.
+const PARK_DURATION_S: f64 = 3.0;
+
+/// Settle time after disabling the motors on shutdown, before draining ACK
+/// frames. Mirrors the ROS2 v10_simple_hardware on_deactivate sleep.
+const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub struct ControlConfig {
@@ -148,6 +166,7 @@ pub async fn spawn(
     cfg: ControlConfig,
     model: srs_model::Arm,
     wiring: StreamWiring,
+    shutdown_tx: oneshot::Sender<()>,
 ) -> Result<()> {
     let joints_action = move_arm_joints::ActionHandle::expose(runner).await?;
     let cartesian_action = move_arm::ActionHandle::expose(runner).await?;
@@ -156,7 +175,8 @@ pub async fn spawn(
     // accepted and silently queued behind a motion the caller never requested.
     let busy = Arc::new(AtomicBool::new(true));
     let (goal_tx, goal_rx) = mpsc::channel::<Goal>(1);
-    tokio::spawn(run_control(arm, cfg.clone(), goal_rx, busy.clone(), model, wiring));
+    let token = runner.cancellation_token().clone();
+    tokio::spawn(run_control(arm, cfg.clone(), goal_rx, busy.clone(), model, wiring, token, shutdown_tx));
     tokio::spawn(actions::run_move_arm_joints(joints_action, cfg.limits, goal_tx.clone(), busy.clone()));
     tokio::spawn(actions::run_move_arm(cartesian_action, goal_tx, busy));
     Ok(())
@@ -174,6 +194,8 @@ async fn run_control(
     busy: Arc<AtomicBool>,
     mut model: srs_model::Arm,
     wiring: StreamWiring,
+    token: CancellationToken,
+    shutdown_tx: oneshot::Sender<()>,
 ) {
     let mut pacer = Pacer::new(cfg.cycle_period);
     let (q0, _) = read_state(&arm, cfg.recv_timeout_us);
@@ -210,6 +232,61 @@ async fn run_control(
             now: Instant::now(),
         };
         mode = mode.tick(&mut io).await;
+        // Biased so a cancelled token always wins over an already-due (overrun)
+        // tick: on shutdown break out and run the return-to-ready + disable below.
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            _ = pacer.pace() => {}
+        }
+    }
+
+    // Cancelled: ease back to the ready pose (the sole motor writer, reusing the
+    // dynamics model) so the arm settles at a known pose instead of dropping when
+    // power cuts, then disable the motors. main.rs awaits `shutdown_tx`, keeping
+    // this task alive through the park before it releases the lock and exits.
+    // Best-effort: a park that overruns the shutdown grace window is force-killed
+    // with the motors still energised, acceptable for now.
+    info!("control loop stopping: easing to ready pose, then disabling motors");
+    return_to_ready(&arm, &cfg, &mut model).await;
+    {
+        // unwrap_or_else: recover even if poisoned so disable_all() always runs.
+        let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+        a.disable_all();
+    }
+    tokio::time::sleep(POST_DISABLE_SLEEP).await;
+    {
+        let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+        a.recv_all(cfg.recv_timeout_us);
+    }
+    // A dropped receiver (main.rs already exited) is fine; nothing to do.
+    let _ = shutdown_tx.send(());
+    info!("control loop stopped (motors disabled)");
+}
+
+/// Best-effort return to [`READY_POSE`] on shutdown: eases from the measured pose
+/// over [`PARK_DURATION_S`] with the same gravity/Coriolis/friction feedforward as
+/// a normal move, so the arm settles at a known pose instead of dropping when the
+/// motors disable. Runs inside the control task after its loop exits on
+/// cancellation, so it is the sole motor writer and reuses the dynamics model.
+/// Respects the per-joint velocity limits, so a pose far from ready takes longer
+/// than [`PARK_DURATION_S`] rather than lunging.
+async fn return_to_ready(arm: &Mutex<ArmCan>, cfg: &ControlConfig, model: &mut srs_model::Arm) {
+    let (q0, _) = read_state(arm, cfg.recv_timeout_us);
+    let trajectory = JointTrajectory::new(q0, READY_POSE, cfg.max_joint_velocity_rad_s, PARK_DURATION_S);
+    let mut pacer = Pacer::new(cfg.cycle_period);
+    loop {
+        let (q, qdot) = read_state(arm, cfg.recv_timeout_us);
+        let (ff_tau, _ee_base, _jacobian) = feedforward(model, &q, &qdot);
+        let now = Instant::now();
+        let (q_des, dq_des) = trajectory.sample(now);
+        {
+            let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+            a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &ff_tau);
+        }
+        if trajectory.is_complete(now) {
+            break;
+        }
         pacer.pace().await;
     }
 }

@@ -10,16 +10,9 @@ use srs_model::Limit;
 use tracing::info;
 
 use super::follow::Follow;
-use super::{ControlConfig, Mode, TickIo, command, fmt_joints};
+use super::{ControlConfig, Mode, READY_POSE, TickIo, command, fmt_joints};
 use crate::{ARM_DOF, JointVec};
 use crate::trajectory::JointTrajectory;
-
-/// Non-singular rest configuration the arm homes to when no producer is
-/// streaming at boot. The arm powers off wherever it hung (often a near-straight
-/// elbow, on the straight-arm singularity), so this brings it to a known,
-/// well-conditioned pose. The elbow (J4) is bent a hair above its URDF lower
-/// limit; every other joint rests at 0.
-const READY_POSE: JointVec = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
 
 /// Requested duration (s) of the startup move, floored at the joint velocity
 /// limits like any joint move (so even a far home is a gentle, planned ease).
