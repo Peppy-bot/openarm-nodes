@@ -7,10 +7,11 @@ mod stream;
 use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
 use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
+use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -154,6 +155,26 @@ fn main() -> Result<()> {
             });
         }
 
+        // is_ready service: false until bringup and control wiring complete, then
+        // true. The real robot_initializer polls this (openarm01_hardware_ready) to
+        // gate the whole robot.
+        let ready = Arc::new(AtomicBool::new(false));
+        {
+            let runner = node_runner.clone();
+            let ready = ready.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
+                        Ok(is_ready::Response::new(ready.load(Ordering::SeqCst)))
+                    })
+                    .await
+                    {
+                        error!("is_ready: {e}");
+                    }
+                }
+            });
+        }
+
         // One busy gate, shared by the move action and the follow loop so only one
         // drives the CAN bus at a time.
         let busy = Arc::new(AtomicBool::new(false));
@@ -178,6 +199,10 @@ fn main() -> Result<()> {
 
         // move_gripper: direct-setpoint control loop.
         tokio::spawn(run_move_gripper(node_runner, gripper, cfg, busy));
+
+        // Motor enabled, follow and move loops running: report ready so the
+        // robot_initializer can release the gate.
+        ready.store(true, Ordering::SeqCst);
 
         Ok(())
     })

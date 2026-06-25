@@ -54,6 +54,12 @@
       {
         name: "openarm01_gripper_state_source",
         tag: "v1"
+      },
+      // Per-component readiness the real robot_initializer aggregates: ready once
+      // the motor is enabled and the control loops are serving.
+      {
+        name: "openarm01_hardware_ready",
+        tag: "v1"
       }
     ],
     topics: {
