@@ -8,7 +8,7 @@
 // stream and the arm resumes following when it ends. The arm is a joint-space
 // servo: task-space commanders solve IK upstream.
 {
-  peppy_schema: "node_v1",
+  peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_arm",
     tag: "v1",

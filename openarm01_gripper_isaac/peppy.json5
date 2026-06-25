@@ -3,7 +3,7 @@
 // the sim to actuate; consumes the sim's gripper_states for move-action feedback.
 // Typed peppygen topics throughout, no raw peppylib.
 {
-  peppy_schema: "node_v1",
+  peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_gripper_isaac",
     tag: "v1",

@@ -3,7 +3,7 @@
 // openarm01_gripper instance (left/right), and relays feedback + result upward.
 // Sim/real agnostic — component nodes own that abstraction.
 {
-  peppy_schema: "node_v1",
+  peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_backbone",
     tag: "v1",

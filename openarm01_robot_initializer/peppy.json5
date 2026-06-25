@@ -2,7 +2,7 @@
 // scene-loaded gate). Conforms to openarm01_robot_initializer:v1 alongside
 // the _mujoco / _isaac siblings.
 {
-  peppy_schema: "node_v1",
+  peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_robot_initializer",
     tag: "v1",

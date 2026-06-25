@@ -6,7 +6,7 @@
 // directly. Sim peripherals attach to this node by node name for
 // engine-internal coupling.
 {
-  peppy_schema: "node_v1",
+  peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_robot_initializer_mujoco",
     tag: "v1",

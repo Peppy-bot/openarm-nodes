@@ -3,7 +3,7 @@
 // actuate; consumes the sim's joint_states for the trajectory anchor + follow
 // re-anchor. Typed peppygen topics throughout, no raw peppylib.
 {
-  peppy_schema: "node_v1",
+  peppy_schema: "node/v1",
   manifest: {
     name: "openarm01_arm_isaac",
     tag: "v1",
