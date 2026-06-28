@@ -2245,7 +2245,7 @@ dependencies = [
 [[package]]
 name = "openarm_can"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/nodes_shared_code#02b7f5a5fb662265cc5042aa842a6a8855d27cb8"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs#02b7f5a5fb662265cc5042aa842a6a8855d27cb8"
 dependencies = [
  "bindgen",
  "cc",

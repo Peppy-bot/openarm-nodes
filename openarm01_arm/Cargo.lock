@@ -2315,7 +2315,7 @@ dependencies = [
 [[package]]
 name = "openarm_can"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/nodes_shared_code?branch=main#525e7086062790ae256729696f59288eaed5b16b"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#525e7086062790ae256729696f59288eaed5b16b"
 dependencies = [
  "bindgen",
  "cc",
@@ -3612,7 +3612,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/nodes_shared_code?branch=main#525e7086062790ae256729696f59288eaed5b16b"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#525e7086062790ae256729696f59288eaed5b16b"
 dependencies = [
  "k",
  "urdf-rs",
