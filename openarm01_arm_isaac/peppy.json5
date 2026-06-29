@@ -1,7 +1,10 @@
-// Isaac sim implementation of openarm01_arm. Follows streamed joint_commands and
-// emits the resolved (q_des, dq_des) on arm_sim_passthrough for the sim to
-// actuate; consumes the sim's joint_states for the trajectory anchor + follow
-// re-anchor. Typed peppygen topics throughout, no raw peppylib.
+// Isaac Sim follower for one openarm01 arm. A thin bridge: it consumes the hub's
+// governed per-arm setpoints (collision-governed, rate-limited, the hub owns all
+// trajectory generation) and republishes the resolved (q_des, dq_des) on the
+// sim-internal arm_sim_passthrough topic for the engine to actuate. No
+// trajectory, follow, or collision logic of its own - that all lives in
+// openarm01_backbone, so the sim and the real arm follow the same governed
+// stream. Two instances, one per side, told apart by arm_id.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -9,22 +12,12 @@
     tag: "v1",
     depends_on: {
       interfaces: [
-        // Streamed joint setpoints the arm follows between moves: optional and
-        // wildcard (`from_any`), so it binds to any conforming producer (the
-        // commander). Mirrors the real arm so both follow the same contract.
+        // The hub's governed per-arm setpoint stream. Wildcard (`from_any`): the
+        // backbone is the producer; this arm reads the entries for its arm_id.
         {
-          name: "openarm01_joint_command_source",
+          name: "openarm01_arm_governed_setpoints",
           tag: "v1",
-          link_id: "commander",
-          from_any: true,
-        },
-        // Measured joint state from the sim, used by the move action to anchor
-        // trajectories and by the follow loop to re-anchor its chase. from_any:
-        // the sim is the producer.
-        {
-          name: "openarm01_joint_state_source",
-          tag: "v1",
-          link_id: "state",
+          link_id: "hub",
           from_any: true,
         },
       ],
@@ -32,14 +25,12 @@
   },
   interfaces: {
     conforms_to: [
-      { name: "openarm01_arm", tag: "v1" },
       // The resolved joint setpoint handed to the sim engine (sim-internal passthrough).
       { name: "openarm01_arm_sim_passthrough", tag: "v1" },
     ],
     topics: {
       consumes: [
-        { name: "joint_commands", link_id: "commander" },
-        { name: "joint_states", link_id: "state" },
+        { name: "arm_governed_setpoints", link_id: "hub" },
       ],
     },
   },
@@ -49,25 +40,9 @@
       def_file: "apptainer.def",
     },
     parameters: {
-      // The arm_id at runtime (0 = left, 1 = right). Two instances are
-      // expected; the bin's file-lock + arm_id guard rejects collisions.
+      // The arm_id at runtime (0 = left, 1 = right). Two instances are expected;
+      // each republishes only the governed setpoints addressed to its arm_id.
       arm_id: "u8",
-      // Control-loop rate (Hz) for moves and follow. Required, mirroring the
-      // real arm (which exposes the same param rather than hiding a default).
-      control_rate_hz: "u32",
-      // How long (s) the arm keeps following a command stream after its last
-      // message before holding. Safety watchdog, required like the real arm.
-      stream_timeout_s: "f64",
-      // Per-joint peak velocity (rad/s) sizing both the quintic move duration
-      // and the follow chase. Defaults are the OpenArm V1.0 URDF velocity limits,
-      // identical to the real arm's defaults.
-      max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
-      max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.754666 },
-      max_joint_velocity_rad_s_3: { $type: "f64", $default: 5.445426 },
-      max_joint_velocity_rad_s_4: { $type: "f64", $default: 5.445426 },
-      max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.943946 },
-      max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.943946 },
-      max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
     },
   },
 }
