@@ -1,14 +1,8 @@
-// openarm01_backbone - bimanual coordination hub. It is the single place that
-// sees both arms, so it owns all arm motion: it consumes the operator joint
-// stream (joint_commands) and exposes the joint / Cartesian move actions,
-// generates the trajectories in-process, runs the self-collision governor over
-// both arms together, and streams the governed per-arm setpoints
-// (governed_setpoints) the arms follow. The arms are thin followers: a sim arm
-// passes the setpoint through to its engine, the real arm runs its MIT control
-// loop on it. Grippers are unchanged: the backbone still relays move_gripper to
-// the per-side gripper instances (gripper geometry is baked into the arm hulls,
-// so gripper motion does not affect self-collision). Sim/real agnostic - the
-// governor is URDF-based, so it runs identically for mujoco, isaac, and hardware.
+// openarm01_backbone: the bimanual coordination hub node. Consumes the operator
+// arm_joint_commands stream and both arms' arm_states; exposes the joint /
+// Cartesian / gripper move actions; conforms to arm_governed_setpoints (the
+// per-arm stream the arms follow) and collision_status; and relays move_gripper
+// to the per-side grippers. See src/main.rs for the architecture.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -21,10 +15,8 @@
           tag: "v1",
           link_id: "robot_init"
         },
-        // Operator joint setpoint stream. Wildcard (`from_any`) like the arms
-        // used to consume it: the hub binds to whatever commander is running and
-        // tells sides apart by arm_id. The hub is now the sole consumer of this
-        // stream (the arms follow governed_setpoints instead).
+        // Operator joint setpoint stream, `from_any`: the hub binds to whatever
+        // commander is running and tells sides apart by arm_id.
         {
           name: "openarm01_arm_joint_commands",
           tag: "v1",
@@ -63,9 +55,8 @@
     }
   },
   interfaces: {
-    // The hub is the producer of the governed per-arm setpoint stream the arms
-    // follow.
     conforms_to: [
+      // The governed per-arm setpoint stream (positions + velocity feedforward).
       {
         name: "openarm01_arm_governed_setpoints",
         tag: "v1"
@@ -74,90 +65,20 @@
         // Live nearest-pair distance + links, for the operator readout.
         name: "openarm01_collision_status",
         tag: "v1"
+      },
+      // The joint / Cartesian arm move actions (move_arm_joints, move_arm),
+      // addressed by arm_id. The hub runs each move itself (trajectory + governor
+      // + governed stream); progress is observed on arm_states.
+      {
+        name: "openarm01_arm_actions",
+        tag: "v1"
       }
     ],
     actions: {
       exposes: [
         {
-          // Joint-space arm motion. arm_id selects the target arm (0 = left,
-          // 1 = right). The hub generates the quintic trajectory, governs it
-          // against the other arm, and streams the result; it no longer forwards
-          // to a per-arm action. Progress is observed on joint_states.
-          name: "move_arm_joints",
-          goal_service: {
-            request_message_format: {
-              arm_id: "u8",
-              joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              },
-              // Requested trajectory duration (s); floored at the per-joint
-              // velocity-limit duration. 0 = fastest.
-              duration_s: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              },
-              action_time: "f64"
-            }
-          }
-        },
-        {
-          // Cartesian arm motion. arm_id selects the target arm. The hub plans IK
-          // along the world-frame path in-process, governs it, and streams the
-          // result. Poses are WORLD frame, quaternion [x, y, z, w].
-          name: "move_arm",
-          goal_service: {
-            request_message_format: {
-              arm_id: "u8",
-              position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              orientation: {
-                $type: "array",
-                $items: "f64",
-                $length: 4
-              },
-              duration_s: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              final_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              final_orientation: {
-                $type: "array",
-                $items: "f64",
-                $length: 4
-              },
-              action_time: "f64"
-            }
-          }
-        },
-        {
-          // Gripper motion. gripper_id selects the target gripper instance. Relay
-          // unchanged: the hub forwards to the per-side gripper move_gripper.
+          // Gripper motion. gripper_id selects the target gripper (0 = left,
+          // 1 = right).
           name: "move_gripper",
           goal_service: {
             request_message_format: {
@@ -181,8 +102,7 @@
           }
         }
       ],
-      // Downstream actions the hub still fires: grippers only. The arm move
-      // actions are gone - the hub executes arm moves itself.
+      // Downstream gripper move actions the hub relays to, per side.
       consumes: [
         {
           link_id: "left_gripper",
@@ -226,11 +146,11 @@
     },
     parameters: {
       // URDF + per-side base links for both srs_model arms and the bimanual
-      // collision model. The default URDF is vendored into the container (from
-      // the repo-root `description/`, since the build context is the node dir).
-      // Must be an OpenArm v10 variant: the governor's torso proxy is hand-fitted
-      // to that mesh (see the openarm_v10 module), and the collision model's
-      // build() aborts if the URDF lacks the expected torso body.
+      // collision model. The default URDF and meshes are checked in at the node
+      // root and copied into the container by apptainer.def. Must be an OpenArm
+      // v10 variant: the governor's torso proxy is hand-fitted to that mesh (see
+      // the openarm_v10 module), and the collision model's build() aborts if the
+      // URDF lacks the expected torso body.
       urdf_path: { $type: "string", $default: "/opt/openarm01_backbone/openarm_v10.urdf" },
       left_base: { $type: "string", $default: "openarm_left_link0" },
       right_base: { $type: "string", $default: "openarm_right_link0" },
@@ -238,7 +158,6 @@
       // (resolves the URDF's package:// refs). Vendored alongside the URDF.
       meshes_dir: { $type: "string", $default: "/opt/openarm01_backbone/meshes" },
       // Coordination loop rate (Hz): the rate governed setpoints are streamed at.
-      // Match the arms' control_rate_hz.
       control_rate_hz: "u32",
       // Self-collision governor band (m), signed surface distance between the two
       // arms. At/under d_stop motion toward contact is fully stopped; at/over
@@ -249,10 +168,11 @@
       // the home pose is unthrottled and an approach throttles within ~2 cm.
       d_stop: { $type: "f64", $default: 0.005 },
       d_safe: { $type: "f64", $default: 0.02 },
-      // Governor state at launch, before the first collision_avoidance message.
-      collision_enabled_default: { $type: "bool", $default: true },
+      // Governor state at launch, before the first governor_control message.
+      collision_governor_enabled_default: { $type: "bool", $default: true },
       // Per-joint peak velocity (rad/s) sizing the quintic trajectories and the
-      // stream chase. OpenArm V1.0 URDF joint velocity limits (match the arm).
+      // stream chase. OpenArm V1.0 URDF joint velocity limits; the hub is the sole
+      // owner of motion sizing.
       max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
       max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.754666 },
       max_joint_velocity_rad_s_3: { $type: "f64", $default: 5.445426 },
@@ -260,13 +180,13 @@
       max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.943946 },
       max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.943946 },
       max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
-      // End-effector linear-speed cap (m/s) for the stream chase. Deployment
-      // tunes it: the sim runs fast (joint-velocity bound, as it did before the
-      // hub), the real arm sets a conservative cap in its launcher. The default
-      // is the permissive sim value, not the real arm's requirement.
+      // End-effector linear-speed cap (m/s) for the stream chase, used only until
+      // the first governor_control message; after that the operator's streamed cap
+      // (openarm01_joint_commander) governs. The default is the permissive sim
+      // value; the operator surface sets the real arm's conservative cap.
       max_ee_velocity_m_s: { $type: "f64", $default: 1.0 },
       // How long (s) the hub keeps following an operator stream after its last
-      // message before releasing the lock and holding (match the arm).
+      // message before releasing the lock and holding.
       stream_timeout_s: "f64",
     }
   }

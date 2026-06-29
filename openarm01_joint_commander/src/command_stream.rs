@@ -32,31 +32,31 @@ pub async fn run(
 ) {
     let arm_pub = match arm_joint_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare joint_commands publisher: {e}"),
+        Err(e) => return error!("declare arm_joint_commands publisher: {e}"),
     };
     let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare gripper_commands publisher: {e}"),
     };
-    let collision_pub = match governor_control::declare_publisher(&runner).await {
+    let governor_pub = match governor_control::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare collision_avoidance publisher: {e}"),
+        Err(e) => return error!("declare governor_control publisher: {e}"),
     };
 
     let mut tasks = Vec::new();
 
-    // Re-publish the operator's collision-avoidance toggle every tick. Unlike the
-    // arm/gripper streams it has no deadman: the hub's governor must always know
-    // the operator's intent, and the lossy QoS means a one-shot publish could be
+    // Re-publish the operator's governor controls every tick. Unlike the arm/gripper
+    // streams these have no deadman: the hub's governor must always know the
+    // operator's intent, and the lossy QoS means a one-shot publish could be
     // dropped, so the latest state is re-sent continuously.
-    let collision_state = state.clone();
+    let governor_state = state.clone();
     tasks.push(tokio::spawn(stream_setpoints(
-        collision_pub,
+        governor_pub,
         command_rate_hz,
         token.clone(),
-        "collision control".to_string(),
+        "governor control".to_string(),
         move || {
-            let s = collision_state.lock().unwrap_or_else(|p| p.into_inner());
+            let s = governor_state.lock().unwrap_or_else(|p| p.into_inner());
             Some(
                 governor_control::build_message(s.collision_enabled, s.d_stop, s.d_safe, s.max_ee_velocity_m_s)
                     .map_err(|e| e.to_string()),

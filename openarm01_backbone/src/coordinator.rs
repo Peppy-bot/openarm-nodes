@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm01_collision_status::v1::collision_status;
 use peppygen::emitted_topics::openarm01_arm_governed_setpoints::v1::arm_governed_setpoints;
+use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
@@ -20,7 +21,12 @@ use crate::governor::Governor;
 use crate::pacer::Pacer;
 use crate::planner::{Goal, Planner};
 use crate::streams::{GovernorConfig, JointCommand, MeasuredState};
-use crate::{ARM_ID_LEFT, ARM_ID_RIGHT, ArmPair, JointVec};
+use crate::{ArmPair, JointVec, Side};
+
+/// How long [`seed`] waits for an arm's first measured state before warning that
+/// the hub is still blocked, so a silent arm is visible in the log instead of an
+/// indefinite quiet stall.
+const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 
 /// One arm's inbound channels into the coordinator: the operator command stream,
 /// the measured state, the accepted-goal queue, and the single-flight busy flag.
@@ -31,7 +37,10 @@ pub struct ArmChannels {
     pub busy: Arc<AtomicBool>,
 }
 
-/// Run the coordination loop forever. Holds the governor and both planners.
+/// Run the coordination loop. Holds the governor and both planners. Runs until
+/// the node's cancellation token fires; returns `Err` if a publisher cannot be
+/// declared at bringup. Any return takes the node down (the supervisor in `main`
+/// treats it as fatal).
 pub async fn run(
     runner: Arc<NodeRunner>,
     mut governor: Governor,
@@ -39,22 +48,29 @@ pub async fn run(
     mut channels: ArmPair<ArmChannels>,
     governor_config: watch::Receiver<GovernorConfig>,
     cycle_period: Duration,
-) {
+    token: CancellationToken,
+) -> peppygen::Result<()> {
     let publisher = match arm_governed_setpoints::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare governed_setpoints publisher: {e}"),
+        Err(e) => {
+            error!("declare governed_setpoints publisher: {e}");
+            return Err(e);
+        }
     };
     let status_publisher = match collision_status::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare collision_status publisher: {e}"),
+        Err(e) => {
+            error!("declare collision_status publisher: {e}");
+            return Err(e);
+        }
     };
 
     // Hold each arm's real pose, not a neutral zero: wait for the first measured
     // state from both arms and seed the held setpoint there before publishing.
-    if seed(&mut channels.left, &mut planners.left, "left").await.is_err()
-        || seed(&mut channels.right, &mut planners.right, "right").await.is_err()
+    if seed(&mut channels.left, &mut planners.left, Side::Left).await.is_err()
+        || seed(&mut channels.right, &mut planners.right, Side::Right).await.is_err()
     {
-        return;
+        return Ok(());
     }
     info!("bimanual hub: both arms reporting; governed streaming begins");
 
@@ -89,19 +105,19 @@ pub async fn run(
         // arm_id; each follower keeps its own arm. A follower never starves as long
         // as it consumes in a tight loop (receive decoupled from publish), the way
         // the hub's own state listeners and the real arm already do.
-        for (arm_id, planner, prev_q, governed_q) in [
-            (ARM_ID_LEFT, &mut planners.left, prev.left, governed.left),
-            (ARM_ID_RIGHT, &mut planners.right, prev.right, governed.right),
+        for (side, planner, prev_q, governed_q) in [
+            (Side::Left, &mut planners.left, prev.left, governed.left),
+            (Side::Right, &mut planners.right, prev.right, governed.right),
         ] {
             let dq: JointVec = std::array::from_fn(|j| (governed_q[j] - prev_q[j]) / dt);
             planner.commit(governed_q);
-            match arm_governed_setpoints::build_message(arm_id, governed_q, dq) {
+            match arm_governed_setpoints::build_message(side.arm_id(), governed_q, dq) {
                 Ok(msg) => {
                     if let Err(e) = publisher.publish(msg).await {
-                        warn!("governed_setpoints publish (arm {arm_id}): {e}");
+                        warn!("governed_setpoints publish ({} arm): {e}", side.label());
                     }
                 }
-                Err(e) => error!("build governed_setpoints (arm {arm_id}): {e}"),
+                Err(e) => error!("build governed_setpoints ({} arm): {e}", side.label()),
             }
         }
 
@@ -120,21 +136,31 @@ pub async fn run(
             }
         }
         tick += 1;
-        pacer.pace().await;
+        tokio::select! {
+            _ = token.cancelled() => return Ok(()),
+            _ = pacer.pace() => {}
+        }
     }
 }
 
-/// The measured-state channel closed before the first state arrived: the node is
-/// shutting down, so seeding is abandoned.
+/// All senders on the measured-state channel dropped (its only producer is the
+/// state listener task), so no measurement will ever arrive: seeding is abandoned.
 struct Shutdown;
 
 /// Wait for the arm's first measured state and seed the planner's held setpoint
 /// there, so the hub never publishes a setpoint before a real measurement exists.
-/// `Err(Shutdown)` if the channel closes first.
-async fn seed(channels: &mut ArmChannels, planner: &mut Planner, side: &str) -> Result<(), Shutdown> {
-    if channels.measured.wait_for(Option::is_some).await.is_err() {
-        error!("{side} arm measured-state channel closed before first state");
-        return Err(Shutdown);
+/// Warns periodically while an arm stays silent so the wait is visible in the log;
+/// `Err(Shutdown)` if the measured-state channel closes first.
+async fn seed(channels: &mut ArmChannels, planner: &mut Planner, side: Side) -> Result<(), Shutdown> {
+    loop {
+        match tokio::time::timeout(SEED_WAIT_WARN_PERIOD, channels.measured.wait_for(Option::is_some)).await {
+            Ok(Ok(_)) => break,
+            Ok(Err(_)) => {
+                error!("{} arm measured-state channel closed before first state", side.label());
+                return Err(Shutdown);
+            }
+            Err(_) => warn!("{} arm has not reported measured state yet; hub waiting to stream", side.label()),
+        }
     }
     let q0 = channels.measured.borrow().expect("gated on first state").positions;
     planner.commit(q0);

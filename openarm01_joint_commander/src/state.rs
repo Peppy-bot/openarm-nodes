@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub const ARM_DOF: usize = 7;
 // Range bounds live in config/joint_limits.json5 (loaded by ui.rs); this is
@@ -100,35 +101,41 @@ pub struct UiState {
     pub left_enabled: bool,
     pub right_enabled: bool,
     // Operator controls for the hub's self-collision governor, streamed to the
-    // backbone on collision_avoidance; the hub holds its own defaults until the
-    // first message. `collision_enabled` defaults true so avoidance is on unless
-    // the operator opts out; the band and speed defaults match the hub's.
+    // backbone on governor_control; the hub holds its own defaults until the first
+    // message. `collision_enabled` defaults true so avoidance is on unless the
+    // operator opts out; the band defaults match the hub's; the speed cap default
+    // is a node parameter so deployment tunes it (conservative for the real arm).
     pub collision_enabled: bool,
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
-    // Latest nearest-pair self-collision proximity from the hub, for the readout.
-    // `None` until the first message (or with no hub up).
+    // Latest nearest-pair self-collision proximity from the hub (it carries its own
+    // receipt time). `None` until the first message; treated as stale (and rendered
+    // n/a) once that receipt time ages past the readout staleness window, so a dead
+    // hub does not leave the last distance latched on the panel.
     pub proximity: Option<Proximity>,
     pub status: String,
 }
 
 /// The hub's reported nearest checked pair: signed surface distance (m, positive
-/// is clearance) and the two link names.
+/// is clearance), the two link names, and the local time it was received (for the
+/// readout's staleness check).
 #[derive(Clone, Debug)]
 pub struct Proximity {
     pub distance: f64,
     pub link_a: String,
     pub link_b: String,
+    pub received_at: Instant,
 }
 
-/// Governor defaults, kept in step with openarm01_backbone's parameter defaults.
+/// Governor band defaults, kept in step with openarm01_backbone's parameter
+/// defaults. The EE-speed cap default is a node parameter (deployment-tuned), not
+/// a constant, so the real arm streams a conservative cap and the sim a fast one.
 pub const DEFAULT_D_STOP: f64 = 0.005;
 pub const DEFAULT_D_SAFE: f64 = 0.02;
-pub const DEFAULT_MAX_EE_VELOCITY_M_S: f64 = 1.0;
 
 impl UiState {
-    pub fn new() -> Self {
+    pub fn new(max_ee_velocity_m_s: f64) -> Self {
         Self {
             left_arm: ArmTarget::home(),
             right_arm: ArmTarget::home(),
@@ -139,7 +146,7 @@ impl UiState {
             collision_enabled: true,
             d_stop: DEFAULT_D_STOP,
             d_safe: DEFAULT_D_SAFE,
-            max_ee_velocity_m_s: DEFAULT_MAX_EE_VELOCITY_M_S,
+            max_ee_velocity_m_s,
             proximity: None,
             status: "ready".to_string(),
         }
@@ -194,6 +201,6 @@ impl UiState {
 
 pub type SharedState = Arc<Mutex<UiState>>;
 
-pub fn new_shared() -> SharedState {
-    Arc::new(Mutex::new(UiState::new()))
+pub fn new_shared(max_ee_velocity_m_s: f64) -> SharedState {
+    Arc::new(Mutex::new(UiState::new(max_ee_velocity_m_s)))
 }

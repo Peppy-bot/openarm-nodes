@@ -51,7 +51,7 @@ class SimTopicIO:
     def __init__(self, node_runner: peppylib.NodeRunner, loop: asyncio.AbstractEventLoop) -> None:
         self._node_runner = node_runner
         self._loop = loop
-        self._joint_pub: Optional[peppylib.TopicPublisher] = None
+        self._arm_pub: Optional[peppylib.TopicPublisher] = None
         self._gripper_pub: Optional[peppylib.TopicPublisher] = None
         self._arm_cmd = {side: _LatestSlot() for side in _SIDES}
         self._gripper_cmd = {side: _LatestSlot() for side in _SIDES}
@@ -60,7 +60,7 @@ class SimTopicIO:
     async def start(self) -> None:
         """Declare publishers and spawn the command-consume loops. Runs on the
         node loop before the sim thread starts."""
-        self._joint_pub = await arm_states.declare_publisher(self._node_runner)
+        self._arm_pub = await arm_states.declare_publisher(self._node_runner)
         self._gripper_pub = await gripper_states.declare_publisher(self._node_runner)
         self._tasks = [
             asyncio.create_task(self._consume_arm()),
@@ -144,9 +144,9 @@ class SimTopicIO:
         slot = self._gripper_cmd.get(gripper_id)
         return slot.get() if slot is not None else None
 
-    def publish_joint_states(self, arm_id: int, positions: list[float], velocities: list[float]) -> None:
-        if self._joint_pub is not None:
-            self._schedule_publish(self._joint_pub, arm_states.build_message(arm_id, positions, velocities))
+    def publish_arm_states(self, arm_id: int, positions: list[float], velocities: list[float]) -> None:
+        if self._arm_pub is not None:
+            self._schedule_publish(self._arm_pub, arm_states.build_message(arm_id, positions, velocities))
 
     def publish_gripper_states(self, gripper_id: int, position: float) -> None:
         if self._gripper_pub is not None:

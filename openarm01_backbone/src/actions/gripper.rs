@@ -11,8 +11,8 @@ use peppygen::exposed_actions::move_gripper::{
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
-// Goal-accept (and cancel) round-trip to a pinned producer — answered directly,
-// so this only needs to cover the decider, not a discovery probe.
+// Goal-accept (and cancel) round-trip to a pinned producer, answered directly, so
+// this only needs to cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -43,6 +43,28 @@ impl Outcome {
             action_time: 0.0,
             is_cancelled: true,
         }
+    }
+}
+
+/// Counts one in-flight relay for its lifetime: increments on creation, and
+/// decrements + wakes the shutdown waiter on drop. Held by the spawned relay task
+/// so even a panic in the relay frees the count instead of wedging teardown.
+struct InflightGuard {
+    count: Arc<AtomicUsize>,
+    idle: Arc<tokio::sync::Notify>,
+}
+
+impl InflightGuard {
+    fn new(count: Arc<AtomicUsize>, idle: Arc<tokio::sync::Notify>) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        Self { count, idle }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.idle.notify_waiters();
     }
 }
 
@@ -97,10 +119,9 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
         // task and the second goal can't be received until the first finishes.
         let runner_for_goal = Arc::clone(&runner);
         let token_for_goal = token.clone();
-        let inflight = inflight.clone();
-        let idle = idle.clone();
-        inflight.fetch_add(1, Ordering::AcqRel);
+        let inflight_guard = InflightGuard::new(inflight.clone(), idle.clone());
         tokio::spawn(async move {
+            let _inflight_guard = inflight_guard; // decrements + notifies on task end (or panic)
             let outcome = forward(&runner_for_goal, &goal_ctx, &token_for_goal).await;
 
             let reply = if outcome.is_cancelled {
@@ -125,8 +146,6 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
             if let Err(e) = reply {
                 warn!(error = %e, "move_gripper: complete failed");
             }
-            inflight.fetch_sub(1, Ordering::AcqRel);
-            idle.notify_waiters();
         });
     }
     Ok(())
@@ -146,201 +165,94 @@ async fn forward(
     }
 }
 
-async fn dispatch_left(
-    runner: &NodeRunner,
-    req: &peppygen::exposed_actions::move_gripper::GoalRequestData,
-    goal_ctx: &GoalContext,
-    token: &CancellationToken,
-) -> Outcome {
-    let downstream = match left_gripper_move_gripper::ActionHandle::fire_goal(
-        runner,
-        GOAL_TIMEOUT,
-        left_gripper_move_gripper::GoalRequest {
-            position: req.position,
-        },
-        QoSProfile::SensorData,
-    )
-    .await
-    {
-        Ok(handle) if handle.data.accepted => handle,
-        Ok(handle) => {
-            return Outcome::failed(format!(
-                "left gripper rejected goal: {}",
-                handle
-                    .data
-                    .error_message
-                    .unwrap_or_else(|| "no reason given".into())
-            ));
-        }
-        Err(e) => return Outcome::failed(format!("fire_goal to left gripper failed: {e}")),
-    };
-    info!("move_gripper: forwarded to left gripper");
-
-    relay_left(&downstream, goal_ctx, token).await
-}
-
-async fn dispatch_right(
-    runner: &NodeRunner,
-    req: &peppygen::exposed_actions::move_gripper::GoalRequestData,
-    goal_ctx: &GoalContext,
-    token: &CancellationToken,
-) -> Outcome {
-    let downstream = match right_gripper_move_gripper::ActionHandle::fire_goal(
-        runner,
-        GOAL_TIMEOUT,
-        right_gripper_move_gripper::GoalRequest {
-            position: req.position,
-        },
-        QoSProfile::SensorData,
-    )
-    .await
-    {
-        Ok(handle) if handle.data.accepted => handle,
-        Ok(handle) => {
-            return Outcome::failed(format!(
-                "right gripper rejected goal: {}",
-                handle
-                    .data
-                    .error_message
-                    .unwrap_or_else(|| "no reason given".into())
-            ));
-        }
-        Err(e) => return Outcome::failed(format!("fire_goal to right gripper failed: {e}")),
-    };
-    info!("move_gripper: forwarded to right gripper");
-
-    relay_right(&downstream, goal_ctx, token).await
-}
-
-// The two relay_* helpers below are byte-equivalent except for the consumed-action
-// module path. Macros would deduplicate but obscure the call sites; two short
-// functions are clearer at the cost of mild repetition.
-async fn relay_left(
-    downstream: &left_gripper_move_gripper::ActionHandle,
-    goal_ctx: &GoalContext,
-    token: &CancellationToken,
-) -> Outcome {
-    let mut upstream_cancelled = false;
-
-    // Await the move result directly. Progress is observed on the gripper_states
-    // stream (consumed by the commander), so there is no feedback to relay; this
-    // loop only propagates cancel/shutdown downward while the goal runs.
-    let result_fut = downstream.get_result(RESULT_TIMEOUT);
-    tokio::pin!(result_fut);
-    let result = loop {
-        tokio::select! {
-            _ = token.cancelled() => {
-                // Propagate shutdown to the in-flight left gripper goal so it
-                // stops driving fingers instead of running until timeout.
-                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
-                    warn!(error = %e, "move_gripper: left shutdown cancel propagation failed");
+// The left and right relays are identical but for the generated consumed-action
+// module they fire into (distinct types per side). This macro defines one
+// dispatch+relay per side over that module, so the relay logic lives once: fire
+// the downstream goal, then await its result while propagating cancel/shutdown
+// downward. Progress is observed on the gripper_states stream (consumed by the
+// commander), so there is no feedback to relay.
+macro_rules! gripper_dispatch {
+    ($name:ident, $link:path, $side:literal) => {
+        async fn $name(
+            runner: &NodeRunner,
+            req: &peppygen::exposed_actions::move_gripper::GoalRequestData,
+            goal_ctx: &GoalContext,
+            token: &CancellationToken,
+        ) -> Outcome {
+            use $link as link;
+            let downstream = match link::ActionHandle::fire_goal(
+                runner,
+                GOAL_TIMEOUT,
+                link::GoalRequest { position: req.position },
+                QoSProfile::SensorData,
+            )
+            .await
+            {
+                Ok(handle) if handle.data.accepted => handle,
+                Ok(handle) => {
+                    return Outcome::failed(format!(
+                        "{} gripper rejected goal: {}",
+                        $side,
+                        handle.data.error_message.unwrap_or_else(|| "no reason given".into())
+                    ));
                 }
-                return Outcome::failed("backbone shutting down");
-            }
-            _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
-                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
-                    warn!(error = %e, "move_gripper: left cancel propagation failed");
+                Err(e) => return Outcome::failed(format!("fire_goal to {} gripper failed: {e}", $side)),
+            };
+            info!("move_gripper: forwarded to {} gripper", $side);
+
+            let mut upstream_cancelled = false;
+            let result_fut = downstream.get_result(RESULT_TIMEOUT);
+            tokio::pin!(result_fut);
+            let result = loop {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        // Propagate shutdown to the in-flight goal so it stops
+                        // driving fingers instead of running until timeout.
+                        if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                            warn!(error = %e, "move_gripper: {} shutdown cancel propagation failed", $side);
+                        }
+                        return Outcome::failed("backbone shutting down");
+                    }
+                    _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
+                        if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                            warn!(error = %e, "move_gripper: {} cancel propagation failed", $side);
+                        }
+                        upstream_cancelled = true;
+                    }
+                    r = &mut result_fut => break r,
                 }
-                upstream_cancelled = true;
+            };
+
+            match result {
+                Ok(result) => match result.outcome {
+                    link::ResultOutcome::Completed(data) => Outcome {
+                        success: data.success,
+                        message: data.message,
+                        final_joint_positions: data.final_joint_positions,
+                        action_time: data.action_time,
+                        is_cancelled: false,
+                    },
+                    link::ResultOutcome::Cancelled(data) => Outcome {
+                        success: data.success,
+                        message: data.message,
+                        final_joint_positions: data.final_joint_positions,
+                        action_time: data.action_time,
+                        is_cancelled: true,
+                    },
+                    link::ResultOutcome::Abandoned => Outcome::failed(format!("{} gripper abandoned", $side)),
+                    link::ResultOutcome::Expired => Outcome::failed(format!("{} gripper result expired", $side)),
+                },
+                Err(e) => {
+                    if upstream_cancelled {
+                        Outcome::cancelled(format!("{} gripper cancellation, get_result: {e}", $side))
+                    } else {
+                        Outcome::failed(format!("get_result from {} gripper failed: {e}", $side))
+                    }
+                }
             }
-            r = &mut result_fut => break r,
         }
     };
-
-    match result {
-        Ok(result) => match result.outcome {
-            left_gripper_move_gripper::ResultOutcome::Completed(data) => Outcome {
-                success: data.success,
-                message: data.message,
-                final_joint_positions: data.final_joint_positions,
-                action_time: data.action_time,
-                is_cancelled: false,
-            },
-            left_gripper_move_gripper::ResultOutcome::Cancelled(data) => Outcome {
-                success: data.success,
-                message: data.message,
-                final_joint_positions: data.final_joint_positions,
-                action_time: data.action_time,
-                is_cancelled: true,
-            },
-            left_gripper_move_gripper::ResultOutcome::Abandoned => {
-                Outcome::failed("left gripper abandoned")
-            }
-            left_gripper_move_gripper::ResultOutcome::Expired => {
-                Outcome::failed("left gripper result expired")
-            }
-        },
-        Err(e) => {
-            if upstream_cancelled {
-                Outcome::cancelled(format!("left gripper cancellation, get_result: {e}"))
-            } else {
-                Outcome::failed(format!("get_result from left gripper failed: {e}"))
-            }
-        }
-    }
 }
 
-async fn relay_right(
-    downstream: &right_gripper_move_gripper::ActionHandle,
-    goal_ctx: &GoalContext,
-    token: &CancellationToken,
-) -> Outcome {
-    let mut upstream_cancelled = false;
-
-    // Await the move result directly. Progress is observed on the gripper_states
-    // stream (consumed by the commander), so there is no feedback to relay; this
-    // loop only propagates cancel/shutdown downward while the goal runs.
-    let result_fut = downstream.get_result(RESULT_TIMEOUT);
-    tokio::pin!(result_fut);
-    let result = loop {
-        tokio::select! {
-            _ = token.cancelled() => {
-                // Propagate shutdown to the in-flight right gripper goal so it
-                // stops driving fingers instead of running until timeout.
-                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
-                    warn!(error = %e, "move_gripper: right shutdown cancel propagation failed");
-                }
-                return Outcome::failed("backbone shutting down");
-            }
-            _ = goal_ctx.cancel_signal(), if !upstream_cancelled => {
-                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
-                    warn!(error = %e, "move_gripper: right cancel propagation failed");
-                }
-                upstream_cancelled = true;
-            }
-            r = &mut result_fut => break r,
-        }
-    };
-
-    match result {
-        Ok(result) => match result.outcome {
-            right_gripper_move_gripper::ResultOutcome::Completed(data) => Outcome {
-                success: data.success,
-                message: data.message,
-                final_joint_positions: data.final_joint_positions,
-                action_time: data.action_time,
-                is_cancelled: false,
-            },
-            right_gripper_move_gripper::ResultOutcome::Cancelled(data) => Outcome {
-                success: data.success,
-                message: data.message,
-                final_joint_positions: data.final_joint_positions,
-                action_time: data.action_time,
-                is_cancelled: true,
-            },
-            right_gripper_move_gripper::ResultOutcome::Abandoned => {
-                Outcome::failed("right gripper abandoned")
-            }
-            right_gripper_move_gripper::ResultOutcome::Expired => {
-                Outcome::failed("right gripper result expired")
-            }
-        },
-        Err(e) => {
-            if upstream_cancelled {
-                Outcome::cancelled(format!("right gripper cancellation, get_result: {e}"))
-            } else {
-                Outcome::failed(format!("get_result from right gripper failed: {e}"))
-            }
-        }
-    }
-}
+gripper_dispatch!(dispatch_left, left_gripper_move_gripper, "left");
+gripper_dispatch!(dispatch_right, right_gripper_move_gripper, "right");

@@ -5,7 +5,7 @@
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::State;
@@ -20,10 +20,14 @@ use tracing::{info, warn};
 
 use crate::actions::move_arm_joints;
 use crate::error::Result;
-use crate::state::{ARM_DOF, ArmTarget, GripperTarget, SharedState, Side, UiState};
+use crate::state::{ARM_DOF, ArmTarget, GripperTarget, Proximity, SharedState, Side, UiState};
 
 const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+// The hub publishes the proximity readout at ~20 Hz; treat it as stale after this
+// long with no update (a dead hub) so the panel falls back to n/a instead of
+// latching the last distance.
+const PROXIMITY_STALE_AFTER: Duration = Duration::from_millis(500);
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
 // Joint + gripper ranges from the robot model; the single source for slider
@@ -111,7 +115,7 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             _ = tick.tick() => {
                 let snap = {
                     let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                    Snapshot::from(&*s)
+                    Snapshot::build(&s, Instant::now())
                 };
                 let json = match serde_json::to_string(&snap) {
                     Ok(j) => j,
@@ -229,9 +233,9 @@ async fn handle_command(text: &str, app: &AppState) {
             s.set_status(format!("collision avoidance {}", if enabled { "ON" } else { "OFF" }));
         }
         Command::SetGovernorParams { d_stop, d_safe, max_ee_velocity_m_s } => {
-            // The hub validates again before applying; clamp here to a sane band so
-            // the UI cannot stream a degenerate one (d_stop must stay below d_safe).
-            if ![d_stop, d_safe, max_ee_velocity_m_s].iter().all(|v| v.is_finite() && *v > 0.0) || d_stop >= d_safe {
+            // The hub validates again before applying; reject a degenerate band here
+            // so the UI cannot stream one (d_stop must stay below d_safe).
+            if !valid_governor_band(d_stop, d_safe, max_ee_velocity_m_s) {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
                 s.set_status("governor params ignored: require 0 < d_stop < d_safe and speed > 0");
                 return;
@@ -243,6 +247,12 @@ async fn handle_command(text: &str, app: &AppState) {
             s.set_status(format!("governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s"));
         }
     }
+}
+
+// A governor band the UI may stream: all finite and positive, with d_stop below
+// d_safe. The hub validates again before applying.
+fn valid_governor_band(d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> bool {
+    [d_stop, d_safe, max_ee_velocity_m_s].iter().all(|v| v.is_finite() && *v > 0.0) && d_stop < d_safe
 }
 
 // Clamp each joint setpoint into its configured [min, max]. The single clamp
@@ -355,8 +365,8 @@ struct GripperView {
     max: f64,
 }
 
-impl From<&UiState> for Snapshot {
-    fn from(s: &UiState) -> Self {
+impl Snapshot {
+    fn build(s: &UiState, now: Instant) -> Self {
         Self {
             left_arm: arm_view(&s.left_arm, Side::Left),
             right_arm: arm_view(&s.right_arm, Side::Right),
@@ -368,7 +378,7 @@ impl From<&UiState> for Snapshot {
             d_stop: s.d_stop,
             d_safe: s.d_safe,
             max_ee_velocity_m_s: s.max_ee_velocity_m_s,
-            proximity: s.proximity.as_ref().map(|p| ProximityView {
+            proximity: live_proximity(s, now).map(|p| ProximityView {
                 distance: p.distance,
                 link_a: p.link_a.clone(),
                 link_b: p.link_b.clone(),
@@ -376,6 +386,12 @@ impl From<&UiState> for Snapshot {
             status: s.status.clone(),
         }
     }
+}
+
+/// The proximity readout if it is still fresh, else `None` (the hub stopped
+/// reporting), so the UI falls back to n/a instead of latching a stale distance.
+fn live_proximity(s: &UiState, now: Instant) -> Option<&Proximity> {
+    s.proximity.as_ref().filter(|p| now.duration_since(p.received_at) < PROXIMITY_STALE_AFTER)
 }
 
 fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
@@ -407,7 +423,7 @@ enum Command {
         duration_s: f64,
     },
     // Toggle the streaming deadman for one side. While enabled, command_stream
-    // emits that side's arm target on joint_commands and gripper opening on
+    // emits that side's arm target on arm_joint_commands and gripper opening on
     // gripper_commands; while disabled both track the measured pose and emit
     // nothing.
     SetEnabled {
@@ -488,6 +504,16 @@ mod tests {
             clamp_to_limits(&mut mid, side);
             assert_eq!(mid, before);
         }
+    }
+
+    #[test]
+    fn valid_governor_band_boundaries() {
+        assert!(valid_governor_band(0.005, 0.02, 1.0));
+        assert!(!valid_governor_band(0.02, 0.02, 1.0), "d_stop == d_safe is degenerate");
+        assert!(!valid_governor_band(0.03, 0.02, 1.0), "d_stop > d_safe is inverted");
+        assert!(!valid_governor_band(0.0, 0.02, 1.0), "non-positive d_stop");
+        assert!(!valid_governor_band(0.005, 0.02, 0.0), "non-positive speed cap");
+        assert!(!valid_governor_band(f64::NAN, 0.02, 1.0), "non-finite d_stop");
     }
 
     #[test]

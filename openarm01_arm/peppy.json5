@@ -60,13 +60,8 @@
       kd5: { $type: "f64", $default: 0.2 },
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
-      // Temporary bring-up safety: when true the control loop holds the measured
-      // pose and never follows governed motion, logging the joint targets it
-      // would otherwise track. Lets the full stack run end-to-end on hardware
-      // without the arm moving. Remove once governed following is trusted.
-      dry_run: { $type: "bool", $default: false },
-      // Rate (Hz) of the always-on measured-state stream (`joint_states`), which
-      // the hub consumes. Required: consumers' needs vary too much for a default.
+      // Rate (Hz) of the always-on measured-state stream (`arm_states`), which the
+      // hub consumes. Required: consumers' needs vary too much for a default.
       state_rate_hz: "u32",
     }
   },

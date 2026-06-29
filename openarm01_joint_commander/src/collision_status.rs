@@ -3,6 +3,7 @@
 // panel can show how close the arms are and color it against the governor band.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::proximity_collision_status;
@@ -25,6 +26,11 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             }
         };
         let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-        s.proximity = Some(Proximity { distance: msg.distance, link_a: msg.link_a, link_b: msg.link_b });
+        s.proximity = Some(Proximity {
+            distance: msg.distance,
+            link_a: msg.link_a,
+            link_b: msg.link_b,
+            received_at: Instant::now(),
+        });
     }
 }

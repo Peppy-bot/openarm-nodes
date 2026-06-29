@@ -12,8 +12,8 @@
     tag: "v1",
     depends_on: {
       interfaces: [
-        // The hub's governed per-arm setpoint stream. Wildcard (`from_any`): the
-        // backbone is the producer; this arm reads the entries for its arm_id.
+        // The hub's governed per-arm setpoint stream, `from_any` (entries told
+        // apart by arm_id).
         {
           name: "openarm01_arm_governed_setpoints",
           tag: "v1",
@@ -40,8 +40,7 @@
       def_file: "apptainer.def",
     },
     parameters: {
-      // The arm_id at runtime (0 = left, 1 = right). Two instances are expected;
-      // each republishes only the governed setpoints addressed to its arm_id.
+      // The arm_id at runtime (0 = left, 1 = right).
       arm_id: "u8",
     },
   },

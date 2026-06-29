@@ -1,5 +1,5 @@
-//! Shared primitives for the bimanual hub: arm DOF, the joint vector, a joint
-//! setpoint, and the side identifiers.
+//! Shared primitives for the bimanual hub: arm DOF, the joint vector, and the
+//! arm side identifier.
 
 /// Degrees of freedom of one arm.
 pub const ARM_DOF: usize = 7;
@@ -7,22 +7,43 @@ pub const ARM_DOF: usize = 7;
 /// One joint-space vector (positions, velocities, or torques), j1..j7.
 pub type JointVec = [f64; ARM_DOF];
 
-/// A joint-space setpoint: target positions and the velocity feedforward that
-/// pairs with them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Setpoint {
-    pub positions: JointVec,
-    pub velocities: JointVec,
+/// Which arm a message addresses. The wire encodes it as `arm_id` (0 = left,
+/// 1 = right); [`Side::from_arm_id`] parses that at the boundary so the rest of
+/// the hub carries a side it cannot get wrong, never a raw `u8`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
 }
 
-pub const ARM_ID_LEFT: u8 = 0;
-pub const ARM_ID_RIGHT: u8 = 1;
+impl Side {
+    /// Parse a wire `arm_id` (0 = left, 1 = right), or `None` if out of range.
+    pub fn from_arm_id(arm_id: u8) -> Option<Self> {
+        match arm_id {
+            0 => Some(Side::Left),
+            1 => Some(Side::Right),
+            _ => None,
+        }
+    }
 
-/// Map an `arm_id` (0 = left, 1 = right) to an index, or `None` if out of range.
-pub fn side_index(arm_id: u8) -> Option<usize> {
-    match arm_id {
-        ARM_ID_LEFT => Some(0),
-        ARM_ID_RIGHT => Some(1),
-        _ => None,
+    /// The wire `arm_id` (0 = left, 1 = right).
+    pub fn arm_id(self) -> u8 {
+        match self {
+            Side::Left => 0,
+            Side::Right => 1,
+        }
+    }
+
+    /// Index into a left-then-right `[T; 2]`.
+    pub fn index(self) -> usize {
+        self.arm_id() as usize
+    }
+
+    /// Label for logs.
+    pub fn label(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+        }
     }
 }

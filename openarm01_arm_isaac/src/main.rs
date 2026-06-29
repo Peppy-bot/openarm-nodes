@@ -14,6 +14,10 @@ use tracing::{error, info, warn};
 /// Latest desired (positions, velocities) for this arm.
 type Setpoint = ([f64; 7], [f64; 7]);
 
+/// Wire arm_id values (matching the hub).
+const ARM_ID_LEFT: u8 = 0;
+const ARM_ID_RIGHT: u8 = 1;
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -21,7 +25,7 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let arm_id = params.arm_id;
-        assert!(arm_id == 0 || arm_id == 1, "arm_id must be 0 (left) or 1 (right), got {arm_id}");
+        assert!(arm_id == ARM_ID_LEFT || arm_id == ARM_ID_RIGHT, "arm_id must be 0 (left) or 1 (right), got {arm_id}");
         info!("starting openarm01_arm_isaac follower arm_id={arm_id}");
 
         let (latest_tx, latest_rx) = watch::channel::<Option<Setpoint>>(None);
@@ -36,21 +40,31 @@ fn main() -> Result<()> {
                 Err(e) => return error!("governed_setpoints subscribe: {e}"),
             };
             loop {
-                match sub.next().await {
-                    Ok(Some((_, msg))) => {
-                        if msg.arm_id == arm_id {
-                            let _ = latest_tx.send(Some((msg.positions, msg.velocities)));
-                        }
-                    }
+                let msg = match sub.next().await {
+                    Ok(Some((_, msg))) => msg,
                     Ok(None) => return, // subscription closed: node shutting down
-                    Err(e) => error!("governed_setpoints receive: {e}"),
+                    Err(e) => {
+                        error!("governed_setpoints receive: {e}");
+                        continue;
+                    }
+                };
+                if msg.arm_id != arm_id {
+                    continue;
                 }
+                // Drop any non-finite governed setpoint, matching the real arm, so a
+                // bad value never reaches the sim engine.
+                let finite = msg.positions.iter().chain(msg.velocities.iter()).all(|v| v.is_finite());
+                if !finite {
+                    warn!("governed_setpoints: dropping message with non-finite values");
+                    continue;
+                }
+                let _ = latest_tx.send(Some((msg.positions, msg.velocities)));
             }
         });
 
         // Publish task: relabel each new setpoint onto arm_sim_passthrough. No
-        // shutdown handler: like the previous arm we must not publish a zero
-        // setpoint on exit (it would command the arm into a self-collision pose).
+        // shutdown handler: never publish a zero setpoint on exit, which would
+        // command the arm into a self-collision pose.
         tokio::spawn(async move {
             let publisher = match arm_sim_passthrough::declare_publisher(&node_runner).await {
                 Ok(p) => p,

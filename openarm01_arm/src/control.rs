@@ -59,9 +59,6 @@ pub struct ControlConfig {
     /// Joint position limits, parsed from the URDF, the final guard clamp applied
     /// to every governed setpoint before it reaches the motors.
     pub limits: [Limit; ARM_DOF],
-    /// Temporary bring-up safety: when set, every tick holds the measured pose
-    /// instead of the governed one and logs the target it would have tracked.
-    pub dry_run: bool,
 }
 
 /// Assert the shutdown ready pose is inside the parsed joint limits, during
@@ -130,7 +127,7 @@ async fn run_control(
             None => (q, ZERO),
         };
 
-        command(&arm, &cfg, &ff_tau, &q, &q_des, &dq_des);
+        command(&arm, &cfg, &ff_tau, &q_des, &dq_des);
         // Biased so a cancelled token always wins over an already-due (overrun)
         // tick: on shutdown break out and run the return-to-ready + disable below.
         tokio::select! {
@@ -198,15 +195,9 @@ fn feedforward(model: &mut srs_model::Arm, q: &JointVec, qdot: &JointVec) -> Joi
 }
 
 /// Command the motors once: this tick's feedforward plus PD to the governed
-/// position/velocity. Under `dry_run` it instead holds the measured pose and logs
-/// the target it would have tracked, so every motion path is neutered here.
-fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q: &JointVec, q_des: &JointVec, dq_des: &JointVec) {
+/// position/velocity.
+fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q_des: &JointVec, dq_des: &JointVec) {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-    if cfg.dry_run {
-        log_dry_target(Instant::now(), q_des);
-        a.mit_control(&cfg.kp, &cfg.kd, q, &ZERO, ff_tau);
-        return;
-    }
     a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau);
 }
 
@@ -214,18 +205,6 @@ fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q: &Join
 /// the motors.
 fn clamp_to_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> JointVec {
     std::array::from_fn(|i| q[i].clamp(limits[i].lo, limits[i].hi))
-}
-
-/// Period between dry-run target logs, throttling the control tick to a readable rate.
-const DRY_LOG_PERIOD: Duration = Duration::from_millis(200);
-
-fn log_dry_target(now: Instant, q_des: &JointVec) {
-    static LAST_LOG: Mutex<Option<Instant>> = Mutex::new(None);
-    let mut last = LAST_LOG.lock().unwrap_or_else(|e| e.into_inner());
-    if last.is_none_or(|t| now.duration_since(t) >= DRY_LOG_PERIOD) {
-        *last = Some(now);
-        info!("dry-run: would follow {}", fmt_joints(q_des));
-    }
 }
 
 /// Read the measured joint state (positions + velocities) one time.
@@ -237,7 +216,3 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec)
     (state.positions, state.velocities)
 }
 
-fn fmt_joints(v: &JointVec) -> String {
-    let parts: Vec<String> = v.iter().map(|x| format!("{:.3}", x)).collect();
-    format!("[{}]", parts.join(", "))
-}

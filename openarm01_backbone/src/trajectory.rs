@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use srs_model::nalgebra::{Isometry3, Translation3};
 use srs_model::{Arm, ArmAnglePolicy};
 
-use crate::{ARM_DOF, JointVec, Setpoint};
+use crate::{ARM_DOF, JointVec};
 
 /// Quintic minimum-jerk trajectory in joint space.
 pub struct JointTrajectory {
@@ -38,28 +38,18 @@ impl JointTrajectory {
         }
     }
 
-    /// The setpoint (positions + velocity feedforward) at time `now`. After
-    /// completion, positions hold at `end` and velocities are zero, so the
-    /// controller naturally transitions into "hold the final setpoint" once the
-    /// trajectory plays out.
-    pub fn sample(&self, now: Instant) -> Setpoint {
+    /// Joint positions at time `now`, on the quintic blend from `start` to `end`.
+    /// Holds at `end` once complete (and before `motion_start`, at `start`).
+    pub fn sample(&self, now: Instant) -> JointVec {
         let t_total = self.duration.as_secs_f64();
         // Degenerate trajectory (start == end and requested_duration_secs == 0): hold at end.
         if t_total == 0.0 {
-            return Setpoint { positions: self.end, velocities: [0.0_f64; ARM_DOF] };
+            return self.end;
         }
         let elapsed = now.duration_since(self.motion_start).as_secs_f64();
         let tau = (elapsed / t_total).clamp(0.0, 1.0);
-        let (s, ds_dtau) = quintic(tau);
-        let ds_dt = ds_dtau / t_total;
-        let mut positions = [0.0_f64; ARM_DOF];
-        let mut velocities = [0.0_f64; ARM_DOF];
-        for i in 0..ARM_DOF {
-            let delta = self.end[i] - self.start[i];
-            positions[i] = self.start[i] + delta * s;
-            velocities[i] = delta * ds_dt;
-        }
-        Setpoint { positions, velocities }
+        let (s, _) = quintic(tau);
+        std::array::from_fn(|i| self.start[i] + (self.end[i] - self.start[i]) * s)
     }
 
     pub fn is_complete(&self, now: Instant) -> bool {
@@ -70,9 +60,8 @@ impl JointTrajectory {
 /// Quintic minimum-jerk trajectory between two end-effector poses (world frame).
 /// Position rides the quintic blend; orientation is slerped at the same blend
 /// parameter, so position and orientation reach the goal together with zero
-/// end-point velocity. The control loop samples a pose each tick and solves IK
-/// for the joint setpoint; the duration is sized up-front (see
-/// [`plan_cartesian_duration`]) so the IK'd path respects the per-joint velocity limits.
+/// end-point velocity. Duration is sized up-front by [`plan_cartesian_duration`]
+/// so the IK'd path respects the per-joint velocity limits.
 pub struct CartesianTrajectory {
     start: Isometry3<f64>,
     end: Isometry3<f64>,
@@ -244,9 +233,7 @@ mod tests {
         let start = [0.1; ARM_DOF];
         let end = [0.5; ARM_DOF];
         let traj = JointTrajectory::new(start, end, V_MAX, 0.1);
-        let Setpoint { positions: q, velocities: dq } = traj.sample(traj.motion_start);
-        assert!(vec_approx_eq(&q, &start));
-        assert!(dq.iter().all(|v| v.abs() < EPS));
+        assert!(vec_approx_eq(&traj.sample(traj.motion_start), &start));
     }
 
     #[test]
@@ -254,9 +241,7 @@ mod tests {
         let start = [0.0; ARM_DOF];
         let end = [0.5; ARM_DOF];
         let traj = JointTrajectory::new(start, end, V_MAX, 0.1);
-        let Setpoint { positions: q, velocities: dq } = traj.sample(traj.motion_start + traj.duration);
-        assert!(vec_approx_eq(&q, &end));
-        assert!(dq.iter().all(|v| v.abs() < EPS));
+        assert!(vec_approx_eq(&traj.sample(traj.motion_start + traj.duration), &end));
     }
 
     #[test]
@@ -264,33 +249,38 @@ mod tests {
         let start = [0.0; ARM_DOF];
         let end = [1.0; ARM_DOF];
         let traj = JointTrajectory::new(start, end, V_MAX, 0.1);
-        let Setpoint { positions: q, velocities: dq } = traj.sample(traj.motion_start + traj.duration + Duration::from_secs(5));
+        let q = traj.sample(traj.motion_start + traj.duration + Duration::from_secs(5));
         assert!(vec_approx_eq(&q, &end));
-        assert!(dq.iter().all(|v| v.abs() < EPS));
+    }
+
+    #[test]
+    fn joint_zero_duration_holds_at_end() {
+        // start == end with a zero request: the degenerate t_total == 0 branch.
+        let q = [0.1, -0.2, 0.3, 0.4, -0.5, 0.6, -0.7];
+        let traj = JointTrajectory::new(q, q, V_MAX, 0.0);
+        assert!(vec_approx_eq(&traj.sample(traj.motion_start), &q));
     }
 
     #[test]
     fn midpoint_position_is_halfway() {
-        // s(0.5) = 6·(1/32) − 15·(1/16) + 10·(1/8) = 0.5
         let start = [0.0; ARM_DOF];
         let end = [1.0; ARM_DOF];
         let traj = JointTrajectory::new(start, end, V_MAX, 0.1);
         let half = Duration::from_secs_f64(traj.duration.as_secs_f64() / 2.0);
-        let Setpoint { positions: q, .. } = traj.sample(traj.motion_start + half);
+        let q = traj.sample(traj.motion_start + half);
         assert!(q.iter().all(|v| approx_eq(*v, 0.5)));
     }
 
     #[test]
-    fn midpoint_velocity_is_peak() {
-        // ds/dτ at τ=0.5 is 30·(1/16) − 60·(1/8) + 30·(1/4) = 1.875
-        // dq/dt = 1.875 · Δq / T
-        let start = [0.0; ARM_DOF];
-        let end = [1.0; ARM_DOF];
-        let traj = JointTrajectory::new(start, end, V_MAX, 0.1);
-        let half = Duration::from_secs_f64(traj.duration.as_secs_f64() / 2.0);
-        let Setpoint { velocities: dq, .. } = traj.sample(traj.motion_start + half);
-        let expected = 1.875 / traj.duration.as_secs_f64();
-        assert!(dq.iter().all(|v| approx_eq(*v, expected)));
+    fn quintic_blend_profile() {
+        // s runs 0 -> 1 with zero slope at both ends; peak slope QUINTIC_PEAK_VELOCITY
+        // at the midpoint. This is the velocity feedforward shape the sampler rides.
+        let (s0, d0) = quintic(0.0);
+        let (sh, dh) = quintic(0.5);
+        let (s1, d1) = quintic(1.0);
+        assert!(approx_eq(s0, 0.0) && approx_eq(d0, 0.0));
+        assert!(approx_eq(sh, 0.5) && approx_eq(dh, QUINTIC_PEAK_VELOCITY));
+        assert!(approx_eq(s1, 1.0) && approx_eq(d1, 0.0));
     }
 
     #[test]
@@ -300,6 +290,40 @@ mod tests {
         assert!(!traj.is_complete(traj.motion_start));
         assert!(traj.is_complete(traj.motion_start + traj.duration));
         assert!(traj.is_complete(traj.motion_start + traj.duration + Duration::from_millis(1)));
+    }
+
+    // --- plan_cartesian_duration (real arm model) ------------------------
+
+    fn left_arm() -> Arm {
+        Arm::from_urdf_file(&format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")), "openarm_left_link0")
+            .expect("build left arm from vendored fixture URDF")
+    }
+
+    #[test]
+    fn plan_cartesian_duration_sizes_in_workspace_and_floors_at_request() {
+        let mut arm = left_arm();
+        let seed = [0.0, 0.3, 0.0, 0.8, 0.0, 0.5, 0.0];
+        let ee = arm.at(&seed).ee_pose();
+        let start = arm.world_pose(&ee);
+        let mut goal = start;
+        goal.translation.vector.z += 0.05; // a small reachable move
+
+        let dur = plan_cartesian_duration(&arm, &start, &goal, seed, &V_MAX, 0.0);
+        assert!(dur.is_some_and(|d| d > 0.0), "an in-workspace move should plan a positive duration");
+        // The request floors the velocity-limited duration.
+        let floored = plan_cartesian_duration(&arm, &start, &goal, seed, &V_MAX, 5.0).expect("reachable");
+        assert!(floored >= 5.0 - EPS, "duration must floor at the requested duration");
+    }
+
+    #[test]
+    fn plan_cartesian_duration_rejects_an_unreachable_target() {
+        let mut arm = left_arm();
+        let seed = [0.0, 0.3, 0.0, 0.8, 0.0, 0.5, 0.0];
+        let ee = arm.at(&seed).ee_pose();
+        let start = arm.world_pose(&ee);
+        let mut unreachable = start;
+        unreachable.translation.vector.x += 10.0; // 10 m away: no IK solution
+        assert!(plan_cartesian_duration(&arm, &start, &unreachable, seed, &V_MAX, 0.0).is_none());
     }
 
     // --- CartesianTrajectory ---------------------------------------------

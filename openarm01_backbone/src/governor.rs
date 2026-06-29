@@ -11,9 +11,9 @@
 //! 14 joints; the collision model computes it analytically from the nearest pair's
 //! witness points (one distance query, no finite differencing). The residual
 //! approximation is the per-tick linearization of the step, bounded by the small
-//! control-rate step and absorbed by the exact line-search backstop, which
-//! guarantees the realized clearance never falls below `d_stop` regardless of
-//! curvature.
+//! control-rate step and absorbed by the exact line-search backstop: each tick the
+//! realized clearance is held at or above the floor `min(d_now, d_stop)`, so an
+//! approach never crosses `d_stop` and an in-penetration recovery never deepens.
 
 use bimanual_collision_model::{BimanualCollisionModel, CollisionError};
 use tracing::{error, info, warn};
@@ -140,6 +140,13 @@ impl Governor {
     /// query fails (the model rejects a non-finite configuration or coincident
     /// witnesses in deep penetration).
     pub fn govern(&mut self, prev: &ArmPair<JointVec>, cand: &ArmPair<JointVec>, dt: f64) -> ArmPair<JointVec> {
+        // Fail-safe up front: never stream a non-finite candidate (an upstream
+        // glitch) to the followers. The in-band paths reach this via the distance
+        // query, but the disabled and far-apart fast paths return `cand` directly,
+        // so guard here so every path holds `prev` rather than passing it through.
+        if concat(cand).iter().any(|x| !x.is_finite()) {
+            return *prev;
+        }
         if !self.enabled {
             return *cand;
         }
@@ -208,7 +215,7 @@ impl Governor {
         match self.distance_at(&governed14) {
             Some(d) if d >= floor => {}
             Some(_) => {
-                governed14 = self.retract_to_floor(&prev14, &governed14, floor);
+                governed14 = self.retract_to_floor(&prev14, &governed14, floor, d_now);
                 limited = true;
             }
             None => return *prev,
@@ -237,7 +244,7 @@ impl Governor {
         let floor = d_now.min(self.d_stop);
         let governed14 = match self.distance_at(&cand14) {
             Some(d) if d >= floor => cand14,
-            Some(_) => self.retract_to_floor(&prev14, &cand14, floor),
+            Some(_) => self.retract_to_floor(&prev14, &cand14, floor, d_now),
             None => return *prev,
         };
         split(&governed14)
@@ -262,9 +269,11 @@ impl Governor {
 
     /// Retract along `prev`->`target` to the furthest fraction whose actual
     /// clearance is at least `floor`, by bisection on the real distance query
-    /// (exact up to the bisection resolution). Assumes `d(prev) >= floor` and
-    /// `d(target) < floor`; a failed query retracts further, fail-safe.
-    fn retract_to_floor(&mut self, prev: &[f64; DUAL_DOF], target: &[f64; DUAL_DOF], floor: f64) -> [f64; DUAL_DOF] {
+    /// (exact up to the bisection resolution). Requires `d(prev) >= floor` (passed
+    /// as `prev_d`, already computed by the caller) and `d(target) < floor`; a
+    /// failed query retracts further, fail-safe.
+    fn retract_to_floor(&mut self, prev: &[f64; DUAL_DOF], target: &[f64; DUAL_DOF], floor: f64, prev_d: f64) -> [f64; DUAL_DOF] {
+        debug_assert!(prev_d >= floor, "retract_to_floor requires d(prev) >= floor (prev_d={prev_d}, floor={floor})");
         let mut lo = 0.0_f64;
         let mut hi = 1.0_f64;
         for _ in 0..12 {
@@ -468,12 +477,26 @@ mod tests {
             q = g.govern(&q, &cand, DT);
             let d = distance(&mut g, &q);
             entered_band |= d < D_SAFE;
-            // Small linearization slack below d_stop; the next tick recovers.
-            assert!(d >= D_STOP - 1e-3, "barrier breached: d={d:+.5}");
+            // The exact backstop holds the realized clearance at the floor, so the
+            // stop distance is never breached on any tick.
+            assert!(d >= D_STOP, "barrier breached: d={d:+.5}");
         }
         assert!(entered_band, "arms never approached into the band");
         // It should converge near the stop boundary, not stall far away.
         assert!(distance(&mut g, &q) < D_STOP + 4e-3, "did not settle near the stop distance");
+    }
+
+    #[test]
+    fn non_finite_candidate_holds_prev() {
+        let mut g = governor(true);
+        let prev = home();
+        let mut bad = wrists_inward(0.2);
+        bad.left[0] = f64::NAN;
+        // Enabled: the up-front guard holds prev rather than steering on NaN.
+        assert_eq!(g.govern(&prev, &bad, DT), prev);
+        // Disabled fast path: still never passes a non-finite candidate through.
+        g.set_enabled(false);
+        assert_eq!(g.govern(&prev, &bad, DT), prev);
     }
 
     #[test]

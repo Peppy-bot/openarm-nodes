@@ -9,16 +9,14 @@
     name: "openarm01_joint_commander",
     tag: "v1",
     depends_on: {
-      // backbone has no variants and is not a conforming impl of any interface,
-      // so the dep is by node identity, not by interface.
-      nodes: [
+      interfaces: [
+        // The hub's arm move actions; the commander fires move_arm_joints (the
+        // "Send" button). Bound to the backbone instance in the launcher.
         {
-          name: "openarm01_backbone",
+          name: "openarm01_arm_actions",
           tag: "v1",
           link_id: "backbone"
-        }
-      ],
-      interfaces: [
+        },
         // Measured joint state of both arms, for live UI progress. Wildcard
         // (`from_any`) so the panel binds to whatever arms are running and tells
         // them apart by `arm_id`; optional, so the commander still boots with no
@@ -50,7 +48,7 @@
     }
   },
   interfaces: {
-    // Streams operator setpoints to the arms (joint_commands) and grippers
+    // Streams operator setpoints to the arms (arm_joint_commands) and grippers
     // (gripper_commands). Producing these is what lets the panel drive an enabled
     // arm/gripper continuously instead of one move at a time; each node clamps,
     // rate-limits, and times out the stream on its side.
@@ -105,9 +103,13 @@
     },
     parameters: {
       // Rate (Hz) at which an armed arm's target setpoint is re-published on
-      // joint_commands. Must stay comfortably above 1 / the arm's stream_timeout_s
-      // so the producer lock survives between operator inputs.
-      command_rate_hz: { $type: "u32", $default: 100 }
+      // arm_joint_commands. Must stay comfortably above 1 / the arm's
+      // stream_timeout_s so the producer lock survives between operator inputs.
+      command_rate_hz: { $type: "u32", $default: 100 },
+      // Operator's launch end-effector speed cap (m/s), streamed live to the hub on
+      // governor_control and retunable from the UI. Deployment-tuned: conservative
+      // by default (the real arm keeps it); the sim launchers raise it.
+      max_ee_velocity_m_s: { $type: "f64", $default: 0.25 }
     }
   }
 }

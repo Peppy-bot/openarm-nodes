@@ -86,7 +86,7 @@ async fn run(
 
     // Await the move result, honoring preempt (a new Send cancels this goal) and
     // shutdown. There is no feedback to drain: live progress is shown from the
-    // joint_states stream (see joint_states.rs). v0.10 ResultResponse.outcome is
+    // arm_states stream (see joint_states.rs). v0.10 ResultResponse.outcome is
     // a typed enum (Completed/Cancelled/Abandoned/Expired).
     let result_fut = downstream.get_result(RESULT_TIMEOUT);
     tokio::pin!(result_fut);

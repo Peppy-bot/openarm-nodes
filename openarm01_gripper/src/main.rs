@@ -151,7 +151,6 @@ fn main() -> Result<()> {
             });
         }
 
-
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm01_hardware_ready) to
         // gate the whole robot.

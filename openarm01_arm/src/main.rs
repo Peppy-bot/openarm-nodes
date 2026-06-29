@@ -106,14 +106,10 @@ fn main() -> Result<()> {
             recv_timeout_us: i32::try_from(params.recv_timeout_us)
                 .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
             limits: model.limits(),
-            dry_run: params.dry_run,
         };
 
         info!("config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us", params.control_rate_hz, cfg.recv_timeout_us);
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
-        if params.dry_run {
-            warn!("DRY RUN: arm will hold its measured pose and log targets without following governed motion");
-        }
 
         // Validate the static ready pose against the parsed joint limits here,
         // during bringup, so a misconfigured pose aborts the whole process before

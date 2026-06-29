@@ -20,7 +20,7 @@ mod trajectory;
 mod types;
 
 pub(crate) use arm_pair::ArmPair;
-pub(crate) use types::{ARM_DOF, ARM_ID_LEFT, ARM_ID_RIGHT, JointVec, Setpoint, side_index};
+pub(crate) use types::{ARM_DOF, JointVec, Side};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -33,10 +33,6 @@ use tracing::{error, info};
 
 use coordinator::ArmChannels;
 use planner::{PlanConfig, Planner};
-
-fn side_label(idx: usize) -> &'static str {
-    if idx == 0 { "left" } else { "right" }
-}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
@@ -83,18 +79,25 @@ fn main() -> Result<()> {
             &params.right_base,
             params.d_stop,
             params.d_safe,
-            params.collision_enabled_default,
+            params.collision_governor_enabled_default,
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));
         info!(
             "self-collision governor ready (d_stop={} d_safe={} default {})",
             params.d_stop,
             params.d_safe,
-            if params.collision_enabled_default { "ENABLED" } else { "DISABLED" },
+            if params.collision_governor_enabled_default { "ENABLED" } else { "DISABLED" },
         );
 
         let left_limits = left_model.limits();
         let right_limits = right_model.limits();
+        // The chase clamps every streamed/planned target into these limits with
+        // `f64::clamp`, which is total only for finite, well-ordered bounds. Assert
+        // it here so a malformed URDF aborts at bringup, not mid-tick.
+        assert!(
+            left_limits.iter().chain(right_limits.iter()).all(|l| l.lo.is_finite() && l.hi.is_finite() && l.lo <= l.hi),
+            "joint position limits must be finite and well-ordered (lo <= hi)"
+        );
         let plan_cfg = |limits| PlanConfig {
             cycle_period,
             max_joint_velocity_rad_s,
@@ -103,8 +106,8 @@ fn main() -> Result<()> {
             stream_timeout,
         };
         let planners = ArmPair::new(
-            Planner::new(side_label(0), left_model, plan_cfg(left_limits), [0.0; ARM_DOF]),
-            Planner::new(side_label(1), right_model, plan_cfg(right_limits), [0.0; ARM_DOF]),
+            Planner::new(Side::Left, left_model, plan_cfg(left_limits)),
+            Planner::new(Side::Right, right_model, plan_cfg(right_limits)),
         );
 
         // Per-arm channels. Listeners fill the watch slots; action handlers send
@@ -117,7 +120,7 @@ fn main() -> Result<()> {
         let (goal_tx1, goal_rx1) = mpsc::channel(1);
         let busy = [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))];
         let (config_tx, config_rx) = watch::channel(streams::GovernorConfig {
-            enabled: params.collision_enabled_default,
+            enabled: params.collision_governor_enabled_default,
             d_stop: params.d_stop,
             d_safe: params.d_safe,
             max_ee_velocity_m_s: params.max_ee_velocity_m_s,
@@ -141,11 +144,19 @@ fn main() -> Result<()> {
         tokio::spawn(async move {
             startup::wait_until_ready(&runner, &token).await;
 
-            // The coordination loop owns the governor, both planners, and the
-            // channels; it streams governed setpoints once both arms report.
-            tokio::spawn(coordinator::run(runner.clone(), governor, planners, channels, config_rx, cycle_period));
-
+            // The coordination loop (owns the governor, both planners, the channels;
+            // streams governed setpoints once both arms report) and the action
+            // handlers are all meant to run for the life of the node.
             let mut set = JoinSet::new();
+            set.spawn(coordinator::run(
+                runner.clone(),
+                governor,
+                planners,
+                channels,
+                config_rx,
+                cycle_period,
+                token.clone(),
+            ));
             set.spawn(actions::arm::run_move_arm_joints(
                 runner.clone(),
                 [goal_tx0.clone(), goal_tx1.clone()],
@@ -158,14 +169,20 @@ fn main() -> Result<()> {
                 [goal_busy[0].clone(), goal_busy[1].clone()],
             ));
             set.spawn(actions::gripper::run(runner.clone(), token.clone()));
-            while let Some(joined) = set.join_next().await {
+
+            // The first task to finish is fatal: cancel the node so the daemon
+            // restarts a clean process rather than running on with a dead
+            // coordination loop or a missing action handler while reporting healthy.
+            if let Some(joined) = set.join_next().await {
                 match joined {
-                    Ok(Ok(())) => info!("backbone handler exited cleanly"),
-                    Ok(Err(e)) => error!(error = %e, "backbone handler returned Err"),
-                    Err(e) if e.is_panic() => error!(error = %e, "backbone handler panicked"),
-                    Err(e) => error!(error = %e, "backbone handler join failed"),
+                    Ok(Ok(())) => error!("backbone task exited; shutting node down"),
+                    Ok(Err(e)) => error!(error = %e, "backbone task failed; shutting node down"),
+                    Err(e) if e.is_panic() => error!(error = %e, "backbone task panicked; shutting node down"),
+                    Err(e) => error!(error = %e, "backbone task join failed; shutting node down"),
                 }
             }
+            token.cancel();
+            set.shutdown().await;
         });
 
         Ok(())

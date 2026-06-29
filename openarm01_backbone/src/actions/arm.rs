@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use peppygen::exposed_actions::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::openarm01_arm_actions::v1::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
 use srs_model::Limit;
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::planner::Goal;
-use crate::{ARM_DOF, JointVec, side_index};
+use crate::{ARM_DOF, JointVec, Side};
 
 /// Claim the arm's single-flight slot, or report it already busy.
 fn claim(busy: &AtomicBool) -> bool {
@@ -40,7 +40,7 @@ pub async fn run_move_arm_joints(
         let accepted = handle
             .handle_goal_next_request(|req| {
                 let d = &req.data;
-                let Some(idx) = side_index(d.arm_id) else {
+                let Some(idx) = Side::from_arm_id(d.arm_id).map(Side::index) else {
                     return Ok(move_arm_joints::GoalResponse::reject("arm_id out of range"));
                 };
                 if !d.joint_positions.iter().all(|v| v.is_finite()) {
@@ -59,7 +59,7 @@ pub async fn run_move_arm_joints(
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
-        let idx = side_index(ctx.request().data.arm_id).expect("validated on accept");
+        let idx = Side::from_arm_id(ctx.request().data.arm_id).map(Side::index).expect("validated on accept");
         let target = ctx.request().data.joint_positions;
         let duration_s = ctx.request().data.duration_s;
         if goal_txs[idx].send(Goal::Joint { target, duration_s, ctx }).await.is_err() {
@@ -82,7 +82,7 @@ pub async fn run_move_arm(
         let accepted = handle
             .handle_goal_next_request(|req| {
                 let d = &req.data;
-                let Some(idx) = side_index(d.arm_id) else {
+                let Some(idx) = Side::from_arm_id(d.arm_id).map(Side::index) else {
                     return Ok(move_arm::GoalResponse::reject("arm_id out of range"));
                 };
                 let finite = d.position.iter().chain(d.orientation.iter()).all(|v| v.is_finite());
@@ -103,7 +103,7 @@ pub async fn run_move_arm(
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
-        let idx = side_index(ctx.request().data.arm_id).expect("validated on accept");
+        let idx = Side::from_arm_id(ctx.request().data.arm_id).map(Side::index).expect("validated on accept");
         let target = pose_from_arrays(ctx.request().data.position, ctx.request().data.orientation);
         let duration_s = ctx.request().data.duration_s;
         if goal_txs[idx].send(Goal::Cartesian { target, duration_s, ctx }).await.is_err() {

@@ -136,7 +136,7 @@ class MujocoBridgeExtension:
                 indices = [self._joint_index.get(name) for name in arm["joints"]]
                 if any(i is None for i in indices):
                     continue
-                self._io.publish_joint_states(
+                self._io.publish_arm_states(
                     arm["arm_id"],
                     [positions[i] for i in indices],
                     [velocities[i] for i in indices],
