@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::arm_states_joint_states;
+use peppygen::consumed_topics::arm_states_arm_states;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
@@ -24,7 +24,7 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = subscription.next() => received,
+            received = arm_states_arm_states::on_next_message_received(&runner) => received,
         };
         let (_producer, msg) = match received {
             Ok(Some(pair)) => pair,

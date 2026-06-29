@@ -1,4 +1,5 @@
 mod actions;
+mod collision_status;
 mod command_stream;
 mod error;
 mod gripper_states;
@@ -35,6 +36,12 @@ fn main() -> Result<()> {
             token.clone(),
         ));
         tokio::spawn(gripper_states::run(
+            node_runner.clone(),
+            shared.clone(),
+            token.clone(),
+        ));
+        // Live nearest-pair self-collision distance + links from the hub.
+        tokio::spawn(collision_status::run(
             node_runner.clone(),
             shared.clone(),
             token.clone(),

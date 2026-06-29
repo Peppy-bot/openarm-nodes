@@ -73,8 +73,9 @@ async fn run(
     .await
     {
         Ok(handle) if handle.data.accepted => handle,
-        Ok(_) => {
-            finalize(&state, side, false, "backbone rejected the goal").await;
+        Ok(handle) => {
+            let reason = handle.data.error_message.unwrap_or_else(|| "no reason given".into());
+            finalize(&state, side, false, format!("backbone rejected the goal: {reason}")).await;
             return;
         }
         Err(e) => {

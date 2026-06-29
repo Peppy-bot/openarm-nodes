@@ -24,7 +24,7 @@
         // them apart by `arm_id`; optional, so the commander still boots with no
         // arm up. This replaces reading move progress off the action feedback.
         {
-          name: "openarm01_joint_state_source",
+          name: "openarm01_arm_states",
           tag: "v1",
           link_id: "arm_states",
           from_any: true
@@ -33,9 +33,17 @@
         // optional pattern as the arms; told apart by `gripper_id`. Replaces
         // reading gripper move progress off the action feedback.
         {
-          name: "openarm01_gripper_state_source",
+          name: "openarm01_gripper_states",
           tag: "v1",
           link_id: "gripper_states",
+          from_any: true
+        },
+        // Live nearest-pair self-collision distance + links from the hub, for the
+        // proximity readout. Wildcard + optional like the state streams.
+        {
+          name: "openarm01_collision_status",
+          tag: "v1",
+          link_id: "proximity",
           from_any: true
         }
       ]
@@ -48,11 +56,18 @@
     // rate-limits, and times out the stream on its side.
     conforms_to: [
       {
-        name: "openarm01_joint_command_source",
+        name: "openarm01_arm_joint_commands",
         tag: "v1"
       },
       {
-        name: "openarm01_gripper_command_source",
+        name: "openarm01_gripper_commands",
+        tag: "v1"
+      },
+      // Runtime on/off for the hub's self-collision governor, driven by the UI
+      // checkbox and re-published periodically (lossy QoS) so a dropped toggle
+      // cannot strand the hub.
+      {
+        name: "openarm01_governor_control",
         tag: "v1"
       }
     ],
@@ -69,12 +84,16 @@
     topics: {
       consumes: [
         {
-          name: "joint_states",
+          name: "arm_states",
           link_id: "arm_states"
         },
         {
           name: "gripper_states",
           link_id: "gripper_states"
+        },
+        {
+          name: "collision_status",
+          link_id: "proximity"
         }
       ]
     }

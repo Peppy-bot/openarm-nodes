@@ -99,8 +99,33 @@ pub struct UiState {
     // deadman because the operator enables a whole side at once.
     pub left_enabled: bool,
     pub right_enabled: bool,
+    // Operator controls for the hub's self-collision governor, streamed to the
+    // backbone on collision_avoidance; the hub holds its own defaults until the
+    // first message. `collision_enabled` defaults true so avoidance is on unless
+    // the operator opts out; the band and speed defaults match the hub's.
+    pub collision_enabled: bool,
+    pub d_stop: f64,
+    pub d_safe: f64,
+    pub max_ee_velocity_m_s: f64,
+    // Latest nearest-pair self-collision proximity from the hub, for the readout.
+    // `None` until the first message (or with no hub up).
+    pub proximity: Option<Proximity>,
     pub status: String,
 }
+
+/// The hub's reported nearest checked pair: signed surface distance (m, positive
+/// is clearance) and the two link names.
+#[derive(Clone, Debug)]
+pub struct Proximity {
+    pub distance: f64,
+    pub link_a: String,
+    pub link_b: String,
+}
+
+/// Governor defaults, kept in step with openarm01_backbone's parameter defaults.
+pub const DEFAULT_D_STOP: f64 = 0.005;
+pub const DEFAULT_D_SAFE: f64 = 0.02;
+pub const DEFAULT_MAX_EE_VELOCITY_M_S: f64 = 1.0;
 
 impl UiState {
     pub fn new() -> Self {
@@ -111,6 +136,11 @@ impl UiState {
             right_gripper: GripperTarget::closed(),
             left_enabled: false,
             right_enabled: false,
+            collision_enabled: true,
+            d_stop: DEFAULT_D_STOP,
+            d_safe: DEFAULT_D_SAFE,
+            max_ee_velocity_m_s: DEFAULT_MAX_EE_VELOCITY_M_S,
+            proximity: None,
             status: "ready".to_string(),
         }
     }

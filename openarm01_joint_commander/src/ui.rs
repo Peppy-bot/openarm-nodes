@@ -223,6 +223,25 @@ async fn handle_command(text: &str, app: &AppState) {
                 s.gripper_mut(side).position = position;
             }
         }
+        Command::SetCollision { enabled } => {
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            s.collision_enabled = enabled;
+            s.set_status(format!("collision avoidance {}", if enabled { "ON" } else { "OFF" }));
+        }
+        Command::SetGovernorParams { d_stop, d_safe, max_ee_velocity_m_s } => {
+            // The hub validates again before applying; clamp here to a sane band so
+            // the UI cannot stream a degenerate one (d_stop must stay below d_safe).
+            if ![d_stop, d_safe, max_ee_velocity_m_s].iter().all(|v| v.is_finite() && *v > 0.0) || d_stop >= d_safe {
+                let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                s.set_status("governor params ignored: require 0 < d_stop < d_safe and speed > 0");
+                return;
+            }
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            s.d_stop = d_stop;
+            s.d_safe = d_safe;
+            s.max_ee_velocity_m_s = max_ee_velocity_m_s;
+            s.set_status(format!("governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s"));
+        }
     }
 }
 
@@ -301,7 +320,21 @@ struct Snapshot {
     // Streaming deadman per side, shared by that side's arm and gripper.
     left_enabled: bool,
     right_enabled: bool,
+    // Operator's self-collision governor controls (streamed to the hub).
+    collision_enabled: bool,
+    d_stop: f64,
+    d_safe: f64,
+    max_ee_velocity_m_s: f64,
+    // Live nearest-pair proximity from the hub (null until the first report).
+    proximity: Option<ProximityView>,
     status: String,
+}
+
+#[derive(Serialize)]
+struct ProximityView {
+    distance: f64,
+    link_a: String,
+    link_b: String,
 }
 
 #[derive(Serialize)]
@@ -331,6 +364,15 @@ impl From<&UiState> for Snapshot {
             right_gripper: gripper_view(&s.right_gripper),
             left_enabled: s.left_enabled,
             right_enabled: s.right_enabled,
+            collision_enabled: s.collision_enabled,
+            d_stop: s.d_stop,
+            d_safe: s.d_safe,
+            max_ee_velocity_m_s: s.max_ee_velocity_m_s,
+            proximity: s.proximity.as_ref().map(|p| ProximityView {
+                distance: p.distance,
+                link_a: p.link_a.clone(),
+                link_b: p.link_b.clone(),
+            }),
             status: s.status.clone(),
         }
     }
@@ -382,6 +424,16 @@ enum Command {
     SetGripperTarget {
         side: SideWire,
         position: f64,
+    },
+    // Set the hub's self-collision-avoidance toggle (streamed continuously).
+    SetCollision {
+        enabled: bool,
+    },
+    // Retune the hub's governor band and stream speed cap (streamed continuously).
+    SetGovernorParams {
+        d_stop: f64,
+        d_safe: f64,
+        max_ee_velocity_m_s: f64,
     },
 }
 
