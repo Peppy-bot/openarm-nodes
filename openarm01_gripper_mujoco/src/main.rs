@@ -2,7 +2,6 @@ mod actions;
 mod config;
 mod follow;
 mod passthrough;
-mod services;
 mod state;
 mod state_stream;
 mod stream;
@@ -36,12 +35,6 @@ fn main() -> Result<()> {
             .expect("peppygen::clock::init");
 
         let shared = state::new_shared();
-
-        tokio::spawn(services::get_gripper_id::run(
-            node_runner.clone(),
-            gripper_id,
-            token.clone(),
-        ));
 
         // Consume the sim's measured opening (gripper_states) to feed the move
         // action's convergence/stall feedback.

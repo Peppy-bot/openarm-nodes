@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
+use peppygen::exposed_actions::openarm01_gripper_actions::v1::move_gripper;
 use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, info, warn};

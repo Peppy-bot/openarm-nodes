@@ -1,4 +1,4 @@
-// Listens for streamed gripper opening setpoints (openarm01_gripper_command_source)
+// Listens for streamed gripper opening setpoints (openarm01_gripper_commands)
 // and keeps the latest one addressed to this gripper in a watch channel for the
 // follow loop. A non-finite position is dropped, so a producer gone bad lets the
 // follow lock time out instead of driving the gripper.
