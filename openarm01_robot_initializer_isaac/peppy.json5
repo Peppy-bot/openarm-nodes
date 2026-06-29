@@ -35,8 +35,8 @@
       { name: "openarm01_robot_initializer", tag: "v1" },
       // Measured state for both arms / both grippers; consumers tell sides apart
       // by arm_id / gripper_id.
-      { name: "openarm01_joint_state_source", tag: "v1" },
-      { name: "openarm01_gripper_state_source", tag: "v1" },
+      { name: "openarm01_arm_states", tag: "v1" },
+      { name: "openarm01_gripper_states", tag: "v1" },
     ],
     topics: {
       consumes: [

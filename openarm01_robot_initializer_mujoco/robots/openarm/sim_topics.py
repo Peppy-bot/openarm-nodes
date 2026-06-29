@@ -16,8 +16,8 @@ import threading
 from typing import Optional
 
 import peppylib
-from peppygen.emitted_topics.openarm01_joint_state_source.v1 import joint_states
-from peppygen.emitted_topics.openarm01_gripper_state_source.v1 import gripper_states
+from peppygen.emitted_topics.openarm01_arm_states.v1 import arm_states
+from peppygen.emitted_topics.openarm01_gripper_states.v1 import gripper_states
 from peppygen.consumed_topics import arm_cmd_arm_sim_passthrough as arm_cmd
 from peppygen.consumed_topics import gripper_cmd_gripper_sim_passthrough as gripper_cmd
 
@@ -60,7 +60,7 @@ class SimTopicIO:
     async def start(self) -> None:
         """Declare publishers and spawn the command-consume loops. Runs on the
         node loop before the sim thread starts."""
-        self._joint_pub = await joint_states.declare_publisher(self._node_runner)
+        self._joint_pub = await arm_states.declare_publisher(self._node_runner)
         self._gripper_pub = await gripper_states.declare_publisher(self._node_runner)
         self._tasks = [
             asyncio.create_task(self._consume_arm()),
@@ -146,7 +146,7 @@ class SimTopicIO:
 
     def publish_joint_states(self, arm_id: int, positions: list[float], velocities: list[float]) -> None:
         if self._joint_pub is not None:
-            self._schedule_publish(self._joint_pub, joint_states.build_message(arm_id, positions, velocities))
+            self._schedule_publish(self._joint_pub, arm_states.build_message(arm_id, positions, velocities))
 
     def publish_gripper_states(self, gripper_id: int, position: float) -> None:
         if self._gripper_pub is not None:
