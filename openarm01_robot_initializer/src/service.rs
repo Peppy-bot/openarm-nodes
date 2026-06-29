@@ -60,12 +60,19 @@ async fn poll_components(
     }
 }
 
-// Sequential && short-circuits: a not-ready component returns false without
-// polling the rest. The four poll() Response types differ with no shared trait,
-// so the readiness check is inlined per link rather than factored generically.
+// Poll all four components concurrently and require every one ready. The poll()
+// Response types differ with no shared trait, so each link is matched inline
+// rather than factored generically. Concurrent (tokio::join!, not sequential
+// awaits) so an unreachable component caps a pass at one POLL_TIMEOUT, not four.
 async fn hardware_ready(runner: &NodeRunner) -> bool {
-    matches!(left_arm_is_ready::poll(runner, POLL_TIMEOUT).await, Ok(r) if r.data.ready)
-        && matches!(right_arm_is_ready::poll(runner, POLL_TIMEOUT).await, Ok(r) if r.data.ready)
-        && matches!(left_gripper_is_ready::poll(runner, POLL_TIMEOUT).await, Ok(r) if r.data.ready)
-        && matches!(right_gripper_is_ready::poll(runner, POLL_TIMEOUT).await, Ok(r) if r.data.ready)
+    let (la, ra, lg, rg) = tokio::join!(
+        left_arm_is_ready::poll(runner, POLL_TIMEOUT),
+        right_arm_is_ready::poll(runner, POLL_TIMEOUT),
+        left_gripper_is_ready::poll(runner, POLL_TIMEOUT),
+        right_gripper_is_ready::poll(runner, POLL_TIMEOUT),
+    );
+    matches!(la, Ok(r) if r.data.ready)
+        && matches!(ra, Ok(r) if r.data.ready)
+        && matches!(lg, Ok(r) if r.data.ready)
+        && matches!(rg, Ok(r) if r.data.ready)
 }
