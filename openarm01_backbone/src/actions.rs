@@ -1,2 +1,2 @@
-pub mod move_arm_joints;
-pub mod move_gripper;
+pub mod arm;
+pub mod gripper;
