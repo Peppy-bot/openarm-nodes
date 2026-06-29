@@ -1,59 +1,50 @@
-//! The arm's control: a single task that owns the motors and runs a state
-//! machine at a fixed rate. Each tick the current [`Mode`] commands the motors
-//! exactly once and returns the next mode, so every transition is a return
-//! value: `Startup` eases to the ready pose and becomes `Follow`; `Follow` is
-//! the ambient default that chases the active command stream (or holds when none
-//! is streaming) and preempts into a move when a goal arrives; a move runs to its
-//! terminal (completion, cancellation, or abort) and returns to `Follow` at the
-//! last commanded setpoint.
+//! The real arm's control: a single task that owns the motors and runs an MIT
+//! control loop following the hub's governed setpoint. The bimanual coordination
+//! hub (openarm01_backbone) owns all trajectory generation, stream following, and
+//! collision governing, and streams the resolved (q_des, dq_des) per arm; this
+//! loop adds only the realtime feedforward (gravity/Coriolis/friction the hub
+//! cannot compute remotely) and a final clamp to the joint limits, then commands
+//! the motors. There is no mode state machine and no streaming logic here.
+//!
+//! On shutdown the loop eases the arm back to a known ready pose (the sole motor
+//! writer, reusing the dynamics model) before disabling the motors, so the arm
+//! settles at a well-conditioned pose instead of dropping when power cuts.
 
-mod cartesian_move;
-mod chase;
-mod follow;
-mod joint_move;
-mod startup;
-
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use peppygen::exposed_actions::openarm01_arm::v1::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
 use peppylib::runtime::CancellationToken;
-use srs_model::nalgebra::Isometry3;
-use srs_model::{Jacobian, Limit};
-use tokio::sync::{mpsc, oneshot, watch};
+use srs_model::Limit;
+use tokio::sync::oneshot;
 use tracing::info;
 
-use crate::actions::{self, Goal};
 use crate::friction;
 use crate::pacer::Pacer;
-use crate::stream::{JointCommand, StreamWiring};
+use crate::stream::{GovernedSetpoint, StreamWiring};
 use crate::trajectory::JointTrajectory;
 use crate::{ARM_DOF, JointVec};
-use cartesian_move::CartesianMove;
-use follow::Follow;
-use joint_move::JointMove;
 use openarm_can::ArmCan;
-use startup::StartupMove;
 
-pub(crate) use startup::assert_ready_pose_in_limits;
-
-/// All-zero joint vector, the zero desired velocity sent alongside a held or
-/// commanded position.
+/// All-zero joint vector: the desired velocity sent while holding a pose.
 const ZERO: JointVec = [0.0; ARM_DOF];
 
-/// Non-singular rest configuration the arm eases to: once on startup (from the
-/// measured power-on pose, before admitting goals) and again on shutdown (before
-/// the motors disable). The arm powers off wherever it hung, often on the
-/// straight-arm singularity, so this is a known, well-conditioned pose. The elbow
-/// (J4) is bent a hair above its URDF lower limit; every other joint rests at 0.
-pub(super) const READY_POSE: JointVec = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
+/// Non-singular rest configuration the arm eases to on shutdown, before the
+/// motors disable. The arm powers off wherever it hung, often on the straight-arm
+/// singularity, so this is a known, well-conditioned pose: the elbow (J4) is bent
+/// a hair above its URDF lower limit; every other joint rests at 0.
+const READY_POSE: JointVec = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
 
 /// Requested duration (s) of the shutdown return-to-ready move, floored at the
-/// joint velocity limits like any joint move. Sized to fit inside the shutdown
-/// grace window alongside the motor disable and lock release.
+/// joint velocity limits. Sized to fit inside the shutdown grace window alongside
+/// the motor disable and lock release.
 const PARK_DURATION_S: f64 = 3.0;
+
+/// Per-joint velocity limits (rad/s) flooring the shutdown park duration, from the
+/// OpenArm V1.0 URDF (symmetric across sides). Only the park samples a trajectory;
+/// normal motion is the hub's already rate-limited governed setpoint.
+const PARK_MAX_JOINT_VELOCITY_RAD_S: JointVec =
+    [16.754666, 16.754666, 5.445426, 5.445426, 20.943946, 20.943946, 20.943946];
 
 /// Settle time after disabling the motors on shutdown, before draining ACK
 /// frames. Mirrors the ROS2 v10_simple_hardware on_deactivate sleep.
@@ -65,92 +56,22 @@ pub struct ControlConfig {
     pub kd: JointVec,
     pub cycle_period: Duration,
     pub recv_timeout_us: i32,
-    pub max_joint_velocity_rad_s: JointVec,
-    /// End-effector linear-speed cap (m/s) for the `Follow` chase. The chase step
-    /// is scaled so the hand never translates faster than this, so a first
-    /// command or a producer hiccup far from the current pose eases over rather
-    /// than lunging. A step that does not move the hand (null to the linear
-    /// Jacobian, e.g. self-motion) is left at the motor rate, bounded only by
-    /// `max_joint_velocity_rad_s` for continuity.
-    pub max_ee_velocity_m_s: f64,
-    /// This arm's joint position limits, parsed from the URDF (per side, via the
-    /// `base_link`). Used to reject out-of-range joint move targets and to clamp
-    /// streamed joint targets.
+    /// Joint position limits, parsed from the URDF, the final guard clamp applied
+    /// to every governed setpoint before it reaches the motors.
     pub limits: [Limit; ARM_DOF],
-    /// How long `Follow` keeps following a stream source after its last command
-    /// before releasing the lock and holding.
-    pub stream_timeout: Duration,
+    /// Temporary bring-up safety: when set, every tick holds the measured pose
+    /// instead of the governed one and logs the target it would have tracked.
+    pub dry_run: bool,
 }
 
-/// Everything one control tick reads or writes: the measured state and
-/// feedforward computed once at the top of the tick, plus the shared resources a
-/// mode needs to command the motors, admit goals, and complete them. Modes take
-/// it by reference; the loop rebuilds it every tick.
-struct TickIo<'a> {
-    arm: &'a Mutex<ArmCan>,
-    cfg: &'a ControlConfig,
-    model: &'a srs_model::Arm,
-    goals: &'a mut mpsc::Receiver<Goal>,
-    /// The single-flight flag claimed by a move action handler at goal acceptance
-    /// and held through startup. A move releases it at its terminal; startup
-    /// releases it once when it reaches the ready pose. `Follow` runs with it
-    /// clear, so a move goal always preempts.
-    busy: &'a AtomicBool,
-    /// Latest streamed joint command, fed by the `joint_commands` listener and
-    /// consumed by [`Follow`].
-    joint_stream: &'a watch::Receiver<Option<JointCommand>>,
-    /// Measured joint positions this tick.
-    q: JointVec,
-    /// Gravity + Coriolis + friction feedforward at the measured state.
-    ff_tau: JointVec,
-    /// End-effector pose at the measured state, in the arm base frame.
-    ee_base: Isometry3<f64>,
-    /// Geometric Jacobian at the measured state (base frame): rows 0..3 map joint
-    /// rates to EE linear velocity, used to cap the `Follow` chase by hand speed.
-    jacobian: Jacobian,
-    now: Instant,
-}
-
-/// The control state machine; see the module docs for the transition story.
-enum Mode {
-    /// Easing from the measured power-on configuration to the ready pose, once,
-    /// before any goal is admitted (`busy` is held through it). Entered when no
-    /// producer is streaming at boot: the arm powers off wherever it hung, often
-    /// on the straight-arm singularity, so this brings it somewhere
-    /// well-conditioned before it holds and waits for a producer or a goal.
-    Startup(StartupMove),
-    /// The ambient default: chase the active command stream under the joint and
-    /// velocity limits (or hold the last setpoint when none is streaming), and
-    /// preempt into a move when a goal arrives. The only state that admits a goal.
-    Follow(Follow),
-    /// Tracking a joint-space trajectory for an accepted `move_arm_joints` goal.
-    JointMove(JointMove),
-    /// Tracking a Cartesian trajectory for an accepted `move_arm` goal: each tick
-    /// samples a pose and solves IK in-process for the joint setpoint.
-    CartesianMove(CartesianMove),
-}
-
-/// A motion's terminal: its normal result, or cancellation by the caller, which
-/// completes via the cancelled terminal with `success = false` in the result
-/// payload (the motion stopped short of its target).
-enum Completion {
-    Done {
-        success: bool,
-        message: &'static str,
-    },
-    Cancelled,
-}
-
-impl Mode {
-    /// Run one control tick: command the motors once and return the next mode.
-    async fn tick(self, io: &mut TickIo<'_>) -> Mode {
-        match self {
-            Mode::Startup(s) => s.tick(io),
-            Mode::Follow(f) => f.tick(io).await,
-            Mode::JointMove(m) => m.tick(io).await,
-            Mode::CartesianMove(m) => m.tick(io).await,
-        }
-    }
+/// Assert the shutdown ready pose is inside the parsed joint limits, during
+/// bringup, so a model whose limits exclude it fails loudly before any hardware
+/// is touched rather than panicking inside the spawned control task.
+pub fn assert_ready_pose_in_limits(limits: &[Limit; ARM_DOF]) {
+    assert!(
+        READY_POSE.iter().zip(limits).all(|(&q, l)| l.contains(q)),
+        "READY_POSE outside joint limits: {READY_POSE:?}",
+    );
 }
 
 /// Shutdown coordination for the control loop: `main.rs` cancels `token` to ask
@@ -162,15 +83,9 @@ struct Shutdown {
 }
 
 /// Spawn the arm's control: a single task that owns the motors (the only motor
-/// writer, so follow and moves can never command concurrently) plus the
-/// `move_arm_joints` and `move_arm` action handlers, which share one goal channel
-/// and one single-flight `busy` flag. Both actions are exposed here, before
-/// anything is spawned, so a failed registration fails node bringup instead of
-/// panicking inside a detached task. The control task owns the srs_model `Arm`
-/// and computes the gravity/Coriolis feedforward (and, for Cartesian moves, the
-/// inverse kinematics) in-process every tick; it reads the streamed joint
-/// setpoint and reports the measured state through `wiring`, its connections to
-/// the stream tasks.
+/// writer) and follows the hub's governed setpoint stream. No actions are exposed
+/// here - the hub owns move admission. `shutdown_tx` is signalled once the loop
+/// has parked and disabled the motors, so main.rs can then release the lock.
 pub async fn spawn(
     runner: &NodeRunner,
     arm: Arc<Mutex<ArmCan>>,
@@ -179,90 +94,43 @@ pub async fn spawn(
     wiring: StreamWiring,
     shutdown_tx: oneshot::Sender<()>,
 ) -> Result<()> {
-    let joints_action = move_arm_joints::ActionHandle::expose(runner).await?;
-    let cartesian_action = move_arm::ActionHandle::expose(runner).await?;
-    // Born busy: the Startup state holds the flag through its move to the ready
-    // pose, so a goal arriving during startup is rejected as busy instead of
-    // accepted and silently queued behind a motion the caller never requested.
-    let busy = Arc::new(AtomicBool::new(true));
-    let (goal_tx, goal_rx) = mpsc::channel::<Goal>(1);
     let token = runner.cancellation_token().clone();
-    tokio::spawn(run_control(
-        arm,
-        cfg.clone(),
-        goal_rx,
-        busy.clone(),
-        model,
-        wiring,
-        Shutdown {
-            token,
-            done: shutdown_tx,
-        },
-    ));
-    tokio::spawn(actions::run_move_arm_joints(
-        joints_action,
-        cfg.limits,
-        goal_tx.clone(),
-        busy.clone(),
-    ));
-    tokio::spawn(actions::run_move_arm(cartesian_action, goal_tx, busy));
+    tokio::spawn(run_control(arm, cfg, model, wiring, token, shutdown_tx));
     Ok(())
 }
 
-/// The single motor-owning control loop. Runs forever at `cfg.cycle_period`:
-/// reads the measured state, computes the feedforward, and runs one [`Mode`]
-/// tick, which commands the motors and yields the next mode. Starts by following
-/// a producer that is already streaming (live from the power-on pose), else in
-/// [`Mode::Startup`] easing to the ready pose; either way it never lunges on boot.
+/// The single motor-owning control loop. Each tick reads the measured state,
+/// computes the feedforward, reports the measured state upward, and commands the
+/// motors to the latest governed setpoint (clamped), holding the measured pose
+/// until the first governed setpoint arrives or whenever the stream is empty. On
+/// cancellation it eases to the ready pose, disables the motors, and signals
+/// `shutdown_tx`.
 async fn run_control(
     arm: Arc<Mutex<ArmCan>>,
     cfg: ControlConfig,
-    mut goals: mpsc::Receiver<Goal>,
-    busy: Arc<AtomicBool>,
     mut model: srs_model::Arm,
     wiring: StreamWiring,
     shutdown: Shutdown,
 ) {
     let mut pacer = Pacer::new(cfg.cycle_period);
-    let (q0, _) = read_state(&arm, cfg.recv_timeout_us);
-    let mut mode = if stream_present(&wiring.joint, &cfg) {
-        // A producer is already streaming: follow it live from the power-on pose,
-        // velocity-capped, so the arm converges to the operator (and keeps
-        // following as they move) with no neutral excursion. Admit goals now.
-        busy.store(false, Ordering::Release);
-        info!(
-            "startup: producer already streaming, following from {}",
-            fmt_joints(&q0)
-        );
-        Mode::Follow(Follow::idle(q0))
-    } else {
-        Mode::Startup(StartupMove::new(q0, &cfg))
-    };
-
-    info!("control loop started (in-process gravity compensation + IK)");
+    info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
     loop {
         let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
-        let (ff_tau, ee_base, jacobian) = feedforward(&mut model, &q, &qdot);
-        wiring
-            .measured
-            .send_replace(Some(crate::stream::MeasuredState {
-                positions: q,
-                velocities: qdot,
-            }));
-        let mut io = TickIo {
-            arm: &arm,
-            cfg: &cfg,
-            model: &model,
-            goals: &mut goals,
-            busy: &busy,
-            joint_stream: &wiring.joint,
-            q,
-            ff_tau,
-            ee_base,
-            jacobian,
-            now: Instant::now(),
+        let ff_tau = feedforward(&mut model, &q, &qdot);
+        wiring.measured.send_replace(Some(crate::stream::MeasuredState {
+            positions: q,
+            velocities: qdot,
+        }));
+
+        // Follow the latest governed setpoint; hold the measured pose (zero
+        // desired velocity) until the hub's stream is live, so the arm never
+        // lunges before the hub is up.
+        let (q_des, dq_des) = match *wiring.governed.borrow() {
+            Some(GovernedSetpoint { q_des, dq_des }) => (clamp_to_limits(&q_des, &cfg.limits), dq_des),
+            None => (q, ZERO),
         };
-        mode = mode.tick(&mut io).await;
+
+        command(&arm, &cfg, &ff_tau, &q, &q_des, &dq_des);
         // Biased so a cancelled token always wins over an already-due (overrun)
         // tick: on shutdown break out and run the return-to-ready + disable below.
         tokio::select! {
@@ -276,8 +144,6 @@ async fn run_control(
     // dynamics model) so the arm settles at a known pose instead of dropping when
     // power cuts, then disable the motors. main.rs awaits `shutdown_tx`, keeping
     // this task alive through the park before it releases the lock and exits.
-    // Best-effort: a park that overruns the shutdown grace window is force-killed
-    // with the motors still energised, acceptable for now.
     info!("control loop stopping: easing to ready pose, then disabling motors");
     return_to_ready(&arm, &cfg, &mut model).await;
     {
@@ -297,23 +163,16 @@ async fn run_control(
 
 /// Best-effort return to [`READY_POSE`] on shutdown: eases from the measured pose
 /// over [`PARK_DURATION_S`] with the same gravity/Coriolis/friction feedforward as
-/// a normal move, so the arm settles at a known pose instead of dropping when the
-/// motors disable. Runs inside the control task after its loop exits on
-/// cancellation, so it is the sole motor writer and reuses the dynamics model.
-/// Respects the per-joint velocity limits, so a pose far from ready takes longer
-/// than [`PARK_DURATION_S`] rather than lunging.
+/// a normal command, so the arm settles at a known pose instead of dropping when
+/// the motors disable. Respects the per-joint velocity limits, so a pose far from
+/// ready takes longer than [`PARK_DURATION_S`] rather than lunging.
 async fn return_to_ready(arm: &Mutex<ArmCan>, cfg: &ControlConfig, model: &mut srs_model::Arm) {
     let (q0, _) = read_state(arm, cfg.recv_timeout_us);
-    let trajectory = JointTrajectory::new(
-        q0,
-        READY_POSE,
-        cfg.max_joint_velocity_rad_s,
-        PARK_DURATION_S,
-    );
+    let trajectory = JointTrajectory::new(q0, READY_POSE, PARK_MAX_JOINT_VELOCITY_RAD_S, PARK_DURATION_S);
     let mut pacer = Pacer::new(cfg.cycle_period);
     loop {
         let (q, qdot) = read_state(arm, cfg.recv_timeout_us);
-        let (ff_tau, _ee_base, _jacobian) = feedforward(model, &q, &qdot);
+        let ff_tau = feedforward(model, &q, &qdot);
         let now = Instant::now();
         let (q_des, dq_des) = trajectory.sample(now);
         {
@@ -327,44 +186,46 @@ async fn return_to_ready(arm: &Mutex<ArmCan>, cfg: &ControlConfig, model: &mut s
     }
 }
 
-/// Whether a producer is already streaming joint commands within the watchdog
-/// window, so the loop follows it live from boot instead of homing to the ready
-/// pose first.
-fn stream_present(joint: &watch::Receiver<Option<JointCommand>>, cfg: &ControlConfig) -> bool {
-    let now = Instant::now();
-    joint
-        .borrow()
-        .as_ref()
-        .is_some_and(|c| now.duration_since(c.recv_at) <= cfg.stream_timeout)
-}
-
 /// One tick of rigid-body feedforward: gravity and Coriolis from the posed chain
-/// (which carries the distal gripper payload) plus locally computed friction, all
-/// at full weight, so the PD term only corrects residual error. Poses the chain
-/// once and also returns the EE pose (base frame) that the same evaluation yields
-/// for free (used by Cartesian admission, the state streams, and move results)
-/// plus the geometric Jacobian (used to cap the `Follow` chase by hand speed).
-fn feedforward(
-    model: &mut srs_model::Arm,
-    q: &JointVec,
-    qdot: &JointVec,
-) -> (JointVec, Isometry3<f64>, Jacobian) {
+/// (carrying the distal gripper payload) plus locally computed friction, so the
+/// PD term only corrects residual error.
+fn feedforward(model: &mut srs_model::Arm, q: &JointVec, qdot: &JointVec) -> JointVec {
     let posed = model.at(q);
     let gravity = posed.gravity_torques();
     let coriolis = posed.coriolis_torques(qdot);
-    let ee_base = posed.ee_pose();
-    let jacobian = posed.jacobian();
     let friction = friction::torques(&friction::V1, qdot);
-    let ff_tau = std::array::from_fn(|i| gravity[i] + coriolis[i] + friction[i]);
-    (ff_tau, ee_base, jacobian)
+    std::array::from_fn(|i| gravity[i] + coriolis[i] + friction[i])
 }
 
-/// Command the motors once: this tick's feedforward plus PD to the desired
-/// position/velocity. The single control task is the only caller, so locking
-/// here can never contend with another writer.
-fn command(io: &TickIo<'_>, q_des: &JointVec, dq_des: &JointVec) {
-    let mut a = io.arm.lock().unwrap_or_else(|e| e.into_inner());
-    a.mit_control(&io.cfg.kp, &io.cfg.kd, q_des, dq_des, &io.ff_tau);
+/// Command the motors once: this tick's feedforward plus PD to the governed
+/// position/velocity. Under `dry_run` it instead holds the measured pose and logs
+/// the target it would have tracked, so every motion path is neutered here.
+fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q: &JointVec, q_des: &JointVec, dq_des: &JointVec) {
+    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+    if cfg.dry_run {
+        log_dry_target(Instant::now(), q_des);
+        a.mit_control(&cfg.kp, &cfg.kd, q, &ZERO, ff_tau);
+        return;
+    }
+    a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau);
+}
+
+/// Clamp a governed target into the joint position limits, the final guard before
+/// the motors.
+fn clamp_to_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> JointVec {
+    std::array::from_fn(|i| q[i].clamp(limits[i].lo, limits[i].hi))
+}
+
+/// Period between dry-run target logs, throttling the control tick to a readable rate.
+const DRY_LOG_PERIOD: Duration = Duration::from_millis(200);
+
+fn log_dry_target(now: Instant, q_des: &JointVec) {
+    static LAST_LOG: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_none_or(|t| now.duration_since(t) >= DRY_LOG_PERIOD) {
+        *last = Some(now);
+        info!("dry-run: would follow {}", fmt_joints(q_des));
+    }
 }
 
 /// Read the measured joint state (positions + velocities) one time.
@@ -374,14 +235,6 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec)
     a.recv_all(recv_timeout_us);
     let state = a.get_state();
     (state.positions, state.velocities)
-}
-
-/// Decompose a world-frame pose into the interface's `(position, quaternion)`
-/// arrays: position `[x, y, z]` (m) and quaternion `[x, y, z, w]`.
-fn world_pose_arrays(pose: &Isometry3<f64>) -> ([f64; 3], [f64; 4]) {
-    let t = pose.translation.vector;
-    let r = pose.rotation;
-    ([t.x, t.y, t.z], [r.i, r.j, r.k, r.w])
 }
 
 fn fmt_joints(v: &JointVec) -> String {
