@@ -100,7 +100,15 @@ pub async fn run(
         // candidates: the closing-velocity barrier limits only the gap-closing
         // component of the joint step, per arm.
         let prev = ArmPair::new(planners.left.setpoint(), planners.right.setpoint());
-        let governed = governor.govern(&prev, &candidate, dt);
+        // The arms' real pose for the governor's measured-state monitor. Falls back
+        // to the held setpoint if an arm has no measurement this instant (only before
+        // the first state, which `seed` already gated on), so a momentary gap never
+        // reads as a breach.
+        let measured = ArmPair::new(
+            channels.left.measured.borrow().as_ref().map_or(prev.left, |m| m.positions),
+            channels.right.measured.borrow().as_ref().map_or(prev.right, |m| m.positions),
+        );
+        let governed = governor.govern(&prev, &candidate, &measured, dt);
 
         // Publish one governed setpoint per arm. The single publisher just changes
         // arm_id; each follower keeps its own arm. A follower never starves as long
