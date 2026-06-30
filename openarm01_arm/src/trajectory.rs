@@ -149,7 +149,10 @@ pub fn plan_cartesian_duration(
         prev_q = Some(sol.q);
         seed = sol.q;
     }
-    Some(velocity_limited_duration(peak_ratio, requested_duration_secs))
+    Some(velocity_limited_duration(
+        peak_ratio,
+        requested_duration_secs,
+    ))
 }
 
 // --- Shared blend / sizing helpers -----------------------------------------
@@ -192,7 +195,10 @@ fn velocity_limited_duration(peak_velocity_ratio: f64, requested_secs: f64) -> f
 /// jump.
 fn interpolate_pose(start: &Isometry3<f64>, end: &Isometry3<f64>, s: f64) -> Isometry3<f64> {
     let position = start.translation.vector.lerp(&end.translation.vector, s);
-    let rotation = start.rotation.try_slerp(&end.rotation, s, 1e-6).unwrap_or(end.rotation);
+    let rotation = start
+        .rotation
+        .try_slerp(&end.rotation, s, 1e-6)
+        .unwrap_or(end.rotation);
     Isometry3::from_parts(Translation3::from(position), rotation)
 }
 

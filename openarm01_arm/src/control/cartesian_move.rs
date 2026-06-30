@@ -56,7 +56,13 @@ impl CartesianMove {
             let (pos, quat) = world_pose_arrays(&start_world);
             if let Err(e) = g
                 .ctx
-                .complete(false, "target path unreachable / no in-limit IK solution".into(), pos, quat, 0.0)
+                .complete(
+                    false,
+                    "target path unreachable / no in-limit IK solution".into(),
+                    pos,
+                    quat,
+                    0.0,
+                )
                 .await
             {
                 error!("move_arm complete: {e}");
@@ -95,7 +101,10 @@ impl CartesianMove {
         }
 
         let base_target = io.model.base_pose(&self.trajectory.sample(io.now));
-        let Some(sol) = io.model.solve_ik(&base_target, ArmAnglePolicy::FromSeed, &self.seed) else {
+        let Some(sol) = io
+            .model
+            .solve_ik(&base_target, ArmAnglePolicy::FromSeed, &self.seed)
+        else {
             // IK failed mid-path (unreachable / singular): hold the last good config.
             command(io, &self.prev_q_des, &ZERO);
             let done = Completion::Done {
@@ -115,7 +124,12 @@ impl CartesianMove {
             .duration_since(self.prev_sample_at)
             .as_secs_f64()
             .max(io.cfg.cycle_period.as_secs_f64() * 0.5);
-        if exceeds_velocity_limits(&sol.q, &self.prev_q_des, &io.cfg.max_joint_velocity_rad_s, dt) {
+        if exceeds_velocity_limits(
+            &sol.q,
+            &self.prev_q_des,
+            &io.cfg.max_joint_velocity_rad_s,
+            dt,
+        ) {
             command(io, &self.prev_q_des, &ZERO);
             let done = Completion::Done {
                 success: false,
@@ -133,8 +147,15 @@ impl CartesianMove {
         self.seed = sol.q;
 
         if self.trajectory.is_complete(io.now) {
-            self.finish(io, Completion::Done { success: true, message: "cartesian move complete" }, elapsed)
-                .await
+            self.finish(
+                io,
+                Completion::Done {
+                    success: true,
+                    message: "cartesian move complete",
+                },
+                elapsed,
+            )
+            .await
         } else {
             Mode::CartesianMove(self)
         }
@@ -150,10 +171,14 @@ impl CartesianMove {
         let (pos, quat) = world_pose_arrays(&io.model.world_pose(&io.ee_base));
         let result = match completion {
             Completion::Done { success, message } => {
-                self.ctx.complete(success, message.into(), pos, quat, elapsed).await
+                self.ctx
+                    .complete(success, message.into(), pos, quat, elapsed)
+                    .await
             }
             Completion::Cancelled => {
-                self.ctx.complete_cancelled(false, "goal cancelled".into(), pos, quat, elapsed).await
+                self.ctx
+                    .complete_cancelled(false, "goal cancelled".into(), pos, quat, elapsed)
+                    .await
             }
         };
         if let Err(e) = result {
@@ -166,7 +191,12 @@ impl CartesianMove {
 
 /// Whether stepping from `q_prev` to `q_new` over `dt_s` implies any joint
 /// velocity beyond [`VELOCITY_GUARD_MARGIN`] times its limit.
-fn exceeds_velocity_limits(q_new: &JointVec, q_prev: &JointVec, max_vel_rad_s: &JointVec, dt_s: f64) -> bool {
+fn exceeds_velocity_limits(
+    q_new: &JointVec,
+    q_prev: &JointVec,
+    max_vel_rad_s: &JointVec,
+    dt_s: f64,
+) -> bool {
     q_new
         .iter()
         .zip(q_prev)

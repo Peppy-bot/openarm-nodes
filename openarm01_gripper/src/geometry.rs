@@ -51,7 +51,7 @@ mod tests {
     fn travel_window_is_closed_to_open() {
         assert!((GRIPPER_LIMITS_M.lo - 0.0).abs() < 1e-12);
         assert!((GRIPPER_LIMITS_M.hi - OPEN_M).abs() < 1e-12);
-        assert!(GRIPPER_LIMITS_M.lo < GRIPPER_LIMITS_M.hi);
+        const { assert!(GRIPPER_LIMITS_M.lo < GRIPPER_LIMITS_M.hi) };
     }
 
     #[test]
@@ -68,8 +68,8 @@ mod tests {
     fn mapping_signs_oppose() {
         // 0 m → 0 rad, OPEN_M → OPEN_RAD. The open direction is negative in the
         // motor frame; a sign flip would drive the gripper the wrong way.
-        assert!(OPEN_M > 0.0);
-        assert!(OPEN_RAD < 0.0);
+        const { assert!(OPEN_M > 0.0) };
+        const { assert!(OPEN_RAD < 0.0) };
     }
 
     #[test]
@@ -86,7 +86,10 @@ mod tests {
         // round-trip catches inverse mismatch (wrong constant in numerator/denominator).
         for pos_m in [0.0, 0.01, OPEN_M / 3.0, OPEN_M] {
             let back = motor_rad_to_meters(meters_to_motor_rad(pos_m));
-            assert!((back - pos_m).abs() < 1e-12, "round-trip failed for {pos_m}");
+            assert!(
+                (back - pos_m).abs() < 1e-12,
+                "round-trip failed for {pos_m}"
+            );
         }
     }
 }

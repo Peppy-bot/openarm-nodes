@@ -20,13 +20,21 @@ pub async fn run(
     state: Arc<SharedState>,
     token: CancellationToken,
 ) {
+    let mut subscription = match state_joint_states::subscribe(&runner).await {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "joint_states subscribe");
+            return;
+        }
+    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = state_joint_states::on_next_message_received(&runner) => received,
+            received = subscription.next() => received,
         };
         let (_producer, msg) = match received {
-            Ok(pair) => pair,
+            Ok(Some(pair)) => pair,
+            Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "joint_states receive");
                 continue;

@@ -11,8 +11,8 @@ use tracing::info;
 
 use super::follow::Follow;
 use super::{ControlConfig, Mode, READY_POSE, TickIo, command, fmt_joints};
-use crate::{ARM_DOF, JointVec};
 use crate::trajectory::JointTrajectory;
+use crate::{ARM_DOF, JointVec};
 
 /// Requested duration (s) of the startup move, floored at the joint velocity
 /// limits like any joint move (so even a far home is a gentle, planned ease).
@@ -37,9 +37,18 @@ impl StartupMove {
     /// pose: eases out rather than lunging, and tolerates powering off below the
     /// elbow floor (it moves up into range).
     pub(super) fn new(q0: JointVec, cfg: &ControlConfig) -> Self {
-        info!("startup: no stream present, moving to ready pose {} (from {})", fmt_joints(&READY_POSE), fmt_joints(&q0));
+        info!(
+            "startup: no stream present, moving to ready pose {} (from {})",
+            fmt_joints(&READY_POSE),
+            fmt_joints(&q0)
+        );
         Self {
-            trajectory: JointTrajectory::new(q0, READY_POSE, cfg.max_joint_velocity_rad_s, READY_MOVE_DURATION_S),
+            trajectory: JointTrajectory::new(
+                q0,
+                READY_POSE,
+                cfg.max_joint_velocity_rad_s,
+                READY_MOVE_DURATION_S,
+            ),
         }
     }
 

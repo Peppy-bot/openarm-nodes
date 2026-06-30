@@ -8,7 +8,12 @@ use crate::{ARM_DOF, JointVec};
 
 /// Advance the setpoint one tick toward the target, each joint stepping at
 /// most `vmax * dt`: the velocity-limited chase that absorbs target jumps.
-pub(super) fn chase_step(setpoint: &JointVec, target: &JointVec, vmax: &JointVec, dt: f64) -> JointVec {
+pub(super) fn chase_step(
+    setpoint: &JointVec,
+    target: &JointVec,
+    vmax: &JointVec,
+    dt: f64,
+) -> JointVec {
     std::array::from_fn(|i| {
         let max_step = vmax[i] * dt;
         setpoint[i] + (target[i] - setpoint[i]).clamp(-max_step, max_step)

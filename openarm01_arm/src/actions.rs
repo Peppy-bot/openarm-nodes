@@ -62,7 +62,9 @@ pub async fn run_move_arm_joints(
                 if claim(&busy, &claimed) {
                     Ok(move_arm_joints::GoalResponse::accept())
                 } else {
-                    Ok(move_arm_joints::GoalResponse::reject("arm is already executing a motion"))
+                    Ok(move_arm_joints::GoalResponse::reject(
+                        "arm is already executing a motion",
+                    ))
                 }
             })
             .await
@@ -111,7 +113,9 @@ pub async fn run_move_arm(
                 if claim(&busy, &claimed) {
                     Ok(move_arm::GoalResponse::accept())
                 } else {
-                    Ok(move_arm::GoalResponse::reject("arm is already executing a motion"))
+                    Ok(move_arm::GoalResponse::reject(
+                        "arm is already executing a motion",
+                    ))
                 }
             })
             .await
@@ -187,7 +191,10 @@ fn check_duration(duration_s: f64) -> Result<(), &'static str> {
 /// True if every joint target lies within this arm's position limits. Non-finite
 /// values (NaN/inf) fall outside any range, so they are rejected too.
 fn target_in_limits(target: &JointVec, limits: &[Limit; ARM_DOF]) -> bool {
-    limits.iter().zip(target).all(|(limit, &q)| limit.contains(q))
+    limits
+        .iter()
+        .zip(target)
+        .all(|(limit, &q)| limit.contains(q))
 }
 
 /// Build a world-frame pose from a `move_arm` goal's `(position, quaternion)`
@@ -270,7 +277,10 @@ mod tests {
         // A non-unit quaternion is accepted and normalized.
         let pose = parse_target_pose(&[0.1, 0.2, 0.3], &[0.0, 0.0, 0.0, 2.0]).expect("valid");
         assert!((pose.rotation.norm() - 1.0).abs() < 1e-12);
-        assert!((pose.translation.vector - srs_model::nalgebra::Vector3::new(0.1, 0.2, 0.3)).norm() < 1e-12);
+        assert!(
+            (pose.translation.vector - srs_model::nalgebra::Vector3::new(0.1, 0.2, 0.3)).norm()
+                < 1e-12
+        );
 
         // Zero quaternion is degenerate.
         assert!(parse_target_pose(&[0.0; 3], &[0.0, 0.0, 0.0, 0.0]).is_none());

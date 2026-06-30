@@ -40,7 +40,8 @@ pub async fn run(
             .position;
         let opening = geometry::motor_rad_to_meters(motor_rad);
         let result = async {
-            let msg = gripper_states::build_message(gripper_id, opening).map_err(|e| e.to_string())?;
+            let msg =
+                gripper_states::build_message(gripper_id, opening).map_err(|e| e.to_string())?;
             publisher.publish(msg).await.map_err(|e| e.to_string())
         }
         .await;

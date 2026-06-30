@@ -59,7 +59,11 @@ mod tests {
         let tau = torques(p, &[0.0; ARM_DOF]);
         // ω=0 → tanh(0)=0, Fv·ω=0, so τ = Fo.
         for (i, &t) in tau.iter().enumerate() {
-            assert!((t - p.fo[i]).abs() < 1e-12, "joint {i}: tau={t} Fo={}", p.fo[i]);
+            assert!(
+                (t - p.fo[i]).abs() < 1e-12,
+                "joint {i}: tau={t} Fo={}",
+                p.fo[i]
+            );
         }
     }
 
@@ -70,7 +74,10 @@ mod tests {
         // ω large positive → tanh→+1, so τ ≈ Fo + Fv·ω + Fc.
         for (i, &t) in tau.iter().enumerate() {
             let expected = p.fo[i] + p.fv[i] * omega + p.fc[i];
-            assert!((t - expected).abs() < 1e-6, "joint {i}: tau={t} expected={expected}");
+            assert!(
+                (t - expected).abs() < 1e-6,
+                "joint {i}: tau={t} expected={expected}"
+            );
         }
     }
 
