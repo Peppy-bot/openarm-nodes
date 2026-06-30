@@ -227,32 +227,21 @@ impl Governor {
         let prev14 = concat(prev);
         let cand14 = concat(cand);
 
-        // Outside the influence zone the barrier imposes no closing limit, but a
-        // single oversized tick can still vault from beyond `d_safe` past the stop
-        // floor, so the candidate is held to the same floor (`d_stop`) rather than
-        // returned unchecked.
+        // Outside the influence zone the barrier imposes no closing limit, but the
+        // candidate must still not cross the stop floor. Distance is not monotone
+        // along the segment, so scan it rather than trusting either endpoint: a
+        // single tick can pass through a pocket while both ends read clear.
         if d_now >= self.d_safe {
-            match self.distance_at(&cand14) {
-                // Both ends sit clear of the band: a velocity-limited tick cannot
-                // have dipped a full band-width below in between, so skip the scan.
-                Some(d) if d >= self.d_safe => {
+            return match self.clip_to_floor(&prev14, &cand14, self.d_stop) {
+                Clip::Clear => {
                     self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
-                    return *cand;
+                    *cand
                 }
-                // The candidate reached the band (or below): walk the segment so a
-                // pocket between two band-clear ends cannot pass unchecked.
-                Some(_) => match self.clip_to_floor(&prev14, &cand14, self.d_stop) {
-                    Clip::Clear => {
-                        self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
-                        return *cand;
-                    }
-                    Clip::Clipped(q) => {
-                        self.log_transition(Guard::Stopped, d_now, &link_a, &link_b);
-                        return split(&q);
-                    }
-                },
-                None => return *prev,
-            }
+                Clip::Clipped(q) => {
+                    self.log_transition(Guard::Stopped, d_now, &link_a, &link_b);
+                    split(&q)
+                }
+            };
         }
 
         let step: [f64; DUAL_DOF] = std::array::from_fn(|i| cand14[i] - prev14[i]);
@@ -724,39 +713,28 @@ mod tests {
     }
 
     #[test]
-    fn fast_path_clips_a_mid_segment_pocket_an_endpoint_check_would_miss() {
+    fn outside_band_segment_is_scanned_even_when_both_ends_are_clear() {
         let mut g = governor(true);
-        // Bimanual distance is not monotone along a joint-space segment. Sweeping the
-        // left shoulder (j1) swings the left arm around the right one: from home the
-        // clearance dives into deep penetration near j1=1.4 and resurfaces past
-        // j1~3.1. So a segment from home to a far shoulder angle whose endpoint lands
-        // back inside the band (clear of the stop, but below d_safe so the scan runs
-        // rather than the cheap exit) crosses a sub-stop pocket in between.
+        // Bimanual distance is not monotone along a joint-space segment, and the
+        // governor must not trust the endpoints even when both are clear of the band.
+        // Sweeping the left shoulder (j1) swings the left arm around the right one:
+        // from home the clearance dives into deep penetration near j1=1.4 and
+        // resurfaces by j1~3.15. So home and a far shoulder angle are both clear of
+        // d_safe, yet the straight segment between them crosses well below the stop.
         let prev = home();
-        assert!(distance(&mut g, &prev) >= D_SAFE, "home is the clear, outside-band start");
-        let at_shoulder = |j1: f64| {
+        let cand = {
             let mut p = home();
-            p.left[1] = j1;
+            p.left[1] = 3.2;
             p
         };
-        // Bisect the resurfacing flank (monotone there) for a shoulder angle whose
-        // clearance lands in the middle of the band.
-        let target = 0.5 * (D_STOP + D_SAFE);
-        let (mut lo, mut hi) = (2.8_f64, 3.2_f64);
-        for _ in 0..50 {
-            let mid = 0.5 * (lo + hi);
-            if distance(&mut g, &at_shoulder(mid)) < target { lo = mid } else { hi = mid }
-        }
-        let cand = at_shoulder(0.5 * (lo + hi));
+        assert!(distance(&mut g, &prev) >= D_SAFE, "home end is clear of the band");
+        assert!(distance(&mut g, &cand) >= D_SAFE, "far-shoulder end is clear of the band");
+        assert!(segment_min(&mut g, &prev, &cand, 128) < D_STOP, "the segment dips below the stop");
 
-        // The pocket is real: the end is clear of the stop, the interior is not.
-        assert!((D_STOP..D_SAFE).contains(&distance(&mut g, &cand)), "cand sits in the band, clear of the stop");
-        assert!(segment_min(&mut g, &prev, &cand, 128) < D_STOP, "the segment must dip below the stop");
-
-        // Endpoint-only logic would pass `cand` through (it is clear of the stop); the
-        // segment scan must clip it to a setpoint that is itself clear of the stop.
+        // Trusting the (clear) endpoints would pass `cand` through; the segment scan
+        // must clip it to a setpoint that is itself clear of the stop.
         let governed = g.govern(&prev, &cand, &prev, DT);
-        assert_ne!(governed, cand, "a segment with a sub-stop interior was passed unclipped");
+        assert_ne!(governed, cand, "a clear-ended segment with a sub-stop interior was passed unclipped");
         assert!(distance(&mut g, &governed) >= D_STOP - 1e-6, "the clipped setpoint is below the stop");
     }
 }
