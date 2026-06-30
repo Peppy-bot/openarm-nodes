@@ -102,9 +102,10 @@
       def_file: "apptainer.def"
     },
     parameters: {
-      // Rate (Hz) at which an armed arm's target setpoint is re-published on
-      // arm_joint_commands. Must stay comfortably above 1 / the arm's
-      // stream_timeout_s so the producer lock survives between operator inputs.
+      // Rate (Hz) at which enabled operator arm targets are re-published on
+      // arm_joint_commands, which the backbone consumes. Must stay comfortably
+      // above 1 / the backbone's stream_timeout_s so the producer lock survives
+      // between operator inputs.
       command_rate_hz: "u32",
       // Operator's launch end-effector speed cap (m/s), streamed live to the hub on
       // governor_control and retunable from the UI. Require > 0. The sim launchers
