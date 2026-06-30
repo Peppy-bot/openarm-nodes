@@ -51,17 +51,26 @@ const MIN_GRADIENT_NORM_SQ: f64 = 1e-18;
 /// so only a genuine divergence trips it. A module constant (not a node parameter),
 /// like the approach speed above; promote it to a parameter when tuning on hardware.
 const MONITOR_TRIP_FRACTION: f64 = 0.5;
+// The trip floor must sit strictly inside (0, d_stop) or the hysteresis band
+// [trip_floor, d_stop) collapses and the latch logic degrades silently.
+const _: () = assert!(MONITOR_TRIP_FRACTION > 0.0 && MONITOR_TRIP_FRACTION < 1.0);
 
-/// Interior samples the backstop walks along a per-tick segment to bracket the
-/// first sub-floor crossing. Bimanual surface distance is not monotone along a
-/// joint-space segment, so an endpoint check (or a bisection that assumes
-/// monotonicity) can step over a thin pocket; scanning bounds a missed crossing to
-/// ~1/`SEGMENT_SAMPLES` of the step, which the small velocity-limited tick resolves.
-const SEGMENT_SAMPLES: usize = 16;
+/// Floor-scan resolution: the backstop walks a per-tick segment and probes at least
+/// once every `MAX_PROBE_ARC_RAD` of joint motion, so the spatial resolution is
+/// bounded regardless of how large the step is. Bimanual surface distance is not
+/// monotone along a joint-space segment, so a fixed grid would step over a thin
+/// pocket on a large jump; scaling the probe count to the segment length keeps the
+/// resolution fixed. Tied to the smallest hull feature the scan must resolve (a few
+/// mm of surface motion).
+const MAX_PROBE_ARC_RAD: f64 = 0.01;
+/// Probe-count floor (small steps still get a dense scan) and ceiling (bounds the
+/// per-tick cost on a pathological large jump; velocity-limited ticks stay well
+/// under it).
+const SEGMENT_SAMPLES_MIN: usize = 16;
+const SEGMENT_SAMPLES_MAX: usize = 64;
 
-/// Bisection iterations within the bracketing interval (width `1/SEGMENT_SAMPLES`)
-/// once the scan finds the first crossing: `1/16 / 2^8 ~= 1e-4` of the step, on par
-/// with the prior whole-segment resolution.
+/// Bisection iterations within a bracketing interval once the scan finds the first
+/// crossing: at the densest, `1/SEGMENT_SAMPLES_MIN / 2^8 ~= 1e-4` of the step.
 const FLOOR_BISECT_ITERS: usize = 8;
 
 /// Where the governor last sat, so throttle/stop/clear are logged on transition
@@ -199,9 +208,11 @@ impl Governor {
         }
         // Measured-state tripwire: the commanded barrier below shapes only the
         // commanded stream and cannot see tracking error, so if the arms have
-        // actually closed past the monitor floor, hold `prev` until they recover.
-        if self.actual_breach(measured) {
-            return *prev;
+        // actually closed past the monitor floor, block a command that would close
+        // the gap further. Separation is never blocked, so the operator can always
+        // retreat from a near-collision.
+        if let Some(held) = self.monitor_hold(prev, cand, measured) {
+            return held;
         }
         // One analytic query yields both the current clearance and its gradient.
         let (d_now, grad, link_a, link_b) = match self.model.distance_gradient(&prev.left, &prev.right) {
@@ -226,61 +237,30 @@ impl Governor {
         };
         let prev14 = concat(prev);
         let cand14 = concat(cand);
+        let floor = self.step_floor(d_now);
 
         // Outside the influence zone the barrier imposes no closing limit, but the
         // candidate must still not cross the stop floor. Distance is not monotone
         // along the segment, so scan it rather than trusting either endpoint: a
         // single tick can pass through a pocket while both ends read clear.
         if d_now >= self.d_safe {
-            return match self.clip_to_floor(&prev14, &cand14, self.d_stop) {
-                Clip::Clear => {
-                    self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
-                    *cand
-                }
-                Clip::Clipped(q) => {
-                    self.log_transition(Guard::Stopped, d_now, &link_a, &link_b);
-                    split(&q)
-                }
+            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, floor) {
+                Clip::Clear => (Guard::Clear, *cand),
+                Clip::Clipped(q) => (Guard::Stopped, split(&q)),
             };
+            self.log_transition(guard, d_now, &link_a, &link_b);
+            return governed;
         }
 
-        let step: [f64; DUAL_DOF] = std::array::from_fn(|i| cand14[i] - prev14[i]);
-        // Predicted change in clearance over this tick if the full step is taken,
-        // and the most clearance the barrier permits losing.
-        let predicted_delta_d = dot(&grad, &step);
-        let max_loss = self.allowed_closing(d_now) * dt;
-
-        let norm_sq = dot(&grad, &grad);
-        let (mut governed14, mut limited) = if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
-            (cand14, false)
-        } else {
-            // Subtract just enough of the closing component (along the distance
-            // gradient) to land on the barrier `grad . step = -max_loss`.
-            let excess = (predicted_delta_d + max_loss) / norm_sq;
-            (std::array::from_fn(|i| prev14[i] + step[i] - excess * grad[i]), true)
+        // In the band: throttle only the closing component (the velocity-damper
+        // barrier), then hold the realized clearance at the floor with the exact
+        // backstop, since the first-order projection can still let surface curvature
+        // carry the clamped step past it.
+        let (projected14, throttled) = self.throttle_closing(&prev14, &cand14, &grad, d_now, dt);
+        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, floor) {
+            Clip::Clear => (projected14, throttled),
+            Clip::Clipped(q) => (q, true),
         };
-
-        // The barrier may only slow the commanded motion, never add motion a joint
-        // was not commanded. The minimum-norm correction above spreads the closing
-        // reduction along the gradient, which can jog the arm the operator is not
-        // driving and even reverse the joint they are (fighting an escape). Clamp
-        // each joint's governed step into [0, commanded step]: a held joint stays
-        // put, no joint reverses, and separating motion is untouched. The backstop
-        // below still guarantees the floor on the clamped step.
-        for i in 0..DUAL_DOF {
-            governed14[i] = prev14[i] + (governed14[i] - prev14[i]).clamp(step[i].min(0.0), step[i].max(0.0));
-        }
-
-        // Exact backstop: the first-order projection can still let surface curvature
-        // carry the step past the stop floor, so walk prev->governed and clip at the
-        // first floor crossing. The floor is d_stop, or the current clearance if
-        // already inside it (so an in-penetration recovery is never forced to close
-        // further).
-        let floor = d_now.min(self.d_stop);
-        if let Clip::Clipped(q) = self.clip_to_floor(&prev14, &governed14, floor) {
-            governed14 = q;
-            limited = true;
-        }
 
         let guard = if !limited {
             Guard::Clear
@@ -293,29 +273,46 @@ impl Governor {
         split(&governed14)
     }
 
-    /// Measured-state monitor (defense in depth): does the real clearance, from the
-    /// measured joint state, sit past the monitor floor? Trips when it drops below
-    /// `MONITOR_TRIP_FRACTION * d_stop` and stays tripped until it recovers past
-    /// `d_stop` (hysteresis, latched in `monitor_tripped`), so a measurement hovering
-    /// at the wall cannot chatter the hold. A failed distance query cannot confirm
-    /// the arms are clear, so it counts as a breach (fail-safe). Logs each
-    /// transition. Only ever consulted while the governor is enabled.
-    fn actual_breach(&mut self, measured: &ArmPair<JointVec>) -> bool {
+    /// Measured-state monitor (defense in depth): the commanded barrier shapes only
+    /// the commanded stream and cannot see tracking error, so this watches the real
+    /// clearance from the measured joint state. When the arms have actually closed
+    /// past `MONITOR_TRIP_FRACTION * d_stop` it blocks a command that would close the
+    /// gap further, until the clearance recovers past `d_stop` (hysteresis, latched
+    /// in `monitor_tripped`, so a measurement hovering at the wall cannot chatter).
+    /// Separation is never blocked: a command that increases the real clearance
+    /// always passes, so the operator can always retreat from a near-collision.
+    /// Returns `Some(prev)` to hold, `None` to let the normal governing proceed. A
+    /// failed distance query counts as a breach (fail-safe). Only consulted while
+    /// enabled.
+    fn monitor_hold(
+        &mut self,
+        prev: &ArmPair<JointVec>,
+        cand: &ArmPair<JointVec>,
+        measured: &ArmPair<JointVec>,
+    ) -> Option<ArmPair<JointVec>> {
+        // No measured clearance (non-finite state or deep penetration): defer to the
+        // main governing (whose deep-penetration fallback still lets the operator
+        // escape), so a failed query never blocks separation or latches the hold.
+        let d_measured = self.distance_at(&concat(measured))?;
         let trip_floor = MONITOR_TRIP_FRACTION * self.d_stop;
         let threshold = if self.monitor_tripped { self.d_stop } else { trip_floor };
-        let breached = match self.model.min_distance(&measured.left, &measured.right) {
-            Ok(p) => p.distance < threshold,
-            Err(_) => true,
-        };
+        let breached = d_measured < threshold;
         if breached != self.monitor_tripped {
             if breached {
-                warn!("collision MONITOR: measured clearance past {trip_floor:+.4} m (real divergence below the commanded floor), holding");
+                warn!("collision MONITOR: measured clearance past {trip_floor:+.4} m, blocking approach (separation still allowed)");
             } else {
                 info!("collision MONITOR: measured clearance recovered past d_stop, resuming");
             }
             self.monitor_tripped = breached;
         }
-        breached
+        if !breached {
+            return None;
+        }
+        // Hold only a command confirmed to close the gap further. A command that opens
+        // it, or one whose clearance cannot be confirmed, is never held, so the
+        // operator can always retreat from a near-collision.
+        let closes = self.distance_at(&concat(cand)).is_some_and(|d_cand| d_cand <= d_measured);
+        if closes { Some(*prev) } else { None }
     }
 
     /// Gradient-free fallback for deep penetration: with no usable gradient, allow
@@ -327,11 +324,53 @@ impl Governor {
         let prev14 = concat(prev);
         let cand14 = concat(cand);
         let Some(d_now) = self.distance_at(&prev14) else { return *prev };
-        let floor = d_now.min(self.d_stop);
-        match self.clip_to_floor(&prev14, &cand14, floor) {
+        match self.clip_to_floor(&prev14, &cand14, self.step_floor(d_now)) {
             Clip::Clear => split(&cand14),
             Clip::Clipped(q) => split(&q),
         }
+    }
+
+    /// The clearance this tick's governed step must not drop below: `d_stop`
+    /// normally, or the current clearance if the arms are already inside it (so an
+    /// in-penetration recovery is never forced to close further).
+    fn step_floor(&self, d_now: f64) -> f64 {
+        d_now.min(self.d_stop)
+    }
+
+    /// The closing-velocity barrier: scale back only the gap-closing component of the
+    /// step (minimum-norm, along the distance gradient) so the clearance loses no more
+    /// than `allowed_closing(d_now) * dt`, then clamp each joint's step into
+    /// `[0, commanded]` so the barrier can only slow motion, never add motion a joint
+    /// was not commanded nor reverse one it was. Returns the governed configuration
+    /// and whether it limited the step.
+    fn throttle_closing(
+        &self,
+        prev14: &[f64; DUAL_DOF],
+        cand14: &[f64; DUAL_DOF],
+        grad: &[f64; DUAL_DOF],
+        d_now: f64,
+        dt: f64,
+    ) -> ([f64; DUAL_DOF], bool) {
+        let step: [f64; DUAL_DOF] = std::array::from_fn(|i| cand14[i] - prev14[i]);
+        // Predicted change in clearance over this tick if the full step is taken, and
+        // the most clearance the barrier permits losing.
+        let predicted_delta_d = dot(grad, &step);
+        let max_loss = self.allowed_closing(d_now) * dt;
+        let norm_sq = dot(grad, grad);
+        let (projected, limited) = if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
+            (*cand14, false)
+        } else {
+            // Subtract just enough of the closing component (along the gradient) to
+            // land on the barrier `grad . step = -max_loss`.
+            let excess = (predicted_delta_d + max_loss) / norm_sq;
+            (std::array::from_fn(|i| prev14[i] + step[i] - excess * grad[i]), true)
+        };
+        // The minimum-norm correction spreads the closing reduction along the
+        // gradient, which can jog a joint the operator did not drive or reverse one
+        // they did. Clamp each joint's governed step into [0, commanded step]: a held
+        // joint stays put, no joint reverses, separating motion is untouched.
+        let governed = std::array::from_fn(|i| prev14[i] + (projected[i] - prev14[i]).clamp(step[i].min(0.0), step[i].max(0.0)));
+        (governed, limited)
     }
 
     /// Permitted approach speed (m/s) at signed surface distance `d`: zero at or
@@ -353,17 +392,27 @@ impl Governor {
 
     /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
     /// point where the straight segment drops below `floor`, or [`Clip::Clear`] if
-    /// every sampled point stays at or above it. Bimanual distance is not monotone
-    /// along a joint-space segment, so this scans `SEGMENT_SAMPLES` interior points to
-    /// bracket the first breach (an endpoint check alone can step over a pocket) and
-    /// bisects within that bracket for the boundary. A failed query counts as a
-    /// breach (so a model-rejected configuration is never returned), retracting
-    /// conservatively. Assumes `prev` itself is clear (the caller's `d_now >= floor`).
+    /// every probed point stays at or above it. Bimanual distance is not monotone
+    /// along a joint-space segment, so this probes interior points (one per
+    /// `MAX_PROBE_ARC_RAD` of joint motion, bounded by `SEGMENT_SAMPLES_MIN`..`MAX`) to
+    /// bracket the first breach (an endpoint check alone can step over a pocket, and a
+    /// fixed grid can step over one on a large jump) and bisects within that bracket
+    /// for the boundary. A failed query counts as a breach (so a model-rejected
+    /// configuration is never returned), retracting conservatively. Requires `prev`
+    /// itself to be clear (the caller's `d_now >= floor`).
     fn clip_to_floor(&mut self, prev: &[f64; DUAL_DOF], target: &[f64; DUAL_DOF], floor: f64) -> Clip {
+        debug_assert!(
+            self.distance_at(prev).is_none_or(|d| d >= floor),
+            "clip_to_floor requires prev to be clear of the floor"
+        );
         let point_at = |t: f64| -> [f64; DUAL_DOF] { std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i])) };
+        // Probe count scaled to the segment length so no probe moves any joint more
+        // than MAX_PROBE_ARC_RAD: the spatial resolution is bounded for any step size.
+        let max_excursion = (0..DUAL_DOF).map(|i| (target[i] - prev[i]).abs()).fold(0.0_f64, f64::max);
+        let samples = ((max_excursion / MAX_PROBE_ARC_RAD).ceil() as usize).clamp(SEGMENT_SAMPLES_MIN, SEGMENT_SAMPLES_MAX);
         let mut last_clear = 0.0_f64;
-        for s in 1..=SEGMENT_SAMPLES {
-            let t = s as f64 / SEGMENT_SAMPLES as f64;
+        for s in 1..=samples {
+            let t = s as f64 / samples as f64;
             match self.distance_at(&point_at(t)) {
                 Some(d) if d >= floor => last_clear = t,
                 _ => {
@@ -511,11 +560,11 @@ mod tests {
         let escape = chase(&deep, &home(), 0.02);
         let out = g.govern_without_gradient(&deep, &escape);
         assert_ne!(out, deep, "escape was frozen in place");
-        assert!(distance(&mut g, &out) >= floor - 2e-3, "escape dropped below the floor");
+        assert!(distance(&mut g, &out) >= floor - 1e-3, "escape dropped below the floor");
         // A deeper command is held at the floor, never pushed past it.
         let deeper = chase(&deep, &wrists_inward(2.0), 0.02);
         let held = g.govern_without_gradient(&deep, &deeper);
-        assert!(distance(&mut g, &held) >= floor - 2e-3, "guard let penetration deepen");
+        assert!(distance(&mut g, &held) >= floor - 1e-3, "guard let penetration deepen");
     }
 
     #[test]
@@ -568,13 +617,17 @@ mod tests {
         let mut q = home();
         let mut entered_band = false;
         for _ in 0..250 {
-            let cand = chase(&q, &target, 0.02);
-            q = g.govern(&q, &cand, &q, DT);
+            let prev = q;
+            let cand = chase(&prev, &target, 0.02);
+            q = g.govern(&prev, &cand, &prev, DT);
             let d = distance(&mut g, &q);
             entered_band |= d < D_SAFE;
             // The exact backstop holds the realized clearance at the floor, so the
             // stop distance is never breached on any tick.
             assert!(d >= D_STOP, "barrier breached: d={d:+.5}");
+            // The whole realized path prev->governed, not just its endpoint, stays at
+            // or above the floor (the step is small, so a coarse sweep resolves it).
+            assert!(segment_min(&mut g, &prev, &q, 16) >= D_STOP - 1e-3, "the prev->governed path dipped below the stop");
         }
         assert!(entered_band, "arms never approached into the band");
         // It should converge near the stop boundary, not stall far away.
@@ -643,16 +696,41 @@ mod tests {
     }
 
     #[test]
-    fn monitor_holds_when_measured_breaches_while_command_is_safe() {
+    fn monitor_always_allows_separation_when_measured_breaches() {
         let mut g = governor(true);
-        // The command is a safe, far-apart step, but the MEASURED arms have actually
-        // closed past the monitor floor (tracking divergence the commanded barrier
-        // cannot see): the last setpoint is held regardless of the safe command.
-        let prev = home();
-        let cand = wrists_inward(0.2);
-        let breaching = wrists_inward(2.0);
-        assert!(distance(&mut g, &breaching) < MONITOR_TRIP_FRACTION * D_STOP, "measured pose must breach the monitor floor");
-        assert_eq!(g.govern(&prev, &cand, &breaching, DT), prev, "monitor did not hold on a measured breach");
+        // The MEASURED arms are past the monitor floor (a real near-collision). A
+        // command that opens the gap must ALWAYS pass: the operator can never be
+        // trapped inside a near-collision, even while the monitor is tripped.
+        let measured = wrists_inward(2.0);
+        assert!(distance(&mut g, &measured) < MONITOR_TRIP_FRACTION * D_STOP, "measured pose must breach the monitor floor");
+        let prev = measured;
+        let retreat = wrists_inward(1.4); // a more-open configuration
+        assert!(distance(&mut g, &retreat) > distance(&mut g, &measured), "retreat opens the gap");
+        let governed = g.govern(&prev, &retreat, &measured, DT);
+        assert_ne!(governed, prev, "separation was blocked while the monitor was tripped");
+        assert!(distance(&mut g, &governed) > distance(&mut g, &measured), "the governed step did not open the gap");
+    }
+
+    /// The left shoulder swung in is a deep self-collision; interpolating home toward
+    /// it gives configurations at any chosen clearance for the monitor tests.
+    fn deep_collision() -> ArmPair<JointVec> {
+        let mut p = home();
+        p.left[1] = 1.4;
+        p
+    }
+
+    #[test]
+    fn monitor_holds_a_closing_command_when_measured_breaches() {
+        let mut g = governor(true);
+        // Same breach, but the command would close the gap further: that is held.
+        let deep = deep_collision();
+        assert!(distance(&mut g, &deep) < 0.0, "deep pose must be in penetration");
+        let measured = config_at_distance(&mut g, &home(), &deep, 0.5 * MONITOR_TRIP_FRACTION * D_STOP);
+        assert!(distance(&mut g, &measured) < MONITOR_TRIP_FRACTION * D_STOP, "measured must breach the floor");
+        let prev = measured;
+        // `deep` is more closed than the measured pose: a closing command, held at prev.
+        assert!(distance(&mut g, &deep) < distance(&mut g, &measured), "deep is a closing command");
+        assert_eq!(g.govern(&prev, &deep, &measured, DT), prev, "a closing command was not held on a measured breach");
     }
 
     #[test]
@@ -662,32 +740,32 @@ mod tests {
         // trips and the commanded step passes as it would without it.
         let prev = home();
         let cand = wrists_inward(0.2);
+        assert!(distance(&mut g, &prev) >= D_SAFE, "precondition: home sits outside the band");
         assert_eq!(g.govern(&prev, &cand, &prev, DT), cand, "monitor tripped under good tracking");
     }
 
     #[test]
-    fn monitor_hysteresis_holds_until_recovered_past_d_stop() {
+    fn monitor_hysteresis_holds_a_closing_command_until_recovered_past_d_stop() {
         let mut g = governor(true);
+        // `deep` is a closing command vs every measured pose below, so the monitor's
+        // hold, not a separation pass, is what is under test.
+        let deep = deep_collision();
         let prev = home();
-        let cand = wrists_inward(0.2);
-        let breaching = wrists_inward(2.0);
+        let breaching = config_at_distance(&mut g, &home(), &deep, 0.5 * MONITOR_TRIP_FRACTION * D_STOP);
         assert!(distance(&mut g, &breaching) < MONITOR_TRIP_FRACTION * D_STOP);
 
         // A measured pose whose real clearance sits inside the hysteresis band
         // [trip floor, d_stop): below the commanded stop but above the trip floor.
-        let in_band = config_at_distance(&mut g, &home(), &breaching, 0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP));
-        let d_band = distance(&mut g, &in_band);
-        assert!((MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&d_band), "setup: in_band d={d_band}");
+        let in_band = config_at_distance(&mut g, &home(), &deep, 0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP));
+        assert!((MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&distance(&mut g, &in_band)), "setup: in_band not in the hysteresis band");
 
-        // From clear, an in-band measurement is above the trip floor, so it does not trip.
-        assert_eq!(g.govern(&prev, &cand, &in_band, DT), cand, "in-band measurement tripped from clear");
-        // A real breach past the trip floor trips it.
-        assert_eq!(g.govern(&prev, &cand, &breaching, DT), prev, "did not trip past the floor");
-        // The same in-band measurement (recovered past the trip floor but not d_stop)
-        // stays held: hysteresis.
-        assert_eq!(g.govern(&prev, &cand, &in_band, DT), prev, "released before recovering past d_stop");
-        // Fully recovered past d_stop: releases and the command passes.
-        assert_eq!(g.govern(&prev, &cand, &prev, DT), cand, "did not release after recovery");
+        // Breach trips the latch: the closing command is held at prev.
+        assert_eq!(g.govern(&prev, &deep, &breaching, DT), prev, "closing command not held on a breach");
+        // In-band measurement (above the trip floor, below d_stop): still held (hysteresis).
+        assert_eq!(g.govern(&prev, &deep, &in_band, DT), prev, "released before recovering past d_stop");
+        // Recovered past d_stop: the latch releases, so the command is governed
+        // normally (clipped toward the floor), not force-held at prev.
+        assert_ne!(g.govern(&prev, &deep, &home(), DT), prev, "did not release after recovery");
     }
 
     #[test]
@@ -698,6 +776,39 @@ mod tests {
         let cand = wrists_inward(0.2);
         let breaching = wrists_inward(2.0);
         assert_eq!(g.govern(&home(), &cand, &breaching, DT), cand);
+    }
+
+    #[test]
+    fn monitor_defers_when_the_measured_query_fails_so_separation_is_never_blocked() {
+        let mut g = governor(true);
+        // A non-finite measured state makes the distance query fail. The monitor must
+        // not hold (which would block escape); it defers to the main governing, so the
+        // command is never force-held at prev.
+        let prev = home();
+        let cand = wrists_inward(0.2);
+        let mut measured = home();
+        measured.left[0] = f64::NAN;
+        assert_eq!(g.govern(&prev, &cand, &measured, DT), cand, "monitor blocked a command on a failed measured query");
+    }
+
+    #[test]
+    fn monitor_does_not_trip_from_clear_on_an_in_band_measurement() {
+        let mut g = governor(true);
+        // Hysteresis asymmetry: from an untripped state the trip threshold is the trip
+        // floor, not d_stop, so a measurement in [trip floor, d_stop) must NOT trip. A
+        // closing command is then governed normally, not force-held at prev.
+        let deep = deep_collision();
+        let in_band = config_at_distance(&mut g, &home(), &deep, 0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP));
+        assert!((MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&distance(&mut g, &in_band)), "setup: in_band not in the hysteresis band");
+        assert_ne!(g.govern(&home(), &deep, &in_band, DT), home(), "an in-band measurement tripped from a clear state");
+    }
+
+    #[test]
+    fn concat_split_round_trip() {
+        let pair = ArmPair::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0]);
+        assert_eq!(split(&concat(&pair)), pair);
+        let flat: [f64; DUAL_DOF] = std::array::from_fn(|i| i as f64);
+        assert_eq!(concat(&split(&flat)), flat);
     }
 
     /// Minimum clearance sampled along the straight segment `prev`->`cand`.
