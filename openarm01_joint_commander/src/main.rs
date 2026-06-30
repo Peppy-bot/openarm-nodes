@@ -21,13 +21,26 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let token = node_runner.cancellation_token().clone();
-        // The operator streams the EE-speed cap live; its launch default is a
-        // parameter so the real arm starts conservative and the sim starts fast.
+        // The operator streams the governor controls live; their launch defaults are
+        // node parameters, kept in step with the hub's, so the real arm starts
+        // conservative (tight band, slow cap) and the sim launchers start fast.
         assert!(
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
             "max_ee_velocity_m_s must be a positive finite number"
         );
-        let shared = state::new_shared(params.max_ee_velocity_m_s);
+        assert!(
+            params.d_stop.is_finite()
+                && params.d_safe.is_finite()
+                && params.d_stop > 0.0
+                && params.d_stop < params.d_safe,
+            "governor band must satisfy 0 < d_stop < d_safe"
+        );
+        let shared = state::new_shared(
+            params.collision_governor_enabled,
+            params.d_stop,
+            params.d_safe,
+            params.max_ee_velocity_m_s,
+        );
 
         // Rate feeds `Duration::from_micros(1_000_000 / rate)`, so a rate above
         // 1 MHz would round to a 0 µs period; no real deployment approaches that,

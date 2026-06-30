@@ -133,13 +133,18 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             }
         }
     }
-    // The operator's connection is the streaming deadman: once it drops, disable
-    // every arm and gripper so command_stream stops emitting and each node's
-    // stream timeout releases it to hold.
     let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+    on_operator_disconnect(&mut s);
+}
+
+/// Reset on operator disconnect: drop the streaming deadman for both sides (each
+/// node's stream timeout then releases to hold) and restore the governor enable to
+/// its launch default.
+fn on_operator_disconnect(s: &mut UiState) {
     for side in [Side::Left, Side::Right] {
         s.set_enabled(side, false);
     }
+    s.collision_enabled = s.collision_enabled_default;
 }
 
 async fn handle_command(text: &str, app: &AppState) {
@@ -504,6 +509,27 @@ mod tests {
             clamp_to_limits(&mut mid, side);
             assert_eq!(mid, before);
         }
+    }
+
+    #[test]
+    fn disconnect_disarms_sides_and_restores_governor_default_on() {
+        // Launched with avoidance on; operator turned it off with both sides armed.
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25);
+        s.collision_enabled = false;
+        s.set_enabled(Side::Left, true);
+        s.set_enabled(Side::Right, true);
+        on_operator_disconnect(&mut s);
+        assert!(!s.left_enabled && !s.right_enabled, "disconnect must drop the deadman for both sides");
+        assert!(s.collision_enabled, "disconnect must restore the launch governor default (on)");
+    }
+
+    #[test]
+    fn disconnect_restores_governor_default_off_when_launched_ungoverned() {
+        // Launched deliberately ungoverned; operator turned avoidance on.
+        let mut s = UiState::new(false, 0.005, 0.02, 0.25);
+        s.collision_enabled = true;
+        on_operator_disconnect(&mut s);
+        assert!(!s.collision_enabled, "disconnect must restore the launch default (off), not force on");
     }
 
     #[test]

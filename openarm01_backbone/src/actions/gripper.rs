@@ -71,6 +71,19 @@ impl Drop for InflightGuard {
 // Expose move_gripper. For each accepted goal, dispatch on gripper_id to the
 // left or right consumed action, relay feedback upward, propagate cancel
 // downward, and answer the caller with either complete or complete_cancelled.
+/// Accept a gripper goal only when the position is finite and addressed to a known
+/// side; otherwise reject with a reason. The downstream gripper node still enforces
+/// the opening range (its single source of truth), so this gates finiteness + id only.
+fn validate_goal(position: f64, gripper_id: u8) -> GoalResponse {
+    if !position.is_finite() {
+        return GoalResponse::reject("non-finite gripper position");
+    }
+    match gripper_id {
+        0 | 1 => GoalResponse::accept(),
+        other => GoalResponse::reject(format!("invalid gripper_id {other} (expected 0 for left, 1 for right)")),
+    }
+}
+
 pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen::Result<()> {
     let mut handle = ActionHandle::expose(&runner).await?;
 
@@ -98,12 +111,7 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) -> peppygen:
         let goal_ctx = tokio::select! {
             _ = token.cancelled() => break,
             result = handle.handle_goal_next_request(|req: &GoalRequest| {
-                match req.data.gripper_id {
-                    0 | 1 => Ok(GoalResponse::accept()),
-                    other => Ok(GoalResponse::reject(format!(
-                        "invalid gripper_id {other} (expected 0 for left, 1 for right)"
-                    ))),
-                }
+                Ok(validate_goal(req.data.position, req.data.gripper_id))
             }) => match result {
                 Ok(Some(ctx)) => ctx,
                 Ok(None) => break,
@@ -256,3 +264,25 @@ macro_rules! gripper_dispatch {
 
 gripper_dispatch!(dispatch_left, left_gripper_move_gripper, "left");
 gripper_dispatch!(dispatch_right, right_gripper_move_gripper, "right");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_goal_rejects_non_finite_position() {
+        assert!(!validate_goal(f64::NAN, 0).accepted, "NaN position must be rejected");
+        assert!(!validate_goal(f64::INFINITY, 1).accepted, "infinite position must be rejected");
+    }
+
+    #[test]
+    fn validate_goal_accepts_finite_known_side() {
+        assert!(validate_goal(0.02, 0).accepted, "finite position on the left must be accepted");
+        assert!(validate_goal(0.0, 1).accepted, "finite position on the right must be accepted");
+    }
+
+    #[test]
+    fn validate_goal_rejects_unknown_gripper_id() {
+        assert!(!validate_goal(0.02, 2).accepted, "unknown gripper_id must be rejected");
+    }
+}

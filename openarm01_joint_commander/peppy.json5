@@ -105,11 +105,17 @@
       // Rate (Hz) at which an armed arm's target setpoint is re-published on
       // arm_joint_commands. Must stay comfortably above 1 / the arm's
       // stream_timeout_s so the producer lock survives between operator inputs.
-      command_rate_hz: { $type: "u32", $default: 100 },
+      command_rate_hz: "u32",
       // Operator's launch end-effector speed cap (m/s), streamed live to the hub on
-      // governor_control and retunable from the UI. Deployment-tuned: conservative
-      // by default (the real arm keeps it); the sim launchers raise it.
-      max_ee_velocity_m_s: { $type: "f64", $default: 0.25 }
+      // governor_control and retunable from the UI. Require > 0. The sim launchers
+      // set a permissive value; the real arm a conservative one.
+      max_ee_velocity_m_s: "f64",
+      // Launch state for the rest of the governor controls the operator streams live
+      // on governor_control, set per deployment in step with openarm01_backbone. The
+      // band requires 0 < d_stop < d_safe.
+      collision_governor_enabled: "bool",
+      d_stop: "f64",
+      d_safe: "f64"
     }
   }
 }

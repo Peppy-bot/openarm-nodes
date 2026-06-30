@@ -51,11 +51,13 @@ fn main() -> Result<()> {
                 if msg.arm_id != arm_id {
                     continue;
                 }
-                // Drop any non-finite governed setpoint, matching the real arm, so a
-                // bad value never reaches the sim engine.
+                // Clear the latest on any non-finite governed setpoint, matching the
+                // real arm, so a bad value never reaches the sim engine and the sim
+                // holds its last commanded pose.
                 let finite = msg.positions.iter().chain(msg.velocities.iter()).all(|v| v.is_finite());
                 if !finite {
-                    warn!("governed_setpoints: dropping message with non-finite values");
+                    warn!("governed_setpoints: clearing target on non-finite values");
+                    let _ = latest_tx.send(None);
                     continue;
                 }
                 let _ = latest_tx.send(Some((msg.positions, msg.velocities)));

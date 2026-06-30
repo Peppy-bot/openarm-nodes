@@ -2,7 +2,7 @@
 // side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
 // hardware control loop (gravity/Coriolis/friction feedforward from the
 // in-process srs_model, plus MIT control) and tracks the hub's governed
-// setpoint, reporting measured state on the always-on `joint_states` stream. The
+// setpoint, reporting measured state on the always-on `arm_states` stream. The
 // hub (openarm01_backbone) owns all trajectory generation, stream following, and
 // self-collision governing, so the arm carries no motion logic of its own.
 {

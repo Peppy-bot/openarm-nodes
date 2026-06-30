@@ -33,6 +33,19 @@ use tracing::{error, info};
 use coordinator::ArmChannels;
 use planner::{PlanConfig, Planner};
 
+/// Spawn a never-returning inbound listener into the hub's supervised task set,
+/// adapting its `()` output to the set's `Result` so its exit trips the
+/// fatal-first-exit like any other hub task.
+fn spawn_listener<F>(set: &mut JoinSet<Result<()>>, listener: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    set.spawn(async move {
+        listener.await;
+        Ok(())
+    });
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
 
@@ -78,14 +91,14 @@ fn main() -> Result<()> {
             &params.right_base,
             params.d_stop,
             params.d_safe,
-            params.collision_governor_enabled_default,
+            params.collision_governor_enabled,
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));
         info!(
             "self-collision governor ready (d_stop={} d_safe={} default {})",
             params.d_stop,
             params.d_safe,
-            if params.collision_governor_enabled_default { "ENABLED" } else { "DISABLED" },
+            if params.collision_governor_enabled { "ENABLED" } else { "DISABLED" },
         );
 
         let left_limits = left_model.limits();
@@ -119,7 +132,7 @@ fn main() -> Result<()> {
         let (goal_tx1, goal_rx1) = mpsc::channel(1);
         let busy = [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))];
         let (config_tx, config_rx) = watch::channel(streams::GovernorConfig {
-            enabled: params.collision_governor_enabled_default,
+            enabled: params.collision_governor_enabled,
             d_stop: params.d_stop,
             d_safe: params.d_safe,
             max_ee_velocity_m_s: params.max_ee_velocity_m_s,
@@ -129,11 +142,6 @@ fn main() -> Result<()> {
             ArmChannels { command: cmd_rx0, measured: meas_rx0, goals: goal_rx0, busy: busy[0].clone() },
             ArmChannels { command: cmd_rx1, measured: meas_rx1, goals: goal_rx1, busy: busy[1].clone() },
         );
-
-        // Always-on inbound listeners (they only buffer the latest message).
-        tokio::spawn(streams::run_joint_command_listener(node_runner.clone(), [cmd_tx0, cmd_tx1]));
-        tokio::spawn(streams::run_joint_state_listener(node_runner.clone(), [meas_tx0, meas_tx1]));
-        tokio::spawn(streams::run_governor_config_listener(node_runner.clone(), config_tx));
 
         // Gate exposing actions + streaming on the robot being ready, in a spawned
         // task so this setup closure returns promptly for the health probe.
@@ -168,6 +176,15 @@ fn main() -> Result<()> {
                 [goal_busy[0].clone(), goal_busy[1].clone()],
             ));
             set.spawn(actions::gripper::run(runner.clone(), token.clone()));
+
+            // Inbound listeners buffer the latest message into the watch slots. They
+            // run under the same fatal-first-exit supervision as the rest of the hub,
+            // so a listener that dies takes the node down instead of leaving the
+            // coordinator streaming on stale measured state or governor controls while
+            // the node still reports healthy.
+            spawn_listener(&mut set, streams::run_joint_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]));
+            spawn_listener(&mut set, streams::run_joint_state_listener(runner.clone(), [meas_tx0, meas_tx1]));
+            spawn_listener(&mut set, streams::run_governor_config_listener(runner.clone(), config_tx));
 
             // The first task to finish is fatal: cancel the node so the daemon
             // restarts a clean process rather than running on with a dead

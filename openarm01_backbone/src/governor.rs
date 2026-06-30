@@ -171,14 +171,27 @@ impl Governor {
                 return *prev;
             }
         };
-        // Outside the influence zone: no closing constraint, take the full step.
-        if d_now >= self.d_safe {
-            self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
-            return *cand;
-        }
-
         let prev14 = concat(prev);
         let cand14 = concat(cand);
+
+        // Outside the influence zone the barrier imposes no closing limit, but a
+        // single oversized tick can still vault from beyond `d_safe` past the stop
+        // floor, so the candidate goes through the same exact backstop rather than
+        // returning unchecked (the floor is `d_stop`).
+        if d_now >= self.d_safe {
+            match self.distance_at(&cand14) {
+                Some(d) if d >= self.d_stop => {
+                    self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
+                    return *cand;
+                }
+                Some(_) => {
+                    self.log_transition(Guard::Stopped, d_now, &link_a, &link_b);
+                    return split(&self.retract_to_floor(&prev14, &cand14, self.d_stop, d_now));
+                }
+                None => return *prev,
+            }
+        }
+
         let step: [f64; DUAL_DOF] = std::array::from_fn(|i| cand14[i] - prev14[i]);
         // Predicted change in clearance over this tick if the full step is taken,
         // and the most clearance the barrier permits losing.
@@ -484,6 +497,21 @@ mod tests {
         assert!(entered_band, "arms never approached into the band");
         // It should converge near the stop boundary, not stall far away.
         assert!(distance(&mut g, &q) < D_STOP + 4e-3, "did not settle near the stop distance");
+    }
+
+    #[test]
+    fn outside_band_large_jump_is_floored() {
+        let mut g = governor(true);
+        // Start clear (outside the band) and command a single oversized step that
+        // would vault straight past the stop floor in one tick. The outside-band
+        // fast path must still run the backstop and retract to the floor.
+        let start = home();
+        assert!(distance(&mut g, &start) >= D_SAFE, "start should sit outside the band");
+        let deep = wrists_inward(1.5);
+        assert!(distance(&mut g, &deep) < D_STOP, "target should be past the stop floor");
+        let governed = g.govern(&start, &deep, DT);
+        assert_ne!(governed, deep, "oversized step passed unfloored");
+        assert!(distance(&mut g, &governed) >= D_STOP, "large jump breached the stop floor");
     }
 
     #[test]

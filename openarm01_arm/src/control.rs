@@ -88,7 +88,7 @@ async fn run_control(
         // desired velocity) until the hub's stream is live, so the arm never
         // lunges before the hub is up.
         let (q_des, dq_des) = match *wiring.governed.borrow() {
-            Some(GovernedSetpoint { q_des, dq_des }) => (clamp_to_limits(&q_des, &cfg.limits), dq_des),
+            Some(GovernedSetpoint { q_des, dq_des }) => clamp_setpoint_to_limits(&q_des, &dq_des, &cfg.limits),
             None => (q, ZERO),
         };
 
@@ -141,10 +141,20 @@ fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q_des: &
     a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau);
 }
 
-/// Clamp a governed target into the joint position limits, the final guard before
-/// the motors.
-fn clamp_to_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> JointVec {
-    std::array::from_fn(|i| q[i].clamp(limits[i].lo, limits[i].hi))
+/// Clamp a governed setpoint into the joint position limits, the final guard
+/// before the motors. A joint whose target is pinned at a limit also has its
+/// desired velocity zeroed when that velocity points further past the stop, so the
+/// MIT controller is never commanded to drive outward through a hard limit (the
+/// `kd * (dq_des - qdot)` term cannot add outward torque at the wall). Inward
+/// (recovering) velocity is preserved.
+fn clamp_setpoint_to_limits(q: &JointVec, dq: &JointVec, limits: &[Limit; ARM_DOF]) -> (JointVec, JointVec) {
+    let q_clamped: JointVec = std::array::from_fn(|i| q[i].clamp(limits[i].lo, limits[i].hi));
+    let dq_clamped: JointVec = std::array::from_fn(|i| {
+        let driving_below = q[i] < limits[i].lo && dq[i] < 0.0;
+        let driving_above = q[i] > limits[i].hi && dq[i] > 0.0;
+        if driving_below || driving_above { 0.0 } else { dq[i] }
+    });
+    (q_clamped, dq_clamped)
 }
 
 /// Read the measured joint state (positions + velocities) one time.
@@ -154,5 +164,47 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec)
     a.recv_all(recv_timeout_us);
     let state = a.get_state();
     (state.positions, state.velocities)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_limits() -> [Limit; ARM_DOF] {
+        std::array::from_fn(|_| Limit { lo: -1.0, hi: 1.0 })
+    }
+
+    #[test]
+    fn clamps_position_and_zeros_outward_velocity_at_a_limit() {
+        // Joint 0: target above hi with outward (+) velocity. Joint 1: target below
+        // lo with outward (-) velocity. Both clamp to the limit and zero the velocity.
+        let q = [2.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let dq = [0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let (qc, dqc) = clamp_setpoint_to_limits(&q, &dq, &unit_limits());
+        assert_eq!(qc[0], 1.0);
+        assert_eq!(qc[1], -1.0);
+        assert_eq!(dqc[0], 0.0, "outward velocity at the upper stop is zeroed");
+        assert_eq!(dqc[1], 0.0, "outward velocity at the lower stop is zeroed");
+    }
+
+    #[test]
+    fn preserves_inward_recovery_velocity_past_a_limit() {
+        // Past the limits but velocity points back toward range: keep it so the arm
+        // can recover rather than being pinned outside.
+        let q = [2.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let dq = [-0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let (_, dqc) = clamp_setpoint_to_limits(&q, &dq, &unit_limits());
+        assert_eq!(dqc[0], -0.5, "inward velocity above hi is preserved");
+        assert_eq!(dqc[1], 0.5, "inward velocity below lo is preserved");
+    }
+
+    #[test]
+    fn leaves_in_range_setpoints_untouched() {
+        let q = [0.5, -0.5, 0.0, 0.3, -0.3, 0.1, -0.1];
+        let dq = [0.4, -0.4, 0.2, -0.2, 0.1, -0.1, 0.0];
+        let (qc, dqc) = clamp_setpoint_to_limits(&q, &dq, &unit_limits());
+        assert_eq!(qc, q, "in-range positions are unchanged");
+        assert_eq!(dqc, dq, "in-range velocities are unchanged");
+    }
 }
 

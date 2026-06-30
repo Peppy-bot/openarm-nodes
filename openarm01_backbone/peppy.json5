@@ -162,14 +162,15 @@
       // Self-collision governor band (m), signed surface distance between the two
       // arms. At/under d_stop motion toward contact is fully stopped; at/over
       // d_safe it is unthrottled; between, it ramps linearly. Separating motion
-      // is never throttled (recovery from a tangle is always allowed). Defaults
-      // are the band the collision model was validated against: the rest-pose
-      // clearance (~24 mm of the nearest checked pair) sits just above d_safe, so
-      // the home pose is unthrottled and an approach throttles within ~2 cm.
-      d_stop: { $type: "f64", $default: 0.005 },
-      d_safe: { $type: "f64", $default: 0.02 },
+      // is never throttled (recovery from a tangle is always allowed). Require
+      // 0 < d_stop < d_safe. The collision model was validated against
+      // d_stop=0.005, d_safe=0.02: the rest-pose clearance (~24 mm of the nearest
+      // checked pair) sits just above d_safe, so the home pose is unthrottled and
+      // an approach throttles within ~2 cm.
+      d_stop: "f64",
+      d_safe: "f64",
       // Governor state at launch, before the first governor_control message.
-      collision_governor_enabled_default: { $type: "bool", $default: true },
+      collision_governor_enabled: "bool",
       // Per-joint peak velocity (rad/s) sizing the quintic trajectories and the
       // stream chase. OpenArm V1.0 URDF joint velocity limits; the hub is the sole
       // owner of motion sizing.
@@ -182,9 +183,9 @@
       max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
       // End-effector linear-speed cap (m/s) for the stream chase, used only until
       // the first governor_control message; after that the operator's streamed cap
-      // (openarm01_joint_commander) governs. The default is the permissive sim
-      // value; the operator surface sets the real arm's conservative cap.
-      max_ee_velocity_m_s: { $type: "f64", $default: 1.0 },
+      // (openarm01_joint_commander) governs. Require > 0. The sim launchers set a
+      // permissive value; the real arm a conservative one.
+      max_ee_velocity_m_s: "f64",
       // How long (s) the hub keeps following an operator stream after its last
       // message before releasing the lock and holding.
       stream_timeout_s: "f64",

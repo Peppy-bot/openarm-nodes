@@ -51,9 +51,8 @@ const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 500;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
-/// Tighter bound for shutdown lock removal so the shutdown pose-hold
-/// (`control::SHUTDOWN_HOLD`) + motor disable + removal stays inside the default
-/// 5 s shutdown grace window.
+/// Tighter bound for shutdown lock removal so motor disable + lock removal stays
+/// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {

@@ -102,13 +102,17 @@ pub struct UiState {
     pub right_enabled: bool,
     // Operator controls for the hub's self-collision governor, streamed to the
     // backbone on governor_control; the hub holds its own defaults until the first
-    // message. `collision_enabled` defaults true so avoidance is on unless the
-    // operator opts out; the band defaults match the hub's; the speed cap default
-    // is a node parameter so deployment tunes it (conservative for the real arm).
+    // message. All four launch defaults are node parameters, kept in step with the
+    // hub's, so a deployment tunes startup from one place; the operator then drives
+    // them live from the UI.
     pub collision_enabled: bool,
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
+    // The launch governor-enable state, restored on operator disconnect so an
+    // operator who turned avoidance off cannot leave the hub latched ungoverned,
+    // while a deployment that launched ungoverned is not force-armed either.
+    pub collision_enabled_default: bool,
     // Latest nearest-pair self-collision proximity from the hub (it carries its own
     // receipt time). `None` until the first message; treated as stale (and rendered
     // n/a) once that receipt time ages past the readout staleness window, so a dead
@@ -128,14 +132,8 @@ pub struct Proximity {
     pub received_at: Instant,
 }
 
-/// Governor band defaults, kept in step with openarm01_backbone's parameter
-/// defaults. The EE-speed cap default is a node parameter (deployment-tuned), not
-/// a constant, so the real arm streams a conservative cap and the sim a fast one.
-pub const DEFAULT_D_STOP: f64 = 0.005;
-pub const DEFAULT_D_SAFE: f64 = 0.02;
-
 impl UiState {
-    pub fn new(max_ee_velocity_m_s: f64) -> Self {
+    pub fn new(collision_enabled: bool, d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> Self {
         Self {
             left_arm: ArmTarget::home(),
             right_arm: ArmTarget::home(),
@@ -143,9 +141,10 @@ impl UiState {
             right_gripper: GripperTarget::closed(),
             left_enabled: false,
             right_enabled: false,
-            collision_enabled: true,
-            d_stop: DEFAULT_D_STOP,
-            d_safe: DEFAULT_D_SAFE,
+            collision_enabled,
+            collision_enabled_default: collision_enabled,
+            d_stop,
+            d_safe,
             max_ee_velocity_m_s,
             proximity: None,
             status: "ready".to_string(),
@@ -201,6 +200,6 @@ impl UiState {
 
 pub type SharedState = Arc<Mutex<UiState>>;
 
-pub fn new_shared(max_ee_velocity_m_s: f64) -> SharedState {
-    Arc::new(Mutex::new(UiState::new(max_ee_velocity_m_s)))
+pub fn new_shared(collision_enabled: bool, d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> SharedState {
+    Arc::new(Mutex::new(UiState::new(collision_enabled, d_stop, d_safe, max_ee_velocity_m_s)))
 }
