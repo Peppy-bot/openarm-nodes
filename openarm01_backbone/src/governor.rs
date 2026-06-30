@@ -52,6 +52,18 @@ const MIN_GRADIENT_NORM_SQ: f64 = 1e-18;
 /// like the approach speed above; promote it to a parameter when tuning on hardware.
 const MONITOR_TRIP_FRACTION: f64 = 0.5;
 
+/// Interior samples the backstop walks along a per-tick segment to bracket the
+/// first sub-floor crossing. Bimanual surface distance is not monotone along a
+/// joint-space segment, so an endpoint check (or a bisection that assumes
+/// monotonicity) can step over a thin pocket; scanning bounds a missed crossing to
+/// ~1/`SEGMENT_SAMPLES` of the step, which the small velocity-limited tick resolves.
+const SEGMENT_SAMPLES: usize = 16;
+
+/// Bisection iterations within the bracketing interval (width `1/SEGMENT_SAMPLES`)
+/// once the scan finds the first crossing: `1/16 / 2^8 ~= 1e-4` of the step, on par
+/// with the prior whole-segment resolution.
+const FLOOR_BISECT_ITERS: usize = 8;
+
 /// Where the governor last sat, so throttle/stop/clear are logged on transition
 /// rather than at the control rate.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -59,6 +71,15 @@ enum Guard {
     Clear,
     Throttling,
     Stopped,
+}
+
+/// Outcome of walking a per-tick segment against the floor.
+enum Clip {
+    /// Every sampled point along the segment stayed at or above the floor.
+    Clear,
+    /// The segment crossed below the floor; carries the furthest point reached
+    /// before the first crossing.
+    Clipped([f64; DUAL_DOF]),
 }
 
 /// The nearest checked pair at a configuration: signed surface distance (m;
@@ -208,18 +229,28 @@ impl Governor {
 
         // Outside the influence zone the barrier imposes no closing limit, but a
         // single oversized tick can still vault from beyond `d_safe` past the stop
-        // floor, so the candidate goes through the same exact backstop rather than
-        // returning unchecked (the floor is `d_stop`).
+        // floor, so the candidate is held to the same floor (`d_stop`) rather than
+        // returned unchecked.
         if d_now >= self.d_safe {
             match self.distance_at(&cand14) {
-                Some(d) if d >= self.d_stop => {
+                // Both ends sit clear of the band: a velocity-limited tick cannot
+                // have dipped a full band-width below in between, so skip the scan.
+                Some(d) if d >= self.d_safe => {
                     self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
                     return *cand;
                 }
-                Some(_) => {
-                    self.log_transition(Guard::Stopped, d_now, &link_a, &link_b);
-                    return split(&self.retract_to_floor(&prev14, &cand14, self.d_stop, d_now));
-                }
+                // The candidate reached the band (or below): walk the segment so a
+                // pocket between two band-clear ends cannot pass unchecked.
+                Some(_) => match self.clip_to_floor(&prev14, &cand14, self.d_stop) {
+                    Clip::Clear => {
+                        self.log_transition(Guard::Clear, d_now, &link_a, &link_b);
+                        return *cand;
+                    }
+                    Clip::Clipped(q) => {
+                        self.log_transition(Guard::Stopped, d_now, &link_a, &link_b);
+                        return split(&q);
+                    }
+                },
                 None => return *prev,
             }
         }
@@ -252,18 +283,14 @@ impl Governor {
         }
 
         // Exact backstop: the first-order projection can still let surface curvature
-        // carry the step past the stop floor, so verify the realized clearance and
-        // retract along prev->governed until it is back at the floor. The floor is
-        // d_stop, or the current clearance if already inside it (so an in-penetration
-        // recovery is never forced to close further).
+        // carry the step past the stop floor, so walk prev->governed and clip at the
+        // first floor crossing. The floor is d_stop, or the current clearance if
+        // already inside it (so an in-penetration recovery is never forced to close
+        // further).
         let floor = d_now.min(self.d_stop);
-        match self.distance_at(&governed14) {
-            Some(d) if d >= floor => {}
-            Some(_) => {
-                governed14 = self.retract_to_floor(&prev14, &governed14, floor, d_now);
-                limited = true;
-            }
-            None => return *prev,
+        if let Clip::Clipped(q) = self.clip_to_floor(&prev14, &governed14, floor) {
+            governed14 = q;
+            limited = true;
         }
 
         let guard = if !limited {
@@ -312,12 +339,10 @@ impl Governor {
         let cand14 = concat(cand);
         let Some(d_now) = self.distance_at(&prev14) else { return *prev };
         let floor = d_now.min(self.d_stop);
-        let governed14 = match self.distance_at(&cand14) {
-            Some(d) if d >= floor => cand14,
-            Some(_) => self.retract_to_floor(&prev14, &cand14, floor, d_now),
-            None => return *prev,
-        };
-        split(&governed14)
+        match self.clip_to_floor(&prev14, &cand14, floor) {
+            Clip::Clear => split(&cand14),
+            Clip::Clipped(q) => split(&q),
+        }
     }
 
     /// Permitted approach speed (m/s) at signed surface distance `d`: zero at or
@@ -337,24 +362,35 @@ impl Governor {
         self.model.min_distance(&pair.left, &pair.right).ok().map(|p| p.distance)
     }
 
-    /// Retract along `prev`->`target` to the furthest fraction whose actual
-    /// clearance is at least `floor`, by bisection on the real distance query
-    /// (exact up to the bisection resolution). Requires `d(prev) >= floor` (passed
-    /// as `prev_d`, already computed by the caller) and `d(target) < floor`; a
-    /// failed query retracts further, fail-safe.
-    fn retract_to_floor(&mut self, prev: &[f64; DUAL_DOF], target: &[f64; DUAL_DOF], floor: f64, prev_d: f64) -> [f64; DUAL_DOF] {
-        debug_assert!(prev_d >= floor, "retract_to_floor requires d(prev) >= floor (prev_d={prev_d}, floor={floor})");
-        let mut lo = 0.0_f64;
-        let mut hi = 1.0_f64;
-        for _ in 0..12 {
-            let mid = 0.5 * (lo + hi);
-            let q: [f64; DUAL_DOF] = std::array::from_fn(|i| prev[i] + mid * (target[i] - prev[i]));
-            match self.distance_at(&q) {
-                Some(d) if d >= floor => lo = mid,
-                _ => hi = mid,
+    /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
+    /// point where the straight segment drops below `floor`, or [`Clip::Clear`] if
+    /// every sampled point stays at or above it. Bimanual distance is not monotone
+    /// along a joint-space segment, so this scans `SEGMENT_SAMPLES` interior points to
+    /// bracket the first breach (an endpoint check alone can step over a pocket) and
+    /// bisects within that bracket for the boundary. A failed query counts as a
+    /// breach (so a model-rejected configuration is never returned), retracting
+    /// conservatively. Assumes `prev` itself is clear (the caller's `d_now >= floor`).
+    fn clip_to_floor(&mut self, prev: &[f64; DUAL_DOF], target: &[f64; DUAL_DOF], floor: f64) -> Clip {
+        let point_at = |t: f64| -> [f64; DUAL_DOF] { std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i])) };
+        let mut last_clear = 0.0_f64;
+        for s in 1..=SEGMENT_SAMPLES {
+            let t = s as f64 / SEGMENT_SAMPLES as f64;
+            match self.distance_at(&point_at(t)) {
+                Some(d) if d >= floor => last_clear = t,
+                _ => {
+                    let (mut lo, mut hi) = (last_clear, t);
+                    for _ in 0..FLOOR_BISECT_ITERS {
+                        let mid = 0.5 * (lo + hi);
+                        match self.distance_at(&point_at(mid)) {
+                            Some(d) if d >= floor => lo = mid,
+                            _ => hi = mid,
+                        }
+                    }
+                    return Clip::Clipped(point_at(lo));
+                }
             }
         }
-        std::array::from_fn(|i| prev[i] + lo * (target[i] - prev[i]))
+        Clip::Clear
     }
 
     fn log_transition(&mut self, next: Guard, d: f64, link_a: &str, link_b: &str) {
@@ -673,5 +709,54 @@ mod tests {
         let cand = wrists_inward(0.2);
         let breaching = wrists_inward(2.0);
         assert_eq!(g.govern(&home(), &cand, &breaching, DT), cand);
+    }
+
+    /// Minimum clearance sampled along the straight segment `prev`->`cand`.
+    fn segment_min(g: &mut Governor, prev: &ArmPair<JointVec>, cand: &ArmPair<JointVec>, n: usize) -> f64 {
+        let p = concat(prev);
+        let c = concat(cand);
+        let mut m = f64::INFINITY;
+        for i in 0..=n {
+            let t = i as f64 / n as f64;
+            m = m.min(distance(g, &split(&std::array::from_fn(|j| p[j] + t * (c[j] - p[j])))));
+        }
+        m
+    }
+
+    #[test]
+    fn fast_path_clips_a_mid_segment_pocket_an_endpoint_check_would_miss() {
+        let mut g = governor(true);
+        // Bimanual distance is not monotone along a joint-space segment. Sweeping the
+        // left shoulder (j1) swings the left arm around the right one: from home the
+        // clearance dives into deep penetration near j1=1.4 and resurfaces past
+        // j1~3.1. So a segment from home to a far shoulder angle whose endpoint lands
+        // back inside the band (clear of the stop, but below d_safe so the scan runs
+        // rather than the cheap exit) crosses a sub-stop pocket in between.
+        let prev = home();
+        assert!(distance(&mut g, &prev) >= D_SAFE, "home is the clear, outside-band start");
+        let at_shoulder = |j1: f64| {
+            let mut p = home();
+            p.left[1] = j1;
+            p
+        };
+        // Bisect the resurfacing flank (monotone there) for a shoulder angle whose
+        // clearance lands in the middle of the band.
+        let target = 0.5 * (D_STOP + D_SAFE);
+        let (mut lo, mut hi) = (2.8_f64, 3.2_f64);
+        for _ in 0..50 {
+            let mid = 0.5 * (lo + hi);
+            if distance(&mut g, &at_shoulder(mid)) < target { lo = mid } else { hi = mid }
+        }
+        let cand = at_shoulder(0.5 * (lo + hi));
+
+        // The pocket is real: the end is clear of the stop, the interior is not.
+        assert!((D_STOP..D_SAFE).contains(&distance(&mut g, &cand)), "cand sits in the band, clear of the stop");
+        assert!(segment_min(&mut g, &prev, &cand, 128) < D_STOP, "the segment must dip below the stop");
+
+        // Endpoint-only logic would pass `cand` through (it is clear of the stop); the
+        // segment scan must clip it to a setpoint that is itself clear of the stop.
+        let governed = g.govern(&prev, &cand, &prev, DT);
+        assert_ne!(governed, cand, "a segment with a sub-stop interior was passed unclipped");
+        assert!(distance(&mut g, &governed) >= D_STOP - 1e-6, "the clipped setpoint is below the stop");
     }
 }
