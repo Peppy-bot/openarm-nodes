@@ -2,16 +2,14 @@
 //! side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
 //! hardware control loop (gravity/Coriolis/friction feedforward from the
 //! in-process srs_model, plus MIT control) and tracks the hub's governed
-//! setpoint, reporting measured state on the always-on `joint_states` stream. The
+//! setpoint, reporting measured state on the always-on `arm_states` stream. The
 //! hub (openarm01_backbone) owns all trajectory generation, stream following, and
-//! self-collision governing, so this node carries no motion logic of its own
-//! beyond the shutdown return-to-ready park.
+//! self-collision governing, so this node carries no motion logic of its own; on
+//! shutdown it disables the motors and lets the arm go limp.
 
 mod control;
 mod friction;
-mod pacer;
 mod stream;
-mod trajectory;
 
 use control::ControlConfig;
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
@@ -53,9 +51,9 @@ const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 500;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
-/// Tighter bound for shutdown lock removal so the return-to-ready park
-/// (`control::PARK_DURATION_S`) + motor disable + removal stays inside the
-/// default 5 s shutdown grace window.
+/// Tighter bound for shutdown lock removal so the shutdown pose-hold
+/// (`control::SHUTDOWN_HOLD`) + motor disable + removal stays inside the default
+/// 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
@@ -111,12 +109,6 @@ fn main() -> Result<()> {
         info!("config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us", params.control_rate_hz, cfg.recv_timeout_us);
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
 
-        // Validate the static ready pose against the parsed joint limits here,
-        // during bringup, so a misconfigured pose aborts the whole process before
-        // any hardware is touched instead of panicking inside the spawned control
-        // task (which would leave a zombie node with motors enabled but no loop).
-        control::assert_ready_pose_in_limits(&cfg.limits);
-
         // Instance lock: crash if another instance with the same arm_id is
         // running. Held in the core-node datastore (released from the on_shutdown
         // hook below), so a lock leaked by a hard crash clears with the stack
@@ -140,8 +132,8 @@ fn main() -> Result<()> {
         // Shutdown: register the lock-release hook right after acquiring the lock,
         // so a panic during bringup still releases the key (dropping `shutdown_tx`
         // completes `shutdown_rx`, so the hook runs). On a normal stop the control
-        // task eases to the ready pose and disables the motors (the sole motor
-        // writer), signalling `shutdown_tx` when done; this hook waits for that,
+        // task disables the motors (the sole motor writer) and signals
+        // `shutdown_tx` when done; this hook waits for that,
         // then removes the datastore lock. The runtime fires it on every stop path
         // with the messenger connected and awaits it before exit.
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -213,7 +205,7 @@ fn main() -> Result<()> {
 
         // Single control task (the only motor writer): follows the governed
         // setpoint with in-process feedforward and a final limit clamp, and on
-        // shutdown eases to the ready pose before disabling the motors.
+        // shutdown disables the motors.
         control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx).await?;
 
         // Motors enabled, initial state populated, control loop running: report

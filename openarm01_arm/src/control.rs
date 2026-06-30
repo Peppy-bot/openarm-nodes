@@ -6,12 +6,13 @@
 //! cannot compute remotely) and a final clamp to the joint limits, then commands
 //! the motors. There is no mode state machine and no streaming logic here.
 //!
-//! On shutdown the loop eases the arm back to a known ready pose (the sole motor
-//! writer, reusing the dynamics model) before disabling the motors, so the arm
-//! settles at a well-conditioned pose instead of dropping when power cuts.
+//! On shutdown the loop disables the motors and lets the arm go limp. It does not
+//! park to a pose: a collision-aware return-to-home is the hub's job (it sees both
+//! arms), and a local straight-line joint path would be collision-blind and could
+//! command the two arms into each other.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use peppygen::{NodeRunner, Result};
 use peppylib::runtime::CancellationToken;
@@ -19,32 +20,15 @@ use srs_model::Limit;
 use tokio::sync::oneshot;
 use tracing::info;
 
+use control_core::Pacer;
+
 use crate::friction;
-use crate::pacer::Pacer;
 use crate::stream::{GovernedSetpoint, StreamWiring};
-use crate::trajectory::JointTrajectory;
 use crate::{ARM_DOF, JointVec};
 use openarm_can::ArmCan;
 
 /// All-zero joint vector: the desired velocity sent while holding a pose.
 const ZERO: JointVec = [0.0; ARM_DOF];
-
-/// Non-singular rest configuration the arm eases to on shutdown, before the
-/// motors disable. The arm powers off wherever it hung, often on the straight-arm
-/// singularity, so this is a known, well-conditioned pose: the elbow (J4) is bent
-/// a hair above its URDF lower limit; every other joint rests at 0.
-const READY_POSE: JointVec = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
-
-/// Requested duration (s) of the shutdown return-to-ready move, floored at the
-/// joint velocity limits. Sized to fit inside the shutdown grace window alongside
-/// the motor disable and lock release.
-const PARK_DURATION_S: f64 = 3.0;
-
-/// Per-joint velocity limits (rad/s) flooring the shutdown park duration, from the
-/// OpenArm V1.0 URDF (symmetric across sides). Only the park samples a trajectory;
-/// normal motion is the hub's already rate-limited governed setpoint.
-const PARK_MAX_JOINT_VELOCITY_RAD_S: JointVec =
-    [16.754666, 16.754666, 5.445426, 5.445426, 20.943946, 20.943946, 20.943946];
 
 /// Settle time after disabling the motors on shutdown, before draining ACK
 /// frames. Mirrors the ROS2 v10_simple_hardware on_deactivate sleep.
@@ -61,28 +45,10 @@ pub struct ControlConfig {
     pub limits: [Limit; ARM_DOF],
 }
 
-/// Assert the shutdown ready pose is inside the parsed joint limits, during
-/// bringup, so a model whose limits exclude it fails loudly before any hardware
-/// is touched rather than panicking inside the spawned control task.
-pub fn assert_ready_pose_in_limits(limits: &[Limit; ARM_DOF]) {
-    assert!(
-        READY_POSE.iter().zip(limits).all(|(&q, l)| l.contains(q)),
-        "READY_POSE outside joint limits: {READY_POSE:?}",
-    );
-}
-
-/// Shutdown coordination for the control loop: `main.rs` cancels `token` to ask
-/// the loop to stop, and once it has eased the arm to the ready pose and disabled
-/// the motors it signals `done` so `main.rs` can release the lock and exit.
-struct Shutdown {
-    token: CancellationToken,
-    done: oneshot::Sender<()>,
-}
-
 /// Spawn the arm's control: a single task that owns the motors (the only motor
 /// writer) and follows the hub's governed setpoint stream. No actions are exposed
 /// here - the hub owns move admission. `shutdown_tx` is signalled once the loop
-/// has parked and disabled the motors, so main.rs can then release the lock.
+/// has disabled the motors, so main.rs can then release the lock.
 pub async fn spawn(
     runner: &NodeRunner,
     arm: Arc<Mutex<ArmCan>>,
@@ -100,8 +66,7 @@ pub async fn spawn(
 /// computes the feedforward, reports the measured state upward, and commands the
 /// motors to the latest governed setpoint (clamped), holding the measured pose
 /// until the first governed setpoint arrives or whenever the stream is empty. On
-/// cancellation it eases to the ready pose, disables the motors, and signals
-/// `shutdown_tx`.
+/// cancellation it disables the motors and signals `shutdown_tx`.
 async fn run_control(
     arm: Arc<Mutex<ArmCan>>,
     cfg: ControlConfig,
@@ -109,7 +74,7 @@ async fn run_control(
     wiring: StreamWiring,
     shutdown: Shutdown,
 ) {
-    let mut pacer = Pacer::new(cfg.cycle_period);
+    let mut pacer = Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
     loop {
         let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
@@ -129,7 +94,7 @@ async fn run_control(
 
         command(&arm, &cfg, &ff_tau, &q_des, &dq_des);
         // Biased so a cancelled token always wins over an already-due (overrun)
-        // tick: on shutdown break out and run the return-to-ready + disable below.
+        // tick: on shutdown break out and disable the motors below.
         tokio::select! {
             biased;
             _ = shutdown.token.cancelled() => break,
@@ -137,12 +102,12 @@ async fn run_control(
         }
     }
 
-    // Cancelled: ease back to the ready pose (the sole motor writer, reusing the
-    // dynamics model) so the arm settles at a known pose instead of dropping when
-    // power cuts, then disable the motors. main.rs awaits `shutdown_tx`, keeping
-    // this task alive through the park before it releases the lock and exits.
-    info!("control loop stopping: easing to ready pose, then disabling motors");
-    return_to_ready(&arm, &cfg, &mut model).await;
+    // Cancelled: disable the motors and let the arm go limp. A graceful, collision-
+    // aware park is the hub's responsibility (it sees both arms); the arm on its own
+    // must not drive to a fixed pose, because a collision-blind straight joint path
+    // could command the two arms into each other. main.rs awaits `shutdown_tx` so
+    // the lock is released only after the motors are off.
+    info!("control loop stopping: disabling motors");
     {
         // unwrap_or_else: recover even if poisoned so disable_all() always runs.
         let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
@@ -156,31 +121,6 @@ async fn run_control(
     // A dropped receiver (main.rs already exited) is fine; nothing to do.
     let _ = shutdown.done.send(());
     info!("control loop stopped (motors disabled)");
-}
-
-/// Best-effort return to [`READY_POSE`] on shutdown: eases from the measured pose
-/// over [`PARK_DURATION_S`] with the same gravity/Coriolis/friction feedforward as
-/// a normal command, so the arm settles at a known pose instead of dropping when
-/// the motors disable. Respects the per-joint velocity limits, so a pose far from
-/// ready takes longer than [`PARK_DURATION_S`] rather than lunging.
-async fn return_to_ready(arm: &Mutex<ArmCan>, cfg: &ControlConfig, model: &mut srs_model::Arm) {
-    let (q0, _) = read_state(arm, cfg.recv_timeout_us);
-    let trajectory = JointTrajectory::new(q0, READY_POSE, PARK_MAX_JOINT_VELOCITY_RAD_S, PARK_DURATION_S);
-    let mut pacer = Pacer::new(cfg.cycle_period);
-    loop {
-        let (q, qdot) = read_state(arm, cfg.recv_timeout_us);
-        let ff_tau = feedforward(model, &q, &qdot);
-        let now = Instant::now();
-        let (q_des, dq_des) = trajectory.sample(now);
-        {
-            let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-            a.mit_control(&cfg.kp, &cfg.kd, &q_des, &dq_des, &ff_tau);
-        }
-        if trajectory.is_complete(now) {
-            break;
-        }
-        pacer.pace().await;
-    }
 }
 
 /// One tick of rigid-body feedforward: gravity and Coriolis from the posed chain

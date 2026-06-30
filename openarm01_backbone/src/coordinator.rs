@@ -17,8 +17,9 @@ use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
+use control_core::Pacer;
+
 use crate::governor::Governor;
-use crate::pacer::Pacer;
 use crate::planner::{Goal, Planner};
 use crate::streams::{GovernorConfig, JointCommand, MeasuredState};
 use crate::{ArmPair, JointVec, Side};
@@ -79,7 +80,7 @@ pub async fn run(
     // the control rate: one extra distance query every `readout_every` ticks.
     let readout_every = (0.05 / dt).round().max(1.0) as u64;
     let mut tick: u64 = 0;
-    let mut pacer = Pacer::new(cycle_period);
+    let mut pacer = Pacer::new(cycle_period).expect("control_rate_hz is asserted > 0 at startup");
     loop {
         // Apply the latest operator controls (cheap no-ops when unchanged; invalid
         // band/speed values are rejected by the setters, keeping the last good).

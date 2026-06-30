@@ -573,6 +573,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "control_core"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#ba225daa3cf07bd423c3ab3f3a7e04181047b102"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2210,6 +2220,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "openarm01_arm"
 version = "0.1.0"
 dependencies = [
+ "control_core",
  "openarm_can",
  "peppygen",
  "peppylib",

@@ -12,7 +12,6 @@ mod chase;
 mod coordinator;
 mod governor;
 mod openarm_v10;
-mod pacer;
 mod planner;
 mod startup;
 mod streams;

@@ -13,8 +13,9 @@ use peppygen::emitted_topics::openarm01_arm_states::v1::arm_states;
 use tokio::sync::watch;
 use tracing::{error, warn};
 
+use control_core::Pacer;
+
 use crate::JointVec;
-use crate::pacer::Pacer;
 
 /// The latest governed setpoint for this arm: the position/velocity the MIT loop
 /// tracks. Produced by the hub, already collision-governed and rate-limited.
@@ -93,7 +94,7 @@ pub async fn run_state_publisher(
     if measured.wait_for(Option::is_some).await.is_err() {
         return; // control loop gone: node is shutting down
     }
-    let mut pacer = Pacer::new(period);
+    let mut pacer = Pacer::new(period).expect("state publish period is non-zero (derives from state_rate_hz)");
     let mut failing = false;
     loop {
         if measured.has_changed().is_err() {
