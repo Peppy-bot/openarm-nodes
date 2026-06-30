@@ -157,7 +157,9 @@ pub async fn run(
 struct Shutdown;
 
 /// Wait for the arm's first measured state and seed the planner's held setpoint
-/// there, so the hub never publishes a setpoint before a real measurement exists.
+/// there (clamped into the joint limits, so a power-up pose past a soft limit does
+/// not anchor the hub off-limit), so the hub never publishes a setpoint before a
+/// real measurement exists.
 /// Warns periodically while an arm stays silent so the wait is visible in the log;
 /// `Err(Shutdown)` if the measured-state channel closes first.
 async fn seed(channels: &mut ArmChannels, planner: &mut Planner, side: Side) -> Result<(), Shutdown> {
@@ -172,7 +174,7 @@ async fn seed(channels: &mut ArmChannels, planner: &mut Planner, side: Side) -> 
         }
     }
     let q0 = channels.measured.borrow().expect("gated on first state").positions;
-    planner.commit(q0);
+    planner.seed_from_measured(q0);
     Ok(())
 }
 

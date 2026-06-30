@@ -121,6 +121,16 @@ impl Planner {
         self.setpoint = governed;
     }
 
+    /// Seed the held setpoint from the arm's first measured pose, clamped into the
+    /// joint limits. A power-up pose parked past a soft limit (e.g. the elbow below
+    /// its one-sided lower bound, hard against the boundary singularity) would
+    /// otherwise anchor the hub off-limit while the arm clamps every command back to
+    /// the limit, leaving the hub's held setpoint disagreeing with the arm's actual
+    /// pose. Clamping the seed keeps the two consistent from the first tick.
+    pub fn seed_from_measured(&mut self, measured: JointVec) {
+        self.setpoint = clamp_to_limits(&measured, &self.cfg.limits);
+    }
+
     /// The last published setpoint, the coordinator's `prev` for the governor.
     pub fn setpoint(&self) -> JointVec {
         self.setpoint
@@ -375,6 +385,27 @@ mod tests {
 
     fn joint_cmd(instance: &str, seq: u64, positions: JointVec, recv_at: Instant) -> JointCommand {
         JointCommand { seq, producer: producer(instance), recv_at, positions }
+    }
+
+    #[test]
+    fn seed_from_measured_clamps_a_below_limit_pose_to_the_joint_limits() {
+        // Build with the real URDF limits: the elbow (j4, index 3) has a one-sided
+        // lower bound of ~0.05, hard against the boundary singularity. A power-up pose
+        // with the elbow below it must seed at the limit, not off it.
+        let model = Arm::from_urdf_file(&format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")), "openarm_left_link0")
+            .expect("build left arm from vendored fixture URDF");
+        let limits = model.limits();
+        let cfg = PlanConfig { limits, ..test_cfg(100) };
+        let mut planner = Planner::new(Side::Left, model, cfg);
+
+        let mut measured = [0.0; ARM_DOF];
+        measured[3] = -0.2; // elbow below its lower limit
+        planner.seed_from_measured(measured);
+
+        let seeded = planner.setpoint();
+        assert_eq!(seeded[3], limits[3].lo, "elbow seeds at its lower limit, off the singularity");
+        assert!(seeded[3] >= 0.04, "vendored URDF elbow lower limit is ~0.05");
+        assert_eq!(seeded[0], 0.0, "an in-range joint is untouched");
     }
 
     #[test]
