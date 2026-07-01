@@ -586,14 +586,12 @@ mod tests {
 
     #[test]
     fn seed_from_measured_clamps_a_below_limit_pose_to_the_joint_limits() {
-        // Build with the real URDF limits: the elbow (j4, index 3) has a one-sided
-        // lower bound of ~0.05, hard against the boundary singularity. A power-up pose
-        // with the elbow below it must seed at the limit, not off it.
-        let model = Arm::from_urdf_file(
-            &format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")),
-            "openarm_left_link0",
-        )
-        .expect("build left arm from vendored fixture URDF");
+        // Build the real arm: the elbow (j4, index 3) carries a one-sided lower bound
+        // of ~0.05 (the singularity floor applied by crate::arm_model), hard against the
+        // boundary singularity. A power-up pose with the elbow below it must seed at the
+        // limit, not off it.
+        let model =
+            crate::arm_model("openarm_left_link0").expect("build left arm from bundled URDF");
         let limits = model.limits();
         let cfg = PlanConfig {
             limits,

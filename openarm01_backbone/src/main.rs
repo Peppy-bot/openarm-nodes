@@ -46,6 +46,19 @@ where
     });
 }
 
+/// Build one arm model from the embedded OpenArm description, with the elbow
+/// singularity margin applied. The description carries no solver dep and exports the
+/// margin as a constant; applying it here is the single site the hub imposes it, so the
+/// model's `limits()` carry it for IK seeding, trajectory sizing, and the chase clamp.
+fn arm_model(base_link: &str) -> std::result::Result<srs_model::Arm, srs_model::SrsError> {
+    Ok(
+        srs_model::Arm::from_urdf(openarm_description::urdf(), base_link)?.with_lower_floor(
+            openarm_description::ELBOW_JOINT_INDEX,
+            openarm_description::ELBOW_SINGULARITY_FLOOR_RAD,
+        ),
+    )
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -89,27 +102,43 @@ fn main() -> Result<()> {
         let cycle_period = Duration::from_micros(1_000_000 / params.control_rate_hz as u64);
         let stream_timeout = Duration::from_secs_f64(params.stream_timeout_s);
 
-        // Two arm models (FK/IK/Jacobian/limits) and the bimanual collision model,
-        // all from the one URDF. A bad URDF / base link / mesh dir aborts bringup.
-        let left_model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.left_base)
-            .unwrap_or_else(|e| {
-                panic!("build left arm model from base '{}': {e}", params.left_base)
-            });
-        let right_model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.right_base)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "build right arm model from base '{}': {e}",
-                    params.right_base
-                )
-            });
+        // Two arm models (FK/IK/Jacobian/limits, with the elbow singularity margin)
+        // and the bimanual collision model, all from the embedded OpenArm description.
+        // A bad base link aborts bringup.
+        let left_model = arm_model(&params.left_base).unwrap_or_else(|e| {
+            panic!("build left arm model from base '{}': {e}", params.left_base)
+        });
+        let right_model = arm_model(&params.right_base).unwrap_or_else(|e| {
+            panic!(
+                "build right arm model from base '{}': {e}",
+                params.right_base
+            )
+        });
         info!(
-            "arm models loaded (urdf '{}', left '{}', right '{}')",
-            params.urdf_path, params.left_base, params.right_base
+            "arm models loaded (left '{}', right '{}')",
+            params.left_base, params.right_base
         );
 
+        // The collision model needs the URDF string (joint limits are irrelevant to it,
+        // so no margin) and the meshes on disk; the file-based builder reads the meshes
+        // materialized from the embedded description into a per-process scratch dir. A
+        // unique tempdir (not a fixed shared path) avoids a start/restart race on the
+        // files; `Governor::build` reads them synchronously, so the handle can drop right
+        // after and self-clean.
+        let meshes_tmp = tempfile::tempdir()
+            .unwrap_or_else(|e| panic!("create scratch dir for collision meshes: {e}"));
+        openarm_description::write_meshes_to(meshes_tmp.path())
+            .unwrap_or_else(|e| panic!("materialize collision meshes: {e}"));
+        let meshes_dir = meshes_tmp.path().to_str().unwrap_or_else(|| {
+            panic!(
+                "meshes dir path is not valid UTF-8: {:?}",
+                meshes_tmp.path()
+            )
+        });
+
         let governor = governor::Governor::build(
-            &params.urdf_path,
-            &params.meshes_dir,
+            openarm_description::urdf(),
+            meshes_dir,
             &params.left_base,
             &params.right_base,
             params.d_stop,

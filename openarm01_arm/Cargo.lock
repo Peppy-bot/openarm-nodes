@@ -575,7 +575,7 @@ dependencies = [
 [[package]]
 name = "control_core"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#ba225daa3cf07bd423c3ab3f3a7e04181047b102"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",
@@ -1464,7 +1464,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2222,6 +2222,7 @@ version = "0.1.0"
 dependencies = [
  "control_core",
  "openarm_can",
+ "openarm_description",
  "peppygen",
  "peppylib",
  "srs_model",
@@ -2233,12 +2234,17 @@ dependencies = [
 [[package]]
 name = "openarm_can"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#ba225daa3cf07bd423c3ab3f3a7e04181047b102"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
 dependencies = [
  "bindgen",
  "cc",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "openarm_description"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
 
 [[package]]
 name = "openssl-probe"
@@ -2636,7 +2642,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2675,7 +2681,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3563,7 +3569,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#ba225daa3cf07bd423c3ab3f3a7e04181047b102"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
 dependencies = [
  "k",
  "thiserror 2.0.18",

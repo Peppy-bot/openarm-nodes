@@ -32,12 +32,9 @@
     parameters: {
       arm_id: "u8",
       can_interface: "string",
-      // URDF describing the robot (must include the world->base mount tree) and
-      // the link where this arm's SRS chain starts. Used to build the rigid-body
-      // model for the in-process gravity/Coriolis feedforward and the joint
-      // limits the governed setpoint is clamped to.
-      urdf_path: { $type: "string", $default: "/opt/openarm01_arm/openarm_v10.urdf" },
-      base_link: "string", // e.g. "openarm_left_link0"
+      // Link where this arm's SRS chain starts, selecting the side in the embedded
+      // OpenArm description (openarm_description). e.g. "openarm_left_link0".
+      base_link: "string",
       // Hardware-loop rate (Hz). Required: pick deliberately per deployment. The
       // stack currently unifies on 100 Hz (hub stream rate and arm loop rate match);
       // confirm `overruns=0` at the target rate during bring-up.
