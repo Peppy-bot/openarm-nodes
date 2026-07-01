@@ -121,13 +121,20 @@ fn main() -> Result<()> {
 
         // The collision model needs the URDF string (joint limits are irrelevant to it,
         // so no margin) and the meshes on disk; the file-based builder reads the meshes
-        // materialized from the embedded description into a scratch dir.
-        let meshes_dir = std::env::temp_dir().join("openarm01_backbone_meshes");
-        openarm_description::write_meshes_to(&meshes_dir)
+        // materialized from the embedded description into a per-process scratch dir. A
+        // unique tempdir (not a fixed shared path) avoids a start/restart race on the
+        // files; `Governor::build` reads them synchronously, so the handle can drop right
+        // after and self-clean.
+        let meshes_tmp = tempfile::tempdir()
+            .unwrap_or_else(|e| panic!("create scratch dir for collision meshes: {e}"));
+        openarm_description::write_meshes_to(meshes_tmp.path())
             .unwrap_or_else(|e| panic!("materialize collision meshes: {e}"));
-        let meshes_dir = meshes_dir
-            .to_str()
-            .unwrap_or_else(|| panic!("meshes dir path is not valid UTF-8: {meshes_dir:?}"));
+        let meshes_dir = meshes_tmp.path().to_str().unwrap_or_else(|| {
+            panic!(
+                "meshes dir path is not valid UTF-8: {:?}",
+                meshes_tmp.path()
+            )
+        });
 
         let governor = governor::Governor::build(
             openarm_description::urdf(),
