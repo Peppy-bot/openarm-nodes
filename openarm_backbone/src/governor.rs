@@ -26,7 +26,7 @@
 use bimanual_collision_model::{BimanualCollisionModel, CollisionError};
 use tracing::{error, info, warn};
 
-use crate::openarm_v10::{TORSO_BODY, torso_hulls};
+use crate::torso::{TORSO_BODY, torso_hulls};
 use crate::{ARM_DOF, ArmPair, JointVec};
 
 /// Joints across both arms, left (0..7) then right (7..14).
@@ -565,7 +565,7 @@ mod tests {
     use super::*;
 
     /// Materialize the bundled collision meshes so the file-based collision builder
-    /// can fit hulls; the URDF itself comes from `openarm_description::urdf()`. Written
+    /// can fit hulls; the URDF itself comes from `openarm_description::HardwareVersion::V1.urdf()`. Written
     /// once into a unique tempdir held for the test process: `cargo test` runs these in
     /// parallel, so re-writing per call would let one test truncate a mesh mid-read of
     /// another's `build()`; a unique path also avoids clashing with a concurrent test
@@ -574,7 +574,7 @@ mod tests {
         static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         DIR.get_or_init(|| {
             let dir = tempfile::tempdir().expect("create scratch dir for collision meshes");
-            openarm_description::write_meshes_to(dir.path()).expect("materialize collision meshes");
+            openarm_description::HardwareVersion::V1.write_meshes_to(dir.path()).expect("materialize collision meshes");
             dir
         })
         .path()
@@ -599,7 +599,7 @@ mod tests {
     fn governor(enabled: bool) -> Governor {
         let meshes_dir = fixture_meshes_dir();
         Governor::build(
-            openarm_description::urdf(),
+            openarm_description::HardwareVersion::V1.urdf(),
             meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
             "openarm_left_link0",
             "openarm_right_link0",
@@ -619,7 +619,7 @@ mod tests {
         // than silently under-resolving the segment.
         let meshes_dir = fixture_meshes_dir();
         let mut g = Governor::build(
-            openarm_description::urdf(),
+            openarm_description::HardwareVersion::V1.urdf(),
             meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
             "openarm_left_link0",
             "openarm_right_link0",

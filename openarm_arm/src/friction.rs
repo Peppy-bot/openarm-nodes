@@ -16,18 +16,23 @@ pub struct Params {
     pub k: JointVec,
 }
 
-/// OpenArm V1.0 friction constants, taken from openarm_teleop's
-/// `config/follower.yaml`. This node is a stiff position controller, so it matches
-/// the teleop follower role. `follower.yaml` and `leader.yaml` agree on every
-/// constant except `Fc[5]` (joint 6: follower 0.093, leader 0.083). The
-/// `coef_tmp = 0.1` tanh softening that `ComputeFriction` always applies is folded
-/// into `k` (so `k` here is the yaml `k` times 0.1), making the runtime expression
+/// Friction constants from openarm_teleop's `config/follower.yaml`. This node is a stiff
+/// position controller, so it matches the teleop follower role. `follower.yaml` and
+/// `leader.yaml` agree on every constant except `Fc[5]` (joint 6: follower 0.093, leader
+/// 0.083). The `coef_tmp = 0.1` tanh softening that `ComputeFriction` always applies is
+/// folded into `k` (so `k` here is the yaml `k` times 0.1), making the runtime expression
 /// `Fo + Fv·ω + Fc·tanh(k·ω)`.
 ///
+/// The enactic teleop config is not versioned, so these apply to both hardware
+/// generations. `Fo` is a directional Coulomb-breakaway offset defined in each joint's
+/// positive direction; v2.0 reoriented joints 1/3/4, so confirm the per-joint sign
+/// convention against the v2 URDF axes at bring-up (a flipped joint would need its `Fo`
+/// sign flipped). Not defaulted differently in code because the reference does not.
+///
 /// These are the physical (full) friction torques, applied directly at full weight
-/// (matching the openarm teleop follower). Fo is a non-zero static offset, so at
-/// rest the model commands a small directional bias (intentional Coulomb breakaway).
-pub const V1: Params = Params {
+/// (matching the openarm teleop follower). Fo is a non-zero static offset, so at rest the
+/// model commands a small directional bias (intentional Coulomb breakaway).
+pub const NOMINAL: Params = Params {
     fc: [0.306, 0.306, 0.40, 0.166, 0.050, 0.093, 0.172],
     fv: [0.063, 0.063, 0.604, 0.813, 0.029, 0.072, 0.084],
     fo: [0.088, 0.088, 0.008, -0.058, 0.005, 0.009, -0.059],
@@ -45,7 +50,7 @@ mod tests {
     use crate::ARM_DOF;
 
     /// Self-contained constants for the `torques` math (distinct, non-zero per
-    /// joint), independent of the production [`V1`] values.
+    /// joint), independent of the production [`NOMINAL`] values.
     const FIXTURE: Params = Params {
         fc: [0.09, 0.10, 0.12, 0.05, 0.015, 0.025, 0.05],
         fv: [0.02, 0.03, 0.18, 0.24, 0.009, 0.02, 0.025],
@@ -93,8 +98,13 @@ mod tests {
     }
 
     #[test]
-    fn v1_constants_are_complete_and_finite() {
-        for arr in [&V1.fc, &V1.fv, &V1.fo, &V1.k] {
+    fn nominal_constants_are_complete_and_finite() {
+        for arr in [
+            &NOMINAL.fc,
+            &NOMINAL.fv,
+            &NOMINAL.fo,
+            &NOMINAL.k,
+        ] {
             assert!(arr.iter().all(|x| x.is_finite()));
         }
     }

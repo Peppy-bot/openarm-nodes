@@ -12,7 +12,8 @@ mod friction;
 mod stream;
 
 use control::ControlConfig;
-use openarm_can::{ArmCan, CallbackMode, v10};
+use openarm_can::{ARM_MOTOR_TYPES, ARM_RECV_IDS, ARM_SEND_IDS, ArmCan, CallbackMode};
+use openarm_description::HardwareVersion;
 use peppygen::exposed_services::openarm_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
@@ -72,20 +73,26 @@ fn main() -> Result<()> {
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
         let side = side_label(arm_id);
 
-        // Build the srs_model arm from the embedded OpenArm description: forward
-        // kinematics for the in-process gravity/Coriolis feedforward, plus joint limits
-        // off the same parsed chain. The elbow singularity margin is a control policy the
-        // description exports as a constant; apply it so limits() carries it. A non-SRS
-        // or short chain from base_link errors here.
-        let model = srs_model::Arm::from_urdf(openarm_description::urdf(), &params.base_link)
+        // Which OpenArm generation this arm drives; selects the embedded description.
+        let hardware_version: HardwareVersion = params
+            .hardware_version
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        // Build the srs_model arm from this generation's embedded OpenArm description:
+        // forward kinematics for the in-process gravity/Coriolis feedforward, plus joint
+        // limits off the same parsed chain. The elbow singularity margin is a control
+        // policy the description exports per generation; apply it so limits() carries it.
+        // A non-SRS or short chain from base_link errors here.
+        let model = srs_model::Arm::from_urdf(hardware_version.urdf(), &params.base_link)
             .map(|arm| {
                 arm.with_lower_floor(
-                    openarm_description::ELBOW_JOINT_INDEX,
-                    openarm_description::ELBOW_SINGULARITY_FLOOR_RAD,
+                    hardware_version.elbow_joint_index(),
+                    hardware_version.elbow_singularity_floor_rad(),
                 )
             })
-            .unwrap_or_else(|e| panic!("build arm model from base '{}': {e}", params.base_link));
-        info!("model loaded (base '{}')", params.base_link);
+            .unwrap_or_else(|e| panic!("build {hardware_version} arm model from base '{}': {e}", params.base_link));
+        info!("model loaded ({hardware_version}, base '{}')", params.base_link);
 
         // Gravity acts along world -Z, so it is only correct if the URDF carries the
         // mount tree above base_link to orient that frame. We do not force one (a
@@ -167,12 +174,9 @@ fn main() -> Result<()> {
 
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
+        // Arm motor lineup + CAN addressing are identical across generations.
         let mut arm = ArmCan::new(&can_interface, ENABLE_FD).expect("ArmCan::new");
-        arm.init_motors(
-            &v10::ARM_MOTOR_TYPES,
-            &v10::ARM_SEND_IDS,
-            &v10::ARM_RECV_IDS,
-        );
+        arm.init_motors(&ARM_MOTOR_TYPES, &ARM_SEND_IDS, &ARM_RECV_IDS);
         arm.set_callback_mode(CallbackMode::Ignore);
         arm.enable_all();
         tokio::time::sleep(POST_ENABLE_SLEEP).await;

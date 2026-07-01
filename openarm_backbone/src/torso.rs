@@ -1,9 +1,10 @@
-//! OpenArm v10 model facts the governor needs but the URDF does not carry: the
-//! torso body name and a tight convex proxy for its concave mesh. Hand-fitted to
-//! the OpenArm v10 torso, matching the fixed description in `openarm_description`; a
-//! different robot needs its own proxy here. The collision model's `build()` rejects
-//! a URDF without `TORSO_BODY`, so a mismatch aborts at bringup rather than running
-//! against the wrong geometry.
+//! OpenArm torso facts the governor needs but the URDF does not carry: the torso body
+//! name and a tight convex proxy for its concave mesh. The bimanual stand is unchanged
+//! between v1.0 and v2.0 (`body_link0_symp.stl` is byte-identical, same mount transforms),
+//! so this proxy is shared across both generations. Hand-fitted to that torso mesh; a
+//! different robot needs its own proxy here. The collision model's `build()` rejects a
+//! URDF without `TORSO_BODY`, so a mismatch aborts at bringup rather than running against
+//! the wrong geometry.
 
 use bimanual_collision_model::{ConvexPiece, Point3};
 
@@ -14,8 +15,8 @@ use bimanual_collision_model::{ConvexPiece, Point3};
 pub const TORSO_BODY: &str = "openarm_body_link0";
 
 /// Base plate, shoulder flare, rear brace, central column, and head block bounding
-/// the OpenArm v10 torso mesh in the root frame. See the collision model's torso
-/// fixture for the per-feature derivation.
+/// the OpenArm torso mesh in the root frame. See the collision model's torso fixture
+/// for the per-feature derivation.
 pub fn torso_hulls() -> Vec<ConvexPiece> {
     let ring = |y: f64, z: f64| {
         [

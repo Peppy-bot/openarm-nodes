@@ -11,10 +11,10 @@ mod arm_pair;
 mod chase;
 mod coordinator;
 mod governor;
-mod openarm_v10;
 mod planner;
 mod startup;
 mod streams;
+mod torso;
 mod trajectory;
 mod types;
 
@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use openarm_description::HardwareVersion;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -50,11 +51,14 @@ where
 /// singularity margin applied. The description carries no solver dep and exports the
 /// margin as a constant; applying it here is the single site the hub imposes it, so the
 /// model's `limits()` carry it for IK seeding, trajectory sizing, and the chase clamp.
-fn arm_model(base_link: &str) -> std::result::Result<srs_model::Arm, srs_model::SrsError> {
+fn arm_model(
+    version: HardwareVersion,
+    base_link: &str,
+) -> std::result::Result<srs_model::Arm, srs_model::SrsError> {
     Ok(
-        srs_model::Arm::from_urdf(openarm_description::urdf(), base_link)?.with_lower_floor(
-            openarm_description::ELBOW_JOINT_INDEX,
-            openarm_description::ELBOW_SINGULARITY_FLOOR_RAD,
+        srs_model::Arm::from_urdf(version.urdf(), base_link)?.with_lower_floor(
+            version.elbow_joint_index(),
+            version.elbow_singularity_floor_rad(),
         ),
     )
 }
@@ -102,13 +106,20 @@ fn main() -> Result<()> {
         let cycle_period = Duration::from_micros(1_000_000 / params.control_rate_hz as u64);
         let stream_timeout = Duration::from_secs_f64(params.stream_timeout_s);
 
+        // Which OpenArm generation the arms are; selects the embedded description for both
+        // the srs_model arms and the bimanual collision model.
+        let hardware_version: HardwareVersion = params
+            .hardware_version
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}"));
+
         // Two arm models (FK/IK/Jacobian/limits, with the elbow singularity margin)
         // and the bimanual collision model, all from the embedded OpenArm description.
         // A bad base link aborts bringup.
-        let left_model = arm_model(&params.left_base).unwrap_or_else(|e| {
+        let left_model = arm_model(hardware_version, &params.left_base).unwrap_or_else(|e| {
             panic!("build left arm model from base '{}': {e}", params.left_base)
         });
-        let right_model = arm_model(&params.right_base).unwrap_or_else(|e| {
+        let right_model = arm_model(hardware_version, &params.right_base).unwrap_or_else(|e| {
             panic!(
                 "build right arm model from base '{}': {e}",
                 params.right_base
@@ -127,7 +138,8 @@ fn main() -> Result<()> {
         // after and self-clean.
         let meshes_tmp = tempfile::tempdir()
             .unwrap_or_else(|e| panic!("create scratch dir for collision meshes: {e}"));
-        openarm_description::write_meshes_to(meshes_tmp.path())
+        hardware_version
+            .write_meshes_to(meshes_tmp.path())
             .unwrap_or_else(|e| panic!("materialize collision meshes: {e}"));
         let meshes_dir = meshes_tmp.path().to_str().unwrap_or_else(|| {
             panic!(
@@ -137,7 +149,7 @@ fn main() -> Result<()> {
         });
 
         let governor = governor::Governor::build(
-            openarm_description::urdf(),
+            hardware_version.urdf(),
             meshes_dir,
             &params.left_base,
             &params.right_base,

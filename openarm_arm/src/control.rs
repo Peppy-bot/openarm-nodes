@@ -159,7 +159,7 @@ fn feedforward(model: &mut srs_model::Arm, q: &JointVec, qdot: &JointVec) -> Joi
     let posed = model.at(q);
     let gravity = posed.gravity_torques();
     let coriolis = posed.coriolis_torques(qdot);
-    let friction = friction::torques(&friction::V1, qdot);
+    let friction = friction::torques(&friction::NOMINAL, qdot);
     std::array::from_fn(|i| gravity[i] + coriolis[i] + friction[i])
 }
 
