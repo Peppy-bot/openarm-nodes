@@ -145,18 +145,13 @@
       def_file: "apptainer.def"
     },
     parameters: {
-      // URDF + per-side base links for both srs_model arms and the bimanual
-      // collision model. The default URDF and meshes are checked in at the node
-      // root and copied into the container by apptainer.def. Must be an OpenArm
-      // v10 variant: the governor's torso proxy is hand-fitted to that mesh (see
-      // the openarm_v10 module), and the collision model's build() aborts if the
-      // URDF lacks the expected torso body.
-      urdf_path: { $type: "string", $default: "/opt/openarm01_backbone/openarm_v10.urdf" },
+      // Per-side base links selecting the two SRS chains in the embedded OpenArm
+      // description (openarm_description), used for both srs_model arms and the
+      // bimanual collision model. The description is a fixed OpenArm v10: the
+      // governor's torso proxy is hand-fitted to its mesh (see the openarm_v10
+      // module), and the collision model's build() aborts without the expected torso.
       left_base: { $type: "string", $default: "openarm_left_link0" },
       right_base: { $type: "string", $default: "openarm_right_link0" },
-      // Directory of collision meshes the bimanual model fits hulls from
-      // (resolves the URDF's package:// refs). Vendored alongside the URDF.
-      meshes_dir: { $type: "string", $default: "/opt/openarm01_backbone/meshes" },
       // Coordination loop rate (Hz): the rate governed setpoints are streamed at.
       control_rate_hz: "u32",
       // Self-collision governor band (m), signed surface distance between the two

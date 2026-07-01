@@ -304,11 +304,7 @@ mod tests {
     // --- plan_cartesian_duration (real arm model) ------------------------
 
     fn left_arm() -> Arm {
-        Arm::from_urdf_file(
-            &format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")),
-            "openarm_left_link0",
-        )
-        .expect("build left arm from vendored fixture URDF")
+        crate::arm_model("openarm_left_link0").expect("build left arm from bundled URDF")
     }
 
     #[test]

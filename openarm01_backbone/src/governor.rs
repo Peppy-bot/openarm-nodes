@@ -121,9 +121,9 @@ impl Governor {
     /// Build the bimanual model (with the tight torso proxy) and validate the band.
     /// Fails loudly on a bad URDF / mesh dir / base link or an invalid band, so a
     /// misconfigured hub aborts at bringup instead of running ungoverned.
-    #[allow(clippy::too_many_arguments)] // distinct model paths + band + speed bound + toggle
+    #[allow(clippy::too_many_arguments)] // distinct model inputs + band + speed bound + toggle
     pub fn build(
-        urdf_path: &str,
+        urdf: &str,
         meshes_dir: &str,
         left_base: &str,
         right_base: &str,
@@ -142,12 +142,10 @@ impl Governor {
                 "invalid max_joint_velocity_rad_s ({max_joint_velocity_rad_s}): must be finite and > 0"
             ));
         }
-        let model =
-            BimanualCollisionModel::builder_from_file(urdf_path, meshes_dir, left_base, right_base)
-                .map_err(|e| format!("build collision model from '{urdf_path}': {e}"))?
-                .hulls(TORSO_BODY, torso_hulls())
-                .build()
-                .map_err(|e| format!("finalize collision model: {e}"))?;
+        let model = BimanualCollisionModel::builder(urdf, meshes_dir, left_base, right_base)
+            .hulls(TORSO_BODY, torso_hulls())
+            .build()
+            .map_err(|e| format!("build collision model: {e}"))?;
         Ok(Self {
             model,
             d_stop,
@@ -566,7 +564,14 @@ fn dot(a: &[f64; DUAL_DOF], b: &[f64; DUAL_DOF]) -> f64 {
 mod tests {
     use super::*;
 
-    const FIXTURES: &str = env!("CARGO_MANIFEST_DIR");
+    /// Materialize the bundled collision meshes so the file-based collision builder
+    /// can fit hulls; the URDF itself comes from `openarm_description::urdf()`.
+    fn fixture_meshes_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("openarm01_backbone_governor_test_meshes");
+        openarm_description::write_meshes_to(&dir).expect("materialize collision meshes");
+        dir
+    }
+
     const D_STOP: f64 = 0.005;
     const D_SAFE: f64 = 0.02;
     const DT: f64 = 0.01;
@@ -583,9 +588,10 @@ mod tests {
     }
 
     fn governor(enabled: bool) -> Governor {
+        let meshes_dir = fixture_meshes_dir();
         Governor::build(
-            &format!("{FIXTURES}/openarm_v10.urdf"),
-            &format!("{FIXTURES}/meshes"),
+            openarm_description::urdf(),
+            meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
             "openarm_left_link0",
             "openarm_right_link0",
             D_STOP,
@@ -593,7 +599,7 @@ mod tests {
             MAX_JOINT_VELOCITY_RAD_S,
             enabled,
         )
-        .expect("build governor from vendored fixtures")
+        .expect("build governor from bundled description")
     }
 
     #[test]
@@ -602,9 +608,10 @@ mod tests {
         // A tiny velocity makes the bound (max_joint_velocity * DT) 5e-4 rad, so any
         // real step exceeds it and the scan's velocity-limit assertion fires rather
         // than silently under-resolving the segment.
+        let meshes_dir = fixture_meshes_dir();
         let mut g = Governor::build(
-            &format!("{FIXTURES}/openarm_v10.urdf"),
-            &format!("{FIXTURES}/meshes"),
+            openarm_description::urdf(),
+            meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
             "openarm_left_link0",
             "openarm_right_link0",
             D_STOP,
@@ -612,7 +619,7 @@ mod tests {
             0.05,
             true,
         )
-        .expect("build governor from vendored fixtures");
+        .expect("build governor from bundled description");
         let prev = home();
         let mut left = prev.left;
         left[0] += 0.5; // 0.5 rad >> the 5e-4 rad velocity-limited bound

@@ -1,9 +1,9 @@
 //! OpenArm v10 model facts the governor needs but the URDF does not carry: the
 //! torso body name and a tight convex proxy for its concave mesh. Hand-fitted to
-//! the OpenArm v10 torso, so the hub's `urdf_path` parameter must point at an
-//! OpenArm v10 variant; a different robot needs its own proxy here. The collision
-//! model's `build()` rejects a URDF without `TORSO_BODY`, so a mismatch aborts at
-//! bringup rather than running against the wrong geometry.
+//! the OpenArm v10 torso, matching the fixed description in `openarm_description`; a
+//! different robot needs its own proxy here. The collision model's `build()` rejects
+//! a URDF without `TORSO_BODY`, so a mismatch aborts at bringup rather than running
+//! against the wrong geometry.
 
 use bimanual_collision_model::{ConvexPiece, Point3};
 

@@ -72,16 +72,20 @@ fn main() -> Result<()> {
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
         let side = side_label(arm_id);
 
-        // Build the srs_model arm from the URDF: forward kinematics for the
-        // in-process gravity/Coriolis feedforward, plus joint limits off the same
-        // parsed chain (one source of truth, the URDF). A non-SRS or short chain
-        // from base_link errors here.
-        let model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.base_link)
+        // Build the srs_model arm from the embedded OpenArm description: forward
+        // kinematics for the in-process gravity/Coriolis feedforward, plus joint limits
+        // off the same parsed chain. The elbow singularity margin is a control policy the
+        // description exports as a constant; apply it so limits() carries it. A non-SRS
+        // or short chain from base_link errors here.
+        let model = srs_model::Arm::from_urdf(openarm_description::urdf(), &params.base_link)
+            .map(|arm| {
+                arm.with_lower_floor(
+                    openarm_description::ELBOW_JOINT_INDEX,
+                    openarm_description::ELBOW_SINGULARITY_FLOOR_RAD,
+                )
+            })
             .unwrap_or_else(|e| panic!("build arm model from base '{}': {e}", params.base_link));
-        info!(
-            "model loaded (urdf '{}', base '{}')",
-            params.urdf_path, params.base_link
-        );
+        info!("model loaded (base '{}')", params.base_link);
 
         // Gravity acts along world -Z, so it is only correct if the URDF carries the
         // mount tree above base_link to orient that frame. We do not force one (a
