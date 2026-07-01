@@ -566,16 +566,19 @@ mod tests {
 
     /// Materialize the bundled collision meshes so the file-based collision builder
     /// can fit hulls; the URDF itself comes from `openarm_description::urdf()`. Written
-    /// once and shared: `cargo test` runs these in parallel, so re-writing a fixed path
-    /// per call would let one test truncate a mesh mid-read of another's `build()`.
+    /// once into a unique tempdir held for the test process: `cargo test` runs these in
+    /// parallel, so re-writing per call would let one test truncate a mesh mid-read of
+    /// another's `build()`; a unique path also avoids clashing with a concurrent test
+    /// process on the same host.
     fn fixture_meshes_dir() -> std::path::PathBuf {
-        static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         DIR.get_or_init(|| {
-            let dir = std::env::temp_dir().join("openarm01_backbone_governor_test_meshes");
-            openarm_description::write_meshes_to(&dir).expect("materialize collision meshes");
+            let dir = tempfile::tempdir().expect("create scratch dir for collision meshes");
+            openarm_description::write_meshes_to(dir.path()).expect("materialize collision meshes");
             dir
         })
-        .clone()
+        .path()
+        .to_path_buf()
     }
 
     const D_STOP: f64 = 0.005;
