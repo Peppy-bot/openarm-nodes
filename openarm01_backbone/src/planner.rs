@@ -46,8 +46,16 @@ pub struct PlanConfig {
 
 /// A goal accepted by an action handler and handed to the planner.
 pub enum Goal {
-    Joint { target: JointVec, duration_s: f64, ctx: move_arm_joints::GoalContext },
-    Cartesian { target: Isometry3<f64>, duration_s: f64, ctx: move_arm::GoalContext },
+    Joint {
+        target: JointVec,
+        duration_s: f64,
+        ctx: move_arm_joints::GoalContext,
+    },
+    Cartesian {
+        target: Isometry3<f64>,
+        duration_s: f64,
+        ctx: move_arm::GoalContext,
+    },
 }
 
 /// Releases the arm's single-flight busy flag on drop. Held for the lifetime of a
@@ -74,7 +82,11 @@ enum Mode {
     /// Ambient: chase the locked operator stream, or hold when none is streaming.
     Follow { lock: Option<Lock> },
     /// Tracking a quintic joint trajectory for an accepted move_arm_joints goal.
-    JointMove { traj: JointTrajectory, ctx: move_arm_joints::GoalContext, _busy: BusyGuard },
+    JointMove {
+        traj: JointTrajectory,
+        ctx: move_arm_joints::GoalContext,
+        _busy: BusyGuard,
+    },
     /// Tracking a Cartesian pose trajectory for an accepted move_arm goal, solving
     /// IK each tick for the joint target.
     CartesianMove(CartesianMove),
@@ -112,7 +124,13 @@ impl Planner {
     /// held pose from the first measured state (via [`Planner::commit`]) before any
     /// setpoint is published, so this initial value is never streamed.
     pub fn new(side: Side, model: Arm, cfg: PlanConfig) -> Self {
-        Self { side, model, cfg, mode: Mode::Follow { lock: None }, setpoint: [0.0; ARM_DOF] }
+        Self {
+            side,
+            model,
+            cfg,
+            mode: Mode::Follow { lock: None },
+            setpoint: [0.0; ARM_DOF],
+        }
     }
 
     /// Adopt the governed setpoint the coordinator actually published, so the next
@@ -158,18 +176,34 @@ impl Planner {
         // A move preempts Follow; while a move runs the action handler rejects new
         // goals as busy, so the channel only delivers a goal in Follow.
         if matches!(mode, Mode::Follow { .. })
-            && let Ok(goal) = goals.try_recv() {
-                mode = self.start_goal(goal, busy.clone(), now).await;
-            }
+            && let Ok(goal) = goals.try_recv()
+        {
+            mode = self.start_goal(goal, busy.clone(), now).await;
+        }
 
-        let Advance { target, next_mode, is_follow } = self.advance(mode, measured_q, &command, now).await;
+        let Advance {
+            target,
+            next_mode,
+            is_follow,
+        } = self.advance(mode, measured_q, &command, now).await;
         self.mode = next_mode;
 
         let dt = self.cfg.cycle_period.as_secs_f64();
-        let stepped = chase_step(&self.setpoint, &target, &self.cfg.max_joint_velocity_rad_s, dt);
+        let stepped = chase_step(
+            &self.setpoint,
+            &target,
+            &self.cfg.max_joint_velocity_rad_s,
+            dt,
+        );
         if is_follow {
             let jac: Jacobian = self.model.at(&measured_q).jacobian();
-            cap_ee_speed(&self.setpoint, &stepped, &jac, self.cfg.max_ee_velocity_m_s, dt)
+            cap_ee_speed(
+                &self.setpoint,
+                &stepped,
+                &jac,
+                self.cfg.max_ee_velocity_m_s,
+                dt,
+            )
         } else {
             clamp_to_limits(&stepped, &self.cfg.limits)
         }
@@ -187,7 +221,11 @@ impl Planner {
         match mode {
             Mode::Follow { mut lock } => {
                 let target = follow_target(&mut lock, command, self.setpoint, &self.cfg, now);
-                Advance { target, next_mode: Mode::Follow { lock }, is_follow: true }
+                Advance {
+                    target,
+                    next_mode: Mode::Follow { lock },
+                    is_follow: true,
+                }
             }
             Mode::JointMove { traj, ctx, _busy } => {
                 let q_des = traj.sample(now);
@@ -197,21 +235,34 @@ impl Planner {
                     // Success means the trajectory ran to completion (not cancelled).
                     // The result carries the measured pose, so the caller judges how
                     // close it landed; the governor may have held it short.
-                    let (success, message) =
-                        if cancelled { (false, "goal cancelled") } else { (true, "trajectory complete") };
-                    let result = if cancelled {
-                        ctx.complete_cancelled(false, message.into(), measured_q, elapsed).await
+                    let (success, message) = if cancelled {
+                        (false, "goal cancelled")
                     } else {
-                        ctx.complete(success, message.into(), measured_q, elapsed).await
+                        (true, "trajectory complete")
+                    };
+                    let result = if cancelled {
+                        ctx.complete_cancelled(false, message.into(), measured_q, elapsed)
+                            .await
+                    } else {
+                        ctx.complete(success, message.into(), measured_q, elapsed)
+                            .await
                     };
                     if let Err(e) = result {
                         error!("{}: move_arm_joints complete: {e}", self.side.label());
                     }
                     // `_busy` drops here: the slot is released.
                     let target = if cancelled { self.setpoint } else { q_des };
-                    Advance { target, next_mode: Mode::Follow { lock: None }, is_follow: false }
+                    Advance {
+                        target,
+                        next_mode: Mode::Follow { lock: None },
+                        is_follow: false,
+                    }
                 } else {
-                    Advance { target: q_des, next_mode: Mode::JointMove { traj, ctx, _busy }, is_follow: false }
+                    Advance {
+                        target: q_des,
+                        next_mode: Mode::JointMove { traj, ctx, _busy },
+                        is_follow: false,
+                    }
                 }
             }
             Mode::CartesianMove(m) => self.advance_cartesian(m, measured_q, now).await,
@@ -221,30 +272,91 @@ impl Planner {
     /// One Cartesian tick: sample the pose, solve IK (seeded), and complete on
     /// cancel, IK failure, a velocity-guard trip, or normal completion. Any
     /// terminal drops `m` (and with it the busy guard), releasing the slot.
-    async fn advance_cartesian(&mut self, mut m: CartesianMove, measured_q: JointVec, now: Instant) -> Advance {
+    async fn advance_cartesian(
+        &mut self,
+        mut m: CartesianMove,
+        measured_q: JointVec,
+        now: Instant,
+    ) -> Advance {
         let elapsed = now.duration_since(m.traj.motion_start).as_secs_f64();
         if m.ctx.is_cancelled() {
-            self.finish_cartesian(&m.ctx, measured_q, false, "goal cancelled", elapsed, true).await;
-            return Advance { target: m.prev_q_des, next_mode: Mode::Follow { lock: None }, is_follow: false };
+            self.finish_cartesian(&m.ctx, measured_q, false, "goal cancelled", elapsed, true)
+                .await;
+            return Advance {
+                target: m.prev_q_des,
+                next_mode: Mode::Follow { lock: None },
+                is_follow: false,
+            };
         }
         let base_target = self.model.base_pose(&m.traj.sample(now));
-        let Some(sol) = self.model.solve_ik(&base_target, ArmAnglePolicy::FromSeed, &m.seed) else {
-            self.finish_cartesian(&m.ctx, measured_q, false, "IK failed mid-trajectory (unreachable / singular)", elapsed, false).await;
-            return Advance { target: m.prev_q_des, next_mode: Mode::Follow { lock: None }, is_follow: false };
+        let Some(sol) = self
+            .model
+            .solve_ik(&base_target, ArmAnglePolicy::FromSeed, &m.seed)
+        else {
+            self.finish_cartesian(
+                &m.ctx,
+                measured_q,
+                false,
+                "IK failed mid-trajectory (unreachable / singular)",
+                elapsed,
+                false,
+            )
+            .await;
+            return Advance {
+                target: m.prev_q_des,
+                next_mode: Mode::Follow { lock: None },
+                is_follow: false,
+            };
         };
-        let dt = now.duration_since(m.prev_sample_at).as_secs_f64().max(self.cfg.cycle_period.as_secs_f64() * 0.5);
-        if exceeds_velocity_limits(&sol.q, &m.prev_q_des, &self.cfg.max_joint_velocity_rad_s, dt) {
-            self.finish_cartesian(&m.ctx, measured_q, false, "joint velocity limit exceeded near singularity", elapsed, false).await;
-            return Advance { target: m.prev_q_des, next_mode: Mode::Follow { lock: None }, is_follow: false };
+        let dt = now
+            .duration_since(m.prev_sample_at)
+            .as_secs_f64()
+            .max(self.cfg.cycle_period.as_secs_f64() * 0.5);
+        if exceeds_velocity_limits(
+            &sol.q,
+            &m.prev_q_des,
+            &self.cfg.max_joint_velocity_rad_s,
+            dt,
+        ) {
+            self.finish_cartesian(
+                &m.ctx,
+                measured_q,
+                false,
+                "joint velocity limit exceeded near singularity",
+                elapsed,
+                false,
+            )
+            .await;
+            return Advance {
+                target: m.prev_q_des,
+                next_mode: Mode::Follow { lock: None },
+                is_follow: false,
+            };
         }
         m.prev_q_des = sol.q;
         m.prev_sample_at = now;
         m.seed = sol.q;
         if m.traj.is_complete(now) {
-            self.finish_cartesian(&m.ctx, measured_q, true, "cartesian move complete", elapsed, false).await;
-            Advance { target: sol.q, next_mode: Mode::Follow { lock: None }, is_follow: false }
+            self.finish_cartesian(
+                &m.ctx,
+                measured_q,
+                true,
+                "cartesian move complete",
+                elapsed,
+                false,
+            )
+            .await;
+            Advance {
+                target: sol.q,
+                next_mode: Mode::Follow { lock: None },
+                is_follow: false,
+            }
         } else {
-            Advance { target: sol.q, next_mode: Mode::CartesianMove(m), is_follow: false }
+            Advance {
+                target: sol.q,
+                next_mode: Mode::CartesianMove(m),
+                is_follow: false,
+            }
         }
     }
 
@@ -257,24 +369,60 @@ impl Planner {
     async fn start_goal(&mut self, goal: Goal, busy: Arc<AtomicBool>, now: Instant) -> Mode {
         let busy = BusyGuard(busy);
         match goal {
-            Goal::Joint { target, duration_s, ctx } => {
+            Goal::Joint {
+                target,
+                duration_s,
+                ctx,
+            } => {
                 info!("{}: move_arm_joints start", self.side.label());
-                let traj = JointTrajectory::new(self.setpoint, target, self.cfg.max_joint_velocity_rad_s, duration_s);
-                Mode::JointMove { traj, ctx, _busy: busy }
+                let traj = JointTrajectory::new(
+                    self.setpoint,
+                    target,
+                    self.cfg.max_joint_velocity_rad_s,
+                    duration_s,
+                );
+                Mode::JointMove {
+                    traj,
+                    ctx,
+                    _busy: busy,
+                }
             }
-            Goal::Cartesian { target, duration_s, ctx } => {
+            Goal::Cartesian {
+                target,
+                duration_s,
+                ctx,
+            } => {
                 let ee_base = self.model.at(&self.setpoint).ee_pose();
                 let start_world = self.model.world_pose(&ee_base);
-                let plan = plan_cartesian_duration(&self.model, &start_world, &target, self.setpoint, &self.cfg.max_joint_velocity_rad_s, duration_s);
+                let plan = plan_cartesian_duration(
+                    &self.model,
+                    &start_world,
+                    &target,
+                    self.setpoint,
+                    &self.cfg.max_joint_velocity_rad_s,
+                    duration_s,
+                );
                 let Some(duration) = plan else {
                     let (pos, quat) = world_pose_arrays(&start_world);
-                    if let Err(e) = ctx.complete(false, "target path unreachable / no in-limit IK solution".into(), pos, quat, 0.0).await {
+                    if let Err(e) = ctx
+                        .complete(
+                            false,
+                            "target path unreachable / no in-limit IK solution".into(),
+                            pos,
+                            quat,
+                            0.0,
+                        )
+                        .await
+                    {
                         error!("{}: move_arm complete: {e}", self.side.label());
                     }
                     // `busy` drops here: the slot is released even on this early exit.
                     return Mode::Follow { lock: None };
                 };
-                info!("{}: move_arm start, duration={duration:.3}s", self.side.label());
+                info!(
+                    "{}: move_arm start, duration={duration:.3}s",
+                    self.side.label()
+                );
                 Mode::CartesianMove(CartesianMove {
                     traj: CartesianTrajectory::new(start_world, target, duration),
                     ctx,
@@ -288,13 +436,23 @@ impl Planner {
     }
 
     /// Complete a Cartesian goal, reporting the measured world pose at exit.
-    async fn finish_cartesian(&mut self, ctx: &move_arm::GoalContext, measured_q: JointVec, success: bool, message: &str, elapsed: f64, cancelled: bool) {
+    async fn finish_cartesian(
+        &mut self,
+        ctx: &move_arm::GoalContext,
+        measured_q: JointVec,
+        success: bool,
+        message: &str,
+        elapsed: f64,
+        cancelled: bool,
+    ) {
         let ee_base = self.model.at(&measured_q).ee_pose();
         let (pos, quat) = world_pose_arrays(&self.model.world_pose(&ee_base));
         let result = if cancelled {
-            ctx.complete_cancelled(false, message.into(), pos, quat, elapsed).await
+            ctx.complete_cancelled(false, message.into(), pos, quat, elapsed)
+                .await
         } else {
-            ctx.complete(success, message.into(), pos, quat, elapsed).await
+            ctx.complete(success, message.into(), pos, quat, elapsed)
+                .await
         };
         if let Err(e) = result {
             error!("{}: move_arm complete: {e}", self.side.label());
@@ -311,7 +469,13 @@ fn fresh(recv_at: Instant, now: Instant, timeout: Duration) -> bool {
 /// Scale the chase step so the end-effector's linear speed stays under `max_ee`,
 /// using the Jacobian at the measured configuration (mirrors the arm's Follow). A
 /// step that does not move the hand passes unchanged.
-fn cap_ee_speed(setpoint: &JointVec, stepped: &JointVec, jac: &Jacobian, max_ee: f64, dt: f64) -> JointVec {
+fn cap_ee_speed(
+    setpoint: &JointVec,
+    stepped: &JointVec,
+    jac: &Jacobian,
+    max_ee: f64,
+    dt: f64,
+) -> JointVec {
     let delta: JointVec = std::array::from_fn(|i| stepped[i] - setpoint[i]);
     let twist = jac * SVector::<f64, ARM_DOF>::from_column_slice(&delta);
     let ee_speed = twist.fixed_rows::<3>(0).norm() / dt;
@@ -325,15 +489,23 @@ fn cap_ee_speed(setpoint: &JointVec, stepped: &JointVec, jac: &Jacobian, max_ee:
 
 /// Resolve the Follow target: chase the locked operator command, acquiring or
 /// releasing the producer lock by freshness, holding `held` when none is live.
-fn follow_target(lock: &mut Option<Lock>, command: &Option<JointCommand>, held: JointVec, cfg: &PlanConfig, now: Instant) -> JointVec {
+fn follow_target(
+    lock: &mut Option<Lock>,
+    command: &Option<JointCommand>,
+    held: JointVec,
+    cfg: &PlanConfig,
+    now: Instant,
+) -> JointVec {
     match lock.as_mut() {
         Some(l) => {
             if let Some(c) = command
-                && c.producer == l.producer && c.seq != l.last_seq {
-                    l.target = clamp_to_limits(&c.positions, &cfg.limits);
-                    l.last_seq = c.seq;
-                    l.last_fresh = now;
-                }
+                && c.producer == l.producer
+                && c.seq != l.last_seq
+            {
+                l.target = clamp_to_limits(&c.positions, &cfg.limits);
+                l.last_seq = c.seq;
+                l.last_fresh = now;
+            }
             if !fresh(l.last_fresh, now, cfg.stream_timeout) {
                 *lock = None;
                 held
@@ -341,10 +513,18 @@ fn follow_target(lock: &mut Option<Lock>, command: &Option<JointCommand>, held: 
                 l.target
             }
         }
-        None => match command.as_ref().filter(|c| fresh(c.recv_at, now, cfg.stream_timeout)) {
+        None => match command
+            .as_ref()
+            .filter(|c| fresh(c.recv_at, now, cfg.stream_timeout))
+        {
             Some(c) => {
                 let target = clamp_to_limits(&c.positions, &cfg.limits);
-                *lock = Some(Lock { producer: c.producer.clone(), target, last_seq: c.seq, last_fresh: now });
+                *lock = Some(Lock {
+                    producer: c.producer.clone(),
+                    target,
+                    last_seq: c.seq,
+                    last_fresh: now,
+                });
                 target
             }
             None => held,
@@ -361,8 +541,17 @@ fn world_pose_arrays(pose: &Isometry3<f64>) -> ([f64; 3], [f64; 4]) {
 
 /// Whether stepping `q_prev -> q_new` over `dt` implies any joint velocity beyond
 /// the guard margin times its limit.
-fn exceeds_velocity_limits(q_new: &JointVec, q_prev: &JointVec, max_vel: &JointVec, dt: f64) -> bool {
-    q_new.iter().zip(q_prev).zip(max_vel).any(|((&n, &p), &v)| (n - p).abs() > v * dt * VELOCITY_GUARD_MARGIN)
+fn exceeds_velocity_limits(
+    q_new: &JointVec,
+    q_prev: &JointVec,
+    max_vel: &JointVec,
+    dt: f64,
+) -> bool {
+    q_new
+        .iter()
+        .zip(q_prev)
+        .zip(max_vel)
+        .any(|((&n, &p), &v)| (n - p).abs() > v * dt * VELOCITY_GUARD_MARGIN)
 }
 
 #[cfg(test)]
@@ -374,7 +563,10 @@ mod tests {
             cycle_period: Duration::from_millis(10),
             max_joint_velocity_rad_s: [10.0; ARM_DOF],
             max_ee_velocity_m_s: 1.0,
-            limits: [Limit { lo: -10.0, hi: 10.0 }; ARM_DOF],
+            limits: [Limit {
+                lo: -10.0,
+                hi: 10.0,
+            }; ARM_DOF],
             stream_timeout: Duration::from_millis(stream_timeout_ms),
         }
     }
@@ -384,7 +576,12 @@ mod tests {
     }
 
     fn joint_cmd(instance: &str, seq: u64, positions: JointVec, recv_at: Instant) -> JointCommand {
-        JointCommand { seq, producer: producer(instance), recv_at, positions }
+        JointCommand {
+            seq,
+            producer: producer(instance),
+            recv_at,
+            positions,
+        }
     }
 
     #[test]
@@ -392,10 +589,16 @@ mod tests {
         // Build with the real URDF limits: the elbow (j4, index 3) has a one-sided
         // lower bound of ~0.05, hard against the boundary singularity. A power-up pose
         // with the elbow below it must seed at the limit, not off it.
-        let model = Arm::from_urdf_file(&format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")), "openarm_left_link0")
-            .expect("build left arm from vendored fixture URDF");
+        let model = Arm::from_urdf_file(
+            &format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")),
+            "openarm_left_link0",
+        )
+        .expect("build left arm from vendored fixture URDF");
         let limits = model.limits();
-        let cfg = PlanConfig { limits, ..test_cfg(100) };
+        let cfg = PlanConfig {
+            limits,
+            ..test_cfg(100)
+        };
         let mut planner = Planner::new(Side::Left, model, cfg);
 
         let mut measured = [0.0; ARM_DOF];
@@ -403,8 +606,14 @@ mod tests {
         planner.seed_from_measured(measured);
 
         let seeded = planner.setpoint();
-        assert_eq!(seeded[3], limits[3].lo, "elbow seeds at its lower limit, off the singularity");
-        assert!(seeded[3] >= 0.04, "vendored URDF elbow lower limit is ~0.05");
+        assert_eq!(
+            seeded[3], limits[3].lo,
+            "elbow seeds at its lower limit, off the singularity"
+        );
+        assert!(
+            seeded[3] >= 0.04,
+            "vendored URDF elbow lower limit is ~0.05"
+        );
         assert_eq!(seeded[0], 0.0, "an in-range joint is untouched");
     }
 
@@ -415,7 +624,10 @@ mod tests {
             let _g = BusyGuard(busy.clone());
             assert!(busy.load(Ordering::Acquire));
         }
-        assert!(!busy.load(Ordering::Acquire), "guard must free the slot on drop, so no move terminal can leak it");
+        assert!(
+            !busy.load(Ordering::Acquire),
+            "guard must free the slot on drop, so no move terminal can leak it"
+        );
     }
 
     #[test]
@@ -431,7 +643,13 @@ mod tests {
     fn follow_acquires_lock_and_tracks_the_command() {
         let now = Instant::now();
         let mut lock = None;
-        let target = follow_target(&mut lock, &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], now)), [0.9; ARM_DOF], &test_cfg(100), now);
+        let target = follow_target(
+            &mut lock,
+            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], now)),
+            [0.9; ARM_DOF],
+            &test_cfg(100),
+            now,
+        );
         assert!(lock.is_some());
         assert_eq!(target, [0.2; ARM_DOF]);
     }
@@ -449,11 +667,26 @@ mod tests {
     fn follow_releases_lock_after_timeout_then_holds() {
         let t0 = Instant::now();
         let mut lock = None;
-        follow_target(&mut lock, &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)), [0.0; ARM_DOF], &test_cfg(100), t0);
+        follow_target(
+            &mut lock,
+            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)),
+            [0.0; ARM_DOF],
+            &test_cfg(100),
+            t0,
+        );
         assert!(lock.is_some());
         let held = [0.5; ARM_DOF];
-        let target = follow_target(&mut lock, &None, held, &test_cfg(100), t0 + Duration::from_millis(150));
-        assert!(lock.is_none(), "lock should release after the stream goes stale");
+        let target = follow_target(
+            &mut lock,
+            &None,
+            held,
+            &test_cfg(100),
+            t0 + Duration::from_millis(150),
+        );
+        assert!(
+            lock.is_none(),
+            "lock should release after the stream goes stale"
+        );
         assert_eq!(target, held);
     }
 
@@ -461,10 +694,22 @@ mod tests {
     fn follow_ignores_a_foreign_producer_while_locked() {
         let t0 = Instant::now();
         let mut lock = None;
-        follow_target(&mut lock, &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)), [0.0; ARM_DOF], &test_cfg(100), t0);
+        follow_target(
+            &mut lock,
+            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)),
+            [0.0; ARM_DOF],
+            &test_cfg(100),
+            t0,
+        );
         // A fresh command from a different producer (new seq, new positions) must
         // not steer the locked arm: single-source contract.
-        let target = follow_target(&mut lock, &Some(joint_cmd("other", 2, [1.0; ARM_DOF], t0)), [0.0; ARM_DOF], &test_cfg(100), t0);
+        let target = follow_target(
+            &mut lock,
+            &Some(joint_cmd("other", 2, [1.0; ARM_DOF], t0)),
+            [0.0; ARM_DOF],
+            &test_cfg(100),
+            t0,
+        );
         assert_eq!(target, [0.2; ARM_DOF]);
     }
 
@@ -472,12 +717,30 @@ mod tests {
     fn follow_applies_each_seq_once() {
         let t0 = Instant::now();
         let mut lock = None;
-        follow_target(&mut lock, &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)), [0.0; ARM_DOF], &test_cfg(100), t0);
+        follow_target(
+            &mut lock,
+            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)),
+            [0.0; ARM_DOF],
+            &test_cfg(100),
+            t0,
+        );
         // New seq updates the target.
-        let target = follow_target(&mut lock, &Some(joint_cmd("teleop", 2, [0.5; ARM_DOF], t0)), [0.0; ARM_DOF], &test_cfg(100), t0);
+        let target = follow_target(
+            &mut lock,
+            &Some(joint_cmd("teleop", 2, [0.5; ARM_DOF], t0)),
+            [0.0; ARM_DOF],
+            &test_cfg(100),
+            t0,
+        );
         assert_eq!(target, [0.5; ARM_DOF]);
         // Same seq again (even with different positions) is not re-applied.
-        let target = follow_target(&mut lock, &Some(joint_cmd("teleop", 2, [0.9; ARM_DOF], t0)), [0.0; ARM_DOF], &test_cfg(100), t0);
+        let target = follow_target(
+            &mut lock,
+            &Some(joint_cmd("teleop", 2, [0.9; ARM_DOF], t0)),
+            [0.0; ARM_DOF],
+            &test_cfg(100),
+            t0,
+        );
         assert_eq!(target, [0.5; ARM_DOF]);
     }
 
@@ -491,7 +754,10 @@ mod tests {
         let mut stepped = [0.0; ARM_DOF];
         stepped[0] = 0.1; // 0.1 rad over 0.01 s is 10 m/s of hand speed, over the cap.
         let next = cap_ee_speed(&[0.0; ARM_DOF], &stepped, &jac, max_ee, dt);
-        assert!((next[0] - max_ee * dt).abs() < 1e-12, "joint 0 not scaled to the cap");
+        assert!(
+            (next[0] - max_ee * dt).abs() < 1e-12,
+            "joint 0 not scaled to the cap"
+        );
         assert_eq!(next[1..], [0.0; ARM_DOF - 1]);
     }
 
@@ -517,5 +783,4 @@ mod tests {
         assert!(!exceeds_velocity_limits(&under, &prev, &vmax, dt));
         assert!(exceeds_velocity_limits(&over, &prev, &vmax, dt));
     }
-
 }

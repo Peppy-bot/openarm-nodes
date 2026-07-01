@@ -5,6 +5,7 @@ mod geometry;
 mod stream;
 
 use control::{ControlConfig, run_move_gripper};
+use openarm_can::{CallbackMode, GripperCan, v10};
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};

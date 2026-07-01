@@ -139,7 +139,10 @@ pub fn plan_cartesian_duration(
         prev_q = Some(sol.q);
         seed = sol.q;
     }
-    Some(velocity_limited_duration(peak_ratio, requested_duration_secs))
+    Some(velocity_limited_duration(
+        peak_ratio,
+        requested_duration_secs,
+    ))
 }
 
 // --- Shared blend / sizing helpers -----------------------------------------
@@ -182,7 +185,10 @@ fn velocity_limited_duration(peak_velocity_ratio: f64, requested_secs: f64) -> f
 /// jump.
 fn interpolate_pose(start: &Isometry3<f64>, end: &Isometry3<f64>, s: f64) -> Isometry3<f64> {
     let position = start.translation.vector.lerp(&end.translation.vector, s);
-    let rotation = start.rotation.try_slerp(&end.rotation, s, 1e-6).unwrap_or(end.rotation);
+    let rotation = start
+        .rotation
+        .try_slerp(&end.rotation, s, 1e-6)
+        .unwrap_or(end.rotation);
     Isometry3::from_parts(Translation3::from(position), rotation)
 }
 
@@ -241,7 +247,10 @@ mod tests {
         let start = [0.0; ARM_DOF];
         let end = [0.5; ARM_DOF];
         let traj = JointTrajectory::new(start, end, V_MAX, 0.1);
-        assert!(vec_approx_eq(&traj.sample(traj.motion_start + traj.duration), &end));
+        assert!(vec_approx_eq(
+            &traj.sample(traj.motion_start + traj.duration),
+            &end
+        ));
     }
 
     #[test]
@@ -295,8 +304,11 @@ mod tests {
     // --- plan_cartesian_duration (real arm model) ------------------------
 
     fn left_arm() -> Arm {
-        Arm::from_urdf_file(&format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")), "openarm_left_link0")
-            .expect("build left arm from vendored fixture URDF")
+        Arm::from_urdf_file(
+            &format!("{}/openarm_v10.urdf", env!("CARGO_MANIFEST_DIR")),
+            "openarm_left_link0",
+        )
+        .expect("build left arm from vendored fixture URDF")
     }
 
     #[test]
@@ -309,10 +321,17 @@ mod tests {
         goal.translation.vector.z += 0.05; // a small reachable move
 
         let dur = plan_cartesian_duration(&arm, &start, &goal, seed, &V_MAX, 0.0);
-        assert!(dur.is_some_and(|d| d > 0.0), "an in-workspace move should plan a positive duration");
+        assert!(
+            dur.is_some_and(|d| d > 0.0),
+            "an in-workspace move should plan a positive duration"
+        );
         // The request floors the velocity-limited duration.
-        let floored = plan_cartesian_duration(&arm, &start, &goal, seed, &V_MAX, 5.0).expect("reachable");
-        assert!(floored >= 5.0 - EPS, "duration must floor at the requested duration");
+        let floored =
+            plan_cartesian_duration(&arm, &start, &goal, seed, &V_MAX, 5.0).expect("reachable");
+        assert!(
+            floored >= 5.0 - EPS,
+            "duration must floor at the requested duration"
+        );
     }
 
     #[test]

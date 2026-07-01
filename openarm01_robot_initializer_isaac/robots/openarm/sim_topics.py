@@ -74,26 +74,14 @@ class SimTopicIO:
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _consume_arm(self) -> None:
-        # Subscribe once; the held subscription buffers commands in order, so the
-        # loop never misses one published between iterations.
-        try:
-            subscription = await arm_cmd.subscribe(self._node_runner)
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            logger.warning(f"arm command subscribe error: {exc}")
-            return
         while True:
             try:
-                received = await subscription.next()
+                _producer, msg = await arm_cmd.on_next_message_received(self._node_runner)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"arm command consume error: {exc}")
                 continue
-            if received is None:
-                return  # subscription closed
-            _producer, msg = received
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
@@ -105,26 +93,14 @@ class SimTopicIO:
                 slot.set((msg.positions, msg.velocities))
 
     async def _consume_gripper(self) -> None:
-        # Subscribe once; the held subscription buffers commands in order, so the
-        # loop never misses one published between iterations.
-        try:
-            subscription = await gripper_cmd.subscribe(self._node_runner)
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            logger.warning(f"gripper command subscribe error: {exc}")
-            return
         while True:
             try:
-                received = await subscription.next()
+                _producer, msg = await gripper_cmd.on_next_message_received(self._node_runner)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"gripper command consume error: {exc}")
                 continue
-            if received is None:
-                return  # subscription closed
-            _producer, msg = received
             if not math.isfinite(msg.position):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"

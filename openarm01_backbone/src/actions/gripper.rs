@@ -80,7 +80,9 @@ fn validate_goal(position: f64, gripper_id: u8) -> GoalResponse {
     }
     match gripper_id {
         0 | 1 => GoalResponse::accept(),
-        other => GoalResponse::reject(format!("invalid gripper_id {other} (expected 0 for left, 1 for right)")),
+        other => GoalResponse::reject(format!(
+            "invalid gripper_id {other} (expected 0 for left, 1 for right)"
+        )),
     }
 }
 
@@ -271,18 +273,33 @@ mod tests {
 
     #[test]
     fn validate_goal_rejects_non_finite_position() {
-        assert!(!validate_goal(f64::NAN, 0).accepted, "NaN position must be rejected");
-        assert!(!validate_goal(f64::INFINITY, 1).accepted, "infinite position must be rejected");
+        assert!(
+            !validate_goal(f64::NAN, 0).accepted,
+            "NaN position must be rejected"
+        );
+        assert!(
+            !validate_goal(f64::INFINITY, 1).accepted,
+            "infinite position must be rejected"
+        );
     }
 
     #[test]
     fn validate_goal_accepts_finite_known_side() {
-        assert!(validate_goal(0.02, 0).accepted, "finite position on the left must be accepted");
-        assert!(validate_goal(0.0, 1).accepted, "finite position on the right must be accepted");
+        assert!(
+            validate_goal(0.02, 0).accepted,
+            "finite position on the left must be accepted"
+        );
+        assert!(
+            validate_goal(0.0, 1).accepted,
+            "finite position on the right must be accepted"
+        );
     }
 
     #[test]
     fn validate_goal_rejects_unknown_gripper_id() {
-        assert!(!validate_goal(0.02, 2).accepted, "unknown gripper_id must be rejected");
+        assert!(
+            !validate_goal(0.02, 2).accepted,
+            "unknown gripper_id must be rejected"
+        );
     }
 }

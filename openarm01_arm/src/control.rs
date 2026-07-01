@@ -99,7 +99,8 @@ async fn run_control(
     cfg: ControlConfig,
     mut model: srs_model::Arm,
     wiring: StreamWiring,
-    shutdown: Shutdown,
+    token: CancellationToken,
+    shutdown_tx: oneshot::Sender<()>,
 ) {
     let mut pacer =
         Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
@@ -129,7 +130,7 @@ async fn run_control(
         // tick: on shutdown break out and disable the motors below.
         tokio::select! {
             biased;
-            _ = shutdown.token.cancelled() => break,
+            _ = token.cancelled() => break,
             _ = pacer.pace() => {}
         }
     }
@@ -147,7 +148,7 @@ async fn run_control(
         a.recv_all(cfg.recv_timeout_us);
     }
     // A dropped receiver (main.rs already exited) is fine; nothing to do.
-    let _ = shutdown.done.send(());
+    let _ = shutdown_tx.send(());
     info!("control loop stopped (motors disabled)");
 }
 

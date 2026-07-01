@@ -262,7 +262,7 @@ async fn run_control_loop(
         let within_tolerance = (opening - target).abs() < POSITION_TOLERANCE_M;
 
         iter += 1;
-        let stalled = if iter.is_multiple_of(STALL_LOOKBACK_ITERS) {
+        let stalled = if iter % STALL_LOOKBACK_ITERS == 0 {
             let was_stalled = window_anchor
                 .map(|prev| (opening - prev).abs() < STALL_EPSILON_M)
                 .unwrap_or(false);

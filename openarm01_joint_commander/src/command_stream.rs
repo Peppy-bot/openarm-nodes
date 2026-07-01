@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
+use peppygen::emitted_topics::openarm01_arm_joint_commands::v1::arm_joint_commands;
 use peppygen::emitted_topics::openarm01_governor_control::v1::governor_control;
 use peppygen::emitted_topics::openarm01_gripper_commands::v1::gripper_commands;
-use peppygen::emitted_topics::openarm01_arm_joint_commands::v1::arm_joint_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
@@ -58,8 +58,13 @@ pub async fn run(
         move || {
             let s = governor_state.lock().unwrap_or_else(|p| p.into_inner());
             Some(
-                governor_control::build_message(s.collision_enabled, s.d_stop, s.d_safe, s.max_ee_velocity_m_s)
-                    .map_err(|e| e.to_string()),
+                governor_control::build_message(
+                    s.collision_enabled,
+                    s.d_stop,
+                    s.d_safe,
+                    s.max_ee_velocity_m_s,
+                )
+                .map_err(|e| e.to_string()),
             )
         },
     )));
@@ -79,7 +84,10 @@ pub async fn run(
                     }
                     s.arm(side).joints
                 };
-                Some(arm_joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string()))
+                Some(
+                    arm_joint_commands::build_message(side.arm_id(), target)
+                        .map_err(|e| e.to_string()),
+                )
             },
         )));
         // Gripper: stream the opening setpoint while enabled.

@@ -25,7 +25,10 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let arm_id = params.arm_id;
-        assert!(arm_id == ARM_ID_LEFT || arm_id == ARM_ID_RIGHT, "arm_id must be 0 (left) or 1 (right), got {arm_id}");
+        assert!(
+            arm_id == ARM_ID_LEFT || arm_id == ARM_ID_RIGHT,
+            "arm_id must be 0 (left) or 1 (right), got {arm_id}"
+        );
         info!("starting openarm01_arm_mujoco follower arm_id={arm_id}");
 
         let (latest_tx, latest_rx) = watch::channel::<Option<Setpoint>>(None);
@@ -54,7 +57,11 @@ fn main() -> Result<()> {
                 // Clear the latest on any non-finite governed setpoint, matching the
                 // real arm, so a bad value never reaches the sim engine and the sim
                 // holds its last commanded pose.
-                let finite = msg.positions.iter().chain(msg.velocities.iter()).all(|v| v.is_finite());
+                let finite = msg
+                    .positions
+                    .iter()
+                    .chain(msg.velocities.iter())
+                    .all(|v| v.is_finite());
                 if !finite {
                     warn!("governed_setpoints: clearing target on non-finite values");
                     let _ = latest_tx.send(None);
@@ -78,7 +85,9 @@ fn main() -> Result<()> {
                 if latest_rx.changed().await.is_err() {
                     return; // receive task gone: node shutting down
                 }
-                let Some((q_des, dq_des)) = *latest_rx.borrow() else { continue };
+                let Some((q_des, dq_des)) = *latest_rx.borrow() else {
+                    continue;
+                };
                 let result = async {
                     let payload = arm_sim_passthrough::build_message(arm_id, q_des, dq_des)
                         .map_err(|e| e.to_string())?;

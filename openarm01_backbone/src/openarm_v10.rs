@@ -26,13 +26,28 @@ pub fn torso_hulls() -> Vec<ConvexPiece> {
         ]
     };
     let flare = ConvexPiece::from_points(
-        ring(0.085, 0.016).into_iter().chain(ring(0.034, 0.080)).collect(),
+        ring(0.085, 0.016)
+            .into_iter()
+            .chain(ring(0.034, 0.080))
+            .collect(),
     );
     vec![
-        ConvexPiece::aabb(Point3::new(-0.157, -0.097, -0.002), Point3::new(0.097, 0.097, 0.026)),
+        ConvexPiece::aabb(
+            Point3::new(-0.157, -0.097, -0.002),
+            Point3::new(0.097, 0.097, 0.026),
+        ),
         flare,
-        ConvexPiece::aabb(Point3::new(-0.156, -0.034, 0.006), Point3::new(-0.029, 0.034, 0.226)),
-        ConvexPiece::aabb(Point3::new(-0.032, -0.032, 0.058), Point3::new(0.032, 0.032, 0.604)),
-        ConvexPiece::aabb(Point3::new(-0.087, -0.082, 0.598), Point3::new(0.067, 0.082, 0.775)),
+        ConvexPiece::aabb(
+            Point3::new(-0.156, -0.034, 0.006),
+            Point3::new(-0.029, 0.034, 0.226),
+        ),
+        ConvexPiece::aabb(
+            Point3::new(-0.032, -0.032, 0.058),
+            Point3::new(0.032, 0.032, 0.604),
+        ),
+        ConvexPiece::aabb(
+            Point3::new(-0.087, -0.082, 0.598),
+            Point3::new(0.067, 0.082, 0.775),
+        ),
     ]
 }

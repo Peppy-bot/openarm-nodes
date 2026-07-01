@@ -81,7 +81,10 @@ pub async fn run_joint_command_listener(
             continue;
         };
         if !msg.positions.iter().all(|v| v.is_finite()) {
-            warn!("arm_joint_commands: dropping arm {} message with non-finite positions", msg.arm_id);
+            warn!(
+                "arm_joint_commands: dropping arm {} message with non-finite positions",
+                msg.arm_id
+            );
             continue;
         }
         seq[idx] += 1;
@@ -119,12 +122,21 @@ pub async fn run_joint_state_listener(
             warn_unknown_arm("arm_states", msg.arm_id, &mut last_unknown_warn);
             continue;
         };
-        let finite = msg.positions.iter().chain(msg.velocities.iter()).all(|v| v.is_finite());
+        let finite = msg
+            .positions
+            .iter()
+            .chain(msg.velocities.iter())
+            .all(|v| v.is_finite());
         if !finite {
-            warn!("arm_states: dropping arm {} message with non-finite state", msg.arm_id);
+            warn!(
+                "arm_states: dropping arm {} message with non-finite state",
+                msg.arm_id
+            );
             continue;
         }
-        latest[idx].send_replace(Some(MeasuredState { positions: msg.positions }));
+        latest[idx].send_replace(Some(MeasuredState {
+            positions: msg.positions,
+        }));
     }
 }
 
@@ -143,7 +155,10 @@ pub struct GovernorConfig {
 /// Receive the `governor_control` stream forever, mirroring the latest governor
 /// config into `config`. The producer re-publishes periodically, so the lossy QoS
 /// cannot strand the hub in a stale state.
-pub async fn run_governor_config_listener(runner: Arc<NodeRunner>, config: watch::Sender<GovernorConfig>) {
+pub async fn run_governor_config_listener(
+    runner: Arc<NodeRunner>,
+    config: watch::Sender<GovernorConfig>,
+) {
     let mut sub = match collision_ctrl_governor_control::subscribe(&runner).await {
         Ok(s) => s,
         Err(e) => return error!("governor_control subscribe: {e}"),

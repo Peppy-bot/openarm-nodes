@@ -128,14 +128,24 @@ impl Governor {
         enabled: bool,
     ) -> Result<Self, String> {
         if !valid_band(d_stop, d_safe) {
-            return Err(format!("invalid band: require 0 < d_stop ({d_stop}) < d_safe ({d_safe})"));
+            return Err(format!(
+                "invalid band: require 0 < d_stop ({d_stop}) < d_safe ({d_safe})"
+            ));
         }
-        let model = BimanualCollisionModel::builder_from_file(urdf_path, meshes_dir, left_base, right_base)
-            .map_err(|e| format!("build collision model from '{urdf_path}': {e}"))?
-            .hulls(TORSO_BODY, torso_hulls())
-            .build()
-            .map_err(|e| format!("finalize collision model: {e}"))?;
-        Ok(Self { model, d_stop, d_safe, enabled, guard: Guard::Clear, monitor_tripped: false })
+        let model =
+            BimanualCollisionModel::builder_from_file(urdf_path, meshes_dir, left_base, right_base)
+                .map_err(|e| format!("build collision model from '{urdf_path}': {e}"))?
+                .hulls(TORSO_BODY, torso_hulls())
+                .build()
+                .map_err(|e| format!("finalize collision model: {e}"))?;
+        Ok(Self {
+            model,
+            d_stop,
+            d_safe,
+            enabled,
+            guard: Guard::Clear,
+            monitor_tripped: false,
+        })
     }
 
     /// Flip the governor on/off at runtime (the operator toggle). Disabling resets
@@ -144,7 +154,14 @@ impl Governor {
         if enabled == self.enabled {
             return;
         }
-        info!("collision avoidance {}", if enabled { "ENABLED" } else { "DISABLED (passthrough)" });
+        info!(
+            "collision avoidance {}",
+            if enabled {
+                "ENABLED"
+            } else {
+                "DISABLED (passthrough)"
+            }
+        );
         self.enabled = enabled;
         if !enabled {
             self.guard = Guard::Clear;
@@ -195,7 +212,13 @@ impl Governor {
     /// barrier, if the measured clearance has closed past the monitor floor the last
     /// setpoint is held until it recovers (defense in depth, gated by the same
     /// enable, so a disabled governor skips it too).
-    pub fn govern(&mut self, prev: &ArmPair<JointVec>, cand: &ArmPair<JointVec>, measured: &ArmPair<JointVec>, dt: f64) -> ArmPair<JointVec> {
+    pub fn govern(
+        &mut self,
+        prev: &ArmPair<JointVec>,
+        cand: &ArmPair<JointVec>,
+        measured: &ArmPair<JointVec>,
+        dt: f64,
+    ) -> ArmPair<JointVec> {
         // Fail-safe up front: never stream a non-finite candidate (an upstream
         // glitch) to the followers. The in-band paths reach this via the distance
         // query, but the disabled and far-apart fast paths return `cand` directly,
@@ -215,26 +238,32 @@ impl Governor {
             return held;
         }
         // One analytic query yields both the current clearance and its gradient.
-        let (d_now, grad, link_a, link_b) = match self.model.distance_gradient(&prev.left, &prev.right) {
-            Ok(g) => (g.proximity.distance, concat(&ArmPair::new(g.grad_left, g.grad_right)), g.proximity.link_a.to_string(), g.proximity.link_b.to_string()),
-            Err(CollisionError::WitnessesCoincide { .. }) => {
-                // No usable gradient (deep penetration: the witnesses coincide). Do
-                // not freeze (that traps the operator inside the collision); fall
-                // back to a gradient-free, distance-only guard that still lets them
-                // escape and never lets penetration deepen.
-                if self.guard != Guard::Stopped {
-                    warn!("collision: deep penetration, distance-only escape guard");
-                    self.guard = Guard::Stopped;
+        let (d_now, grad, link_a, link_b) =
+            match self.model.distance_gradient(&prev.left, &prev.right) {
+                Ok(g) => (
+                    g.proximity.distance,
+                    concat(&ArmPair::new(g.grad_left, g.grad_right)),
+                    g.proximity.link_a.to_string(),
+                    g.proximity.link_b.to_string(),
+                ),
+                Err(CollisionError::WitnessesCoincide { .. }) => {
+                    // No usable gradient (deep penetration: the witnesses coincide). Do
+                    // not freeze (that traps the operator inside the collision); fall
+                    // back to a gradient-free, distance-only guard that still lets them
+                    // escape and never lets penetration deepen.
+                    if self.guard != Guard::Stopped {
+                        warn!("collision: deep penetration, distance-only escape guard");
+                        self.guard = Guard::Stopped;
+                    }
+                    return self.govern_without_gradient(prev, cand);
                 }
-                return self.govern_without_gradient(prev, cand);
-            }
-            Err(e) => {
-                // NonFinite / NoPairs cannot arise from a finite, governed prev with
-                // pairs configured; treat as a fault and hold rather than steer on it.
-                error!("collision: distance_gradient: {e}; holding");
-                return *prev;
-            }
-        };
+                Err(e) => {
+                    // NonFinite / NoPairs cannot arise from a finite, governed prev with
+                    // pairs configured; treat as a fault and hold rather than steer on it.
+                    error!("collision: distance_gradient: {e}; holding");
+                    return *prev;
+                }
+            };
         let prev14 = concat(prev);
         let cand14 = concat(cand);
         let floor = self.step_floor(d_now);
@@ -295,11 +324,17 @@ impl Governor {
         // escape), so a failed query never blocks separation or latches the hold.
         let d_measured = self.distance_at(&concat(measured))?;
         let trip_floor = MONITOR_TRIP_FRACTION * self.d_stop;
-        let threshold = if self.monitor_tripped { self.d_stop } else { trip_floor };
+        let threshold = if self.monitor_tripped {
+            self.d_stop
+        } else {
+            trip_floor
+        };
         let breached = d_measured < threshold;
         if breached != self.monitor_tripped {
             if breached {
-                warn!("collision MONITOR: measured clearance past {trip_floor:+.4} m, blocking approach (separation still allowed)");
+                warn!(
+                    "collision MONITOR: measured clearance past {trip_floor:+.4} m, blocking approach (separation still allowed)"
+                );
             } else {
                 info!("collision MONITOR: measured clearance recovered past d_stop, resuming");
             }
@@ -311,7 +346,9 @@ impl Governor {
         // Hold only a command confirmed to close the gap further. A command that opens
         // it, or one whose clearance cannot be confirmed, is never held, so the
         // operator can always retreat from a near-collision.
-        let closes = self.distance_at(&concat(cand)).is_some_and(|d_cand| d_cand <= d_measured);
+        let closes = self
+            .distance_at(&concat(cand))
+            .is_some_and(|d_cand| d_cand <= d_measured);
         if closes { Some(*prev) } else { None }
     }
 
@@ -320,10 +357,16 @@ impl Governor {
     /// floor (the current clearance, since we are already inside `d_stop`), else
     /// retract toward `prev`. Escape (which increases clearance) always passes;
     /// penetration never deepens; the operator is never frozen in place.
-    fn govern_without_gradient(&mut self, prev: &ArmPair<JointVec>, cand: &ArmPair<JointVec>) -> ArmPair<JointVec> {
+    fn govern_without_gradient(
+        &mut self,
+        prev: &ArmPair<JointVec>,
+        cand: &ArmPair<JointVec>,
+    ) -> ArmPair<JointVec> {
         let prev14 = concat(prev);
         let cand14 = concat(cand);
-        let Some(d_now) = self.distance_at(&prev14) else { return *prev };
+        let Some(d_now) = self.distance_at(&prev14) else {
+            return *prev;
+        };
         match self.clip_to_floor(&prev14, &cand14, self.step_floor(d_now)) {
             Clip::Clear => split(&cand14),
             Clip::Clipped(q) => split(&q),
@@ -357,19 +400,25 @@ impl Governor {
         let predicted_delta_d = dot(grad, &step);
         let max_loss = self.allowed_closing(d_now) * dt;
         let norm_sq = dot(grad, grad);
-        let (projected, limited) = if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
-            (*cand14, false)
-        } else {
-            // Subtract just enough of the closing component (along the gradient) to
-            // land on the barrier `grad . step = -max_loss`.
-            let excess = (predicted_delta_d + max_loss) / norm_sq;
-            (std::array::from_fn(|i| prev14[i] + step[i] - excess * grad[i]), true)
-        };
+        let (projected, limited) =
+            if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
+                (*cand14, false)
+            } else {
+                // Subtract just enough of the closing component (along the gradient) to
+                // land on the barrier `grad . step = -max_loss`.
+                let excess = (predicted_delta_d + max_loss) / norm_sq;
+                (
+                    std::array::from_fn(|i| prev14[i] + step[i] - excess * grad[i]),
+                    true,
+                )
+            };
         // The minimum-norm correction spreads the closing reduction along the
         // gradient, which can jog a joint the operator did not drive or reverse one
         // they did. Clamp each joint's governed step into [0, commanded step]: a held
         // joint stays put, no joint reverses, separating motion is untouched.
-        let governed = std::array::from_fn(|i| prev14[i] + (projected[i] - prev14[i]).clamp(step[i].min(0.0), step[i].max(0.0)));
+        let governed = std::array::from_fn(|i| {
+            prev14[i] + (projected[i] - prev14[i]).clamp(step[i].min(0.0), step[i].max(0.0))
+        });
         (governed, limited)
     }
 
@@ -387,7 +436,10 @@ impl Governor {
 
     fn distance_at(&mut self, q: &[f64; DUAL_DOF]) -> Option<f64> {
         let pair = split(q);
-        self.model.min_distance(&pair.left, &pair.right).ok().map(|p| p.distance)
+        self.model
+            .min_distance(&pair.left, &pair.right)
+            .ok()
+            .map(|p| p.distance)
     }
 
     /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
@@ -400,16 +452,26 @@ impl Governor {
     /// for the boundary. A failed query counts as a breach (so a model-rejected
     /// configuration is never returned), retracting conservatively. Requires `prev`
     /// itself to be clear (the caller's `d_now >= floor`).
-    fn clip_to_floor(&mut self, prev: &[f64; DUAL_DOF], target: &[f64; DUAL_DOF], floor: f64) -> Clip {
+    fn clip_to_floor(
+        &mut self,
+        prev: &[f64; DUAL_DOF],
+        target: &[f64; DUAL_DOF],
+        floor: f64,
+    ) -> Clip {
         debug_assert!(
             self.distance_at(prev).is_none_or(|d| d >= floor),
             "clip_to_floor requires prev to be clear of the floor"
         );
-        let point_at = |t: f64| -> [f64; DUAL_DOF] { std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i])) };
+        let point_at = |t: f64| -> [f64; DUAL_DOF] {
+            std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i]))
+        };
         // Probe count scaled to the segment length so no probe moves any joint more
         // than MAX_PROBE_ARC_RAD: the spatial resolution is bounded for any step size.
-        let max_excursion = (0..DUAL_DOF).map(|i| (target[i] - prev[i]).abs()).fold(0.0_f64, f64::max);
-        let samples = ((max_excursion / MAX_PROBE_ARC_RAD).ceil() as usize).clamp(SEGMENT_SAMPLES_MIN, SEGMENT_SAMPLES_MAX);
+        let max_excursion = (0..DUAL_DOF)
+            .map(|i| (target[i] - prev[i]).abs())
+            .fold(0.0_f64, f64::max);
+        let samples = ((max_excursion / MAX_PROBE_ARC_RAD).ceil() as usize)
+            .clamp(SEGMENT_SAMPLES_MIN, SEGMENT_SAMPLES_MAX);
         let mut last_clear = 0.0_f64;
         for s in 1..=samples {
             let t = s as f64 / samples as f64;
@@ -436,8 +498,12 @@ impl Governor {
             return;
         }
         match next {
-            Guard::Stopped => warn!("collision: STOP - motion halted at d={d:+.4} m between {link_a} and {link_b}"),
-            Guard::Throttling => warn!("collision: throttling approach, d={d:+.4} m, pair {link_a}/{link_b}"),
+            Guard::Stopped => warn!(
+                "collision: STOP - motion halted at d={d:+.4} m between {link_a} and {link_b}"
+            ),
+            Guard::Throttling => {
+                warn!("collision: throttling approach, d={d:+.4} m, pair {link_a}/{link_b}")
+            }
             Guard::Clear => info!("collision: clear, resuming full speed"),
         }
         self.guard = next;
@@ -452,12 +518,21 @@ fn valid_band(d_stop: f64, d_safe: f64) -> bool {
 
 /// Pack a per-arm pair into one 14-vector, left then right.
 fn concat(pair: &ArmPair<JointVec>) -> [f64; DUAL_DOF] {
-    std::array::from_fn(|i| if i < ARM_DOF { pair.left[i] } else { pair.right[i - ARM_DOF] })
+    std::array::from_fn(|i| {
+        if i < ARM_DOF {
+            pair.left[i]
+        } else {
+            pair.right[i - ARM_DOF]
+        }
+    })
 }
 
 /// Split a 14-vector back into the per-arm pair.
 fn split(q: &[f64; DUAL_DOF]) -> ArmPair<JointVec> {
-    ArmPair::new(std::array::from_fn(|i| q[i]), std::array::from_fn(|i| q[ARM_DOF + i]))
+    ArmPair::new(
+        std::array::from_fn(|i| q[i]),
+        std::array::from_fn(|i| q[ARM_DOF + i]),
+    )
 }
 
 fn dot(a: &[f64; DUAL_DOF], b: &[f64; DUAL_DOF]) -> f64 {
@@ -475,7 +550,10 @@ mod tests {
 
     /// In-limit home; the elbow's one-sided lower limit is 0.05.
     fn home() -> ArmPair<JointVec> {
-        ArmPair::new([0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0])
+        ArmPair::new(
+            [0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.05, 0.0, 0.0, 0.0],
+        )
     }
 
     fn governor(enabled: bool) -> Governor {
@@ -493,17 +571,25 @@ mod tests {
 
     /// Both arms elbow-bent, j3 wrapping the wrists toward the centerline by `t`.
     fn wrists_inward(t: f64) -> ArmPair<JointVec> {
-        ArmPair::new([0.0, 0.0, t, 0.4, 0.0, 0.0, 0.0], [0.0, 0.0, -t, 0.4, 0.0, 0.0, 0.0])
+        ArmPair::new(
+            [0.0, 0.0, t, 0.4, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -t, 0.4, 0.0, 0.0, 0.0],
+        )
     }
 
     fn distance(g: &mut Governor, q: &ArmPair<JointVec>) -> f64 {
-        g.model.min_distance(&q.left, &q.right).expect("finite config").distance
+        g.model
+            .min_distance(&q.left, &q.right)
+            .expect("finite config")
+            .distance
     }
 
     /// Step `from` toward `to` by at most `max` rad on each joint (a stand-in for
     /// the velocity-limited chase that feeds the governor in the real loop).
     fn chase(from: &ArmPair<JointVec>, to: &ArmPair<JointVec>, max: f64) -> ArmPair<JointVec> {
-        let one = |f: &JointVec, t: &JointVec| std::array::from_fn(|i| f[i] + (t[i] - f[i]).clamp(-max, max));
+        let one = |f: &JointVec, t: &JointVec| {
+            std::array::from_fn(|i| f[i] + (t[i] - f[i]).clamp(-max, max))
+        };
         ArmPair::new(one(&from.left, &to.left), one(&from.right, &to.right))
     }
 
@@ -535,7 +621,10 @@ mod tests {
         let mut g = governor(true);
         // Home clearance is outside the band, so any step passes untouched.
         let cand = wrists_inward(0.2);
-        assert!(distance(&mut g, &home()) >= D_SAFE, "home should sit outside the band");
+        assert!(
+            distance(&mut g, &home()) >= D_SAFE,
+            "home should sit outside the band"
+        );
         assert_eq!(g.govern(&home(), &cand, &home(), DT), cand);
     }
 
@@ -560,11 +649,17 @@ mod tests {
         let escape = chase(&deep, &home(), 0.02);
         let out = g.govern_without_gradient(&deep, &escape);
         assert_ne!(out, deep, "escape was frozen in place");
-        assert!(distance(&mut g, &out) >= floor - 1e-3, "escape dropped below the floor");
+        assert!(
+            distance(&mut g, &out) >= floor - 1e-3,
+            "escape dropped below the floor"
+        );
         // A deeper command is held at the floor, never pushed past it.
         let deeper = chase(&deep, &wrists_inward(2.0), 0.02);
         let held = g.govern_without_gradient(&deep, &deeper);
-        assert!(distance(&mut g, &held) >= floor - 1e-3, "guard let penetration deepen");
+        assert!(
+            distance(&mut g, &held) >= floor - 1e-3,
+            "guard let penetration deepen"
+        );
     }
 
     #[test]
@@ -596,7 +691,10 @@ mod tests {
         let q = drive_into_band(&mut g);
         // Build a step orthogonal to the distance gradient (purely tangential): it
         // does not change clearance, so the barrier must pass it unthrottled.
-        let grad_pair = g.model.distance_gradient(&q.left, &q.right).expect("gradient");
+        let grad_pair = g
+            .model
+            .distance_gradient(&q.left, &q.right)
+            .expect("gradient");
         let grad = concat(&ArmPair::new(grad_pair.grad_left, grad_pair.grad_right));
         let raw: [f64; DUAL_DOF] = std::array::from_fn(|i| ((i % 3) as f64 - 1.0) * 0.01);
         let comp = dot(&raw, &grad) / dot(&grad, &grad);
@@ -605,8 +703,14 @@ mod tests {
         let cand = split(&std::array::from_fn(|i| q14[i] + tangential[i]));
         let governed = g.govern(&q, &cand, &q, DT);
         for i in 0..ARM_DOF {
-            assert!((governed.left[i] - cand.left[i]).abs() < 1e-9, "left tangential joint {i} was throttled");
-            assert!((governed.right[i] - cand.right[i]).abs() < 1e-9, "right tangential joint {i} was throttled");
+            assert!(
+                (governed.left[i] - cand.left[i]).abs() < 1e-9,
+                "left tangential joint {i} was throttled"
+            );
+            assert!(
+                (governed.right[i] - cand.right[i]).abs() < 1e-9,
+                "right tangential joint {i} was throttled"
+            );
         }
     }
 
@@ -627,11 +731,17 @@ mod tests {
             assert!(d >= D_STOP, "barrier breached: d={d:+.5}");
             // The whole realized path prev->governed, not just its endpoint, stays at
             // or above the floor (the step is small, so a coarse sweep resolves it).
-            assert!(segment_min(&mut g, &prev, &q, 16) >= D_STOP - 1e-3, "the prev->governed path dipped below the stop");
+            assert!(
+                segment_min(&mut g, &prev, &q, 16) >= D_STOP - 1e-3,
+                "the prev->governed path dipped below the stop"
+            );
         }
         assert!(entered_band, "arms never approached into the band");
         // It should converge near the stop boundary, not stall far away.
-        assert!(distance(&mut g, &q) < D_STOP + 4e-3, "did not settle near the stop distance");
+        assert!(
+            distance(&mut g, &q) < D_STOP + 4e-3,
+            "did not settle near the stop distance"
+        );
     }
 
     #[test]
@@ -641,12 +751,21 @@ mod tests {
         // would vault straight past the stop floor in one tick. The outside-band
         // fast path must still run the backstop and retract to the floor.
         let start = home();
-        assert!(distance(&mut g, &start) >= D_SAFE, "start should sit outside the band");
+        assert!(
+            distance(&mut g, &start) >= D_SAFE,
+            "start should sit outside the band"
+        );
         let deep = wrists_inward(1.5);
-        assert!(distance(&mut g, &deep) < D_STOP, "target should be past the stop floor");
+        assert!(
+            distance(&mut g, &deep) < D_STOP,
+            "target should be past the stop floor"
+        );
         let governed = g.govern(&start, &deep, &start, DT);
         assert_ne!(governed, deep, "oversized step passed unfloored");
-        assert!(distance(&mut g, &governed) >= D_STOP, "large jump breached the stop floor");
+        assert!(
+            distance(&mut g, &governed) >= D_STOP,
+            "large jump breached the stop floor"
+        );
     }
 
     #[test]
@@ -668,7 +787,10 @@ mod tests {
         // An in-band closing step is throttled when enabled, passed when disabled.
         let near = wrists_inward(1.0);
         let closer = wrists_inward(1.3);
-        assert!(distance(&mut g, &near) < D_SAFE, "near pose should be in the band");
+        assert!(
+            distance(&mut g, &near) < D_SAFE,
+            "near pose should be in the band"
+        );
         assert_ne!(g.govern(&near, &closer, &near, DT), closer);
         g.set_enabled(false);
         assert_eq!(g.govern(&near, &closer, &near, DT), closer);
@@ -690,7 +812,11 @@ mod tests {
         for _ in 0..50 {
             let m = 0.5 * (a + b);
             let q = split(&std::array::from_fn(|i| lo[i] + m * (hi[i] - lo[i])));
-            if distance(g, &q) >= target { a = m } else { b = m }
+            if distance(g, &q) >= target {
+                a = m
+            } else {
+                b = m
+            }
         }
         split(&std::array::from_fn(|i| lo[i] + a * (hi[i] - lo[i])))
     }
@@ -702,13 +828,25 @@ mod tests {
         // command that opens the gap must ALWAYS pass: the operator can never be
         // trapped inside a near-collision, even while the monitor is tripped.
         let measured = wrists_inward(2.0);
-        assert!(distance(&mut g, &measured) < MONITOR_TRIP_FRACTION * D_STOP, "measured pose must breach the monitor floor");
+        assert!(
+            distance(&mut g, &measured) < MONITOR_TRIP_FRACTION * D_STOP,
+            "measured pose must breach the monitor floor"
+        );
         let prev = measured;
         let retreat = wrists_inward(1.4); // a more-open configuration
-        assert!(distance(&mut g, &retreat) > distance(&mut g, &measured), "retreat opens the gap");
+        assert!(
+            distance(&mut g, &retreat) > distance(&mut g, &measured),
+            "retreat opens the gap"
+        );
         let governed = g.govern(&prev, &retreat, &measured, DT);
-        assert_ne!(governed, prev, "separation was blocked while the monitor was tripped");
-        assert!(distance(&mut g, &governed) > distance(&mut g, &measured), "the governed step did not open the gap");
+        assert_ne!(
+            governed, prev,
+            "separation was blocked while the monitor was tripped"
+        );
+        assert!(
+            distance(&mut g, &governed) > distance(&mut g, &measured),
+            "the governed step did not open the gap"
+        );
     }
 
     /// The left shoulder swung in is a deep self-collision; interpolating home toward
@@ -724,13 +862,27 @@ mod tests {
         let mut g = governor(true);
         // Same breach, but the command would close the gap further: that is held.
         let deep = deep_collision();
-        assert!(distance(&mut g, &deep) < 0.0, "deep pose must be in penetration");
-        let measured = config_at_distance(&mut g, &home(), &deep, 0.5 * MONITOR_TRIP_FRACTION * D_STOP);
-        assert!(distance(&mut g, &measured) < MONITOR_TRIP_FRACTION * D_STOP, "measured must breach the floor");
+        assert!(
+            distance(&mut g, &deep) < 0.0,
+            "deep pose must be in penetration"
+        );
+        let measured =
+            config_at_distance(&mut g, &home(), &deep, 0.5 * MONITOR_TRIP_FRACTION * D_STOP);
+        assert!(
+            distance(&mut g, &measured) < MONITOR_TRIP_FRACTION * D_STOP,
+            "measured must breach the floor"
+        );
         let prev = measured;
         // `deep` is more closed than the measured pose: a closing command, held at prev.
-        assert!(distance(&mut g, &deep) < distance(&mut g, &measured), "deep is a closing command");
-        assert_eq!(g.govern(&prev, &deep, &measured, DT), prev, "a closing command was not held on a measured breach");
+        assert!(
+            distance(&mut g, &deep) < distance(&mut g, &measured),
+            "deep is a closing command"
+        );
+        assert_eq!(
+            g.govern(&prev, &deep, &measured, DT),
+            prev,
+            "a closing command was not held on a measured breach"
+        );
     }
 
     #[test]
@@ -740,8 +892,15 @@ mod tests {
         // trips and the commanded step passes as it would without it.
         let prev = home();
         let cand = wrists_inward(0.2);
-        assert!(distance(&mut g, &prev) >= D_SAFE, "precondition: home sits outside the band");
-        assert_eq!(g.govern(&prev, &cand, &prev, DT), cand, "monitor tripped under good tracking");
+        assert!(
+            distance(&mut g, &prev) >= D_SAFE,
+            "precondition: home sits outside the band"
+        );
+        assert_eq!(
+            g.govern(&prev, &cand, &prev, DT),
+            cand,
+            "monitor tripped under good tracking"
+        );
     }
 
     #[test]
@@ -751,21 +910,42 @@ mod tests {
         // hold, not a separation pass, is what is under test.
         let deep = deep_collision();
         let prev = home();
-        let breaching = config_at_distance(&mut g, &home(), &deep, 0.5 * MONITOR_TRIP_FRACTION * D_STOP);
+        let breaching =
+            config_at_distance(&mut g, &home(), &deep, 0.5 * MONITOR_TRIP_FRACTION * D_STOP);
         assert!(distance(&mut g, &breaching) < MONITOR_TRIP_FRACTION * D_STOP);
 
         // A measured pose whose real clearance sits inside the hysteresis band
         // [trip floor, d_stop): below the commanded stop but above the trip floor.
-        let in_band = config_at_distance(&mut g, &home(), &deep, 0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP));
-        assert!((MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&distance(&mut g, &in_band)), "setup: in_band not in the hysteresis band");
+        let in_band = config_at_distance(
+            &mut g,
+            &home(),
+            &deep,
+            0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP),
+        );
+        assert!(
+            (MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&distance(&mut g, &in_band)),
+            "setup: in_band not in the hysteresis band"
+        );
 
         // Breach trips the latch: the closing command is held at prev.
-        assert_eq!(g.govern(&prev, &deep, &breaching, DT), prev, "closing command not held on a breach");
+        assert_eq!(
+            g.govern(&prev, &deep, &breaching, DT),
+            prev,
+            "closing command not held on a breach"
+        );
         // In-band measurement (above the trip floor, below d_stop): still held (hysteresis).
-        assert_eq!(g.govern(&prev, &deep, &in_band, DT), prev, "released before recovering past d_stop");
+        assert_eq!(
+            g.govern(&prev, &deep, &in_band, DT),
+            prev,
+            "released before recovering past d_stop"
+        );
         // Recovered past d_stop: the latch releases, so the command is governed
         // normally (clipped toward the floor), not force-held at prev.
-        assert_ne!(g.govern(&prev, &deep, &home(), DT), prev, "did not release after recovery");
+        assert_ne!(
+            g.govern(&prev, &deep, &home(), DT),
+            prev,
+            "did not release after recovery"
+        );
     }
 
     #[test]
@@ -788,7 +968,11 @@ mod tests {
         let cand = wrists_inward(0.2);
         let mut measured = home();
         measured.left[0] = f64::NAN;
-        assert_eq!(g.govern(&prev, &cand, &measured, DT), cand, "monitor blocked a command on a failed measured query");
+        assert_eq!(
+            g.govern(&prev, &cand, &measured, DT),
+            cand,
+            "monitor blocked a command on a failed measured query"
+        );
     }
 
     #[test]
@@ -798,27 +982,50 @@ mod tests {
         // floor, not d_stop, so a measurement in [trip floor, d_stop) must NOT trip. A
         // closing command is then governed normally, not force-held at prev.
         let deep = deep_collision();
-        let in_band = config_at_distance(&mut g, &home(), &deep, 0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP));
-        assert!((MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&distance(&mut g, &in_band)), "setup: in_band not in the hysteresis band");
-        assert_ne!(g.govern(&home(), &deep, &in_band, DT), home(), "an in-band measurement tripped from a clear state");
+        let in_band = config_at_distance(
+            &mut g,
+            &home(),
+            &deep,
+            0.5 * (MONITOR_TRIP_FRACTION * D_STOP + D_STOP),
+        );
+        assert!(
+            (MONITOR_TRIP_FRACTION * D_STOP..D_STOP).contains(&distance(&mut g, &in_band)),
+            "setup: in_band not in the hysteresis band"
+        );
+        assert_ne!(
+            g.govern(&home(), &deep, &in_band, DT),
+            home(),
+            "an in-band measurement tripped from a clear state"
+        );
     }
 
     #[test]
     fn concat_split_round_trip() {
-        let pair = ArmPair::new([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0]);
+        let pair = ArmPair::new(
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+            [8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0],
+        );
         assert_eq!(split(&concat(&pair)), pair);
         let flat: [f64; DUAL_DOF] = std::array::from_fn(|i| i as f64);
         assert_eq!(concat(&split(&flat)), flat);
     }
 
     /// Minimum clearance sampled along the straight segment `prev`->`cand`.
-    fn segment_min(g: &mut Governor, prev: &ArmPair<JointVec>, cand: &ArmPair<JointVec>, n: usize) -> f64 {
+    fn segment_min(
+        g: &mut Governor,
+        prev: &ArmPair<JointVec>,
+        cand: &ArmPair<JointVec>,
+        n: usize,
+    ) -> f64 {
         let p = concat(prev);
         let c = concat(cand);
         let mut m = f64::INFINITY;
         for i in 0..=n {
             let t = i as f64 / n as f64;
-            m = m.min(distance(g, &split(&std::array::from_fn(|j| p[j] + t * (c[j] - p[j])))));
+            m = m.min(distance(
+                g,
+                &split(&std::array::from_fn(|j| p[j] + t * (c[j] - p[j]))),
+            ));
         }
         m
     }
@@ -838,14 +1045,29 @@ mod tests {
             p.left[1] = 3.2;
             p
         };
-        assert!(distance(&mut g, &prev) >= D_SAFE, "home end is clear of the band");
-        assert!(distance(&mut g, &cand) >= D_SAFE, "far-shoulder end is clear of the band");
-        assert!(segment_min(&mut g, &prev, &cand, 128) < D_STOP, "the segment dips below the stop");
+        assert!(
+            distance(&mut g, &prev) >= D_SAFE,
+            "home end is clear of the band"
+        );
+        assert!(
+            distance(&mut g, &cand) >= D_SAFE,
+            "far-shoulder end is clear of the band"
+        );
+        assert!(
+            segment_min(&mut g, &prev, &cand, 128) < D_STOP,
+            "the segment dips below the stop"
+        );
 
         // Trusting the (clear) endpoints would pass `cand` through; the segment scan
         // must clip it to a setpoint that is itself clear of the stop.
         let governed = g.govern(&prev, &cand, &prev, DT);
-        assert_ne!(governed, cand, "a clear-ended segment with a sub-stop interior was passed unclipped");
-        assert!(distance(&mut g, &governed) >= D_STOP - 1e-6, "the clipped setpoint is below the stop");
+        assert_ne!(
+            governed, cand,
+            "a clear-ended segment with a sub-stop interior was passed unclipped"
+        );
+        assert!(
+            distance(&mut g, &governed) >= D_STOP - 1e-6,
+            "the clipped setpoint is below the stop"
+        );
     }
 }

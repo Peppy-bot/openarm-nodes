@@ -133,7 +133,12 @@ pub struct Proximity {
 }
 
 impl UiState {
-    pub fn new(collision_enabled: bool, d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> Self {
+    pub fn new(
+        collision_enabled: bool,
+        d_stop: f64,
+        d_safe: f64,
+        max_ee_velocity_m_s: f64,
+    ) -> Self {
         Self {
             left_arm: ArmTarget::home(),
             right_arm: ArmTarget::home(),
@@ -200,6 +205,16 @@ impl UiState {
 
 pub type SharedState = Arc<Mutex<UiState>>;
 
-pub fn new_shared(collision_enabled: bool, d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> SharedState {
-    Arc::new(Mutex::new(UiState::new(collision_enabled, d_stop, d_safe, max_ee_velocity_m_s)))
+pub fn new_shared(
+    collision_enabled: bool,
+    d_stop: f64,
+    d_safe: f64,
+    max_ee_velocity_m_s: f64,
+) -> SharedState {
+    Arc::new(Mutex::new(UiState::new(
+        collision_enabled,
+        d_stop,
+        d_safe,
+        max_ee_velocity_m_s,
+    )))
 }

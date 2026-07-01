@@ -11,8 +11,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm01_collision_status::v1::collision_status;
 use peppygen::emitted_topics::openarm01_arm_governed_setpoints::v1::arm_governed_setpoints;
+use peppygen::emitted_topics::openarm01_collision_status::v1::collision_status;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
@@ -68,8 +68,12 @@ pub async fn run(
 
     // Hold each arm's real pose, not a neutral zero: wait for the first measured
     // state from both arms and seed the held setpoint there before publishing.
-    if seed(&mut channels.left, &mut planners.left, Side::Left).await.is_err()
-        || seed(&mut channels.right, &mut planners.right, Side::Right).await.is_err()
+    if seed(&mut channels.left, &mut planners.left, Side::Left)
+        .await
+        .is_err()
+        || seed(&mut channels.right, &mut planners.right, Side::Right)
+            .await
+            .is_err()
     {
         return Ok(());
     }
@@ -105,8 +109,18 @@ pub async fn run(
         // the first state, which `seed` already gated on), so a momentary gap never
         // reads as a breach.
         let measured = ArmPair::new(
-            channels.left.measured.borrow().as_ref().map_or(prev.left, |m| m.positions),
-            channels.right.measured.borrow().as_ref().map_or(prev.right, |m| m.positions),
+            channels
+                .left
+                .measured
+                .borrow()
+                .as_ref()
+                .map_or(prev.left, |m| m.positions),
+            channels
+                .right
+                .measured
+                .borrow()
+                .as_ref()
+                .map_or(prev.right, |m| m.positions),
         );
         let governed = governor.govern(&prev, &candidate, &measured, dt);
 
@@ -162,18 +176,37 @@ struct Shutdown;
 /// real measurement exists.
 /// Warns periodically while an arm stays silent so the wait is visible in the log;
 /// `Err(Shutdown)` if the measured-state channel closes first.
-async fn seed(channels: &mut ArmChannels, planner: &mut Planner, side: Side) -> Result<(), Shutdown> {
+async fn seed(
+    channels: &mut ArmChannels,
+    planner: &mut Planner,
+    side: Side,
+) -> Result<(), Shutdown> {
     loop {
-        match tokio::time::timeout(SEED_WAIT_WARN_PERIOD, channels.measured.wait_for(Option::is_some)).await {
+        match tokio::time::timeout(
+            SEED_WAIT_WARN_PERIOD,
+            channels.measured.wait_for(Option::is_some),
+        )
+        .await
+        {
             Ok(Ok(_)) => break,
             Ok(Err(_)) => {
-                error!("{} arm measured-state channel closed before first state", side.label());
+                error!(
+                    "{} arm measured-state channel closed before first state",
+                    side.label()
+                );
                 return Err(Shutdown);
             }
-            Err(_) => warn!("{} arm has not reported measured state yet; hub waiting to stream", side.label()),
+            Err(_) => warn!(
+                "{} arm has not reported measured state yet; hub waiting to stream",
+                side.label()
+            ),
         }
     }
-    let q0 = channels.measured.borrow().expect("gated on first state").positions;
+    let q0 = channels
+        .measured
+        .borrow()
+        .expect("gated on first state")
+        .positions;
     planner.seed_from_measured(q0);
     Ok(())
 }
@@ -187,5 +220,13 @@ async fn tick_arm(channels: &mut ArmChannels, planner: &mut Planner, now: Instan
         None => planner.setpoint(),
     };
     let command = channels.command.borrow().clone();
-    planner.tick(measured_q, command, &mut channels.goals, &channels.busy, now).await
+    planner
+        .tick(
+            measured_q,
+            command,
+            &mut channels.goals,
+            &channels.busy,
+            now,
+        )
+        .await
 }

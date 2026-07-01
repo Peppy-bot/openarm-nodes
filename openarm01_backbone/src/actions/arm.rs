@@ -20,7 +20,8 @@ use crate::{ARM_DOF, JointVec, Side};
 
 /// Claim the arm's single-flight slot, or report it already busy.
 fn claim(busy: &AtomicBool) -> bool {
-    busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
+    busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
 }
 
 fn target_in_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> bool {
@@ -44,25 +45,41 @@ pub async fn run_move_arm_joints(
                     return Ok(move_arm_joints::GoalResponse::reject("arm_id out of range"));
                 };
                 if !d.joint_positions.iter().all(|v| v.is_finite()) {
-                    return Ok(move_arm_joints::GoalResponse::reject("non-finite joint target"));
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "non-finite joint target",
+                    ));
                 }
                 if !(d.duration_s.is_finite() && d.duration_s >= 0.0) {
                     return Ok(move_arm_joints::GoalResponse::reject("invalid duration"));
                 }
                 if !target_in_limits(&d.joint_positions, &limits[idx]) {
-                    return Ok(move_arm_joints::GoalResponse::reject("target out of joint limits"));
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "target out of joint limits",
+                    ));
                 }
                 if !claim(&busy[idx]) {
-                    return Ok(move_arm_joints::GoalResponse::reject("arm is already executing a motion"));
+                    return Ok(move_arm_joints::GoalResponse::reject(
+                        "arm is already executing a motion",
+                    ));
                 }
                 Ok(move_arm_joints::GoalResponse::accept())
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
-        let idx = Side::from_arm_id(ctx.request().data.arm_id).map(Side::index).expect("validated on accept");
+        let idx = Side::from_arm_id(ctx.request().data.arm_id)
+            .map(Side::index)
+            .expect("validated on accept");
         let target = ctx.request().data.joint_positions;
         let duration_s = ctx.request().data.duration_s;
-        if goal_txs[idx].send(Goal::Joint { target, duration_s, ctx }).await.is_err() {
+        if goal_txs[idx]
+            .send(Goal::Joint {
+                target,
+                duration_s,
+                ctx,
+            })
+            .await
+            .is_err()
+        {
             busy[idx].store(false, Ordering::Release);
             error!("move_arm_joints: coordinator channel closed");
             return Ok(());
@@ -85,28 +102,46 @@ pub async fn run_move_arm(
                 let Some(idx) = Side::from_arm_id(d.arm_id).map(Side::index) else {
                     return Ok(move_arm::GoalResponse::reject("arm_id out of range"));
                 };
-                let finite = d.position.iter().chain(d.orientation.iter()).all(|v| v.is_finite());
+                let finite = d
+                    .position
+                    .iter()
+                    .chain(d.orientation.iter())
+                    .all(|v| v.is_finite());
                 if !finite {
                     return Ok(move_arm::GoalResponse::reject("non-finite pose"));
                 }
                 let quat_norm = d.orientation.iter().map(|v| v * v).sum::<f64>().sqrt();
                 if quat_norm < 1e-6 {
-                    return Ok(move_arm::GoalResponse::reject("degenerate orientation quaternion"));
+                    return Ok(move_arm::GoalResponse::reject(
+                        "degenerate orientation quaternion",
+                    ));
                 }
                 if !(d.duration_s.is_finite() && d.duration_s >= 0.0) {
                     return Ok(move_arm::GoalResponse::reject("invalid duration"));
                 }
                 if !claim(&busy[idx]) {
-                    return Ok(move_arm::GoalResponse::reject("arm is already executing a motion"));
+                    return Ok(move_arm::GoalResponse::reject(
+                        "arm is already executing a motion",
+                    ));
                 }
                 Ok(move_arm::GoalResponse::accept())
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
-        let idx = Side::from_arm_id(ctx.request().data.arm_id).map(Side::index).expect("validated on accept");
+        let idx = Side::from_arm_id(ctx.request().data.arm_id)
+            .map(Side::index)
+            .expect("validated on accept");
         let target = pose_from_arrays(ctx.request().data.position, ctx.request().data.orientation);
         let duration_s = ctx.request().data.duration_s;
-        if goal_txs[idx].send(Goal::Cartesian { target, duration_s, ctx }).await.is_err() {
+        if goal_txs[idx]
+            .send(Goal::Cartesian {
+                target,
+                duration_s,
+                ctx,
+            })
+            .await
+            .is_err()
+        {
             busy[idx].store(false, Ordering::Release);
             error!("move_arm: coordinator channel closed");
             return Ok(());

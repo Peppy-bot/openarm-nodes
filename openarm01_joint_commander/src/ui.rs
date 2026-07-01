@@ -235,9 +235,16 @@ async fn handle_command(text: &str, app: &AppState) {
         Command::SetCollision { enabled } => {
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             s.collision_enabled = enabled;
-            s.set_status(format!("collision avoidance {}", if enabled { "ON" } else { "OFF" }));
+            s.set_status(format!(
+                "collision avoidance {}",
+                if enabled { "ON" } else { "OFF" }
+            ));
         }
-        Command::SetGovernorParams { d_stop, d_safe, max_ee_velocity_m_s } => {
+        Command::SetGovernorParams {
+            d_stop,
+            d_safe,
+            max_ee_velocity_m_s,
+        } => {
             // The hub validates again before applying; reject a degenerate band here
             // so the UI cannot stream one (d_stop must stay below d_safe).
             if !valid_governor_band(d_stop, d_safe, max_ee_velocity_m_s) {
@@ -249,7 +256,9 @@ async fn handle_command(text: &str, app: &AppState) {
             s.d_stop = d_stop;
             s.d_safe = d_safe;
             s.max_ee_velocity_m_s = max_ee_velocity_m_s;
-            s.set_status(format!("governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s"));
+            s.set_status(format!(
+                "governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s"
+            ));
         }
     }
 }
@@ -257,7 +266,10 @@ async fn handle_command(text: &str, app: &AppState) {
 // A governor band the UI may stream: all finite and positive, with d_stop below
 // d_safe. The hub validates again before applying.
 fn valid_governor_band(d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> bool {
-    [d_stop, d_safe, max_ee_velocity_m_s].iter().all(|v| v.is_finite() && *v > 0.0) && d_stop < d_safe
+    [d_stop, d_safe, max_ee_velocity_m_s]
+        .iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+        && d_stop < d_safe
 }
 
 // Clamp each joint setpoint into its configured [min, max]. The single clamp
@@ -396,7 +408,9 @@ impl Snapshot {
 /// The proximity readout if it is still fresh, else `None` (the hub stopped
 /// reporting), so the UI falls back to n/a instead of latching a stale distance.
 fn live_proximity(s: &UiState, now: Instant) -> Option<&Proximity> {
-    s.proximity.as_ref().filter(|p| now.duration_since(p.received_at) < PROXIMITY_STALE_AFTER)
+    s.proximity
+        .as_ref()
+        .filter(|p| now.duration_since(p.received_at) < PROXIMITY_STALE_AFTER)
 }
 
 fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
@@ -519,8 +533,14 @@ mod tests {
         s.set_enabled(Side::Left, true);
         s.set_enabled(Side::Right, true);
         on_operator_disconnect(&mut s);
-        assert!(!s.left_enabled && !s.right_enabled, "disconnect must drop the deadman for both sides");
-        assert!(s.collision_enabled, "disconnect must restore the launch governor default (on)");
+        assert!(
+            !s.left_enabled && !s.right_enabled,
+            "disconnect must drop the deadman for both sides"
+        );
+        assert!(
+            s.collision_enabled,
+            "disconnect must restore the launch governor default (on)"
+        );
     }
 
     #[test]
@@ -529,17 +549,32 @@ mod tests {
         let mut s = UiState::new(false, 0.005, 0.02, 0.25);
         s.collision_enabled = true;
         on_operator_disconnect(&mut s);
-        assert!(!s.collision_enabled, "disconnect must restore the launch default (off), not force on");
+        assert!(
+            !s.collision_enabled,
+            "disconnect must restore the launch default (off), not force on"
+        );
     }
 
     #[test]
     fn valid_governor_band_boundaries() {
         assert!(valid_governor_band(0.005, 0.02, 1.0));
-        assert!(!valid_governor_band(0.02, 0.02, 1.0), "d_stop == d_safe is degenerate");
-        assert!(!valid_governor_band(0.03, 0.02, 1.0), "d_stop > d_safe is inverted");
+        assert!(
+            !valid_governor_band(0.02, 0.02, 1.0),
+            "d_stop == d_safe is degenerate"
+        );
+        assert!(
+            !valid_governor_band(0.03, 0.02, 1.0),
+            "d_stop > d_safe is inverted"
+        );
         assert!(!valid_governor_band(0.0, 0.02, 1.0), "non-positive d_stop");
-        assert!(!valid_governor_band(0.005, 0.02, 0.0), "non-positive speed cap");
-        assert!(!valid_governor_band(f64::NAN, 0.02, 1.0), "non-finite d_stop");
+        assert!(
+            !valid_governor_band(0.005, 0.02, 0.0),
+            "non-positive speed cap"
+        );
+        assert!(
+            !valid_governor_band(f64::NAN, 0.02, 1.0),
+            "non-finite d_stop"
+        );
     }
 
     #[test]

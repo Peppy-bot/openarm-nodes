@@ -14,21 +14,13 @@ use tracing::{error, warn};
 use crate::state::{SharedState, Side};
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
-    let mut subscription = match arm_states_joint_states::subscribe(&runner).await {
-        Ok(subscription) => subscription,
-        Err(e) => {
-            error!(error = %e, "joint_states subscribe");
-            return;
-        }
-    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
             received = arm_states_arm_states::on_next_message_received(&runner) => received,
         };
         let (_producer, msg) = match received {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return,
+            Ok(pair) => pair,
             Err(e) => {
                 error!(error = %e, "arm_states receive");
                 continue;

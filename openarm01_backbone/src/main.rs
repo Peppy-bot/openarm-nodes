@@ -47,7 +47,9 @@ where
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
@@ -65,7 +67,9 @@ fn main() -> Result<()> {
             params.max_joint_velocity_rad_s_7,
         ];
         assert!(
-            max_joint_velocity_rad_s.iter().all(|v| v.is_finite() && *v > 0.0),
+            max_joint_velocity_rad_s
+                .iter()
+                .all(|v| v.is_finite() && *v > 0.0),
             "all max_joint_velocity_rad_s_N must be finite and > 0"
         );
         assert!(
@@ -79,10 +83,20 @@ fn main() -> Result<()> {
         // Two arm models (FK/IK/Jacobian/limits) and the bimanual collision model,
         // all from the one URDF. A bad URDF / base link / mesh dir aborts bringup.
         let left_model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.left_base)
-            .unwrap_or_else(|e| panic!("build left arm model from base '{}': {e}", params.left_base));
+            .unwrap_or_else(|e| {
+                panic!("build left arm model from base '{}': {e}", params.left_base)
+            });
         let right_model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.right_base)
-            .unwrap_or_else(|e| panic!("build right arm model from base '{}': {e}", params.right_base));
-        info!("arm models loaded (urdf '{}', left '{}', right '{}')", params.urdf_path, params.left_base, params.right_base);
+            .unwrap_or_else(|e| {
+                panic!(
+                    "build right arm model from base '{}': {e}",
+                    params.right_base
+                )
+            });
+        info!(
+            "arm models loaded (urdf '{}', left '{}', right '{}')",
+            params.urdf_path, params.left_base, params.right_base
+        );
 
         let governor = governor::Governor::build(
             &params.urdf_path,
@@ -98,7 +112,11 @@ fn main() -> Result<()> {
             "self-collision governor ready (d_stop={} d_safe={} default {})",
             params.d_stop,
             params.d_safe,
-            if params.collision_governor_enabled { "ENABLED" } else { "DISABLED" },
+            if params.collision_governor_enabled {
+                "ENABLED"
+            } else {
+                "DISABLED"
+            },
         );
 
         let left_limits = left_model.limits();
@@ -107,7 +125,10 @@ fn main() -> Result<()> {
         // `f64::clamp`, which is total only for finite, well-ordered bounds. Assert
         // it here so a malformed URDF aborts at bringup, not mid-tick.
         assert!(
-            left_limits.iter().chain(right_limits.iter()).all(|l| l.lo.is_finite() && l.hi.is_finite() && l.lo <= l.hi),
+            left_limits
+                .iter()
+                .chain(right_limits.iter())
+                .all(|l| l.lo.is_finite() && l.hi.is_finite() && l.lo <= l.hi),
             "joint position limits must be finite and well-ordered (lo <= hi)"
         );
         let plan_cfg = |limits| PlanConfig {
@@ -130,7 +151,10 @@ fn main() -> Result<()> {
         let (meas_tx1, meas_rx1) = watch::channel(None);
         let (goal_tx0, goal_rx0) = mpsc::channel(1);
         let (goal_tx1, goal_rx1) = mpsc::channel(1);
-        let busy = [Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))];
+        let busy = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
         let (config_tx, config_rx) = watch::channel(streams::GovernorConfig {
             enabled: params.collision_governor_enabled,
             d_stop: params.d_stop,
@@ -139,8 +163,18 @@ fn main() -> Result<()> {
         });
 
         let channels = ArmPair::new(
-            ArmChannels { command: cmd_rx0, measured: meas_rx0, goals: goal_rx0, busy: busy[0].clone() },
-            ArmChannels { command: cmd_rx1, measured: meas_rx1, goals: goal_rx1, busy: busy[1].clone() },
+            ArmChannels {
+                command: cmd_rx0,
+                measured: meas_rx0,
+                goals: goal_rx0,
+                busy: busy[0].clone(),
+            },
+            ArmChannels {
+                command: cmd_rx1,
+                measured: meas_rx1,
+                goals: goal_rx1,
+                busy: busy[1].clone(),
+            },
         );
 
         // Gate exposing actions + streaming on the robot being ready, in a spawned
@@ -182,9 +216,18 @@ fn main() -> Result<()> {
             // so a listener that dies takes the node down instead of leaving the
             // coordinator streaming on stale measured state or governor controls while
             // the node still reports healthy.
-            spawn_listener(&mut set, streams::run_joint_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]));
-            spawn_listener(&mut set, streams::run_joint_state_listener(runner.clone(), [meas_tx0, meas_tx1]));
-            spawn_listener(&mut set, streams::run_governor_config_listener(runner.clone(), config_tx));
+            spawn_listener(
+                &mut set,
+                streams::run_joint_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]),
+            );
+            spawn_listener(
+                &mut set,
+                streams::run_joint_state_listener(runner.clone(), [meas_tx0, meas_tx1]),
+            );
+            spawn_listener(
+                &mut set,
+                streams::run_governor_config_listener(runner.clone(), config_tx),
+            );
 
             // The first task to finish is fatal: cancel the node so the daemon
             // restarts a clean process rather than running on with a dead
@@ -193,7 +236,9 @@ fn main() -> Result<()> {
                 match joined {
                     Ok(Ok(())) => error!("backbone task exited; shutting node down"),
                     Ok(Err(e)) => error!(error = %e, "backbone task failed; shutting node down"),
-                    Err(e) if e.is_panic() => error!(error = %e, "backbone task panicked; shutting node down"),
+                    Err(e) if e.is_panic() => {
+                        error!(error = %e, "backbone task panicked; shutting node down")
+                    }
                     Err(e) => error!(error = %e, "backbone task join failed; shutting node down"),
                 }
             }

@@ -12,6 +12,7 @@ mod friction;
 mod stream;
 
 use control::ControlConfig;
+use openarm_can::{ArmCan, CallbackMode, v10};
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
@@ -97,15 +98,26 @@ fn main() -> Result<()> {
         }
 
         let cfg = ControlConfig {
-            kp: [params.kp1, params.kp2, params.kp3, params.kp4, params.kp5, params.kp6, params.kp7],
-            kd: [params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7],
+            kp: [
+                params.kp1, params.kp2, params.kp3, params.kp4, params.kp5, params.kp6, params.kp7,
+            ],
+            kd: [
+                params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7,
+            ],
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
-            recv_timeout_us: i32::try_from(params.recv_timeout_us)
-                .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
+            recv_timeout_us: i32::try_from(params.recv_timeout_us).unwrap_or_else(|_| {
+                panic!(
+                    "recv_timeout_us ({}) exceeds i32::MAX",
+                    params.recv_timeout_us
+                )
+            }),
             limits: model.limits(),
         };
 
-        info!("config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us", params.control_rate_hz, cfg.recv_timeout_us);
+        info!(
+            "config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us",
+            params.control_rate_hz, cfg.recv_timeout_us
+        );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
 
         // Instance lock: crash if another instance with the same arm_id is
@@ -193,14 +205,21 @@ fn main() -> Result<()> {
         // own rate (the hub consumes it).
         let (governed_tx, governed_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
-        tokio::spawn(stream::run_governed_setpoint_listener(node_runner.clone(), arm_id, governed_tx));
+        tokio::spawn(stream::run_governed_setpoint_listener(
+            node_runner.clone(),
+            arm_id,
+            governed_tx,
+        ));
         tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
             arm_id,
             Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
             measured_rx,
         ));
-        let wiring = stream::StreamWiring { governed: governed_rx, measured: measured_tx };
+        let wiring = stream::StreamWiring {
+            governed: governed_rx,
+            measured: measured_tx,
+        };
 
         // Single control task (the only motor writer): follows the governed
         // setpoint with in-process feedforward and a final limit clamp, and on
