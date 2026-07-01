@@ -18,6 +18,7 @@ pub async fn publish(
     gripper_id: u8,
     opening: f64,
 ) -> Result<(), String> {
-    let payload = gripper_sim_passthrough::build_message(gripper_id, opening).map_err(|e| e.to_string())?;
+    let payload =
+        gripper_sim_passthrough::build_message(gripper_id, opening).map_err(|e| e.to_string())?;
     publisher.publish(payload).await.map_err(|e| e.to_string())
 }

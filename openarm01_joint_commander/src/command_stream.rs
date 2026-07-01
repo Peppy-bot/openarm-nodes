@@ -55,7 +55,9 @@ pub async fn run(
                     }
                     s.arm(side).joints
                 };
-                Some(joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string()))
+                Some(
+                    joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string()),
+                )
             },
         )));
         // Gripper: stream the opening setpoint while enabled.

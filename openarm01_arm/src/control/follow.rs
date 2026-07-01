@@ -54,7 +54,11 @@ impl Follow {
     /// Enter follow holding `setpoint`, with no producer yet (re-armed on the next
     /// fresh command). Used at startup and after every move.
     pub(super) fn idle(setpoint: JointVec) -> Self {
-        Self { setpoint, lock: None, conflict_warned: false }
+        Self {
+            setpoint,
+            lock: None,
+            conflict_warned: false,
+        }
     }
 
     /// Preempt into a pending move, else chase the locked producer (or hold), and
@@ -82,8 +86,19 @@ impl Follow {
                 // that would slam the PD), then scale the whole step so the hand's
                 // linear speed stays under the cap. A step null to the linear
                 // Jacobian (e.g. self-motion) is left at the motor rate.
-                let stepped = chase_step(&self.setpoint, &lock.target, &io.cfg.max_joint_velocity_rad_s, dt);
-                let next = cap_ee_speed(&self.setpoint, &stepped, &io.jacobian, io.cfg.max_ee_velocity_m_s, dt);
+                let stepped = chase_step(
+                    &self.setpoint,
+                    &lock.target,
+                    &io.cfg.max_joint_velocity_rad_s,
+                    dt,
+                );
+                let next = cap_ee_speed(
+                    &self.setpoint,
+                    &stepped,
+                    &io.jacobian,
+                    io.cfg.max_ee_velocity_m_s,
+                    dt,
+                );
                 let dq = std::array::from_fn(|i| (next[i] - self.setpoint[i]) / dt);
                 self.setpoint = next;
                 dq
@@ -108,7 +123,10 @@ impl Follow {
             conflict = maintain(l, &joint, io);
             let stale = now.duration_since(l.last_fresh) > timeout;
             if stale {
-                info!("openarm01_arm: joint stream quiet for {timeout:?}, releasing lock; holding at {}", fmt_joints(&self.setpoint));
+                info!(
+                    "openarm01_arm: joint stream quiet for {timeout:?}, releasing lock; holding at {}",
+                    fmt_joints(&self.setpoint)
+                );
                 lock = None;
             }
         } else if let Some(jc) = joint.as_ref().filter(|c| fresh(c.recv_at, now, timeout)) {
@@ -131,15 +149,24 @@ impl Follow {
         if self.conflict_warned {
             return;
         }
-        let locked = self.lock.as_ref().map_or_else(|| "no producer".to_string(), |l| format!("{:?}", l.producer));
-        warn!("openarm01_arm: a second joint producer is publishing while locked to {locked}; ignoring it (single-source contract violated)");
+        let locked = self.lock.as_ref().map_or_else(
+            || "no producer".to_string(),
+            |l| format!("{:?}", l.producer),
+        );
+        warn!(
+            "openarm01_arm: a second joint producer is publishing while locked to {locked}; ignoring it (single-source contract violated)"
+        );
         self.conflict_warned = true;
     }
 }
 
 /// Lock onto a producer, taking its clamped positions as the first target.
 fn acquire(cmd: &JointCommand, io: &TickIo<'_>) -> Lock {
-    info!("openarm01_arm: following joint stream from {:?} (at {})", cmd.producer, fmt_joints(&io.q));
+    info!(
+        "openarm01_arm: following joint stream from {:?} (at {})",
+        cmd.producer,
+        fmt_joints(&io.q)
+    );
     Lock {
         producer: cmd.producer.clone(),
         target: clamp_to_limits(&cmd.positions, &io.cfg.limits),
@@ -164,8 +191,15 @@ fn maintain(lock: &mut Lock, joint: &Option<JointCommand>, io: &TickIo<'_>) -> b
 
 /// True if a fresh joint command this tick comes from a producer other than the
 /// locked one.
-fn foreign_producer(joint: &Option<JointCommand>, locked: &ProducerRef, now: Instant, timeout: Duration) -> bool {
-    joint.as_ref().is_some_and(|c| &c.producer != locked && fresh(c.recv_at, now, timeout))
+fn foreign_producer(
+    joint: &Option<JointCommand>,
+    locked: &ProducerRef,
+    now: Instant,
+    timeout: Duration,
+) -> bool {
+    joint
+        .as_ref()
+        .is_some_and(|c| &c.producer != locked && fresh(c.recv_at, now, timeout))
 }
 
 /// Whether a command that arrived at `recv_at` is still within the watchdog
@@ -178,11 +212,21 @@ fn fresh(recv_at: Instant, now: Instant, timeout: Duration) -> bool {
 /// stays under `max_ee` (m/s), using the Jacobian's linear rows. A step that
 /// barely moves the hand is left unscaled, so self-motion and near-singular
 /// directions run at the motor rate (`stepped` is already motor-rate-limited).
-fn cap_ee_speed(setpoint: &JointVec, stepped: &JointVec, jacobian: &Jacobian, max_ee: f64, dt: f64) -> JointVec {
+fn cap_ee_speed(
+    setpoint: &JointVec,
+    stepped: &JointVec,
+    jacobian: &Jacobian,
+    max_ee: f64,
+    dt: f64,
+) -> JointVec {
     let delta: JointVec = std::array::from_fn(|i| stepped[i] - setpoint[i]);
     let twist = jacobian * SVector::<f64, ARM_DOF>::from_column_slice(&delta);
     let ee_speed = twist.fixed_rows::<3>(0).norm() / dt;
-    let scale = if ee_speed.is_finite() && ee_speed > max_ee { max_ee / ee_speed } else { 1.0 };
+    let scale = if ee_speed.is_finite() && ee_speed > max_ee {
+        max_ee / ee_speed
+    } else {
+        1.0
+    };
     std::array::from_fn(|i| setpoint[i] + delta[i] * scale)
 }
 
@@ -195,7 +239,12 @@ mod tests {
         ProducerRef::new("core".to_string(), instance.to_string())
     }
     fn joint_cmd(instance: &str, recv_at: Instant) -> JointCommand {
-        JointCommand { seq: 1, producer: producer(instance), recv_at, positions: [0.0; ARM_DOF] }
+        JointCommand {
+            seq: 1,
+            producer: producer(instance),
+            recv_at,
+            positions: [0.0; ARM_DOF],
+        }
     }
 
     #[test]
@@ -215,14 +264,29 @@ mod tests {
 
         // No command, or the locked producer itself, is not foreign.
         assert!(!foreign_producer(&None, &locked, now, timeout));
-        assert!(!foreign_producer(&Some(joint_cmd("teleop", now)), &locked, now, timeout));
+        assert!(!foreign_producer(
+            &Some(joint_cmd("teleop", now)),
+            &locked,
+            now,
+            timeout
+        ));
 
         // A fresh command from a different producer is foreign.
-        assert!(foreign_producer(&Some(joint_cmd("other", now)), &locked, now, timeout));
+        assert!(foreign_producer(
+            &Some(joint_cmd("other", now)),
+            &locked,
+            now,
+            timeout
+        ));
 
         // A stale command from a different producer is not (it is not live).
         let stale = now - Duration::from_millis(150);
-        assert!(!foreign_producer(&Some(joint_cmd("other", stale)), &locked, now, timeout));
+        assert!(!foreign_producer(
+            &Some(joint_cmd("other", stale)),
+            &locked,
+            now,
+            timeout
+        ));
     }
 
     #[test]
@@ -233,7 +297,17 @@ mod tests {
         let dt = 0.01;
         let max_ee = 0.25;
         // A 0.1 rad step on joint 0 is 10 m/s of hand speed, well over the cap.
-        let next = cap_ee_speed(&[0.0; ARM_DOF], &{ let mut s = [0.0; ARM_DOF]; s[0] = 0.1; s }, &jac, max_ee, dt);
+        let next = cap_ee_speed(
+            &[0.0; ARM_DOF],
+            &{
+                let mut s = [0.0; ARM_DOF];
+                s[0] = 0.1;
+                s
+            },
+            &jac,
+            max_ee,
+            dt,
+        );
         // Scaled so the hand moves at exactly the cap: step = max_ee * dt.
         assert!((next[0] - max_ee * dt).abs() < 1e-12);
         assert_eq!(next[1..], [0.0; ARM_DOF - 1]);

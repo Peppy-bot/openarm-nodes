@@ -30,7 +30,16 @@ pub fn spawn(
     duration_s: f64,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, preempt, side, joint_positions, duration_s).await;
+        run(
+            runner,
+            state,
+            token,
+            preempt,
+            side,
+            joint_positions,
+            duration_s,
+        )
+        .await;
     });
 }
 

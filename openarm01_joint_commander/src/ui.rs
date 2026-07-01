@@ -147,21 +147,32 @@ async fn handle_command(text: &str, app: &AppState) {
         }
     };
     match cmd {
-        Command::FireArm { side, mut joints, duration_s } => {
+        Command::FireArm {
+            side,
+            mut joints,
+            duration_s,
+        } => {
             let side: Side = side.into();
             // A discrete move preempts the live stream, so refuse one while enabled
             // rather than relying on the UI to hide the button.
             {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
                 if s.enabled(side) {
-                    s.set_status(format!("{} arm: disable before a discrete move", side.label()));
+                    s.set_status(format!(
+                        "{} arm: disable before a discrete move",
+                        side.label()
+                    ));
                     return;
                 }
             }
             clamp_to_limits(&mut joints, side);
             // The arm floors the duration at its velocity-limit minimum; this
             // guard only catches garbage input (NaN, negative, absurd).
-            let duration_s = if duration_s.is_finite() { duration_s.clamp(0.0, 30.0) } else { 0.0 };
+            let duration_s = if duration_s.is_finite() {
+                duration_s.clamp(0.0, 30.0)
+            } else {
+                0.0
+            };
             fire_arm(app, side, joints, duration_s).await;
         }
         Command::SetEnabled { side, on } => {
@@ -175,7 +186,10 @@ async fn handle_command(text: &str, app: &AppState) {
                 let (Some(arm_measured), Some(gripper_measured)) =
                     (s.arm(side).last_feedback, s.gripper(side).last_feedback)
                 else {
-                    s.set_status(format!("{}: no measured pose yet, not enabling", side.label()));
+                    s.set_status(format!(
+                        "{}: no measured pose yet, not enabling",
+                        side.label()
+                    ));
                     return;
                 };
                 s.arm_mut(side).joints = arm_measured;
@@ -185,7 +199,11 @@ async fn handle_command(text: &str, app: &AppState) {
             s.set_status(format!(
                 "{}: {}",
                 side.label(),
-                if on { "ENABLED, streaming arm + gripper" } else { "disabled" }
+                if on {
+                    "ENABLED, streaming arm + gripper"
+                } else {
+                    "disabled"
+                }
             ));
         }
         Command::SetArmTarget { side, mut joints } => {
@@ -223,7 +241,11 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
     // promptly, so in_flight clears within the cancel round-trip.
     let preempt = {
         let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-        if s.arm(side).in_flight { s.arm(side).preempt.clone() } else { None }
+        if s.arm(side).in_flight {
+            s.arm(side).preempt.clone()
+        } else {
+            None
+        }
     };
     if let Some(tok) = preempt {
         tok.cancel();
@@ -246,7 +268,10 @@ async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s
     {
         let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
         if s.arm(side).in_flight {
-            s.set_status(format!("{} arm: previous goal still finishing", side.label()));
+            s.set_status(format!(
+                "{} arm: previous goal still finishing",
+                side.label()
+            ));
             return;
         }
         s.arm_mut(side).in_flight = true;

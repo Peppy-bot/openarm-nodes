@@ -38,11 +38,21 @@ struct MotionResult {
 
 impl MotionResult {
     fn reached(position_m: f64, action_time: f64) -> Self {
-        Self { success: true, message: "reached".into(), final_position_m: position_m, action_time }
+        Self {
+            success: true,
+            message: "reached".into(),
+            final_position_m: position_m,
+            action_time,
+        }
     }
 
     fn timed_out(position_m: f64, action_time: f64) -> Self {
-        Self { success: false, message: "timeout".into(), final_position_m: position_m, action_time }
+        Self {
+            success: false,
+            message: "timeout".into(),
+            final_position_m: position_m,
+            action_time,
+        }
     }
 }
 
@@ -69,7 +79,9 @@ pub async fn run_move_gripper(
                 // Reject targets outside the gripper's physical travel (also
                 // rejects NaN/inf, which Limit::contains treats as out of range).
                 if !GRIPPER_LIMITS_M.contains(req.data.position) {
-                    return Ok(move_gripper::GoalResponse::reject("target position out of range"));
+                    return Ok(move_gripper::GoalResponse::reject(
+                        "target position out of range",
+                    ));
                 }
                 // Atomically claim the slot; reject if a motion already holds it.
                 if busy

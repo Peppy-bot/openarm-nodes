@@ -19,7 +19,11 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) {
     // the components itself. A background task caches their aggregate readiness
     // here and the handler just reads it.
     let ready = Arc::new(AtomicBool::new(false));
-    tokio::spawn(poll_components(runner.clone(), ready.clone(), token.clone()));
+    tokio::spawn(poll_components(
+        runner.clone(),
+        ready.clone(),
+        token.clone(),
+    ));
 
     tracing::info!("is_ready service started");
     loop {
@@ -39,7 +43,11 @@ pub async fn run(runner: Arc<NodeRunner>, token: CancellationToken) {
     }
 }
 
-async fn poll_components(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: CancellationToken) {
+async fn poll_components(
+    runner: Arc<NodeRunner>,
+    ready: Arc<AtomicBool>,
+    token: CancellationToken,
+) {
     // Re-poll each tick (not latch) so a component that dies flips the robot back
     // to not-ready. A plain sleep loop, not interval(), to avoid burst catch-up
     // after a slow tick.

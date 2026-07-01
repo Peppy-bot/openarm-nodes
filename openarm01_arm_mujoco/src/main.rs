@@ -18,7 +18,9 @@ use tracing::info;
 use crate::config::{ArmId, ControlParams};
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let arm_id = ArmId::new(params.arm_id).expect("arm_id must be 0 (left) or 1 (right)");

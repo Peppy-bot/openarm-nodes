@@ -5,8 +5,8 @@ mod pacer;
 mod stream;
 mod trajectory;
 
-use openarm_can::{ArmCan, CallbackMode, v10};
 use control::ControlConfig;
+use openarm_can::{ArmCan, CallbackMode, v10};
 use peppygen::exposed_services::openarm01_arm::v1::get_arm_id;
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
@@ -36,7 +36,9 @@ fn side_label(arm_id: u8) -> &'static str {
     match arm_id {
         ARM_ID_LEFT => "left",
         ARM_ID_RIGHT => "right",
-        other => panic!("arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {other}"),
+        other => {
+            panic!("arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {other}")
+        }
     }
 }
 
@@ -51,7 +53,9 @@ const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let arm_id = params.arm_id;
@@ -76,7 +80,9 @@ fn main() -> Result<()> {
             params.max_joint_velocity_rad_s_7,
         ];
         assert!(
-            max_joint_velocity_rad_s.iter().all(|v| v.is_finite() && *v > 0.0),
+            max_joint_velocity_rad_s
+                .iter()
+                .all(|v| v.is_finite() && *v > 0.0),
             "all max_joint_velocity_rad_s_N must be finite and > 0"
         );
         assert!(
@@ -91,7 +97,10 @@ fn main() -> Result<()> {
         // chain from base_link errors here.
         let model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.base_link)
             .unwrap_or_else(|e| panic!("build arm model from base '{}': {e}", params.base_link));
-        info!("model loaded (urdf '{}', base '{}')", params.urdf_path, params.base_link);
+        info!(
+            "model loaded (urdf '{}', base '{}')",
+            params.urdf_path, params.base_link
+        );
 
         // Gravity acts along world -Z, so it is only correct if the URDF carries the
         // mount tree above base_link to orient that frame. We do not force one (a
@@ -109,16 +118,18 @@ fn main() -> Result<()> {
 
         let cfg = ControlConfig {
             kp: [
-                params.kp1, params.kp2, params.kp3, params.kp4,
-                params.kp5, params.kp6, params.kp7,
+                params.kp1, params.kp2, params.kp3, params.kp4, params.kp5, params.kp6, params.kp7,
             ],
             kd: [
-                params.kd1, params.kd2, params.kd3, params.kd4,
-                params.kd5, params.kd6, params.kd7,
+                params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7,
             ],
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
-            recv_timeout_us: i32::try_from(params.recv_timeout_us)
-                .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
+            recv_timeout_us: i32::try_from(params.recv_timeout_us).unwrap_or_else(|_| {
+                panic!(
+                    "recv_timeout_us ({}) exceeds i32::MAX",
+                    params.recv_timeout_us
+                )
+            }),
             max_joint_velocity_rad_s,
             max_ee_velocity_m_s: params.max_ee_velocity_m_s,
             limits: model.limits(),
@@ -128,8 +139,7 @@ fn main() -> Result<()> {
         // Echo the resolved config so every run records exactly what it ran with.
         info!(
             "config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us",
-            params.control_rate_hz,
-            cfg.recv_timeout_us,
+            params.control_rate_hz, cfg.recv_timeout_us,
         );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
         info!(
@@ -149,7 +159,9 @@ fn main() -> Result<()> {
         // instead of lingering like a /tmp file. get-then-store is not atomic; two
         // simultaneous starts can race (single-writer in practice).
         let lock_key = format!("openarm01_arm_{arm_id}_instance_lock");
-        if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
+        if let Some(held) =
+            datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await?
+        {
             panic!("instance lock {lock_key} held by {}", held.last_modified_by);
         }
         datastore::store(
@@ -174,7 +186,9 @@ fn main() -> Result<()> {
             let lock_key = lock_key.clone();
             node_runner.on_shutdown(async move {
                 let _ = shutdown_rx.await;
-                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), LOCK_REMOVE_TIMEOUT).await {
+                if let Err(e) =
+                    datastore::remove(&runner, lock_key.as_str(), LOCK_REMOVE_TIMEOUT).await
+                {
                     warn!("failed to remove lock {lock_key}: {e}");
                 }
             });
@@ -183,7 +197,11 @@ fn main() -> Result<()> {
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
         let mut arm = ArmCan::new(&can_interface, ENABLE_FD).expect("ArmCan::new");
-        arm.init_motors(&v10::ARM_MOTOR_TYPES, &v10::ARM_SEND_IDS, &v10::ARM_RECV_IDS);
+        arm.init_motors(
+            &v10::ARM_MOTOR_TYPES,
+            &v10::ARM_SEND_IDS,
+            &v10::ARM_RECV_IDS,
+        );
         arm.set_callback_mode(CallbackMode::Ignore);
         arm.enable_all();
         tokio::time::sleep(POST_ENABLE_SLEEP).await;
@@ -238,14 +256,21 @@ fn main() -> Result<()> {
         // `cartesian_states`, always on, at its own rate.
         let (joint_command_tx, joint_command_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
-        tokio::spawn(stream::run_joint_command_listener(node_runner.clone(), arm_id, joint_command_tx));
+        tokio::spawn(stream::run_joint_command_listener(
+            node_runner.clone(),
+            arm_id,
+            joint_command_tx,
+        ));
         tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
             arm_id,
             Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
             measured_rx,
         ));
-        let wiring = stream::StreamWiring { joint: joint_command_rx, measured: measured_tx };
+        let wiring = stream::StreamWiring {
+            joint: joint_command_rx,
+            measured: measured_tx,
+        };
 
         // Single control task (the only motor writer): eases to the ready pose on
         // startup, then follows the active command stream (or holds) between

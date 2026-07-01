@@ -56,10 +56,18 @@ pub async fn run_joint_command_listener(
     arm_id: u8,
     latest: watch::Sender<Option<JointCommand>>,
 ) {
+    let mut subscription = match commander_joint_commands::subscribe(&runner).await {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!("joint_commands subscribe: {e}");
+            return;
+        }
+    };
     let mut seq: u64 = 0;
     loop {
-        let (producer, msg) = match commander_joint_commands::on_next_message_received(&runner).await {
-            Ok(received) => received,
+        let (producer, msg) = match subscription.next().await {
+            Ok(Some(received)) => received,
+            Ok(None) => return,
             Err(e) => {
                 error!("joint_commands receive: {e}");
                 continue;
@@ -109,7 +117,8 @@ pub async fn run_state_publisher(
         }
         let m = (*measured.borrow()).expect("gated on first measurement");
         let result = async {
-            let joints = joint_states::build_message(arm_id, m.positions, m.velocities).map_err(|e| e.to_string())?;
+            let joints = joint_states::build_message(arm_id, m.positions, m.velocities)
+                .map_err(|e| e.to_string())?;
             joint_pub.publish(joints).await.map_err(|e| e.to_string())?;
             Ok::<(), String>(())
         }

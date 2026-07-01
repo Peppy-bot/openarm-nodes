@@ -20,13 +20,21 @@ pub async fn run(
     state: Arc<SharedState>,
     token: CancellationToken,
 ) {
+    let mut subscription = match state_gripper_states::subscribe(&runner).await {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "gripper_states subscribe");
+            return;
+        }
+    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = state_gripper_states::on_next_message_received(&runner) => received,
+            received = subscription.next() => received,
         };
         let (_producer, msg) = match received {
-            Ok(pair) => pair,
+            Ok(Some(pair)) => pair,
+            Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "gripper_states receive");
                 continue;
@@ -35,7 +43,10 @@ pub async fn run(
         if msg.gripper_id != gripper_id.as_u8() || !msg.position.is_finite() {
             continue;
         }
-        let mut latest = state.gripper_state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut latest = state
+            .gripper_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         *latest = Some(GripperStateLatest {
             opening: msg.position,
             recv_at: Instant::now(),

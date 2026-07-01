@@ -18,9 +18,18 @@ pub(super) struct JointMove {
 
 impl JointMove {
     pub(super) fn start(g: crate::actions::JointMoveGoal, io: &TickIo<'_>) -> Self {
-        info!("move_arm_joints: start={} target={}", fmt_joints(&io.q), fmt_joints(&g.target));
+        info!(
+            "move_arm_joints: start={} target={}",
+            fmt_joints(&io.q),
+            fmt_joints(&g.target)
+        );
         Self {
-            trajectory: JointTrajectory::new(io.q, g.target, io.cfg.max_joint_velocity_rad_s, g.duration_s),
+            trajectory: JointTrajectory::new(
+                io.q,
+                g.target,
+                io.cfg.max_joint_velocity_rad_s,
+                g.duration_s,
+            ),
             ctx: g.ctx,
         }
     }
@@ -42,8 +51,16 @@ impl JointMove {
         }
 
         if self.trajectory.is_complete(io.now) {
-            self.finish(io, Completion::Done { success: true, message: "trajectory complete" }, q_des, elapsed)
-                .await
+            self.finish(
+                io,
+                Completion::Done {
+                    success: true,
+                    message: "trajectory complete",
+                },
+                q_des,
+                elapsed,
+            )
+            .await
         } else {
             Mode::JointMove(self)
         }
@@ -55,13 +72,23 @@ impl JointMove {
     /// move is open-loop, so it does not assert the measured joints reached the
     /// target within a tolerance. The result carries the measured positions at
     /// exit (`io.q`) for the caller to judge goal achievement.
-    async fn finish(self, io: &TickIo<'_>, completion: Completion, setpoint: JointVec, elapsed: f64) -> Mode {
+    async fn finish(
+        self,
+        io: &TickIo<'_>,
+        completion: Completion,
+        setpoint: JointVec,
+        elapsed: f64,
+    ) -> Mode {
         let result = match completion {
             Completion::Done { success, message } => {
-                self.ctx.complete(success, message.into(), io.q, elapsed).await
+                self.ctx
+                    .complete(success, message.into(), io.q, elapsed)
+                    .await
             }
             Completion::Cancelled => {
-                self.ctx.complete_cancelled(false, "goal cancelled".into(), io.q, elapsed).await
+                self.ctx
+                    .complete_cancelled(false, "goal cancelled".into(), io.q, elapsed)
+                    .await
             }
         };
         if let Err(e) = result {

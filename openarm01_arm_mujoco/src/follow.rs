@@ -66,8 +66,10 @@ pub async fn run(
                 .filter(|c| c.recv_at.elapsed() <= params.stream_timeout)
                 .map(|c| c.positions)
         };
-        let (Some(target), Some(from)) = (fresh, setpoint.or_else(|| state::snapshot_positions(&state)))
-        else {
+        let (Some(target), Some(from)) = (
+            fresh,
+            setpoint.or_else(|| state::snapshot_positions(&state)),
+        ) else {
             setpoint = state::snapshot_positions(&state);
             continue;
         };

@@ -134,7 +134,10 @@ enum Mode {
 /// completes via the cancelled terminal with `success = false` in the result
 /// payload (the motion stopped short of its target).
 enum Completion {
-    Done { success: bool, message: &'static str },
+    Done {
+        success: bool,
+        message: &'static str,
+    },
     Cancelled,
 }
 
@@ -148,6 +151,14 @@ impl Mode {
             Mode::CartesianMove(m) => m.tick(io).await,
         }
     }
+}
+
+/// Shutdown coordination for the control loop: `main.rs` cancels `token` to ask
+/// the loop to stop, and once it has eased the arm to the ready pose and disabled
+/// the motors it signals `done` so `main.rs` can release the lock and exit.
+struct Shutdown {
+    token: CancellationToken,
+    done: oneshot::Sender<()>,
 }
 
 /// Spawn the arm's control: a single task that owns the motors (the only motor
@@ -176,8 +187,24 @@ pub async fn spawn(
     let busy = Arc::new(AtomicBool::new(true));
     let (goal_tx, goal_rx) = mpsc::channel::<Goal>(1);
     let token = runner.cancellation_token().clone();
-    tokio::spawn(run_control(arm, cfg.clone(), goal_rx, busy.clone(), model, wiring, token, shutdown_tx));
-    tokio::spawn(actions::run_move_arm_joints(joints_action, cfg.limits, goal_tx.clone(), busy.clone()));
+    tokio::spawn(run_control(
+        arm,
+        cfg.clone(),
+        goal_rx,
+        busy.clone(),
+        model,
+        wiring,
+        Shutdown {
+            token,
+            done: shutdown_tx,
+        },
+    ));
+    tokio::spawn(actions::run_move_arm_joints(
+        joints_action,
+        cfg.limits,
+        goal_tx.clone(),
+        busy.clone(),
+    ));
     tokio::spawn(actions::run_move_arm(cartesian_action, goal_tx, busy));
     Ok(())
 }
@@ -194,8 +221,7 @@ async fn run_control(
     busy: Arc<AtomicBool>,
     mut model: srs_model::Arm,
     wiring: StreamWiring,
-    token: CancellationToken,
-    shutdown_tx: oneshot::Sender<()>,
+    shutdown: Shutdown,
 ) {
     let mut pacer = Pacer::new(cfg.cycle_period);
     let (q0, _) = read_state(&arm, cfg.recv_timeout_us);
@@ -204,7 +230,10 @@ async fn run_control(
         // velocity-capped, so the arm converges to the operator (and keeps
         // following as they move) with no neutral excursion. Admit goals now.
         busy.store(false, Ordering::Release);
-        info!("startup: producer already streaming, following from {}", fmt_joints(&q0));
+        info!(
+            "startup: producer already streaming, following from {}",
+            fmt_joints(&q0)
+        );
         Mode::Follow(Follow::idle(q0))
     } else {
         Mode::Startup(StartupMove::new(q0, &cfg))
@@ -214,10 +243,12 @@ async fn run_control(
     loop {
         let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
         let (ff_tau, ee_base, jacobian) = feedforward(&mut model, &q, &qdot);
-        wiring.measured.send_replace(Some(crate::stream::MeasuredState {
-            positions: q,
-            velocities: qdot,
-        }));
+        wiring
+            .measured
+            .send_replace(Some(crate::stream::MeasuredState {
+                positions: q,
+                velocities: qdot,
+            }));
         let mut io = TickIo {
             arm: &arm,
             cfg: &cfg,
@@ -236,7 +267,7 @@ async fn run_control(
         // tick: on shutdown break out and run the return-to-ready + disable below.
         tokio::select! {
             biased;
-            _ = token.cancelled() => break,
+            _ = shutdown.token.cancelled() => break,
             _ = pacer.pace() => {}
         }
     }
@@ -260,7 +291,7 @@ async fn run_control(
         a.recv_all(cfg.recv_timeout_us);
     }
     // A dropped receiver (main.rs already exited) is fine; nothing to do.
-    let _ = shutdown_tx.send(());
+    let _ = shutdown.done.send(());
     info!("control loop stopped (motors disabled)");
 }
 
@@ -273,7 +304,12 @@ async fn run_control(
 /// than [`PARK_DURATION_S`] rather than lunging.
 async fn return_to_ready(arm: &Mutex<ArmCan>, cfg: &ControlConfig, model: &mut srs_model::Arm) {
     let (q0, _) = read_state(arm, cfg.recv_timeout_us);
-    let trajectory = JointTrajectory::new(q0, READY_POSE, cfg.max_joint_velocity_rad_s, PARK_DURATION_S);
+    let trajectory = JointTrajectory::new(
+        q0,
+        READY_POSE,
+        cfg.max_joint_velocity_rad_s,
+        PARK_DURATION_S,
+    );
     let mut pacer = Pacer::new(cfg.cycle_period);
     loop {
         let (q, qdot) = read_state(arm, cfg.recv_timeout_us);
@@ -296,7 +332,10 @@ async fn return_to_ready(arm: &Mutex<ArmCan>, cfg: &ControlConfig, model: &mut s
 /// pose first.
 fn stream_present(joint: &watch::Receiver<Option<JointCommand>>, cfg: &ControlConfig) -> bool {
     let now = Instant::now();
-    joint.borrow().as_ref().is_some_and(|c| now.duration_since(c.recv_at) <= cfg.stream_timeout)
+    joint
+        .borrow()
+        .as_ref()
+        .is_some_and(|c| now.duration_since(c.recv_at) <= cfg.stream_timeout)
 }
 
 /// One tick of rigid-body feedforward: gravity and Coriolis from the posed chain
@@ -305,7 +344,11 @@ fn stream_present(joint: &watch::Receiver<Option<JointCommand>>, cfg: &ControlCo
 /// once and also returns the EE pose (base frame) that the same evaluation yields
 /// for free (used by Cartesian admission, the state streams, and move results)
 /// plus the geometric Jacobian (used to cap the `Follow` chase by hand speed).
-fn feedforward(model: &mut srs_model::Arm, q: &JointVec, qdot: &JointVec) -> (JointVec, Isometry3<f64>, Jacobian) {
+fn feedforward(
+    model: &mut srs_model::Arm,
+    q: &JointVec,
+    qdot: &JointVec,
+) -> (JointVec, Isometry3<f64>, Jacobian) {
     let posed = model.at(q);
     let gravity = posed.gravity_torques();
     let coriolis = posed.coriolis_torques(qdot);

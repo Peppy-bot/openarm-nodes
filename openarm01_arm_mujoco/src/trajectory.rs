@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 pub const ARM_DOF: usize = 7;
 pub type JointVec = [f64; ARM_DOF];
 
-
 /// Quintic minimum-jerk trajectory in joint space.
 ///
 /// Position profile: s(τ) = 6τ⁵ − 15τ⁴ + 10τ³ with τ = t/T ∈ [0,1].

@@ -26,13 +26,21 @@ pub async fn run(
     latest: watch::Sender<Option<GripperCommand>>,
     token: CancellationToken,
 ) {
+    let mut subscription = match commander_gripper_commands::subscribe(&runner).await {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "gripper_commands subscribe");
+            return;
+        }
+    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = commander_gripper_commands::on_next_message_received(&runner) => received,
+            received = subscription.next() => received,
         };
         let (_producer, msg) = match received {
-            Ok(pair) => pair,
+            Ok(Some(pair)) => pair,
+            Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "gripper_commands receive");
                 continue;

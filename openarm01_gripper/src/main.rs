@@ -4,8 +4,8 @@ mod follow;
 mod geometry;
 mod stream;
 
-use openarm_can::{CallbackMode, GripperCan, v10};
 use control::{ControlConfig, run_move_gripper};
+use openarm_can::{CallbackMode, GripperCan, v10};
 use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
@@ -28,7 +28,9 @@ const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let gripper_id = params.gripper_id;
@@ -46,8 +48,12 @@ fn main() -> Result<()> {
 
         let cfg = ControlConfig {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
-            recv_timeout_us: i32::try_from(params.recv_timeout_us)
-                .unwrap_or_else(|_| panic!("recv_timeout_us ({}) exceeds i32::MAX", params.recv_timeout_us)),
+            recv_timeout_us: i32::try_from(params.recv_timeout_us).unwrap_or_else(|_| {
+                panic!(
+                    "recv_timeout_us ({}) exceeds i32::MAX",
+                    params.recv_timeout_us
+                )
+            }),
             position_tolerance_m: params.position_tolerance,
             motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
@@ -60,7 +66,9 @@ fn main() -> Result<()> {
         // simultaneous starts can race (single-writer in practice). Same scheme as
         // openarm01_arm.
         let lock_key = format!("openarm01_gripper_{gripper_id}_instance_lock");
-        if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
+        if let Some(held) =
+            datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await?
+        {
             panic!("instance lock {lock_key} held by {}", held.last_modified_by);
         }
         datastore::store(
@@ -79,7 +87,9 @@ fn main() -> Result<()> {
             let runner = node_runner.clone();
             let lock_key = lock_key.clone();
             node_runner.on_shutdown(async move {
-                if let Err(e) = datastore::remove(&runner, lock_key.as_str(), LOCK_REMOVE_TIMEOUT).await {
+                if let Err(e) =
+                    datastore::remove(&runner, lock_key.as_str(), LOCK_REMOVE_TIMEOUT).await
+                {
                     warn!("failed to remove lock {lock_key}: {e}");
                 }
             });
@@ -88,7 +98,11 @@ fn main() -> Result<()> {
         // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
         let mut gripper = GripperCan::new(&can_interface, ENABLE_FD).expect("GripperCan::new");
-        gripper.init_motor(v10::GRIPPER_MOTOR_TYPE, v10::GRIPPER_SEND_ID, v10::GRIPPER_RECV_ID);
+        gripper.init_motor(
+            v10::GRIPPER_MOTOR_TYPE,
+            v10::GRIPPER_SEND_ID,
+            v10::GRIPPER_RECV_ID,
+        );
 
         // IGNORE during enable so ACK frames aren't processed as state updates,
         // then switch to STATE before the control loop (matches demo.cpp bringup pattern).
