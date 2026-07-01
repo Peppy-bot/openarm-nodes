@@ -18,7 +18,7 @@ use peppygen::{NodeRunner, Result};
 use peppylib::runtime::CancellationToken;
 use srs_model::Limit;
 use tokio::sync::oneshot;
-use tracing::info;
+use tracing::{error, info};
 
 use control_core::Pacer;
 
@@ -45,10 +45,12 @@ pub struct ControlConfig {
     pub limits: [Limit; ARM_DOF],
 }
 
-/// Spawn the arm's control: a single task that owns the motors (the only motor
-/// writer) and follows the hub's governed setpoint stream. No actions are exposed
-/// here - the hub owns move admission. `shutdown_tx` is signalled once the loop
-/// has disabled the motors, so main.rs can then release the lock.
+/// Spawn the arm's control and supervise it. `run_control` is the sole motor
+/// writer, so a fire-and-forget spawn would let a panic pass unobserved, leaving
+/// the node up with the motors uncontrolled and no control loop. The supervisor
+/// watches the control task and, if it ever stops, cancels the node so it restarts
+/// under supervision instead of serving blind. `shutdown_tx` is signalled once a
+/// clean stop has disabled the motors, so main.rs can then release the lock.
 pub async fn spawn(
     runner: &NodeRunner,
     arm: Arc<Mutex<ArmCan>>,
@@ -58,8 +60,33 @@ pub async fn spawn(
     shutdown_tx: oneshot::Sender<()>,
 ) -> Result<()> {
     let token = runner.cancellation_token().clone();
-    tokio::spawn(run_control(arm, cfg, model, wiring, token, shutdown_tx));
+    let control = tokio::spawn(run_control(
+        arm.clone(),
+        cfg,
+        model,
+        wiring,
+        token.clone(),
+        shutdown_tx,
+    ));
+    tokio::spawn(supervise(control, arm, token));
     Ok(())
+}
+
+/// Watch the sole motor-writer task. A clean stop returns `Ok` after the loop has
+/// already disabled the motors; a panic returns `Err` with the motors still live,
+/// so disable them here. Either way cancel the node: on a clean stop the token is
+/// already cancelled (idempotent), and on a panic this converts a silently dead
+/// control loop into a node restart rather than an arm left with no controller.
+async fn supervise(
+    control: tokio::task::JoinHandle<()>,
+    arm: Arc<Mutex<ArmCan>>,
+    token: CancellationToken,
+) {
+    if let Err(join_error) = control.await {
+        error!(%join_error, "control loop terminated unexpectedly; disabling motors");
+        disable_motors(&arm);
+    }
+    token.cancel();
 }
 
 /// The single motor-owning control loop. Each tick reads the measured state,
@@ -74,21 +101,26 @@ async fn run_control(
     wiring: StreamWiring,
     shutdown: Shutdown,
 ) {
-    let mut pacer = Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
+    let mut pacer =
+        Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
     loop {
         let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
         let ff_tau = feedforward(&mut model, &q, &qdot);
-        wiring.measured.send_replace(Some(crate::stream::MeasuredState {
-            positions: q,
-            velocities: qdot,
-        }));
+        wiring
+            .measured
+            .send_replace(Some(crate::stream::MeasuredState {
+                positions: q,
+                velocities: qdot,
+            }));
 
         // Follow the latest governed setpoint; hold the measured pose (zero
         // desired velocity) until the hub's stream is live, so the arm never
         // lunges before the hub is up.
         let (q_des, dq_des) = match *wiring.governed.borrow() {
-            Some(GovernedSetpoint { q_des, dq_des }) => clamp_setpoint_to_limits(&q_des, &dq_des, &cfg.limits),
+            Some(GovernedSetpoint { q_des, dq_des }) => {
+                clamp_setpoint_to_limits(&q_des, &dq_des, &cfg.limits)
+            }
             None => (q, ZERO),
         };
 
@@ -108,11 +140,7 @@ async fn run_control(
     // could command the two arms into each other. main.rs awaits `shutdown_tx` so
     // the lock is released only after the motors are off.
     info!("control loop stopping: disabling motors");
-    {
-        // unwrap_or_else: recover even if poisoned so disable_all() always runs.
-        let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-        a.disable_all();
-    }
+    disable_motors(&arm);
     tokio::time::sleep(POST_DISABLE_SLEEP).await;
     {
         let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
@@ -136,7 +164,13 @@ fn feedforward(model: &mut srs_model::Arm, q: &JointVec, qdot: &JointVec) -> Joi
 
 /// Command the motors once: this tick's feedforward plus PD to the governed
 /// position/velocity.
-fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q_des: &JointVec, dq_des: &JointVec) {
+fn command(
+    arm: &Mutex<ArmCan>,
+    cfg: &ControlConfig,
+    ff_tau: &JointVec,
+    q_des: &JointVec,
+    dq_des: &JointVec,
+) {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
     a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau);
 }
@@ -147,14 +181,30 @@ fn command(arm: &Mutex<ArmCan>, cfg: &ControlConfig, ff_tau: &JointVec, q_des: &
 /// MIT controller is never commanded to drive outward through a hard limit (the
 /// `kd * (dq_des - qdot)` term cannot add outward torque at the wall). Inward
 /// (recovering) velocity is preserved.
-fn clamp_setpoint_to_limits(q: &JointVec, dq: &JointVec, limits: &[Limit; ARM_DOF]) -> (JointVec, JointVec) {
+fn clamp_setpoint_to_limits(
+    q: &JointVec,
+    dq: &JointVec,
+    limits: &[Limit; ARM_DOF],
+) -> (JointVec, JointVec) {
     let q_clamped: JointVec = std::array::from_fn(|i| q[i].clamp(limits[i].lo, limits[i].hi));
     let dq_clamped: JointVec = std::array::from_fn(|i| {
         let driving_below = q[i] < limits[i].lo && dq[i] < 0.0;
         let driving_above = q[i] > limits[i].hi && dq[i] > 0.0;
-        if driving_below || driving_above { 0.0 } else { dq[i] }
+        if driving_below || driving_above {
+            0.0
+        } else {
+            dq[i]
+        }
     });
     (q_clamped, dq_clamped)
+}
+
+/// Disable all motors so the arm goes limp. Recovers a poisoned lock (unwrap into
+/// the inner guard) so the disable runs even if the control loop panicked holding
+/// it, since going limp is the safe failure state.
+fn disable_motors(arm: &Mutex<ArmCan>) {
+    let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+    a.disable_all();
 }
 
 /// Read the measured joint state (positions + velocities) one time.
@@ -207,4 +257,3 @@ mod tests {
         assert_eq!(dqc, dq, "in-range velocities are unchanged");
     }
 }
-
