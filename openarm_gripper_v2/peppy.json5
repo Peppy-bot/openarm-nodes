@@ -1,0 +1,78 @@
+// The OpenArm v2.0 gripper: a revolute pinch gripper on a single DM4310 driven in
+// POS_FORCE mode (position command with a speed and grip-force limit), reporting measured
+// grip force on gripper_states. One instance per side, selected by `gripper_id`. Distinct
+// node from openarm_gripper (v1.0 prismatic, MIT); a launcher deploys one or the other.
+{
+  peppy_schema: "node/v1",
+  manifest: {
+    name: "openarm_gripper_v2",
+    tag: "v1",
+    depends_on: {
+      interfaces: [
+        // Streamed opening setpoints the gripper follows between moves: optional
+        // and wildcard (`from_any`) so it binds to any conforming producer.
+        {
+          name: "openarm_gripper_commands",
+          tag: "v1",
+          link_id: "commander",
+          from_any: true,
+        },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    },
+    parameters: {
+      gripper_id: "u8",
+      can_interface: "string",
+      // Hardware-loop rate (Hz). Pick deliberately per deployment; the stack
+      // currently unifies on 100 Hz across arms and grippers.
+      control_rate_hz: "u32",
+      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (10 ms at 100 Hz).
+      recv_timeout_us: { $type: "u32", $default: 1000 },
+      // Error threshold (m) for goal completion.
+      position_tolerance: { $type: "f64", $default: 0.001 },
+      motion_timeout_s: { $type: "f64", $default: 10.0 },
+      // POS_FORCE absolute speed limit (rad/s at the motor). Default matches enactic's
+      // reference (test_gripper_posforce).
+      speed_rad_s: { $type: "f64", $default: 25.0 },
+      // POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap the gripper
+      // may apply. Default matches enactic's reference; raise for a firmer grip.
+      force_limit_pu: { $type: "f64", $default: 0.15 },
+      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
+      // consumers' needs vary too much for a default to be meaningful.
+      state_rate_hz: "u32",
+      // How long (s) the gripper keeps following a stream after its last message
+      // before holding. Safety watchdog.
+      stream_timeout_s: "f64"
+    }
+  },
+  interfaces: {
+    conforms_to: [
+      {
+        name: "openarm_gripper_actions",
+        tag: "v1"
+      },
+      // Always-on measured opening so teleop/monitoring consume sim and real
+      // grippers identically (by gripper_id).
+      {
+        name: "openarm_gripper_states",
+        tag: "v1"
+      },
+      // Per-component readiness the real robot_initializer aggregates: ready once
+      // the motor is enabled and the control loops are serving.
+      {
+        name: "openarm_hardware_ready",
+        tag: "v1"
+      }
+    ],
+    topics: {
+      consumes: [
+        { name: "gripper_commands", link_id: "commander" }
+      ]
+    }
+  },
+}

@@ -33,14 +33,12 @@ pub async fn run(
             _ = token.cancelled() => return,
             _ = tokio::time::sleep(period) => {}
         }
-        let motor_rad = gripper
+        let state = gripper
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get_state()
-            .position;
-        let opening = geometry::motor_rad_to_meters(motor_rad);
-        // The v1.0 prismatic gripper does not sense grip force; report 0.
-        let force = 0.0;
+            .get_state();
+        let opening = geometry::motor_rad_to_meters(state.position);
+        let force = state.torque;
         let result = async {
             let msg = gripper_states::build_message(gripper_id, opening, force)
                 .map_err(|e| e.to_string())?;
