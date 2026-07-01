@@ -14,13 +14,14 @@ use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tracing::warn;
 
-use crate::config::{ControlParams, GRIPPER_OPEN_M};
+use crate::config::{ApertureMap, ControlParams};
 use crate::passthrough;
 use crate::stream::GripperCommand;
 
 pub async fn run(
     passthrough_pub: TopicPublisher,
     gripper_id: u8,
+    map: ApertureMap,
     busy: Arc<AtomicBool>,
     cmd: watch::Receiver<Option<GripperCommand>>,
     params: ControlParams,
@@ -55,9 +56,9 @@ pub async fn run(
         };
         // Clamp defensively (a producer could stream out of range); the sim
         // splits the aperture across the two fingers.
-        let opening = position.clamp(0.0, GRIPPER_OPEN_M);
+        let opening = position.clamp(0.0, map.open_m());
 
-        match passthrough::publish(&passthrough_pub, gripper_id, opening).await {
+        match passthrough::publish(&passthrough_pub, gripper_id, &map, opening).await {
             Ok(()) => failing = false,
             Err(e) if !failing => {
                 failing = true;

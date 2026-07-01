@@ -13,7 +13,7 @@ use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::config::GRIPPER_OPEN_M;
+use crate::config::ApertureMap;
 use crate::passthrough;
 use crate::state::SharedState;
 
@@ -60,6 +60,7 @@ pub async fn run(
     token: CancellationToken,
     passthrough_pub: TopicPublisher,
     gripper_id: u8,
+    map: ApertureMap,
     busy: Arc<AtomicBool>,
 ) {
     let mut action_handle = move_gripper::ActionHandle::expose(&runner)
@@ -93,7 +94,7 @@ pub async fn run(
             // settled command before the runtime tears the publisher down.
             // Repeats survive a single best-effort drop on the bridge.
             for _ in 0..SHUTDOWN_GRACE_REPEATS {
-                if let Err(e) = passthrough::publish(&passthrough_pub, gripper_id, 0.0).await {
+                if let Err(e) = passthrough::publish(&passthrough_pub, gripper_id, &map, 0.0).await {
                     warn!("shutdown publish: {e}");
                 }
                 tokio::time::sleep(SHUTDOWN_GRACE_TICK).await;
@@ -105,9 +106,10 @@ pub async fn run(
         let goal_request =
             action_handle.handle_goal_next_request(|req: &move_gripper::GoalRequest| {
                 let pos_m = req.data.position;
-                if !(0.0..=GRIPPER_OPEN_M).contains(&pos_m) {
+                let open_m = map.open_m();
+                if !(0.0..=open_m).contains(&pos_m) {
                     return Ok(move_gripper::GoalResponse::reject(format!(
-                        "position out of range [0.0, {GRIPPER_OPEN_M}]"
+                        "position out of range [0.0, {open_m}]"
                     )));
                 }
                 // Single-flight: claim the shared gate in the decider so a goal
@@ -154,6 +156,7 @@ pub async fn run(
             let result = run_control_loop(
                 &passthrough_pub,
                 gripper_id,
+                &map,
                 &state,
                 &goal_ctx,
                 &token,
@@ -196,6 +199,7 @@ pub async fn run(
 async fn run_control_loop(
     passthrough_pub: &TopicPublisher,
     gripper_id: u8,
+    map: &ApertureMap,
     state: &Arc<SharedState>,
     goal_ctx: &move_gripper::GoalContext,
     token: &CancellationToken,
@@ -212,7 +216,7 @@ async fn run_control_loop(
         // Republish every tick: the passthrough is best-effort, so this is the
         // self-healing path. Idempotent. If it keeps failing, bail before
         // convergence/stall reports false success.
-        match passthrough::publish(passthrough_pub, gripper_id, target).await {
+        match passthrough::publish(passthrough_pub, gripper_id, map, target).await {
             Ok(()) => consecutive_publish_failures = 0,
             Err(e) => {
                 consecutive_publish_failures += 1;

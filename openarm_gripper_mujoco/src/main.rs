@@ -13,7 +13,7 @@ use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
 use tracing::info;
 
-use crate::config::{ControlParams, GripperId};
+use crate::config::{ApertureMap, ControlParams, GripperId};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -23,6 +23,9 @@ fn main() -> Result<()> {
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let gripper_id =
             GripperId::new(params.gripper_id).expect("gripper_id must be 0 (left) or 1 (right)");
+        // Prismatic (v1) vs revolute (v2) finger geometry: maps the jaw opening
+        // (m) on the shared gripper interface to the sim passthrough value.
+        let map = ApertureMap::for_version(&params.hardware_version, gripper_id);
         let token = node_runner.cancellation_token().clone();
         info!(
             "starting openarm_gripper_mujoco instance={} gripper_id={}",
@@ -41,6 +44,7 @@ fn main() -> Result<()> {
         tokio::spawn(state_stream::run(
             node_runner.clone(),
             gripper_id,
+            map,
             shared.clone(),
             token.clone(),
         ));
@@ -65,6 +69,7 @@ fn main() -> Result<()> {
         tokio::spawn(follow::run(
             passthrough_pub.clone(),
             gripper_id.as_u8(),
+            map,
             busy.clone(),
             cmd_rx,
             control,
@@ -77,6 +82,7 @@ fn main() -> Result<()> {
             token.clone(),
             passthrough_pub,
             gripper_id.as_u8(),
+            map,
             busy,
         ));
 

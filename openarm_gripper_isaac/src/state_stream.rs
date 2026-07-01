@@ -11,12 +11,13 @@ use peppygen::consumed_topics::state_gripper_states;
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 
-use crate::config::GripperId;
+use crate::config::{ApertureMap, GripperId};
 use crate::state::{GripperStateLatest, SharedState};
 
 pub async fn run(
     runner: Arc<NodeRunner>,
     gripper_id: GripperId,
+    map: ApertureMap,
     state: Arc<SharedState>,
     token: CancellationToken,
 ) {
@@ -48,7 +49,7 @@ pub async fn run(
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         *latest = Some(GripperStateLatest {
-            opening: msg.position,
+            opening: map.to_aperture(msg.position),
             recv_at: Instant::now(),
         });
     }
