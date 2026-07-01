@@ -4,7 +4,14 @@ Bridges the physics thread (sync, runs mj_step in an executor) to the
 node_runner's asyncio loop, where peppygen topic pub/sub lives. Consume tasks on
 the loop keep the latest actuator command per side in thread-safe slots; the
 physics thread reads those and publishes measured state back through the loop.
-Every hop is a generated peppygen topic: no JSON, no raw peppylib.
+
+Publishers and payload (de)serialization go through generated peppygen topics.
+The command consumers hold one persistent subscriber each: the generated Python
+consumed-topic API only exposes single-shot on_next_message_received, which
+re-subscribes on every call and so both drops any command published in the gap
+between calls and re-trips the messenger's one-per-(name, tag) from_any
+reservation in a loop. The persistent subscribe below mirrors the Rust generated
+`subscribe`; it reuses the generated subscribe arguments and _deserialize_payload.
 """
 
 from __future__ import annotations
@@ -25,6 +32,24 @@ logger = logging.getLogger(__name__)
 
 # Left = 0, right = 1, matching arm_id / gripper_id across the stack.
 _SIDES = (0, 1)
+
+
+async def _subscribe_persistent(node_runner, interface: str, topic_name: str, producer_slot: str):
+    """Declare one persistent from_any subscriber, mirroring the generated
+    single-shot on_next_message_received's subscribe arguments. Loop on the
+    returned subscription's on_next_message() to receive every message with no
+    re-subscribe gap. Arguments are duplicated from the generated consumed-topic
+    module because the Python API does not (yet) expose a persistent subscribe."""
+    return await peppylib.TopicMessenger.subscribe(
+        node_runner.messenger(),
+        node_runner.bound_core_node(),
+        node_runner.bound_instance_id(),
+        peppylib.SenderTarget.interface(interface, "v1"),
+        topic_name,
+        node_runner.pinned_producer_for(producer_slot),
+        peppylib.QoSProfile.Standard,
+        is_from_any=True,
+    )
 
 
 class _LatestSlot:
@@ -74,14 +99,20 @@ class SimTopicIO:
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _consume_arm(self) -> None:
+        subscription = await _subscribe_persistent(
+            self._node_runner, "openarm_arm_sim_passthrough", "arm_sim_passthrough", "arm_cmd"
+        )
         while True:
             try:
-                _producer, msg = await arm_cmd.on_next_message_received(self._node_runner)
+                raw = await subscription.on_next_message()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"arm command consume error: {exc}")
                 continue
+            if raw is None:
+                return
+            msg = arm_cmd._deserialize_payload(raw.payload)
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
@@ -93,14 +124,23 @@ class SimTopicIO:
                 slot.set((msg.positions, msg.velocities))
 
     async def _consume_gripper(self) -> None:
+        subscription = await _subscribe_persistent(
+            self._node_runner,
+            "openarm_gripper_sim_passthrough",
+            "gripper_sim_passthrough",
+            "gripper_cmd",
+        )
         while True:
             try:
-                _producer, msg = await gripper_cmd.on_next_message_received(self._node_runner)
+                raw = await subscription.on_next_message()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"gripper command consume error: {exc}")
                 continue
+            if raw is None:
+                return
+            msg = gripper_cmd._deserialize_payload(raw.payload)
             if not math.isfinite(msg.position):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
