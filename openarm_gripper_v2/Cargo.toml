@@ -7,6 +7,6 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-openarm_can = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "openarm_can" }
+openarm_can = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "rename/openarm01-to-openarm", package = "openarm_can" }
 peppygen = { path = ".peppy/libs/peppygen" }
 peppylib = { path = ".peppy/libs/peppylib" }
