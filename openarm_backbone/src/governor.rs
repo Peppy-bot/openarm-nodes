@@ -612,6 +612,29 @@ mod tests {
     }
 
     #[test]
+    fn v2_governor_builds_with_the_revolute_gripper() {
+        // Regression: the OpenArm v2.0 revolute pinch gripper must not break the collision
+        // model. Its finger links hang off revolute joints, which the builder now bounds by
+        // sampling the arc (v1's prismatic fingers used the extremes). A build failure here
+        // means the finger sweep is being rejected again.
+        let dir = tempfile::tempdir().expect("scratch dir for v2 collision meshes");
+        openarm_description::HardwareVersion::V2
+            .write_meshes_to(dir.path())
+            .expect("materialize v2 collision meshes");
+        Governor::build(
+            openarm_description::HardwareVersion::V2.urdf(),
+            dir.path().to_str().expect("meshes dir path is valid UTF-8"),
+            "openarm_left_base_link",
+            "openarm_right_base_link",
+            D_STOP,
+            D_SAFE,
+            MAX_JOINT_VELOCITY_RAD_S,
+            true,
+        )
+        .expect("v2 governor builds (revolute gripper fingers bounded by arc sampling)");
+    }
+
+    #[test]
     #[should_panic(expected = "exceeds the velocity-limited bound")]
     fn a_step_beyond_the_velocity_limit_trips_the_scan_assert() {
         // A tiny velocity makes the bound (max_joint_velocity * DT) 5e-4 rad, so any
