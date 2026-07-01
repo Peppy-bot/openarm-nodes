@@ -12,7 +12,7 @@
         // Streamed opening setpoints the gripper follows between moves: optional
         // and wildcard (`from_any`) so it binds to any conforming producer.
         {
-          name: "openarm01_gripper_command_source",
+          name: "openarm01_gripper_commands",
           tag: "v1",
           link_id: "commander",
           from_any: true,
@@ -20,7 +20,7 @@
         // Measured opening from the sim, used by the move action for convergence
         // feedback. from_any: the sim is the producer.
         {
-          name: "openarm01_gripper_state_source",
+          name: "openarm01_gripper_states",
           tag: "v1",
           link_id: "state",
           from_any: true,
@@ -30,7 +30,7 @@
   },
   interfaces: {
     conforms_to: [
-      { name: "openarm01_gripper", tag: "v1" },
+      { name: "openarm01_gripper_actions", tag: "v1" },
       // The resolved aperture handed to the sim engine (sim-internal passthrough).
       { name: "openarm01_gripper_sim_passthrough", tag: "v1" },
     ],

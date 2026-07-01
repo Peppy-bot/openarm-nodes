@@ -6,7 +6,6 @@ mod stream;
 
 use control::{ControlConfig, run_move_gripper};
 use openarm_can::{CallbackMode, GripperCan, v10};
-use peppygen::exposed_services::openarm01_gripper::v1::get_gripper_id;
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
@@ -150,22 +149,6 @@ fn main() -> Result<()> {
                 g.disable_all();
                 std::thread::sleep(POST_DISABLE_SLEEP);
                 g.recv_all(BRINGUP_RECV_US);
-            });
-        }
-
-        // get_gripper_id service.
-        {
-            let runner = node_runner.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = get_gripper_id::handle_next_request(&runner, |_req| {
-                        Ok(get_gripper_id::Response::new(gripper_id))
-                    })
-                    .await
-                    {
-                        error!("get_gripper_id: {e}");
-                    }
-                }
             });
         }
 

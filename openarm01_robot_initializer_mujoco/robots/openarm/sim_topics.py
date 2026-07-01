@@ -16,8 +16,8 @@ import threading
 from typing import Optional
 
 import peppylib
-from peppygen.emitted_topics.openarm01_joint_state_source.v1 import joint_states
-from peppygen.emitted_topics.openarm01_gripper_state_source.v1 import gripper_states
+from peppygen.emitted_topics.openarm01_arm_states.v1 import arm_states
+from peppygen.emitted_topics.openarm01_gripper_states.v1 import gripper_states
 from peppygen.consumed_topics import arm_cmd_arm_sim_passthrough as arm_cmd
 from peppygen.consumed_topics import gripper_cmd_gripper_sim_passthrough as gripper_cmd
 
@@ -51,7 +51,7 @@ class SimTopicIO:
     def __init__(self, node_runner: peppylib.NodeRunner, loop: asyncio.AbstractEventLoop) -> None:
         self._node_runner = node_runner
         self._loop = loop
-        self._joint_pub: Optional[peppylib.TopicPublisher] = None
+        self._arm_pub: Optional[peppylib.TopicPublisher] = None
         self._gripper_pub: Optional[peppylib.TopicPublisher] = None
         self._arm_cmd = {side: _LatestSlot() for side in _SIDES}
         self._gripper_cmd = {side: _LatestSlot() for side in _SIDES}
@@ -60,7 +60,7 @@ class SimTopicIO:
     async def start(self) -> None:
         """Declare publishers and spawn the command-consume loops. Runs on the
         node loop before the sim thread starts."""
-        self._joint_pub = await joint_states.declare_publisher(self._node_runner)
+        self._arm_pub = await arm_states.declare_publisher(self._node_runner)
         self._gripper_pub = await gripper_states.declare_publisher(self._node_runner)
         self._tasks = [
             asyncio.create_task(self._consume_arm()),
@@ -74,26 +74,14 @@ class SimTopicIO:
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _consume_arm(self) -> None:
-        # Subscribe once; the held subscription buffers commands in order, so the
-        # loop never misses one published between iterations.
-        try:
-            subscription = await arm_cmd.subscribe(self._node_runner)
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            logger.warning(f"arm command subscribe error: {exc}")
-            return
         while True:
             try:
-                received = await subscription.next()
+                _producer, msg = await arm_cmd.on_next_message_received(self._node_runner)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"arm command consume error: {exc}")
                 continue
-            if received is None:
-                return  # subscription closed
-            _producer, msg = received
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
@@ -105,26 +93,14 @@ class SimTopicIO:
                 slot.set((msg.positions, msg.velocities))
 
     async def _consume_gripper(self) -> None:
-        # Subscribe once; the held subscription buffers commands in order, so the
-        # loop never misses one published between iterations.
-        try:
-            subscription = await gripper_cmd.subscribe(self._node_runner)
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            logger.warning(f"gripper command subscribe error: {exc}")
-            return
         while True:
             try:
-                received = await subscription.next()
+                _producer, msg = await gripper_cmd.on_next_message_received(self._node_runner)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"gripper command consume error: {exc}")
                 continue
-            if received is None:
-                return  # subscription closed
-            _producer, msg = received
             if not math.isfinite(msg.position):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
@@ -144,9 +120,9 @@ class SimTopicIO:
         slot = self._gripper_cmd.get(gripper_id)
         return slot.get() if slot is not None else None
 
-    def publish_joint_states(self, arm_id: int, positions: list[float], velocities: list[float]) -> None:
-        if self._joint_pub is not None:
-            self._schedule_publish(self._joint_pub, joint_states.build_message(arm_id, positions, velocities))
+    def publish_arm_states(self, arm_id: int, positions: list[float], velocities: list[float]) -> None:
+        if self._arm_pub is not None:
+            self._schedule_publish(self._arm_pub, arm_states.build_message(arm_id, positions, velocities))
 
     def publish_gripper_states(self, gripper_id: int, position: float) -> None:
         if self._gripper_pub is not None:

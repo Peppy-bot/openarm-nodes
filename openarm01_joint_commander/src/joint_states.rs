@@ -1,4 +1,4 @@
-// Live arm joint state for the UI. Consumes the always-on `joint_states` stream
+// Live arm joint state for the UI. Consumes the always-on `arm_states` stream
 // from any arm, demuxes by `arm_id`, and writes the latest measured positions
 // into UiState. This replaces reading move progress off the backbone's action
 // feedback: it runs continuously, so the panel shows live joint state whether or
@@ -7,38 +7,27 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::arm_states_joint_states;
+use peppygen::consumed_topics::arm_states_arm_states;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
 use crate::state::{SharedState, Side};
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
-    let mut subscription = match arm_states_joint_states::subscribe(&runner).await {
-        Ok(subscription) => subscription,
-        Err(e) => {
-            error!(error = %e, "joint_states subscribe");
-            return;
-        }
-    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = subscription.next() => received,
+            received = arm_states_arm_states::on_next_message_received(&runner) => received,
         };
         let (_producer, msg) = match received {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return,
+            Ok(pair) => pair,
             Err(e) => {
-                error!(error = %e, "joint_states receive");
+                error!(error = %e, "arm_states receive");
                 continue;
             }
         };
         let Some(side) = Side::from_arm_id(msg.arm_id) else {
-            warn!(
-                arm_id = msg.arm_id,
-                "joint_states: unknown arm_id; ignoring"
-            );
+            warn!(arm_id = msg.arm_id, "arm_states: unknown arm_id; ignoring");
             continue;
         };
         let mut s = state.lock().unwrap_or_else(|p| p.into_inner());

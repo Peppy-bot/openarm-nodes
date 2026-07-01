@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
+use peppygen::exposed_actions::openarm01_gripper_actions::v1::move_gripper;
 use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, info, warn};
@@ -262,7 +262,7 @@ async fn run_control_loop(
         let within_tolerance = (opening - target).abs() < POSITION_TOLERANCE_M;
 
         iter += 1;
-        let stalled = if iter.is_multiple_of(STALL_LOOKBACK_ITERS) {
+        let stalled = if iter % STALL_LOOKBACK_ITERS == 0 {
             let was_stalled = window_anchor
                 .map(|prev| (opening - prev).abs() < STALL_EPSILON_M)
                 .unwrap_or(false);

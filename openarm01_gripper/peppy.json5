@@ -11,7 +11,7 @@
         // Streamed opening setpoints the gripper follows between moves: optional
         // and wildcard (`from_any`) so it binds to any conforming producer.
         {
-          name: "openarm01_gripper_command_source",
+          name: "openarm01_gripper_commands",
           tag: "v1",
           link_id: "commander",
           from_any: true,
@@ -27,10 +27,10 @@
     parameters: {
       gripper_id: "u8",
       can_interface: "string",
-      // Hardware-loop rate (Hz). Pick deliberately per deployment; the OpenArm
-      // teleop reference runs the gripper in a 500 Hz loop.
+      // Hardware-loop rate (Hz). Pick deliberately per deployment; the stack
+      // currently unifies on 100 Hz across arms and grippers.
       control_rate_hz: "u32",
-      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (2 ms at 500 Hz).
+      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (10 ms at 100 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
       // Error threshold (m) for goal completion.
       position_tolerance: { $type: "f64", $default: 0.001 },
@@ -46,13 +46,13 @@
   interfaces: {
     conforms_to: [
       {
-        name: "openarm01_gripper",
+        name: "openarm01_gripper_actions",
         tag: "v1"
       },
       // Always-on measured opening so teleop/monitoring consume sim and real
       // grippers identically (by gripper_id).
       {
-        name: "openarm01_gripper_state_source",
+        name: "openarm01_gripper_states",
         tag: "v1"
       },
       // Per-component readiness the real robot_initializer aggregates: ready once

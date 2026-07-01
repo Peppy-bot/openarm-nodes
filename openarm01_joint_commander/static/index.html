@@ -169,6 +169,27 @@
     <div class="panel" id="left_gripper"></div>
     <div class="panel" id="right_gripper"></div>
   </div>
+  <div class="row" style="justify-content:center; gap:18px; align-items:center; flex-wrap:wrap;">
+    <label style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" id="collision_chk" onchange="set_collision(this.checked)" checked>
+      Collision avoidance
+    </label>
+    <label style="display:flex; align-items:center; gap:6px;">
+      Stop d (m)
+      <input type="number" id="gov_d_stop" step="0.001" min="0.001" style="width:5.5em;" onchange="send_governor_params()">
+    </label>
+    <label style="display:flex; align-items:center; gap:6px;">
+      Safe d (m)
+      <input type="number" id="gov_d_safe" step="0.001" min="0.001" style="width:5.5em;" onchange="send_governor_params()">
+    </label>
+    <label style="display:flex; align-items:center; gap:6px;">
+      Max EE (m/s)
+      <input type="number" id="gov_max_ee" step="0.05" min="0.01" style="width:5.5em;" onchange="send_governor_params()">
+    </label>
+  </div>
+  <div class="row" style="justify-content:center;">
+    <div id="proximity" style="font-weight:600; padding:4px 10px; border-radius:4px;">closest pair: n/a</div>
+  </div>
   <div class="status" id="status">connecting…</div>
 
 <script>
@@ -176,6 +197,9 @@ const PI = Math.PI;
 const ARM_DOF = 7;
 const GRIPPER_MAX = 0.044;
 const HOME_DURATION_S = 3;
+// Home is all zeros except the elbow (j4), held at a small positive angle so it
+// stays clear of the elbow singularity at 0 (which its lower limit excludes).
+const HOME_ELBOW_J4 = 0.1;
 let ws = null;
 let latestSnap = null;
 // One streaming deadman per side, shared by that side's arm and gripper.
@@ -270,12 +294,13 @@ function toggle_enable(side) {
 }
 
 function reset_arm(side) {
-  // Home parks the arm: disable so the stream stops, then drive to all-zeros as a
-  // discrete, time-bounded move.
+  // Home parks the arm: disable so the stream stops, then drive to the home pose
+  // (zeros, elbow held off the singularity) as a discrete, time-bounded move.
   if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
-    $(`${side}_j${i}`).value = 0;
-    $(`${side}_t${i}`).textContent = '+0.000';
+    const v = i === 3 ? HOME_ELBOW_J4 : 0;
+    $(`${side}_j${i}`).value = v;
+    $(`${side}_t${i}`).textContent = fmt(v);
   }
   fire_arm(side, HOME_DURATION_S);
 }
@@ -361,7 +386,54 @@ function apply_snapshot(snap) {
       gsh.classList.add('off');
     }
   }
+  // Reflect the hub collision toggle, but never fight the operator mid-click.
+  const cc = $('collision_chk');
+  if (cc && document.activeElement !== cc) cc.checked = snap.collision_enabled;
+  // Seed the governor inputs from the snapshot unless the operator is editing one.
+  reflect_governor_input('gov_d_stop', snap.d_stop);
+  reflect_governor_input('gov_d_safe', snap.d_safe);
+  reflect_governor_input('gov_max_ee', snap.max_ee_velocity_m_s);
+  update_proximity(snap);
   $('status').textContent = snap.status;
+}
+
+// Closest self-collision pair: distance in mm + the two links, colored black
+// (clear, d >= d_safe) -> orange (inside d_safe) -> red (inside d_stop).
+function update_proximity(snap) {
+  const el = $('proximity');
+  const p = snap.proximity;
+  if (!p) { el.textContent = 'closest pair: n/a'; el.style.color = '#888'; el.style.background = 'transparent'; return; }
+  const mm = (p.distance * 1000).toFixed(1);
+  const short = s => s.replace(/^openarm_/, '');
+  let color = '#000', bg = 'transparent';
+  if (p.distance < snap.d_stop) { color = '#fff'; bg = '#c0392b'; }       // red: inside stop
+  else if (p.distance < snap.d_safe) { color = '#fff'; bg = '#e67e22'; }  // orange: inside safe
+  el.textContent = `closest pair: ${mm} mm   ${short(p.link_a)} ↔ ${short(p.link_b)}`;
+  el.style.color = color;
+  el.style.background = bg;
+}
+
+function reflect_governor_input(id, value) {
+  const el = $(id);
+  if (el && document.activeElement !== el && value != null) el.value = value;
+}
+
+// Stream the operator's self-collision-avoidance toggle to the hub.
+function set_collision(on) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_collision', enabled: !!on}));
+}
+
+// Stream the operator's governor band + EE speed cap to the hub. The hub re-checks
+// and ignores a degenerate band (d_stop must stay below d_safe).
+function send_governor_params() {
+  if (!ws || ws.readyState !== 1) return;
+  const d_stop = parseFloat($('gov_d_stop').value);
+  const d_safe = parseFloat($('gov_d_safe').value);
+  const max_ee_velocity_m_s = parseFloat($('gov_max_ee').value);
+  // A blur on a half-edited field parses to NaN, which JSON.stringify serializes as
+  // null; drop the update rather than send a null the hub would reject.
+  if (![d_stop, d_safe, max_ee_velocity_m_s].every(Number.isFinite)) return;
+  ws.send(JSON.stringify({cmd: 'set_governor_params', d_stop, d_safe, max_ee_velocity_m_s}));
 }
 
 function connect() {

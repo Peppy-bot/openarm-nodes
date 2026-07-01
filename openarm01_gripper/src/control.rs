@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::openarm01_gripper::v1::move_gripper;
+use peppygen::exposed_actions::openarm01_gripper_actions::v1::move_gripper;
 use tracing::error;
 
 use openarm_can::GripperCan;

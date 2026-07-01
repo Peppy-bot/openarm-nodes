@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm01_gripper_state_source::v1::gripper_states;
+use peppygen::emitted_topics::openarm01_gripper_states::v1::gripper_states;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 

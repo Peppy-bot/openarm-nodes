@@ -73,8 +73,18 @@ async fn run(
     .await
     {
         Ok(handle) if handle.data.accepted => handle,
-        Ok(_) => {
-            finalize(&state, side, false, "backbone rejected the goal").await;
+        Ok(handle) => {
+            let reason = handle
+                .data
+                .error_message
+                .unwrap_or_else(|| "no reason given".into());
+            finalize(
+                &state,
+                side,
+                false,
+                format!("backbone rejected the goal: {reason}"),
+            )
+            .await;
             return;
         }
         Err(e) => {
@@ -85,7 +95,7 @@ async fn run(
 
     // Await the move result, honoring preempt (a new Send cancels this goal) and
     // shutdown. There is no feedback to drain: live progress is shown from the
-    // joint_states stream (see joint_states.rs). v0.10 ResultResponse.outcome is
+    // arm_states stream (see joint_states.rs). v0.10 ResultResponse.outcome is
     // a typed enum (Completed/Cancelled/Abandoned/Expired).
     let result_fut = downstream.get_result(RESULT_TIMEOUT);
     tokio::pin!(result_fut);

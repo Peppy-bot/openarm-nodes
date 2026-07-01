@@ -1,123 +1,127 @@
-//! Plumbing for the bidirectional streams: a listener task that keeps the latest
-//! well-formed `joint_commands` setpoint, tagged with its producer and arrival
-//! time, in a watch channel for the control loop's `Follow` mode, and a publisher
-//! task that emits the measured joint state on `joint_states` at a fixed rate. The
-//! arm follows joints only; a task-space commander solves IK upstream and streams
-//! joints. All run for the life of the node.
+//! Stream plumbing for the real-arm follower: a listener that keeps the latest
+//! governed setpoint addressed to this arm (from the hub's `governed_setpoints`)
+//! in a watch channel for the control loop, and a publisher that emits the
+//! measured joint state on `arm_states` at a fixed rate (the hub consumes it to
+//! anchor trajectories and run the governor). All run for the life of the node.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::commander_joint_commands;
-use peppygen::emitted_topics::openarm01_joint_state_source::v1::joint_states;
-use peppylib::messaging::ProducerRef;
+use peppygen::consumed_topics::hub_arm_governed_setpoints;
+use peppygen::emitted_topics::openarm01_arm_states::v1::arm_states;
 use tokio::sync::watch;
 use tracing::{error, warn};
 
-use crate::JointVec;
-use crate::pacer::Pacer;
+use control_core::Pacer;
 
-/// The latest streamed joint setpoint, as the control loop sees it. `seq`
-/// (incremented per accepted message) distinguishes a fresh command from one
-/// already acted on; `producer` is the wire address `Follow` locks to so a
-/// single source drives the arm; `recv_at` is the arrival time the lock uses to
-/// tell a live stream from a stale leftover in the watch channel.
-#[derive(Clone)]
-pub struct JointCommand {
-    pub seq: u64,
-    pub producer: ProducerRef,
-    pub recv_at: Instant,
-    pub positions: JointVec,
+use crate::JointVec;
+
+/// The latest governed setpoint for this arm: the position/velocity the MIT loop
+/// tracks. Produced by the hub, already collision-governed and rate-limited.
+#[derive(Clone, Copy)]
+pub struct GovernedSetpoint {
+    pub q_des: JointVec,
+    pub dq_des: JointVec,
 }
 
-/// Measured joint state the control loop publishes each tick for the `joint_states`
-/// emitter, as wire arrays.
+/// Measured joint state the control loop publishes each tick for the
+/// `arm_states` emitter, as wire arrays.
 #[derive(Clone, Copy)]
 pub struct MeasuredState {
     pub positions: JointVec,
     pub velocities: JointVec,
 }
 
-/// The control loop's connections to the stream tasks: the inbound joint-setpoint
-/// channel (latest command) and the outbound measured-state channel feeding the
-/// publisher. Built in `main`, consumed by the control loop.
+/// The control loop's connections to the stream tasks: the inbound governed
+/// setpoint (latest) and the outbound measured-state channel feeding the publisher.
 pub struct StreamWiring {
-    pub joint: watch::Receiver<Option<JointCommand>>,
+    pub governed: watch::Receiver<Option<GovernedSetpoint>>,
     pub measured: watch::Sender<Option<MeasuredState>>,
 }
 
-/// Receive `joint_commands` forever, keeping only the latest well-formed message
-/// addressed to this arm in `latest`. A message with any non-finite position is
-/// dropped and never reaches the control loop, so a producer gone bad lets the
-/// lock time out instead of driving the arm.
-pub async fn run_joint_command_listener(
+/// Receive `governed_setpoints` forever, folding each message into `latest` via
+/// [`apply_setpoint`]. One held subscription, looped: there is no re-subscribe gap
+/// between messages, so a setpoint for this arm is never dropped while the other
+/// arm's message is in flight.
+pub async fn run_governed_setpoint_listener(
     runner: Arc<NodeRunner>,
     arm_id: u8,
-    latest: watch::Sender<Option<JointCommand>>,
+    latest: watch::Sender<Option<GovernedSetpoint>>,
 ) {
-    let mut subscription = match commander_joint_commands::subscribe(&runner).await {
-        Ok(subscription) => subscription,
-        Err(e) => {
-            error!("joint_commands subscribe: {e}");
-            return;
-        }
+    let mut sub = match hub_arm_governed_setpoints::subscribe(&runner).await {
+        Ok(s) => s,
+        Err(e) => return error!("governed_setpoints subscribe: {e}"),
     };
-    let mut seq: u64 = 0;
     loop {
-        let (producer, msg) = match subscription.next().await {
-            Ok(Some(received)) => received,
-            Ok(None) => return,
+        let msg = match sub.next().await {
+            Ok(Some((_, msg))) => msg,
+            Ok(None) => return, // subscription closed: node shutting down
             Err(e) => {
-                error!("joint_commands receive: {e}");
+                error!("governed_setpoints receive: {e}");
                 continue;
             }
         };
-        if msg.arm_id != arm_id {
-            continue;
-        }
-        if !msg.positions.iter().all(|v| v.is_finite()) {
-            warn!("joint_commands: dropping message with non-finite positions");
-            continue;
-        }
-        seq += 1;
-        latest.send_replace(Some(JointCommand {
-            seq,
-            producer,
-            recv_at: Instant::now(),
-            positions: msg.positions,
-        }));
+        apply_setpoint(&latest, arm_id, msg.arm_id, msg.positions, msg.velocities);
     }
+}
+
+/// Fold one received setpoint into the watch: ignore the other arm's message,
+/// clear the target on any non-finite value (so the control loop holds measured
+/// pose rather than tracking a stale target), otherwise publish it.
+fn apply_setpoint(
+    latest: &watch::Sender<Option<GovernedSetpoint>>,
+    arm_id: u8,
+    msg_arm_id: u8,
+    positions: JointVec,
+    velocities: JointVec,
+) {
+    if msg_arm_id != arm_id {
+        return;
+    }
+    if !positions
+        .iter()
+        .chain(velocities.iter())
+        .all(|v| v.is_finite())
+    {
+        warn!("governed_setpoints: clearing target on non-finite values");
+        latest.send_replace(None);
+        return;
+    }
+    latest.send_replace(Some(GovernedSetpoint {
+        q_des: positions,
+        dq_des: velocities,
+    }));
 }
 
 /// Emit the measured joint state at a fixed rate, forever. The publisher is
 /// declared once and reused. The watch starts empty and is first filled by the
 /// control loop's first tick, so nothing is published before a real measurement
-/// exists. The loop exits if the control task drops the sender (it has died), so
-/// the stream goes silent rather than republishing a frozen final measurement.
-/// Publish failures are logged once per failure streak rather than at the emit rate.
+/// exists. The loop exits if the control task drops the sender, so the stream
+/// goes silent rather than republishing a frozen final measurement.
 pub async fn run_state_publisher(
     runner: Arc<NodeRunner>,
     arm_id: u8,
     period: Duration,
     mut measured: watch::Receiver<Option<MeasuredState>>,
 ) {
-    let joint_pub = match joint_states::declare_publisher(&runner).await {
+    let joint_pub = match arm_states::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare joint_states publisher: {e}"),
+        Err(e) => return error!("declare arm_states publisher: {e}"),
     };
     if measured.wait_for(Option::is_some).await.is_err() {
         return; // control loop gone: node is shutting down
     }
-    let mut pacer = Pacer::new(period);
+    let mut pacer =
+        Pacer::new(period).expect("state publish period is non-zero (derives from state_rate_hz)");
     let mut failing = false;
     loop {
         if measured.has_changed().is_err() {
-            return; // control task dropped the sender: stop emitting instead of going stale
+            return;
         }
         let m = (*measured.borrow()).expect("gated on first measurement");
         let result = async {
-            let joints = joint_states::build_message(arm_id, m.positions, m.velocities)
+            let joints = arm_states::build_message(arm_id, m.positions, m.velocities)
                 .map_err(|e| e.to_string())?;
             joint_pub.publish(joints).await.map_err(|e| e.to_string())?;
             Ok::<(), String>(())
@@ -132,5 +136,51 @@ pub async fn run_state_publisher(
             Err(_) => {}
         }
         pacer.pace().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ARM: u8 = 0;
+
+    #[test]
+    fn non_finite_setpoint_clears_the_target() {
+        let (tx, rx) = watch::channel::<Option<GovernedSetpoint>>(None);
+        apply_setpoint(&tx, ARM, ARM, [0.1; crate::ARM_DOF], [0.0; crate::ARM_DOF]);
+        assert!(rx.borrow().is_some(), "valid setpoint should be published");
+        // A non-finite value in either positions or velocities clears the target so
+        // the control loop holds; a valid setpoint after a clear republishes.
+        let mut bad_pos = [0.0; crate::ARM_DOF];
+        bad_pos[0] = f64::NAN;
+        apply_setpoint(&tx, ARM, ARM, bad_pos, [0.0; crate::ARM_DOF]);
+        assert!(
+            rx.borrow().is_none(),
+            "non-finite position must clear the target"
+        );
+
+        apply_setpoint(&tx, ARM, ARM, [0.1; crate::ARM_DOF], [0.0; crate::ARM_DOF]);
+        assert!(
+            rx.borrow().is_some(),
+            "valid setpoint must republish after a clear"
+        );
+        let mut bad_vel = [0.0; crate::ARM_DOF];
+        bad_vel[3] = f64::INFINITY;
+        apply_setpoint(&tx, ARM, ARM, [0.1; crate::ARM_DOF], bad_vel);
+        assert!(
+            rx.borrow().is_none(),
+            "non-finite velocity must clear the target"
+        );
+    }
+
+    #[test]
+    fn other_arms_setpoint_is_ignored() {
+        let (tx, rx) = watch::channel::<Option<GovernedSetpoint>>(None);
+        apply_setpoint(&tx, ARM, 1, [0.1; crate::ARM_DOF], [0.0; crate::ARM_DOF]);
+        assert!(
+            rx.borrow().is_none(),
+            "another arm's setpoint must be ignored"
+        );
     }
 }

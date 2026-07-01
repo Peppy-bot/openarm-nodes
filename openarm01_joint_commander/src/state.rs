@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub const ARM_DOF: usize = 7;
 // Range bounds live in config/joint_limits.json5 (loaded by ui.rs); this is
@@ -99,11 +100,45 @@ pub struct UiState {
     // deadman because the operator enables a whole side at once.
     pub left_enabled: bool,
     pub right_enabled: bool,
+    // Operator controls for the hub's self-collision governor, streamed to the
+    // backbone on governor_control; the hub holds its own defaults until the first
+    // message. All four launch defaults are node parameters, kept in step with the
+    // hub's, so a deployment tunes startup from one place; the operator then drives
+    // them live from the UI.
+    pub collision_enabled: bool,
+    pub d_stop: f64,
+    pub d_safe: f64,
+    pub max_ee_velocity_m_s: f64,
+    // The launch governor-enable state, restored on operator disconnect so an
+    // operator who turned avoidance off cannot leave the hub latched ungoverned,
+    // while a deployment that launched ungoverned is not force-armed either.
+    pub collision_enabled_default: bool,
+    // Latest nearest-pair self-collision proximity from the hub (it carries its own
+    // receipt time). `None` until the first message; treated as stale (and rendered
+    // n/a) once that receipt time ages past the readout staleness window, so a dead
+    // hub does not leave the last distance latched on the panel.
+    pub proximity: Option<Proximity>,
     pub status: String,
 }
 
+/// The hub's reported nearest checked pair: signed surface distance (m, positive
+/// is clearance), the two link names, and the local time it was received (for the
+/// readout's staleness check).
+#[derive(Clone, Debug)]
+pub struct Proximity {
+    pub distance: f64,
+    pub link_a: String,
+    pub link_b: String,
+    pub received_at: Instant,
+}
+
 impl UiState {
-    pub fn new() -> Self {
+    pub fn new(
+        collision_enabled: bool,
+        d_stop: f64,
+        d_safe: f64,
+        max_ee_velocity_m_s: f64,
+    ) -> Self {
         Self {
             left_arm: ArmTarget::home(),
             right_arm: ArmTarget::home(),
@@ -111,6 +146,12 @@ impl UiState {
             right_gripper: GripperTarget::closed(),
             left_enabled: false,
             right_enabled: false,
+            collision_enabled,
+            collision_enabled_default: collision_enabled,
+            d_stop,
+            d_safe,
+            max_ee_velocity_m_s,
+            proximity: None,
             status: "ready".to_string(),
         }
     }
@@ -164,6 +205,16 @@ impl UiState {
 
 pub type SharedState = Arc<Mutex<UiState>>;
 
-pub fn new_shared() -> SharedState {
-    Arc::new(Mutex::new(UiState::new()))
+pub fn new_shared(
+    collision_enabled: bool,
+    d_stop: f64,
+    d_safe: f64,
+    max_ee_velocity_m_s: f64,
+) -> SharedState {
+    Arc::new(Mutex::new(UiState::new(
+        collision_enabled,
+        d_stop,
+        d_safe,
+        max_ee_velocity_m_s,
+    )))
 }

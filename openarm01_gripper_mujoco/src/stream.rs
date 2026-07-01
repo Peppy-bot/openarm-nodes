@@ -1,4 +1,4 @@
-// Listens for streamed gripper opening setpoints (openarm01_gripper_command_source)
+// Listens for streamed gripper opening setpoints (openarm01_gripper_commands)
 // and keeps the latest one addressed to this gripper in a watch channel for the
 // follow loop. A non-finite position is dropped, so a producer gone bad lets the
 // follow lock time out instead of driving the gripper.
@@ -26,21 +26,13 @@ pub async fn run(
     latest: watch::Sender<Option<GripperCommand>>,
     token: CancellationToken,
 ) {
-    let mut subscription = match commander_gripper_commands::subscribe(&runner).await {
-        Ok(subscription) => subscription,
-        Err(e) => {
-            error!(error = %e, "gripper_commands subscribe");
-            return;
-        }
-    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = subscription.next() => received,
+            received = commander_gripper_commands::on_next_message_received(&runner) => received,
         };
         let (_producer, msg) = match received {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return,
+            Ok(pair) => pair,
             Err(e) => {
                 error!(error = %e, "gripper_commands receive");
                 continue;

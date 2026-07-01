@@ -1,13 +1,18 @@
-mod actions;
+//! One arm of the openarm01 robot (real hardware); instantiate twice, one per
+//! side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
+//! hardware control loop (gravity/Coriolis/friction feedforward from the
+//! in-process srs_model, plus MIT control) and tracks the hub's governed
+//! setpoint, reporting measured state on the always-on `arm_states` stream. The
+//! hub (openarm01_backbone) owns all trajectory generation, stream following, and
+//! self-collision governing, so this node carries no motion logic of its own; on
+//! shutdown it disables the motors and lets the arm go limp.
+
 mod control;
 mod friction;
-mod pacer;
 mod stream;
-mod trajectory;
 
 use control::ControlConfig;
 use openarm_can::{ArmCan, CallbackMode, v10};
-use peppygen::exposed_services::openarm01_arm::v1::get_arm_id;
 use peppygen::exposed_services::openarm01_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
@@ -24,9 +29,9 @@ pub const ARM_DOF: usize = 7;
 /// One joint-space vector (positions, velocities, or torques), j1..j7.
 pub type JointVec = [f64; ARM_DOF];
 
-/// `arm_id` values (0 = left, 1 = right). The geometry and joint limits come from
-/// the URDF via `base_link`; `arm_id` is the robot-side identity for the service
-/// contract and the log label.
+/// `arm_id` values (0 = left, 1 = right). Geometry and joint limits come from the
+/// URDF via `base_link`; `arm_id` selects which governed setpoints to follow and
+/// which arm the measured state is tagged with.
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
@@ -47,9 +52,8 @@ const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: i32 = 500;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
-/// Tighter bound for shutdown lock removal so the return-to-ready park
-/// (`control::PARK_DURATION_S`) + motor disable + removal stays inside the
-/// default 5 s shutdown grace window.
+/// Tighter bound for shutdown lock removal so motor disable + lock removal stays
+/// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn main() -> Result<()> {
@@ -66,35 +70,12 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
-        assert!(
-            params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
-            "stream_timeout_s must be a positive finite number"
-        );
-        let max_joint_velocity_rad_s = [
-            params.max_joint_velocity_rad_s_1,
-            params.max_joint_velocity_rad_s_2,
-            params.max_joint_velocity_rad_s_3,
-            params.max_joint_velocity_rad_s_4,
-            params.max_joint_velocity_rad_s_5,
-            params.max_joint_velocity_rad_s_6,
-            params.max_joint_velocity_rad_s_7,
-        ];
-        assert!(
-            max_joint_velocity_rad_s
-                .iter()
-                .all(|v| v.is_finite() && *v > 0.0),
-            "all max_joint_velocity_rad_s_N must be finite and > 0"
-        );
-        assert!(
-            params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
-            "max_ee_velocity_m_s must be a positive finite number"
-        );
         let side = side_label(arm_id);
 
         // Build the srs_model arm from the URDF: forward kinematics for the
-        // in-process gravity and Coriolis feedforward, plus joint limits off the
-        // same parsed chain (one source of truth, the URDF). A non-SRS or short
-        // chain from base_link errors here.
+        // in-process gravity/Coriolis feedforward, plus joint limits off the same
+        // parsed chain (one source of truth, the URDF). A non-SRS or short chain
+        // from base_link errors here.
         let model = srs_model::Arm::from_urdf_file(&params.urdf_path, &params.base_link)
             .unwrap_or_else(|e| panic!("build arm model from base '{}': {e}", params.base_link));
         info!(
@@ -130,28 +111,14 @@ fn main() -> Result<()> {
                     params.recv_timeout_us
                 )
             }),
-            max_joint_velocity_rad_s,
-            max_ee_velocity_m_s: params.max_ee_velocity_m_s,
             limits: model.limits(),
-            stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
         };
 
-        // Echo the resolved config so every run records exactly what it ran with.
         info!(
             "config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us",
-            params.control_rate_hz, cfg.recv_timeout_us,
+            params.control_rate_hz, cfg.recv_timeout_us
         );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
-        info!(
-            "config: max_ee_velocity={} m/s, stream_timeout={}s",
-            params.max_ee_velocity_m_s, params.stream_timeout_s,
-        );
-
-        // Validate the static ready pose against the parsed joint limits here,
-        // during bringup, so a misconfigured pose aborts the whole process before
-        // any hardware is touched instead of panicking inside the spawned control
-        // task (which would leave a zombie node with motors enabled but no loop).
-        control::assert_ready_pose_in_limits(&cfg.limits);
 
         // Instance lock: crash if another instance with the same arm_id is
         // running. Held in the core-node datastore (released from the on_shutdown
@@ -176,8 +143,8 @@ fn main() -> Result<()> {
         // Shutdown: register the lock-release hook right after acquiring the lock,
         // so a panic during bringup still releases the key (dropping `shutdown_tx`
         // completes `shutdown_rx`, so the hook runs). On a normal stop the control
-        // task eases to the ready pose and disables the motors (the sole motor
-        // writer), signalling `shutdown_tx` when done; this hook waits for that,
+        // task disables the motors (the sole motor writer) and signals
+        // `shutdown_tx` when done; this hook waits for that,
         // then removes the datastore lock. The runtime fires it on every stop path
         // with the messenger connected and awaits it before exit.
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -207,28 +174,11 @@ fn main() -> Result<()> {
         tokio::time::sleep(POST_ENABLE_SLEEP).await;
         arm.recv_all(BRINGUP_RECV_US);
         arm.set_callback_mode(CallbackMode::State);
-        // recv_all in State mode populates initial joint state. ROS2 gets this implicitly
-        // via the recv inside return_to_zero(); without it get_state() returns all zeros.
+        // recv_all in State mode populates initial joint state; without it get_state() returns zeros.
         arm.recv_all(BRINGUP_RECV_US);
         info!("arm ready");
 
         let arm = Arc::new(Mutex::new(arm));
-
-        // get_arm_id service.
-        {
-            let runner = node_runner.clone();
-            tokio::spawn(async move {
-                loop {
-                    if let Err(e) = get_arm_id::handle_next_request(&runner, |_req| {
-                        Ok(get_arm_id::Response::new(arm_id))
-                    })
-                    .await
-                    {
-                        error!("get_arm_id: {e}");
-                    }
-                }
-            });
-        }
 
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm01_hardware_ready) to
@@ -250,16 +200,15 @@ fn main() -> Result<()> {
             });
         }
 
-        // Bidirectional stream plumbing: the listener keeps the latest well-formed
-        // `joint_commands` setpoint for the control loop, and the publisher emits
-        // the measured joint state and end-effector pose on `joint_states` /
-        // `cartesian_states`, always on, at its own rate.
-        let (joint_command_tx, joint_command_rx) = watch::channel(None);
+        // Stream plumbing: the listener keeps the latest governed setpoint for the
+        // control loop, and the publisher emits the measured joint state at its
+        // own rate (the hub consumes it).
+        let (governed_tx, governed_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
-        tokio::spawn(stream::run_joint_command_listener(
+        tokio::spawn(stream::run_governed_setpoint_listener(
             node_runner.clone(),
             arm_id,
-            joint_command_tx,
+            governed_tx,
         ));
         tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
@@ -268,20 +217,17 @@ fn main() -> Result<()> {
             measured_rx,
         ));
         let wiring = stream::StreamWiring {
-            joint: joint_command_rx,
+            governed: governed_rx,
             measured: measured_tx,
         };
 
-        // Single control task (the only motor writer): eases to the ready pose on
-        // startup, then follows the active command stream (or holds) between
-        // moves, preempting into a joint or Cartesian trajectory while a move goal
-        // runs. Its action handlers only admit goals and hand them over; both
-        // actions are exposed before anything spawns, so a failed registration
-        // fails bringup here.
+        // Single control task (the only motor writer): follows the governed
+        // setpoint with in-process feedforward and a final limit clamp, and on
+        // shutdown disables the motors.
         control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx).await?;
 
-        // Motors enabled, initial state populated, control loop running, actions
-        // registered: report ready so the robot_initializer can release the gate.
+        // Motors enabled, initial state populated, control loop running: report
+        // ready so the robot_initializer can release the gate.
         ready.store(true, Ordering::SeqCst);
 
         Ok(())

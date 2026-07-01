@@ -1,21 +1,22 @@
-mod actions;
-mod config;
-mod follow;
-mod passthrough;
-mod services;
-mod state;
-mod state_stream;
-mod stream;
-mod trajectory;
+//! Isaac sim follower: republish the hub's governed setpoints for this arm onto
+//! the sim's arm_sim_passthrough topic. All motion, trajectory, and collision
+//! logic lives in openarm01_backbone; this node only relabels the governed
+//! stream for the engine. A held subscription receives every setpoint in order
+//! with no re-subscribe gap; a separate task publishes the latest, so neither
+//! arm is starved (the same shape the real arm uses).
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
+use peppygen::consumed_topics::hub_arm_governed_setpoints;
+use peppygen::emitted_topics::openarm01_arm_sim_passthrough::v1::arm_sim_passthrough;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{error, info, warn};
 
-use crate::config::{ArmId, ControlParams};
+/// Latest desired (positions, velocities) for this arm.
+type Setpoint = ([f64; 7], [f64; 7]);
+
+/// Wire arm_id values (matching the hub).
+const ARM_ID_LEFT: u8 = 0;
+const ARM_ID_RIGHT: u8 = 1;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -23,74 +24,99 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
-        let arm_id = ArmId::new(params.arm_id).expect("arm_id must be 0 (left) or 1 (right)");
-        let token = node_runner.cancellation_token().clone();
-        info!(
-            "starting openarm01_arm_isaac instance={} arm_id={}",
-            arm_id.instance_id(),
-            arm_id.raw()
+        let arm_id = params.arm_id;
+        assert!(
+            arm_id == ARM_ID_LEFT || arm_id == ARM_ID_RIGHT,
+            "arm_id must be 0 (left) or 1 (right), got {arm_id}"
         );
+        info!("starting openarm01_arm_isaac follower arm_id={arm_id}");
 
-        // No shutdown handler. Unlike the gripper we must NOT publish ctrl=0.0
-        // on exit: zeroing arm joint targets would command the arm into a hard
-        // self-collision pose. SIGINT cancels the token; the action loop exits
-        // with the arm holding its last commanded pose.
+        let (latest_tx, latest_rx) = watch::channel::<Option<Setpoint>>(None);
+        // Supervise both follower tasks: if either ever exits, whether a clean Ok(None)
+        // on shutdown or an unexpected error/panic, this relabel path is dead, so cancel
+        // the node to restart it rather than leaving it healthy but inert.
+        let token = node_runner.cancellation_token().clone();
 
-        let shared = state::new_shared();
-        let control = ControlParams::from_params(&params);
+        // Receive task: one held subscription, looped. Holding the subscription
+        // means no re-subscribe gap between messages, so a setpoint for this arm is
+        // never dropped while the other arm's message is in flight.
+        let rx_runner = node_runner.clone();
+        let receive = tokio::spawn(async move {
+            let mut sub = match hub_arm_governed_setpoints::subscribe(&rx_runner).await {
+                Ok(s) => s,
+                Err(e) => return error!("governed_setpoints subscribe: {e}"),
+            };
+            loop {
+                let msg = match sub.next().await {
+                    Ok(Some((_, msg))) => msg,
+                    Ok(None) => return, // subscription closed: node shutting down
+                    Err(e) => {
+                        error!("governed_setpoints receive: {e}");
+                        continue;
+                    }
+                };
+                if msg.arm_id != arm_id {
+                    continue;
+                }
+                // Clear the latest on any non-finite governed setpoint, matching the
+                // real arm, so a bad value never reaches the sim engine and the sim
+                // holds its last commanded pose.
+                let finite = msg
+                    .positions
+                    .iter()
+                    .chain(msg.velocities.iter())
+                    .all(|v| v.is_finite());
+                if !finite {
+                    warn!("governed_setpoints: clearing target on non-finite values");
+                    let _ = latest_tx.send(None);
+                    continue;
+                }
+                let _ = latest_tx.send(Some((msg.positions, msg.velocities)));
+            }
+        });
 
-        tokio::spawn(services::get_arm_id::run(
-            node_runner.clone(),
-            arm_id,
-            token.clone(),
-        ));
+        // Publish task: relabel each new setpoint onto arm_sim_passthrough. No
+        // shutdown handler: never publish a zero setpoint on exit, which would
+        // command the arm into a self-collision pose.
+        let publish = tokio::spawn(async move {
+            let publisher = match arm_sim_passthrough::declare_publisher(&node_runner).await {
+                Ok(p) => p,
+                Err(e) => return error!("declare arm_sim_passthrough publisher: {e}"),
+            };
+            let mut latest_rx = latest_rx;
+            let mut failing = false;
+            loop {
+                if latest_rx.changed().await.is_err() {
+                    return; // receive task gone: node shutting down
+                }
+                let Some((q_des, dq_des)) = *latest_rx.borrow() else {
+                    continue;
+                };
+                let result = async {
+                    let payload = arm_sim_passthrough::build_message(arm_id, q_des, dq_des)
+                        .map_err(|e| e.to_string())?;
+                    publisher.publish(payload).await.map_err(|e| e.to_string())
+                }
+                .await;
+                match result {
+                    Ok(()) => failing = false,
+                    Err(e) if !failing => {
+                        failing = true;
+                        warn!("arm_sim_passthrough publish failing, suppressing repeats: {e}");
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
 
-        // Consume the sim's measured joint state (joint_states) to anchor moves
-        // and re-anchor the follow chase.
-        tokio::spawn(state_stream::run(
-            node_runner.clone(),
-            arm_id,
-            shared.clone(),
-            token.clone(),
-        ));
-
-        tokio::spawn(actions::move_arm::run(node_runner.clone(), token.clone()));
-
-        // One passthrough publisher and one busy gate, shared by the move action
-        // and the follow loop so only one drives the sim at a time.
-        let passthrough_pub = passthrough::declare_publisher(&node_runner)
-            .await
-            .expect("declare passthrough publisher");
-        let busy = Arc::new(AtomicBool::new(false));
-
-        // Stream listener -> follow loop: the listener keeps the latest streamed
-        // setpoint, the follow loop drives it between moves.
-        let (cmd_tx, cmd_rx) = watch::channel(None);
-        tokio::spawn(stream::run(
-            node_runner.clone(),
-            arm_id,
-            cmd_tx,
-            token.clone(),
-        ));
-        tokio::spawn(follow::run(
-            passthrough_pub.clone(),
-            arm_id.raw(),
-            busy.clone(),
-            shared.clone(),
-            cmd_rx,
-            control,
-            token.clone(),
-        ));
-
-        tokio::spawn(actions::move_arm_joints::run(
-            node_runner.clone(),
-            shared.clone(),
-            token.clone(),
-            passthrough_pub,
-            arm_id.raw(),
-            busy,
-            control,
-        ));
+        // Cancel the node the moment either task stops.
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = receive => {}
+                _ = publish => {}
+            }
+            token.cancel();
+        });
 
         Ok(())
     })

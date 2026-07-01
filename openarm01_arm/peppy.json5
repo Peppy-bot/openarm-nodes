@@ -1,12 +1,10 @@
-// One arm of the openarm01 robot; instantiate twice, one per side, with a
-// distinct `arm_id`. A root component node: openarm01_backbone depends on it.
-// It owns the hardware control loop: gravity/Coriolis/friction feedforward
-// (gravity and Coriolis from the in-process srs_model) for compliant float,
-// quintic trajectory tracking for accepted move_arm / move_arm_joints goals,
-// and ambient following of a streamed joint setpoint the rest of the time,
-// bidirectional with the always-on `joint_states` stream. A move preempts the
-// stream and the arm resumes following when it ends. The arm is a joint-space
-// servo: task-space commanders solve IK upstream.
+// One arm of the openarm01 robot (real hardware); instantiate twice, one per
+// side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
+// hardware control loop (gravity/Coriolis/friction feedforward from the
+// in-process srs_model, plus MIT control) and tracks the hub's governed
+// setpoint, reporting measured state on the always-on `arm_states` stream. The
+// hub (openarm01_backbone) owns all trajectory generation, stream following, and
+// self-collision governing, so the arm carries no motion logic of its own.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -14,16 +12,14 @@
     tag: "v1",
     depends_on: {
       interfaces: [
-        // Streamed joint setpoints the arm follows between moves: optional and
-        // wildcard (`from_any`), so the arm boots with no producer bound and
-        // accepts any conforming one (teleop leader, planner, IK-solving
-        // commander). Task-space intent stays upstream: the producer solves IK
-        // and streams joints.
+        // The hub's governed per-arm setpoint stream the arm tracks. Wildcard
+        // (`from_any`): the backbone is the producer; this arm reads the entries
+        // for its arm_id. Optional, so the arm boots and holds with no hub up.
         {
-          name: "openarm01_joint_command_source",
+          name: "openarm01_arm_governed_setpoints",
           tag: "v1",
-          link_id: "commander",
-          from_any: true
+          link_id: "hub",
+          from_any: true,
         },
       ],
     },
@@ -38,38 +34,18 @@
       can_interface: "string",
       // URDF describing the robot (must include the world->base mount tree) and
       // the link where this arm's SRS chain starts. Used to build the rigid-body
-      // model for the in-process gravity/Coriolis feedforward. The default is the
-      // V1.0 description baked into this container (vendored from the repo-root
-      // `description/`, since the build context is the node dir); override only to
-      // point at a different description.
+      // model for the in-process gravity/Coriolis feedforward and the joint
+      // limits the governed setpoint is clamped to.
       urdf_path: { $type: "string", $default: "/opt/openarm01_arm/openarm_v10.urdf" },
       base_link: "string", // e.g. "openarm_left_link0"
-      // Hardware-loop rate (Hz). Required: pick deliberately per deployment
-      // (500 Hz matches the OpenArm reference) and confirm `overruns=0` at the
-      // target rate during bring-up.
+      // Hardware-loop rate (Hz). Required: pick deliberately per deployment. The
+      // stack currently unifies on 100 Hz (hub stream rate and arm loop rate match);
+      // confirm `overruns=0` at the target rate during bring-up.
       control_rate_hz: "u32",
-      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (2 ms at 500 Hz).
+      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (10 ms at 100 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
-      // Per-joint peak velocity (rad/s) used to size the quintic trajectory
-      // duration. Defaults are the OpenArm V1.0 URDF joint velocity limits.
-      max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
-      max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.754666 },
-      max_joint_velocity_rad_s_3: { $type: "f64", $default: 5.445426 },
-      max_joint_velocity_rad_s_4: { $type: "f64", $default: 5.445426 },
-      max_joint_velocity_rad_s_5: { $type: "f64", $default: 20.943946 },
-      max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.943946 },
-      max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
-      // End-effector linear-speed cap (m/s) for the Follow chase. The chase step
-      // is scaled so the hand never translates faster than this, so a first
-      // command or a producer hiccup far from the current pose eases over instead
-      // of lunging. Bounds hand speed regardless of which joints move (a shoulder
-      // sweep and a wrist twist that move the hand equally are capped equally); a
-      // step that does not move the hand runs at the motor rate. Raise it for a
-      // fast teleoperator; keep it gentle for bring-up.
-      max_ee_velocity_m_s: { $type: "f64", $default: 0.25 },
-      // MIT-control gains applied every control tick (startup, follow, and
-      // moves), one per joint (1-indexed). Match the openarm teleop config
-      // (Kp/Kd, identical in config/leader.yaml and follower.yaml).
+      // MIT-control gains applied every control tick, one per joint (1-indexed).
+      // Match the openarm teleop config (Kp/Kd).
       kp1: { $type: "f64", $default: 240.0 },
       kp2: { $type: "f64", $default: 240.0 },
       kp3: { $type: "f64", $default: 240.0 },
@@ -84,24 +60,16 @@
       kd5: { $type: "f64", $default: 0.2 },
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
-      // Rate (Hz) of the always-on measured-state stream (`joint_states`).
-      // Required: consumers' needs vary too much for a default to be meaningful.
+      // Rate (Hz) of the always-on measured-state stream (`arm_states`), which the
+      // hub consumes. Required: consumers' needs vary too much for a default.
       state_rate_hz: "u32",
-      // How long (s) the arm keeps following a command stream after its last
-      // message before releasing the lock and holding. The watchdog that stops
-      // the arm when a producer dies, so it is a safety value with no universal
-      // default: pick it per producer rate. Required.
-      stream_timeout_s: "f64",
     }
   },
   interfaces: {
     conforms_to: [
+      // Measured state for the hub (governor + trajectory anchor) and any monitor.
       {
-        name: "openarm01_arm",
-        tag: "v1"
-      },
-      {
-        name: "openarm01_joint_state_source",
+        name: "openarm01_arm_states",
         tag: "v1"
       },
       // Per-component readiness the real robot_initializer aggregates: ready once
@@ -114,8 +82,8 @@
     topics: {
       consumes: [
         {
-          name: "joint_commands",
-          link_id: "commander"
+          name: "arm_governed_setpoints",
+          link_id: "hub"
         }
       ],
     },

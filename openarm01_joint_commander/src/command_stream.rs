@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm01_gripper_command_source::v1::gripper_commands;
-use peppygen::emitted_topics::openarm01_joint_command_source::v1::joint_commands;
+use peppygen::emitted_topics::openarm01_arm_joint_commands::v1::arm_joint_commands;
+use peppygen::emitted_topics::openarm01_governor_control::v1::governor_control;
+use peppygen::emitted_topics::openarm01_gripper_commands::v1::gripper_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
@@ -29,16 +30,55 @@ pub async fn run(
     command_rate_hz: u32,
     token: CancellationToken,
 ) {
-    let arm_pub = match joint_commands::declare_publisher(&runner).await {
+    // A failed publisher declaration leaves the node serving UI/health but unable to
+    // command anything, so cancel the node to restart it rather than returning quietly.
+    let arm_pub = match arm_joint_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare joint_commands publisher: {e}"),
+        Err(e) => {
+            error!("declare arm_joint_commands publisher: {e}");
+            return token.cancel();
+        }
     };
     let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare gripper_commands publisher: {e}"),
+        Err(e) => {
+            error!("declare gripper_commands publisher: {e}");
+            return token.cancel();
+        }
+    };
+    let governor_pub = match governor_control::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare governor_control publisher: {e}");
+            return token.cancel();
+        }
     };
 
     let mut tasks = Vec::new();
+
+    // Re-publish the operator's governor controls every tick. Unlike the arm/gripper
+    // streams these have no deadman: the hub's governor must always know the
+    // operator's intent, and the lossy QoS means a one-shot publish could be
+    // dropped, so the latest state is re-sent continuously.
+    let governor_state = state.clone();
+    tasks.push(tokio::spawn(stream_setpoints(
+        governor_pub,
+        command_rate_hz,
+        token.clone(),
+        "governor control".to_string(),
+        move || {
+            let s = governor_state.lock().unwrap_or_else(|p| p.into_inner());
+            Some(
+                governor_control::build_message(
+                    s.collision_enabled,
+                    s.d_stop,
+                    s.d_safe,
+                    s.max_ee_velocity_m_s,
+                )
+                .map_err(|e| e.to_string()),
+            )
+        },
+    )));
     for side in [Side::Left, Side::Right] {
         // Arm: stream the 7-joint setpoint while enabled.
         let arm_state = state.clone();
@@ -56,7 +96,8 @@ pub async fn run(
                     s.arm(side).joints
                 };
                 Some(
-                    joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string()),
+                    arm_joint_commands::build_message(side.arm_id(), target)
+                        .map_err(|e| e.to_string()),
                 )
             },
         )));
