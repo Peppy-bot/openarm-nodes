@@ -189,8 +189,8 @@ fn clamp_setpoint_to_limits(
 ) -> (JointVec, JointVec) {
     let q_clamped: JointVec = std::array::from_fn(|i| q[i].clamp(limits[i].lo, limits[i].hi));
     let dq_clamped: JointVec = std::array::from_fn(|i| {
-        let driving_below = q[i] < limits[i].lo && dq[i] < 0.0;
-        let driving_above = q[i] > limits[i].hi && dq[i] > 0.0;
+        let driving_below = q[i] <= limits[i].lo && dq[i] < 0.0;
+        let driving_above = q[i] >= limits[i].hi && dq[i] > 0.0;
         if driving_below || driving_above {
             0.0
         } else {
@@ -256,5 +256,23 @@ mod tests {
         let (qc, dqc) = clamp_setpoint_to_limits(&q, &dq, &unit_limits());
         assert_eq!(qc, q, "in-range positions are unchanged");
         assert_eq!(dqc, dq, "in-range velocities are unchanged");
+    }
+
+    #[test]
+    fn zeros_outward_velocity_exactly_at_a_limit() {
+        // Target sitting exactly on a stop (q == limit, not past it) with outward
+        // velocity: the velocity must still be zeroed so the MIT `kd` term adds no
+        // outward torque at the wall. The strict `<`/`>` checks missed this boundary.
+        let q = [1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let dq = [0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let (_, dqc) = clamp_setpoint_to_limits(&q, &dq, &unit_limits());
+        assert_eq!(
+            dqc[0], 0.0,
+            "outward velocity exactly at the upper stop is zeroed"
+        );
+        assert_eq!(
+            dqc[1], 0.0,
+            "outward velocity exactly at the lower stop is zeroed"
+        );
     }
 }

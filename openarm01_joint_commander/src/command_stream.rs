@@ -30,17 +30,28 @@ pub async fn run(
     command_rate_hz: u32,
     token: CancellationToken,
 ) {
+    // A failed publisher declaration leaves the node serving UI/health but unable to
+    // command anything, so cancel the node to restart it rather than returning quietly.
     let arm_pub = match arm_joint_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare arm_joint_commands publisher: {e}"),
+        Err(e) => {
+            error!("declare arm_joint_commands publisher: {e}");
+            return token.cancel();
+        }
     };
     let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare gripper_commands publisher: {e}"),
+        Err(e) => {
+            error!("declare gripper_commands publisher: {e}");
+            return token.cancel();
+        }
     };
     let governor_pub = match governor_control::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare governor_control publisher: {e}"),
+        Err(e) => {
+            error!("declare governor_control publisher: {e}");
+            return token.cancel();
+        }
     };
 
     let mut tasks = Vec::new();

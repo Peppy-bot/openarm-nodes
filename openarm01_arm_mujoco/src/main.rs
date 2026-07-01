@@ -32,12 +32,16 @@ fn main() -> Result<()> {
         info!("starting openarm01_arm_mujoco follower arm_id={arm_id}");
 
         let (latest_tx, latest_rx) = watch::channel::<Option<Setpoint>>(None);
+        // Supervise both follower tasks: if either ever exits, whether a clean Ok(None)
+        // on shutdown or an unexpected error/panic, this relabel path is dead, so cancel
+        // the node to restart it rather than leaving it healthy but inert.
+        let token = node_runner.cancellation_token().clone();
 
         // Receive task: one held subscription, looped. Holding the subscription
         // means no re-subscribe gap between messages, so a setpoint for this arm is
         // never dropped while the other arm's message is in flight.
         let rx_runner = node_runner.clone();
-        tokio::spawn(async move {
+        let receive = tokio::spawn(async move {
             let mut sub = match hub_arm_governed_setpoints::subscribe(&rx_runner).await {
                 Ok(s) => s,
                 Err(e) => return error!("governed_setpoints subscribe: {e}"),
@@ -74,7 +78,7 @@ fn main() -> Result<()> {
         // Publish task: relabel each new setpoint onto arm_sim_passthrough. No
         // shutdown handler: never publish a zero setpoint on exit, which would
         // command the arm into a self-collision pose.
-        tokio::spawn(async move {
+        let publish = tokio::spawn(async move {
             let publisher = match arm_sim_passthrough::declare_publisher(&node_runner).await {
                 Ok(p) => p,
                 Err(e) => return error!("declare arm_sim_passthrough publisher: {e}"),
@@ -103,6 +107,15 @@ fn main() -> Result<()> {
                     Err(_) => {}
                 }
             }
+        });
+
+        // Cancel the node the moment either task stops.
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = receive => {}
+                _ = publish => {}
+            }
+            token.cancel();
         });
 
         Ok(())

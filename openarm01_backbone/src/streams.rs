@@ -23,6 +23,11 @@ use crate::{JointVec, Side};
 /// producer is visible in the log without flooding it at the stream rate.
 const UNKNOWN_ARM_WARN_PERIOD: Duration = Duration::from_secs(1);
 
+/// Pause after a receive error before retrying, so a persistently broken
+/// subscription cannot spin the listener at full CPU or flood the log at the stream
+/// rate. Transient errors still recover; a genuinely dead stream just idles.
+const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
 /// The latest operator joint setpoint for one arm. `seq` distinguishes a fresh
 /// command from one already acted on; `producer` is the source the follow logic
 /// locks to; `recv_at` is the arrival time the watchdog uses to tell a live
@@ -73,6 +78,7 @@ pub async fn run_joint_command_listener(
             Ok(None) => return, // subscription closed: node shutting down
             Err(e) => {
                 error!("arm_joint_commands receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
@@ -115,6 +121,7 @@ pub async fn run_joint_state_listener(
             Ok(None) => return,
             Err(e) => {
                 error!("arm_states receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
@@ -174,7 +181,10 @@ pub async fn run_governor_config_listener(
                 });
             }
             Ok(None) => return,
-            Err(e) => error!("governor_control receive: {e}"),
+            Err(e) => {
+                error!("governor_control receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
+            }
         }
     }
 }

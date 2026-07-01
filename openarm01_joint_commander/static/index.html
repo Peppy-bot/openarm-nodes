@@ -427,12 +427,13 @@ function set_collision(on) {
 // and ignores a degenerate band (d_stop must stay below d_safe).
 function send_governor_params() {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({
-    cmd: 'set_governor_params',
-    d_stop: parseFloat($('gov_d_stop').value),
-    d_safe: parseFloat($('gov_d_safe').value),
-    max_ee_velocity_m_s: parseFloat($('gov_max_ee').value),
-  }));
+  const d_stop = parseFloat($('gov_d_stop').value);
+  const d_safe = parseFloat($('gov_d_safe').value);
+  const max_ee_velocity_m_s = parseFloat($('gov_max_ee').value);
+  // A blur on a half-edited field parses to NaN, which JSON.stringify serializes as
+  // null; drop the update rather than send a null the hub would reject.
+  if (![d_stop, d_safe, max_ee_velocity_m_s].every(Number.isFinite)) return;
+  ws.send(JSON.stringify({cmd: 'set_governor_params', d_stop, d_safe, max_ee_velocity_m_s}));
 }
 
 function connect() {

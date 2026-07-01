@@ -76,6 +76,15 @@ fn main() -> Result<()> {
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
             "max_ee_velocity_m_s must be a positive finite number"
         );
+        // The governor and the commander UI must reject the same bands; validate here
+        // (reusing the governor's own predicate) so a bad launcher value fails at
+        // bringup with a clear message rather than deep inside model construction.
+        assert!(
+            governor::valid_band(params.d_stop, params.d_safe),
+            "collision band invalid: require 0 < d_stop ({}) < d_safe ({}), both finite",
+            params.d_stop,
+            params.d_safe
+        );
 
         let cycle_period = Duration::from_micros(1_000_000 / params.control_rate_hz as u64);
         let stream_timeout = Duration::from_secs_f64(params.stream_timeout_s);
@@ -105,6 +114,10 @@ fn main() -> Result<()> {
             &params.right_base,
             params.d_stop,
             params.d_safe,
+            max_joint_velocity_rad_s
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max),
             params.collision_governor_enabled,
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));

@@ -63,11 +63,11 @@ const _: () = assert!(MONITOR_TRIP_FRACTION > 0.0 && MONITOR_TRIP_FRACTION < 1.0
 /// resolution fixed. Tied to the smallest hull feature the scan must resolve (a few
 /// mm of surface motion).
 const MAX_PROBE_ARC_RAD: f64 = 0.01;
-/// Probe-count floor (small steps still get a dense scan) and ceiling (bounds the
-/// per-tick cost on a pathological large jump; velocity-limited ticks stay well
-/// under it).
+/// Probe-count floor: even a tiny step gets a dense scan. There is no fixed ceiling;
+/// the count scales with the step so the `MAX_PROBE_ARC_RAD` spacing holds for any
+/// step size, and `clip_to_floor` asserts the step never exceeds its velocity-limited
+/// bound, which is what caps the count.
 const SEGMENT_SAMPLES_MIN: usize = 16;
-const SEGMENT_SAMPLES_MAX: usize = 64;
 
 /// Bisection iterations within a bracketing interval once the scan finds the first
 /// crossing: at the densest, `1/SEGMENT_SAMPLES_MIN / 2^8 ~= 1e-4` of the step.
@@ -106,6 +106,9 @@ pub struct Governor {
     d_stop: f64,
     /// Outside this signed surface distance (m) the barrier is inactive.
     d_safe: f64,
+    /// Largest single-joint speed (rad/s). The per-tick floor scan bounds its probe
+    /// count to the velocity-limited step and asserts no step exceeds it.
+    max_joint_velocity_rad_s: f64,
     enabled: bool,
     guard: Guard,
     /// Whether the measured-state monitor is currently holding. Latched with
@@ -118,6 +121,7 @@ impl Governor {
     /// Build the bimanual model (with the tight torso proxy) and validate the band.
     /// Fails loudly on a bad URDF / mesh dir / base link or an invalid band, so a
     /// misconfigured hub aborts at bringup instead of running ungoverned.
+    #[allow(clippy::too_many_arguments)] // distinct model paths + band + speed bound + toggle
     pub fn build(
         urdf_path: &str,
         meshes_dir: &str,
@@ -125,11 +129,17 @@ impl Governor {
         right_base: &str,
         d_stop: f64,
         d_safe: f64,
+        max_joint_velocity_rad_s: f64,
         enabled: bool,
     ) -> Result<Self, String> {
         if !valid_band(d_stop, d_safe) {
             return Err(format!(
                 "invalid band: require 0 < d_stop ({d_stop}) < d_safe ({d_safe})"
+            ));
+        }
+        if !(max_joint_velocity_rad_s.is_finite() && max_joint_velocity_rad_s > 0.0) {
+            return Err(format!(
+                "invalid max_joint_velocity_rad_s ({max_joint_velocity_rad_s}): must be finite and > 0"
             ));
         }
         let model =
@@ -142,6 +152,7 @@ impl Governor {
             model,
             d_stop,
             d_safe,
+            max_joint_velocity_rad_s,
             enabled,
             guard: Guard::Clear,
             monitor_tripped: false,
@@ -255,7 +266,7 @@ impl Governor {
                         warn!("collision: deep penetration, distance-only escape guard");
                         self.guard = Guard::Stopped;
                     }
-                    return self.govern_without_gradient(prev, cand);
+                    return self.govern_without_gradient(prev, cand, dt);
                 }
                 Err(e) => {
                     // NonFinite / NoPairs cannot arise from a finite, governed prev with
@@ -273,7 +284,7 @@ impl Governor {
         // along the segment, so scan it rather than trusting either endpoint: a
         // single tick can pass through a pocket while both ends read clear.
         if d_now >= self.d_safe {
-            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, floor) {
+            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, floor, dt) {
                 Clip::Clear => (Guard::Clear, *cand),
                 Clip::Clipped(q) => (Guard::Stopped, split(&q)),
             };
@@ -286,7 +297,7 @@ impl Governor {
         // backstop, since the first-order projection can still let surface curvature
         // carry the clamped step past it.
         let (projected14, throttled) = self.throttle_closing(&prev14, &cand14, &grad, d_now, dt);
-        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, floor) {
+        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, floor, dt) {
             Clip::Clear => (projected14, throttled),
             Clip::Clipped(q) => (q, true),
         };
@@ -361,13 +372,14 @@ impl Governor {
         &mut self,
         prev: &ArmPair<JointVec>,
         cand: &ArmPair<JointVec>,
+        dt: f64,
     ) -> ArmPair<JointVec> {
         let prev14 = concat(prev);
         let cand14 = concat(cand);
         let Some(d_now) = self.distance_at(&prev14) else {
             return *prev;
         };
-        match self.clip_to_floor(&prev14, &cand14, self.step_floor(d_now)) {
+        match self.clip_to_floor(&prev14, &cand14, self.step_floor(d_now), dt) {
             Clip::Clear => split(&cand14),
             Clip::Clipped(q) => split(&q),
         }
@@ -446,7 +458,7 @@ impl Governor {
     /// point where the straight segment drops below `floor`, or [`Clip::Clear`] if
     /// every probed point stays at or above it. Bimanual distance is not monotone
     /// along a joint-space segment, so this probes interior points (one per
-    /// `MAX_PROBE_ARC_RAD` of joint motion, bounded by `SEGMENT_SAMPLES_MIN`..`MAX`) to
+    /// `MAX_PROBE_ARC_RAD` of joint motion, at least `SEGMENT_SAMPLES_MIN`) to
     /// bracket the first breach (an endpoint check alone can step over a pocket, and a
     /// fixed grid can step over one on a large jump) and bisects within that bracket
     /// for the boundary. A failed query counts as a breach (so a model-rejected
@@ -457,6 +469,7 @@ impl Governor {
         prev: &[f64; DUAL_DOF],
         target: &[f64; DUAL_DOF],
         floor: f64,
+        dt: f64,
     ) -> Clip {
         debug_assert!(
             self.distance_at(prev).is_none_or(|d| d >= floor),
@@ -465,13 +478,23 @@ impl Governor {
         let point_at = |t: f64| -> [f64; DUAL_DOF] {
             std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i]))
         };
-        // Probe count scaled to the segment length so no probe moves any joint more
-        // than MAX_PROBE_ARC_RAD: the spatial resolution is bounded for any step size.
         let max_excursion = (0..DUAL_DOF)
             .map(|i| (target[i] - prev[i]).abs())
             .fold(0.0_f64, f64::max);
-        let samples = ((max_excursion / MAX_PROBE_ARC_RAD).ceil() as usize)
-            .clamp(SEGMENT_SAMPLES_MIN, SEGMENT_SAMPLES_MAX);
+        // The chase/trajectory velocity-limits the step before it reaches the governor,
+        // so no joint moves more than `max_joint_velocity * dt`. A larger excursion is
+        // an upstream bug that would silently under-resolve the scan, so fail loudly
+        // (the `* 1.01` absorbs float rounding at the exact limit). The bound is also
+        // what caps the probe count.
+        let max_step = self.max_joint_velocity_rad_s * dt;
+        assert!(
+            max_excursion <= max_step * 1.01,
+            "governed step {max_excursion:.4} rad exceeds the velocity-limited bound {max_step:.4} rad"
+        );
+        // One probe per `MAX_PROBE_ARC_RAD` of motion (floored for tiny steps); no fixed
+        // ceiling, so the spacing guarantee holds for any step within the bound above.
+        let samples =
+            ((max_excursion / MAX_PROBE_ARC_RAD).ceil() as usize).max(SEGMENT_SAMPLES_MIN);
         let mut last_clear = 0.0_f64;
         for s in 1..=samples {
             let t = s as f64 / samples as f64;
@@ -512,7 +535,7 @@ impl Governor {
 
 /// A valid band requires finite `0 < d_stop < d_safe` (the ramp denominator
 /// `d_safe - d_stop` is then positive).
-fn valid_band(d_stop: f64, d_safe: f64) -> bool {
+pub(crate) fn valid_band(d_stop: f64, d_safe: f64) -> bool {
     d_stop.is_finite() && d_safe.is_finite() && d_stop > 0.0 && d_safe > d_stop
 }
 
@@ -547,6 +570,9 @@ mod tests {
     const D_STOP: f64 = 0.005;
     const D_SAFE: f64 = 0.02;
     const DT: f64 = 0.01;
+    /// Generous so the velocity-limited-step assertion never binds on the synthetic
+    /// direct-jump configs these tests use; the assertion itself is covered separately.
+    const MAX_JOINT_VELOCITY_RAD_S: f64 = 1000.0;
 
     /// In-limit home; the elbow's one-sided lower limit is 0.05.
     fn home() -> ArmPair<JointVec> {
@@ -564,9 +590,34 @@ mod tests {
             "openarm_right_link0",
             D_STOP,
             D_SAFE,
+            MAX_JOINT_VELOCITY_RAD_S,
             enabled,
         )
         .expect("build governor from vendored fixtures")
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the velocity-limited bound")]
+    fn a_step_beyond_the_velocity_limit_trips_the_scan_assert() {
+        // A tiny velocity makes the bound (max_joint_velocity * DT) 5e-4 rad, so any
+        // real step exceeds it and the scan's velocity-limit assertion fires rather
+        // than silently under-resolving the segment.
+        let mut g = Governor::build(
+            &format!("{FIXTURES}/openarm_v10.urdf"),
+            &format!("{FIXTURES}/meshes"),
+            "openarm_left_link0",
+            "openarm_right_link0",
+            D_STOP,
+            D_SAFE,
+            0.05,
+            true,
+        )
+        .expect("build governor from vendored fixtures");
+        let prev = home();
+        let mut left = prev.left;
+        left[0] += 0.5; // 0.5 rad >> the 5e-4 rad velocity-limited bound
+        let cand = ArmPair::new(left, prev.right);
+        let _ = g.govern(&prev, &cand, &prev, DT);
     }
 
     /// Both arms elbow-bent, j3 wrapping the wrists toward the centerline by `t`.
@@ -647,7 +698,7 @@ mod tests {
         let floor = d0.min(D_STOP);
         // Escape toward home increases clearance: allowed, never frozen.
         let escape = chase(&deep, &home(), 0.02);
-        let out = g.govern_without_gradient(&deep, &escape);
+        let out = g.govern_without_gradient(&deep, &escape, DT);
         assert_ne!(out, deep, "escape was frozen in place");
         assert!(
             distance(&mut g, &out) >= floor - 1e-3,
@@ -655,7 +706,7 @@ mod tests {
         );
         // A deeper command is held at the floor, never pushed past it.
         let deeper = chase(&deep, &wrists_inward(2.0), 0.02);
-        let held = g.govern_without_gradient(&deep, &deeper);
+        let held = g.govern_without_gradient(&deep, &deeper, DT);
         assert!(
             distance(&mut g, &held) >= floor - 1e-3,
             "guard let penetration deepen"
