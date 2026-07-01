@@ -1,16 +1,16 @@
-# openarm01 Nodes
+# openarm Nodes
 
 [Peppy](https://github.com/Peppy-bot/peppy) nodes for the OpenArm V10 bimanual robot. The full stack lets you drive two 7-DOF arms and two grippers from your browser, against the real robot, Isaac Sim, or MuJoCo. The nodes and the UI stay the same; only the launcher changes.
 
 | Component | What it does |
 |---|---|
-| [`openarm01_robot_initializer`](./openarm01_robot_initializer) | loads the sim world and reports `is_ready` |
-| [`openarm01_arm`](./openarm01_arm) | drives one arm side (7 joints) |
-| [`openarm01_gripper`](./openarm01_gripper) | drives one gripper side |
-| [`openarm01_backbone`](./openarm01_backbone) | routes goals to the correct side |
-| [`openarm01_joint_commander`](./openarm01_joint_commander) | browser control panel |
+| [`openarm_robot_initializer`](./openarm_robot_initializer) | loads the sim world and reports `is_ready` |
+| [`openarm_arm`](./openarm_arm) | drives one arm side (7 joints) |
+| [`openarm_gripper`](./openarm_gripper) | drives one gripper side |
+| [`openarm_backbone`](./openarm_backbone) | routes goals to the correct side |
+| [`openarm_joint_commander`](./openarm_joint_commander) | browser control panel |
 
-Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm01_arm_isaac`](./openarm01_arm_isaac) and [`openarm01_arm_mujoco`](./openarm01_arm_mujoco)), all conforming to the same interface. The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
+Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same interface. The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
 
 This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickest way to see everything working.
 
@@ -27,7 +27,7 @@ Clone this repo together with [interfaces_hub](https://github.com/Peppy-bot/inte
 ws/
 ├── interfaces_hub/
 ├── launchers_hub/
-└── openarm01_nodes/
+└── openarm_nodes/
 ```
 
 ## 2. Start the daemon and register the repos
@@ -38,7 +38,7 @@ The daemon builds, runs, and connects every node. Registering the repos is what 
 peppy service serve &
 
 peppy repo add /path/to/ws/interfaces_hub
-peppy repo add /path/to/ws/openarm01_nodes
+peppy repo add /path/to/ws/openarm_nodes
 peppy repo refresh
 ```
 
@@ -51,27 +51,27 @@ Each `peppy node add <path> -sb` registers the node in the stack, generates its 
 MuJoCo stack:
 
 ```sh
-peppy node add /path/to/ws/openarm01_nodes/openarm01_robot_initializer_mujoco -sb --idle-timeout 18000
-peppy node add /path/to/ws/openarm01_nodes/openarm01_arm_mujoco -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm01_nodes/openarm01_gripper_mujoco -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm01_nodes/openarm01_backbone -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm01_nodes/openarm01_joint_commander -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer_mujoco -sb --idle-timeout 18000
+peppy node add /path/to/ws/openarm_nodes/openarm_arm_mujoco -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_gripper_mujoco -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_backbone -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_joint_commander -sb --idle-timeout 1800
 ```
 
 For Isaac, swap the three sim-specific nodes. Backbone and joint_commander are engine-agnostic and don't need rebuilding:
 
 ```sh
-peppy node add /path/to/ws/openarm01_nodes/openarm01_robot_initializer_isaac -sb --idle-timeout 18000
-peppy node add /path/to/ws/openarm01_nodes/openarm01_arm_isaac -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm01_nodes/openarm01_gripper_isaac -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer_isaac -sb --idle-timeout 18000
+peppy node add /path/to/ws/openarm_nodes/openarm_arm_isaac -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_gripper_isaac -sb --idle-timeout 1800
 ```
 
 Real robot:
 
 ```sh
-peppy node add /path/to/ws/openarm01_nodes/openarm01_robot_initializer -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm01_nodes/openarm01_arm -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm01_nodes/openarm01_gripper -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_arm -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_gripper -sb --idle-timeout 1800
 ```
 
 After changing a node's code, rebuild it by re-running the same command with `--force` added.
@@ -87,7 +87,7 @@ Every node you added should show `Stage: Ready`. If one is stuck at an earlier s
 ## 4. Launch the stack
 
 ```sh
-peppy stack launch /path/to/ws/launchers_hub/openarm01/openarm01_teleop_mujoco.json5
+peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5
 ```
 
 The launcher starts all eight instances in dependency order (sim first, then arms and grippers, then backbone, then the UI) and wires them together. Once it prints `Launch complete`:
@@ -96,7 +96,7 @@ The launcher starts all eight instances in dependency order (sim first, then arm
 - MuJoCo: open **http://localhost:8080** for the browser viewer
 - Isaac: connect with the [livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html)
 
-Move a slider, press **Send**, and watch the arm follow in the viewer. The launchers themselves are documented in [launchers_hub/openarm01](https://github.com/Peppy-bot/launchers_hub/tree/main/openarm01). Check the stack's health any time:
+Move a slider, press **Send**, and watch the arm follow in the viewer. The launchers themselves are documented in [launchers_hub/openarm](https://github.com/Peppy-bot/launchers_hub/tree/main/openarm). Check the stack's health any time:
 
 ```sh
 peppy stack list
@@ -119,13 +119,13 @@ The base image download outlived the daemon's idle timeout. Re-run the add with 
 **A node won't reach `Stage: Ready`**
 Rebuild it and read the build log peppy prints on failure:
 ```sh
-peppy node add /path/to/ws/openarm01_nodes/<node> -sb --force --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/<node> -sb --force --idle-timeout 1800
 ```
 
 **The stack launches but the arms don't respond**
 The sim keeps loading after `Launch complete`, and Isaac can take a minute. Watch its log until the world is up:
 ```sh
-peppy node info openarm01_robot_initializer_mujoco:v1
+peppy node info openarm_robot_initializer_mujoco:v1
 ```
 
 **A move finishes with "reached (target clamped to joint limits)"**
