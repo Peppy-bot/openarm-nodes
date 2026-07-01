@@ -22,7 +22,17 @@ logger = logging.getLogger(__name__)
 _ASSETS_DIR = Path(
     os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets"))
 )
-_XML_PATH = _ASSETS_DIR / "openarm_bimanual.xml"
+def _scene_path(hardware_version: str) -> Path:
+    # The v1 and v2 scenes are separate MJCF files (openarm_bimanual_v1.xml / _v2.xml);
+    # their meshes resolve from the same assets dir (PEPPY_ROBOT_ASSETS_DIR), materialized
+    # from openarm_description so nothing is baked into the container image.
+    versioned = _ASSETS_DIR / f"openarm_bimanual_{hardware_version}.xml"
+    # v1 falls back to the legacy unversioned scene so an image that predates per-version
+    # scenes still launches. v2 has no fallback: a missing v2 scene must fail loudly rather
+    # than silently simulate the v1 geometry.
+    if hardware_version == "v1" and not versioned.exists():
+        return _ASSETS_DIR / "openarm_bimanual.xml"
+    return versioned
 _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(_MUJOCO_DIR))
@@ -52,7 +62,7 @@ async def _run_sim(params, node_runner) -> list:
             await loop.run_in_executor(
                 None,
                 SimLauncher(
-                    _XML_PATH,
+                    _scene_path(params.hardware_version),
                     _ready,
                     _stop,
                     io,

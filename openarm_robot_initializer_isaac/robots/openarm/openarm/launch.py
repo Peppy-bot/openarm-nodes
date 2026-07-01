@@ -23,7 +23,17 @@ logger = logging.getLogger(__name__)
 _ASSETS_DIR = Path(
     os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets"))
 )
-_USD_PATH = _ASSETS_DIR / "openarm_bimanual.usd"
+def _scene_path(hardware_version: str) -> Path:
+    # The v1 and v2 scenes are separate USD files (openarm_bimanual_v1.usd / _v2.usd);
+    # their meshes resolve from the same assets dir (PEPPY_ROBOT_ASSETS_DIR), materialized
+    # from openarm_description so nothing is baked into the container image.
+    versioned = _ASSETS_DIR / f"openarm_bimanual_{hardware_version}.usd"
+    # v1 falls back to the legacy unversioned scene so an image that predates per-version
+    # scenes still launches. v2 has no fallback: a missing v2 scene must fail loudly rather
+    # than silently simulate the v1 geometry.
+    if hardware_version == "v1" and not versioned.exists():
+        return _ASSETS_DIR / "openarm_bimanual.usd"
+    return versioned
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
 
 _ready = threading.Event()
@@ -43,6 +53,7 @@ class _SimHandoff:
     io: object
     state_rate_hz: int
     headless: bool
+    hardware_version: str
 
 
 _handoff: dict[str, _SimHandoff] = {}
@@ -63,6 +74,7 @@ async def setup(params, node_runner) -> list:
         io=io,
         state_rate_hz=params.state_rate_hz,
         headless=params.headless,
+        hardware_version=params.hardware_version,
     )
     _handoff_ready.set()
 
@@ -123,7 +135,7 @@ def main() -> None:
 
     SimLauncher(
         simulation_app,
-        _USD_PATH,
+        _scene_path(handoff.hardware_version),
         _ready,
         _stop,
         handoff.io,

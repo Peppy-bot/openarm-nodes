@@ -57,6 +57,10 @@
       ],
     },
     parameters: {
+      // Which OpenArm generation to simulate: "v1" or "v2". Selects the scene file
+      // (openarm_bimanual_{v1,v2}.usd) and the meshes materialized into the asset dir.
+      // Required so the sim matches the real deployment it stands in for.
+      hardware_version: "string",
       // Rate (Hz) of the measured-state streams (joint_states / gripper_states).
       state_rate_hz: "u32",
       // Run headless (the deployment default); set false to open the Isaac

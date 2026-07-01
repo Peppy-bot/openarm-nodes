@@ -124,9 +124,9 @@ class SimTopicIO:
         if self._arm_pub is not None:
             self._schedule_publish(self._arm_pub, arm_states.build_message(arm_id, positions, velocities))
 
-    def publish_gripper_states(self, gripper_id: int, position: float) -> None:
+    def publish_gripper_states(self, gripper_id: int, position: float, force: float = 0.0) -> None:
         if self._gripper_pub is not None:
-            self._schedule_publish(self._gripper_pub, gripper_states.build_message(gripper_id, position))
+            self._schedule_publish(self._gripper_pub, gripper_states.build_message(gripper_id, position, force))
 
     def _schedule_publish(self, publisher: peppylib.TopicPublisher, payload: bytes) -> None:
         # Hand the publish to the node loop and return immediately; the physics
