@@ -39,6 +39,12 @@ pub async fn run(
             .get_state()
             .position;
         let opening = geometry::motor_rad_to_meters(motor_rad);
+        // Skip a poisoned sample rather than publishing NaN/Inf to consumers,
+        // matching the finiteness guards on the command paths.
+        if !opening.is_finite() {
+            warn!("gripper_states: skipping non-finite motor sample");
+            continue;
+        }
         // The v1.0 prismatic gripper does not sense grip force; report 0.
         let force = 0.0;
         let result = async {

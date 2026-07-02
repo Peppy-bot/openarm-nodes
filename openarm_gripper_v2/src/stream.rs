@@ -39,6 +39,12 @@ pub async fn run(
             .get_state();
         let opening = geometry::motor_rad_to_meters(state.position);
         let force = state.torque;
+        // Skip a poisoned sample rather than publishing NaN/Inf to consumers,
+        // matching the finiteness guards on the command paths.
+        if !opening.is_finite() || !force.is_finite() {
+            warn!("gripper_states: skipping non-finite motor sample");
+            continue;
+        }
         let result = async {
             let msg = gripper_states::build_message(gripper_id, opening, force)
                 .map_err(|e| e.to_string())?;
