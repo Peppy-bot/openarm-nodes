@@ -7,6 +7,7 @@ mod joint_states;
 mod state;
 mod ui;
 
+use openarm_description::HardwareVersion;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tracing::error;
 
@@ -21,6 +22,13 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let token = node_runner.cancellation_token().clone();
+        // The generation picks the panel's joint/gripper ranges (URDF limits +
+        // jaw width); everything else in the commander is version-blind.
+        let version: HardwareVersion = params
+            .hardware_version
+            .parse()
+            .unwrap_or_else(|e| panic!("hardware_version: {e}"));
+        ui::init_limits(version);
         // The operator streams the governor controls live; their launch defaults are
         // node parameters, kept in step with the hub's, so the real arm starts
         // conservative (tight band, slow cap) and the sim launchers start fast.

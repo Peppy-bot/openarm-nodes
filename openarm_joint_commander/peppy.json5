@@ -107,6 +107,9 @@
       // above 1 / the backbone's stream_timeout_s so the producer lock survives
       // between operator inputs.
       command_rate_hz: "u32",
+      // Robot generation ("v1" or "v2"): picks the panel joint + gripper ranges
+      // (URDF limits + jaw width), so the launcher must be explicit.
+      hardware_version: "string",
       // Operator's launch end-effector speed cap (m/s), streamed live to the hub on
       // governor_control and retunable from the UI. Require > 0. The sim launchers
       // set a permissive value; the real arm a conservative one.

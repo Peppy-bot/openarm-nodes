@@ -12,6 +12,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
+use openarm_description::HardwareVersion;
 use peppygen::NodeRunner;
 use peppylib::runtime::CancellationToken;
 use serde::{Deserialize, Serialize};
@@ -30,11 +31,10 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 const PROXIMITY_STALE_AFTER: Duration = Duration::from_millis(500);
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
-// Joint + gripper ranges from the robot model; the single source for slider
-// bounds (via the WS snapshot) and for clamping incoming commands.
-const JOINT_LIMITS_SRC: &str = include_str!("../config/joint_limits.json5");
-
-#[derive(Clone, Copy, Deserialize)]
+// Joint + gripper ranges from the generation's bundled URDF and jaw width; the
+// single source for slider bounds (via the WS snapshot) and for clamping
+// incoming commands. Resolved once at startup by [`init_limits`].
+#[derive(Clone, Copy)]
 struct JointLimits {
     gripper: [f64; 2],
     left: [[f64; 2]; ARM_DOF],
@@ -50,11 +50,45 @@ impl JointLimits {
     }
 }
 
+static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
+
+/// Resolve the panel's clamp/display ranges from the generation's description:
+/// arm joints from the bundled URDF (with the elbow held off its singularity
+/// floor, matching the hub's clamp) and the gripper from the jaw width. Must
+/// run before the UI serves.
+pub fn init_limits(version: HardwareVersion) {
+    let robot = urdf_rs::read_from_string(version.urdf()).expect("bundled URDF must parse");
+    let side_limits = |side: &str| -> [[f64; 2]; ARM_DOF] {
+        std::array::from_fn(|i| {
+            let name = format!("openarm_{side}_joint{}", i + 1);
+            let joint = robot
+                .joints
+                .iter()
+                .find(|j| j.name == name)
+                .unwrap_or_else(|| panic!("URDF missing joint {name}"));
+            [joint.limit.lower, joint.limit.upper]
+        })
+    };
+    let (mut left, mut right) = (side_limits("left"), side_limits("right"));
+    let elbow = version.elbow_joint_index();
+    let floor = version.elbow_singularity_floor_rad();
+    left[elbow][0] = left[elbow][0].max(floor);
+    right[elbow][0] = right[elbow][0].max(floor);
+    let limits = JointLimits {
+        gripper: [0.0, version.jaw_open_m()],
+        left,
+        right,
+    };
+    assert!(
+        LIMITS.set(limits).is_ok(),
+        "init_limits must run exactly once"
+    );
+}
+
 fn joint_limits() -> &'static JointLimits {
-    static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
-    LIMITS.get_or_init(|| {
-        json5::from_str(JOINT_LIMITS_SRC).expect("config/joint_limits.json5 must parse")
-    })
+    LIMITS
+        .get()
+        .expect("init_limits must run before the UI serves")
 }
 
 #[derive(Clone)]
