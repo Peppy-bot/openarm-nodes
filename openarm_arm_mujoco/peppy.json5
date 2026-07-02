@@ -1,0 +1,47 @@
+// MuJoCo sim follower for one openarm arm. A thin bridge: it consumes the
+// hub's governed per-arm setpoints (collision-governed, rate-limited, the hub
+// owns all trajectory generation) and republishes the resolved (q_des, dq_des)
+// on the sim-internal arm_sim_passthrough topic for the engine to actuate. No
+// trajectory, follow, or collision logic of its own - that all lives in
+// openarm_backbone, so the sim and the real arm follow the same governed
+// stream. Two instances, one per side, told apart by arm_id.
+{
+  peppy_schema: "node/v1",
+  manifest: {
+    name: "openarm_arm_mujoco",
+    tag: "v1",
+    depends_on: {
+      interfaces: [
+        // The hub's governed per-arm setpoint stream, `from_any` (entries told
+        // apart by arm_id).
+        {
+          name: "openarm_arm_governed_setpoints",
+          tag: "v1",
+          link_id: "hub",
+          from_any: true,
+        },
+      ],
+    },
+  },
+  interfaces: {
+    conforms_to: [
+      // The resolved joint setpoint handed to the sim engine (sim-internal passthrough).
+      { name: "openarm_arm_sim_passthrough", tag: "v1" },
+    ],
+    topics: {
+      consumes: [
+        { name: "arm_governed_setpoints", link_id: "hub" },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
+    },
+    parameters: {
+      // The arm_id at runtime (0 = left, 1 = right).
+      arm_id: "u8",
+    },
+  },
+}

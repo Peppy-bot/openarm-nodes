@@ -1,0 +1,64 @@
+// MuJoCo sim implementation of openarm_gripper. Follows streamed
+// gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
+// the sim to actuate; consumes the sim's gripper_states for move-action feedback.
+// Typed peppygen topics throughout, no raw peppylib.
+{
+  peppy_schema: "node/v1",
+  manifest: {
+    name: "openarm_gripper_mujoco",
+    tag: "v1",
+    depends_on: {
+      interfaces: [
+        // Streamed opening setpoints the gripper follows between moves: optional
+        // and wildcard (`from_any`) so it binds to any conforming producer.
+        {
+          name: "openarm_gripper_commands",
+          tag: "v1",
+          link_id: "commander",
+          from_any: true,
+        },
+        // Measured opening from the sim, used by the move action for convergence
+        // feedback. from_any: the sim is the producer.
+        {
+          name: "openarm_gripper_states",
+          tag: "v1",
+          link_id: "state",
+          from_any: true,
+        },
+      ],
+    },
+  },
+  interfaces: {
+    conforms_to: [
+      { name: "openarm_gripper_actions", tag: "v1" },
+      // The resolved aperture handed to the sim engine (sim-internal passthrough).
+      { name: "openarm_gripper_sim_passthrough", tag: "v1" },
+    ],
+    topics: {
+      consumes: [
+        { name: "gripper_commands", link_id: "commander" },
+        { name: "gripper_states", link_id: "state" },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def",
+    },
+    parameters: {
+      // The gripper_id at runtime (0 = left, 1 = right). Two instances are
+      // expected; the bin's file-lock + gripper_id guard rejects collisions.
+      gripper_id: "u8",
+      // Gripper generation: "v1" (prismatic fingers, jaw opening in meters) or
+      // "v2" (revolute pinch fingers). Selects the meters -> sim finger-target
+      // mapping, so the launcher must be explicit.
+      hardware_version: "string",
+      // Control-loop rate (Hz) for the follow loop.
+      control_rate_hz: "u32",
+      // How long (s) the gripper keeps following a stream after its last message
+      // before holding. Safety watchdog.
+      stream_timeout_s: "f64",
+    },
+  },
+}
