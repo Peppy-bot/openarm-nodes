@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 peppygen = { path = ".peppy/libs/peppygen" }
 peppylib = { path = ".peppy/libs/peppylib" }
-openarm_description = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "rename/openarm01-to-openarm", package = "openarm_description" }
+openarm_description = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "openarm_description" }
 urdf-rs = "0.9"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
