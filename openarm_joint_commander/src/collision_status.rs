@@ -13,13 +13,21 @@ use tracing::error;
 use crate::state::{Proximity, SharedState};
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
+    let mut subscription = match proximity_collision_status::subscribe(&runner).await {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "collision_status subscribe");
+            return;
+        }
+    };
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
-            received = proximity_collision_status::on_next_message_received(&runner) => received,
+            received = subscription.next() => received,
         };
         let (_producer, msg) = match received {
-            Ok(pair) => pair,
+            Ok(Some(pair)) => pair,
+            Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "collision_status receive");
                 continue;

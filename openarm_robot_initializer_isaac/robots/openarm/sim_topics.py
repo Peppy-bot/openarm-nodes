@@ -105,14 +105,16 @@ class SimTopicIO:
         while True:
             try:
                 raw = await subscription.on_next_message()
+                if raw is None:
+                    return
+                # Deserialize inside the guard: a corrupt frame is dropped and
+                # logged rather than killing this consume task.
+                msg = arm_cmd._deserialize_payload(raw.payload)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"arm command consume error: {exc}")
                 continue
-            if raw is None:
-                return
-            msg = arm_cmd._deserialize_payload(raw.payload)
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
@@ -133,14 +135,16 @@ class SimTopicIO:
         while True:
             try:
                 raw = await subscription.on_next_message()
+                if raw is None:
+                    return
+                # Deserialize inside the guard: a corrupt frame is dropped and
+                # logged rather than killing this consume task.
+                msg = gripper_cmd._deserialize_payload(raw.payload)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 logger.warning(f"gripper command consume error: {exc}")
                 continue
-            if raw is None:
-                return
-            msg = gripper_cmd._deserialize_payload(raw.payload)
             if not math.isfinite(msg.position):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
