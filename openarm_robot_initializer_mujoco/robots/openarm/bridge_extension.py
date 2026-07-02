@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
 
 
+def _finger_travel_from_range(joint_name: str, lo: float, hi: float) -> float:
+    """Signed full-open travel of a finger joint from its limit range (prismatic
+    meters or revolute radians; the right side's revolute fingers open toward
+    negative angles). Closed (0) must lie within the range; the signed travel is
+    lo + hi, which cancels any symmetric slack an importer added around the
+    nominal 0..travel range (e.g. Isaac's mimic-joint margin)."""
+    if not (lo <= 0.0 <= hi):
+        raise RuntimeError(
+            f"finger joint '{joint_name}' range ({lo}, {hi}) does not contain the"
+            " closed pose (0)"
+        )
+    travel = lo + hi
+    if abs(travel) <= 1e-9:
+        raise RuntimeError(
+            f"finger joint '{joint_name}' range ({lo}, {hi}) has no usable travel"
+        )
+    return travel
+
+
 class MujocoBridgeExtension:
     """Drives the engine from the typed command streams and publishes state."""
 
@@ -106,20 +125,11 @@ class MujocoBridgeExtension:
         )
 
     def _finger_travel(self, joint_name: str) -> float:
-        """Signed full-open travel of a finger joint from the model's own limit
-        range (prismatic meters or revolute radians; the right side's revolute
-        fingers open toward negative angles). Closed is 0 for every finger, so
-        one end of the range must be 0 and the other is the travel."""
         import mujoco  # pylint: disable=C0415
 
         jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
         lo, hi = (float(v) for v in self._model.jnt_range[jid])
-        if min(abs(lo), abs(hi)) > 1e-9 or lo == hi:
-            raise RuntimeError(
-                f"finger joint '{joint_name}' range ({lo}, {hi}) does not run from"
-                " closed (0) to a full-open travel"
-            )
-        return lo + hi
+        return _finger_travel_from_range(joint_name, lo, hi)
 
     def step(self) -> None:
         import mujoco  # pylint: disable=C0415

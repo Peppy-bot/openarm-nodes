@@ -22,6 +22,25 @@ from exts import IsaacActuatorCtrl, IsaacArticulation, IsaacGripperSensor
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
+
+
+def _finger_travel_from_range(joint_name: str, lo: float, hi: float) -> float:
+    """Signed full-open travel of a finger joint from its limit range (prismatic
+    meters or revolute radians; the right side's revolute fingers open toward
+    negative angles). Closed (0) must lie within the range; the signed travel is
+    lo + hi, which cancels any symmetric slack an importer added around the
+    nominal 0..travel range (e.g. Isaac's mimic-joint margin)."""
+    if not (lo <= 0.0 <= hi):
+        raise RuntimeError(
+            f"finger joint '{joint_name}' range ({lo}, {hi}) does not contain the"
+            " closed pose (0)"
+        )
+    travel = lo + hi
+    if abs(travel) <= 1e-9:
+        raise RuntimeError(
+            f"finger joint '{joint_name}' range ({lo}, {hi}) has no usable travel"
+        )
+    return travel
 # The articulation root prim in the loaded USD stage. Every ext (state read,
 # actuator write, gripper sensor) targets this one articulation. The robot USD's
 # defaultPrim is /openarm (the launcher only adds /World/defaultDomeLight at
@@ -131,18 +150,12 @@ class IsaacBridgeExtension:
             return False
         lower, upper = limits
         for gripper in self._grippers:
-            travels = []
-            for name in gripper["fingers"]:
-                lo, hi = lower[self._joint_index[name]], upper[self._joint_index[name]]
-                # Closed is 0 for every finger, so one end of the range must be 0
-                # and the other is the signed full-open travel (prismatic meters
-                # or revolute radians; the right side opens toward negative).
-                if min(abs(lo), abs(hi)) > 1e-9 or lo == hi:
-                    raise RuntimeError(
-                        f"finger joint '{name}' range ({lo}, {hi}) does not run"
-                        " from closed (0) to a full-open travel"
-                    )
-                travels.append(lo + hi)
+            travels = [
+                _finger_travel_from_range(
+                    name, lower[self._joint_index[name]], upper[self._joint_index[name]]
+                )
+                for name in gripper["fingers"]
+            ]
             self._gripper_travels[gripper["gripper_id"]] = travels
         self._ready = True
         logger.info(
