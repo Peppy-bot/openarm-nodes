@@ -143,7 +143,7 @@ impl Governor {
             ));
         }
         let model = BimanualCollisionModel::builder(urdf, meshes_dir, left_base, right_base)
-            .regions(TORSO_BODY, torso_regions())
+            .regions(TORSO_BODY, torso_regions()?)
             .build()
             .map_err(|e| format!("build collision model: {e}"))?;
         Ok(Self {

@@ -21,12 +21,14 @@ pub const TORSO_BODY: &str = "openarm_body_link0";
 /// torso mesh (metres, root frame). Numbers mirror the collision model's torso
 /// fixture, which carries the measured feature extents and the region placement
 /// rules (overlap the cuts by >= 3 mm, keep bounds ~1 mm off flat mesh faces).
-pub fn torso_regions() -> Vec<ClipRegion> {
+/// Errors on an invalid bound so a bad edit surfaces through the governor's
+/// build diagnostics rather than a panic.
+pub fn torso_regions() -> Result<Vec<ClipRegion>, String> {
     [
         // plate: the full-footprint base, everything below the flare skirt.
         ([-INF, -INF, -INF], [INF, INF, 0.012]),
-        // flare: skirt + column bottom, fenced off the gusset at x -0.033.
-        ([-0.033, -0.086, 0.006], [0.033, 0.086, 0.083]),
+        // flare: skirt + column bottom, fenced off the gusset at x -0.0335.
+        ([-0.0335, -0.086, 0.006], [0.033, 0.086, 0.083]),
         // gusset: the diagonal web behind the column; hulls to a tight wedge.
         ([-INF, -0.031, 0.009], [-0.0305, 0.031, 0.226]),
         // column: the square shaft, fenced off the gusset at x -0.0335.
@@ -43,7 +45,7 @@ pub fn torso_regions() -> Vec<ClipRegion> {
             Point3::new(min[0], min[1], min[2]),
             Point3::new(max[0], max[1], max[2]),
         )
-        .expect("torso region bounds are static and valid")
+        .map_err(|e| format!("torso clip region: {e}"))
     })
     .collect()
 }
