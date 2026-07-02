@@ -1,16 +1,17 @@
 # openarm Nodes
 
-[Peppy](https://github.com/Peppy-bot/peppy) nodes for the OpenArm V10 bimanual robot. The full stack lets you drive two 7-DOF arms and two grippers from your browser, against the real robot, Isaac Sim, or MuJoCo. The nodes and the UI stay the same; only the launcher changes.
+[Peppy](https://github.com/Peppy-bot/peppy) nodes for the OpenArm bimanual robot (v1.0 and v2.0). The full stack lets you drive two 7-DOF arms and two grippers from your browser, against the real robot, Isaac Sim, or MuJoCo. The nodes and the UI stay the same; only the launcher changes.
 
 | Component | What it does |
 |---|---|
 | [`openarm_robot_initializer`](./openarm_robot_initializer) | loads the sim world and reports `is_ready` |
 | [`openarm_arm`](./openarm_arm) | drives one arm side (7 joints) |
-| [`openarm_gripper`](./openarm_gripper) | drives one gripper side |
+| [`openarm_gripper`](./openarm_gripper) | drives one gripper side (v1.0 prismatic) |
+| [`openarm_gripper_v2`](./openarm_gripper_v2) | drives one gripper side (v2.0 pinch) |
 | [`openarm_backbone`](./openarm_backbone) | routes goals to the correct side |
 | [`openarm_joint_commander`](./openarm_joint_commander) | browser control panel |
 
-Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same interface. The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
+Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same interface. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter. The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
 
 This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickest way to see everything working.
 
@@ -73,6 +74,8 @@ peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer -sb --idle-ti
 peppy node add /path/to/ws/openarm_nodes/openarm_arm -sb --idle-timeout 1800
 peppy node add /path/to/ws/openarm_nodes/openarm_gripper -sb --idle-timeout 1800
 ```
+
+On v2.0 hardware, build `openarm_gripper_v2` in place of `openarm_gripper`.
 
 After changing a node's code, rebuild it by re-running the same command with `--force` added.
 
