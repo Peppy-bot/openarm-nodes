@@ -32,6 +32,16 @@
           link_id: "arm_states",
           from_any: true
         },
+        // Measured gripper opening of both grippers, so the collision governor can
+        // place the per-finger hulls at the live opening instead of their full
+        // swept envelope. Wildcard + told apart by gripper_id; consumed every tick
+        // like arm_states, falling back to fully-open until the first reading.
+        {
+          name: "openarm_gripper_states",
+          tag: "v1",
+          link_id: "grippers",
+          from_any: true
+        },
         // Runtime on/off for the governor. Wildcard + optional: the hub holds its
         // launch-time default until the first message.
         {
@@ -123,6 +133,10 @@
         {
           name: "arm_states",
           link_id: "arm_states"
+        },
+        {
+          name: "gripper_states",
+          link_id: "grippers"
         },
         {
           name: "governor_control",

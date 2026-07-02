@@ -1,10 +1,10 @@
 //! Inbound stream plumbing for the hub: the operator joint-command stream, both
-//! arms' measured joint state, and the runtime governor controls. Each listener
-//! holds one subscription and keeps the latest well-formed message in a watch
-//! channel the coordinator reads every tick. One held subscription per stream
-//! means no re-subscribe gap, so a message is never dropped between receives.
-//! Arms are told apart by `arm_id` (0 = left, 1 = right); a message for an unknown
-//! arm is dropped (and warned, throttled).
+//! arms' measured joint state, both grippers' measured opening, and the runtime
+//! governor controls. Each listener holds one subscription and keeps the latest
+//! well-formed message in a watch channel the coordinator reads every tick. One
+//! held subscription per stream means no re-subscribe gap, so a message is never
+//! dropped between receives. Arms and grippers are told apart by their id (0 =
+//! left, 1 = right); a message for an unknown id is dropped (and warned, throttled).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::{
     arm_states_arm_states, collision_ctrl_governor_control, commander_arm_joint_commands,
+    grippers_gripper_states,
 };
 use peppylib::messaging::ProducerRef;
 use tokio::sync::watch;
@@ -47,6 +48,15 @@ pub struct JointCommand {
 #[derive(Clone, Copy)]
 pub struct MeasuredState {
     pub positions: JointVec,
+}
+
+/// The latest measured opening of one gripper, fed by the `gripper_states` stream:
+/// the pad-gap width in metres. Consumed every tick like the measured arm state:
+/// the coordinator maps the width to a `[0, 1]` opening fraction and places the
+/// collision fingers there (fully open until the first reading arrives).
+#[derive(Clone, Copy)]
+pub struct GripperOpening {
+    pub width_m: f64,
 }
 
 /// Warn that a message carried an out-of-range `arm_id`, throttled to at most once
@@ -143,6 +153,46 @@ pub async fn run_joint_state_listener(
         }
         latest[idx].send_replace(Some(MeasuredState {
             positions: msg.positions,
+        }));
+    }
+}
+
+/// Receive `gripper_states` forever, keeping the latest measured opening per
+/// gripper. A non-finite position is dropped so the coordinator never places the
+/// collision fingers on a bad reading (it falls back to fully open when no fresh
+/// reading stands). The `force` field is not used by the governor.
+pub async fn run_gripper_state_listener(
+    runner: Arc<NodeRunner>,
+    latest: [watch::Sender<Option<GripperOpening>>; 2],
+) {
+    let mut sub = match grippers_gripper_states::subscribe(&runner).await {
+        Ok(s) => s,
+        Err(e) => return error!("gripper_states subscribe: {e}"),
+    };
+    let mut last_unknown_warn: Option<Instant> = None;
+    loop {
+        let (_, msg) = match sub.next().await {
+            Ok(Some(received)) => received,
+            Ok(None) => return,
+            Err(e) => {
+                error!("gripper_states receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        let Some(idx) = Side::from_arm_id(msg.gripper_id).map(Side::index) else {
+            warn_unknown_arm("gripper_states", msg.gripper_id, &mut last_unknown_warn);
+            continue;
+        };
+        if !msg.position.is_finite() {
+            warn!(
+                "gripper_states: dropping gripper {} message with non-finite position",
+                msg.gripper_id
+            );
+            continue;
+        }
+        latest[idx].send_replace(Some(GripperOpening {
+            width_m: msg.position,
         }));
     }
 }

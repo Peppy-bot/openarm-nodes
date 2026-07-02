@@ -444,6 +444,14 @@ impl Governor {
         }
     }
 
+    /// Set the gripper opening per side as a fraction in `[0, 1]` (0 = closed,
+    /// 1 = open) for the collision model to place the per-finger hulls at, so the
+    /// reported clearance follows the fingers' true positions. Forwarded verbatim;
+    /// the model clamps and ignores a non-finite value (keeping the last opening).
+    pub fn set_gripper_openings(&mut self, left: f64, right: f64) {
+        self.model.set_gripper_openings(left, right);
+    }
+
     fn distance_at(&mut self, q: &[f64; DUAL_DOF]) -> Option<f64> {
         let pair = split(q);
         self.model

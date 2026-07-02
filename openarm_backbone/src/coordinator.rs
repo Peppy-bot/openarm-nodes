@@ -21,7 +21,7 @@ use control_core::Pacer;
 
 use crate::governor::Governor;
 use crate::planner::{Goal, Planner};
-use crate::streams::{GovernorConfig, JointCommand, MeasuredState};
+use crate::streams::{GovernorConfig, GripperOpening, JointCommand, MeasuredState};
 use crate::{ArmPair, JointVec, Side};
 
 /// How long [`seed`] waits for an arm's first measured state before warning that
@@ -29,11 +29,18 @@ use crate::{ArmPair, JointVec, Side};
 /// indefinite quiet stall.
 const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 
+/// The opening fraction the fingers sit at until the first gripper reading
+/// arrives: fully open, the widest finger envelope (analogous to the arm's
+/// measured state falling back to the held setpoint before its first reading).
+const FULLY_OPEN: f64 = 1.0;
+
 /// One arm's inbound channels into the coordinator: the operator command stream,
-/// the measured state, the accepted-goal queue, and the single-flight busy flag.
+/// the measured state, the measured gripper opening, the accepted-goal queue, and
+/// the single-flight busy flag.
 pub struct ArmChannels {
     pub command: watch::Receiver<Option<JointCommand>>,
     pub measured: watch::Receiver<Option<MeasuredState>>,
+    pub gripper: watch::Receiver<Option<GripperOpening>>,
     pub goals: mpsc::Receiver<Goal>,
     pub busy: Arc<AtomicBool>,
 }
@@ -42,6 +49,7 @@ pub struct ArmChannels {
 /// the node's cancellation token fires; returns `Err` if a publisher cannot be
 /// declared at bringup. Any return takes the node down (the supervisor in `main`
 /// treats it as fatal).
+#[allow(clippy::too_many_arguments)] // distinct loop inputs: runtime, governor, planners, channels, config, timing, token
 pub async fn run(
     runner: Arc<NodeRunner>,
     mut governor: Governor,
@@ -49,6 +57,7 @@ pub async fn run(
     mut channels: ArmPair<ArmChannels>,
     governor_config: watch::Receiver<GovernorConfig>,
     cycle_period: Duration,
+    jaw_open_m: f64,
     token: CancellationToken,
 ) -> peppygen::Result<()> {
     let publisher = match arm_governed_setpoints::declare_publisher(&runner).await {
@@ -121,6 +130,15 @@ pub async fn run(
                 .borrow()
                 .as_ref()
                 .map_or(prev.right, |m| m.positions),
+        );
+
+        // Place the collision fingers at each gripper's live opening so the barrier
+        // sees the fingers where they actually are, not their full swept envelope.
+        // Treated like the measured arm state: the latest reading is used every
+        // tick, falling back to fully open only before the first reading arrives.
+        governor.set_gripper_openings(
+            opening_fraction(*channels.left.gripper.borrow(), jaw_open_m),
+            opening_fraction(*channels.right.gripper.borrow(), jaw_open_m),
         );
         let governed = governor.govern(&prev, &candidate, &measured, dt);
 
@@ -229,4 +247,43 @@ async fn tick_arm(channels: &mut ArmChannels, planner: &mut Planner, now: Instan
             now,
         )
         .await
+}
+
+/// Map a measured gripper opening to the `[0, 1]` fraction the collision model
+/// places its fingers at (0 = closed, 1 = fully open): `width / jaw_open_m`,
+/// clamped. A missing reading (none received yet) falls back to [`FULLY_OPEN`],
+/// the widest, most conservative envelope.
+fn opening_fraction(reading: Option<GripperOpening>, jaw_open_m: f64) -> f64 {
+    match reading {
+        Some(g) => (g.width_m / jaw_open_m).clamp(0.0, 1.0),
+        None => FULLY_OPEN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const JAW_OPEN_M: f64 = 0.044;
+
+    #[test]
+    fn a_reading_maps_width_to_a_clamped_fraction() {
+        let half = GripperOpening {
+            width_m: JAW_OPEN_M / 2.0,
+        };
+        assert!((opening_fraction(Some(half), JAW_OPEN_M) - 0.5).abs() < 1e-9);
+        // Out-of-range widths clamp into [0, 1] rather than escaping the finger travel.
+        let over = GripperOpening {
+            width_m: JAW_OPEN_M * 1.5,
+        };
+        assert_eq!(opening_fraction(Some(over), JAW_OPEN_M), 1.0);
+        let under = GripperOpening { width_m: -0.01 };
+        assert_eq!(opening_fraction(Some(under), JAW_OPEN_M), 0.0);
+    }
+
+    #[test]
+    fn a_missing_reading_falls_back_to_fully_open() {
+        // No gripper telemetry yet: the fingers sit at the widest envelope.
+        assert_eq!(opening_fraction(None, JAW_OPEN_M), FULLY_OPEN);
+    }
 }

@@ -203,6 +203,8 @@ fn main() -> Result<()> {
         let (cmd_tx1, cmd_rx1) = watch::channel(None);
         let (meas_tx0, meas_rx0) = watch::channel(None);
         let (meas_tx1, meas_rx1) = watch::channel(None);
+        let (grip_tx0, grip_rx0) = watch::channel(None);
+        let (grip_tx1, grip_rx1) = watch::channel(None);
         let (goal_tx0, goal_rx0) = mpsc::channel(1);
         let (goal_tx1, goal_rx1) = mpsc::channel(1);
         let busy = [
@@ -220,12 +222,14 @@ fn main() -> Result<()> {
             ArmChannels {
                 command: cmd_rx0,
                 measured: meas_rx0,
+                gripper: grip_rx0,
                 goals: goal_rx0,
                 busy: busy[0].clone(),
             },
             ArmChannels {
                 command: cmd_rx1,
                 measured: meas_rx1,
+                gripper: grip_rx1,
                 goals: goal_rx1,
                 busy: busy[1].clone(),
             },
@@ -250,6 +254,7 @@ fn main() -> Result<()> {
                 channels,
                 config_rx,
                 cycle_period,
+                hardware_version.jaw_open_m(),
                 token.clone(),
             ));
             set.spawn(actions::arm::run_move_arm_joints(
@@ -277,6 +282,10 @@ fn main() -> Result<()> {
             spawn_listener(
                 &mut set,
                 streams::run_joint_state_listener(runner.clone(), [meas_tx0, meas_tx1]),
+            );
+            spawn_listener(
+                &mut set,
+                streams::run_gripper_state_listener(runner.clone(), [grip_tx0, grip_tx1]),
             );
             spawn_listener(
                 &mut set,
