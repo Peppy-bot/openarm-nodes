@@ -26,7 +26,7 @@
 use bimanual_collision_model::{BimanualCollisionModel, CollisionError};
 use tracing::{error, info, warn};
 
-use crate::torso::{TORSO_BODY, torso_hulls};
+use crate::torso::{TORSO_BODY, torso_regions};
 use crate::{ARM_DOF, ArmPair, JointVec};
 
 /// Joints across both arms, left (0..7) then right (7..14).
@@ -143,7 +143,7 @@ impl Governor {
             ));
         }
         let model = BimanualCollisionModel::builder(urdf, meshes_dir, left_base, right_base)
-            .hulls(TORSO_BODY, torso_hulls())
+            .regions(TORSO_BODY, torso_regions())
             .build()
             .map_err(|e| format!("build collision model: {e}"))?;
         Ok(Self {

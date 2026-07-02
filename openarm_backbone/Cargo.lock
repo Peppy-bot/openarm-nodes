@@ -243,9 +243,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "bimanual_collision_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#b8c846b9190455e1ff4ac9e8d72c63dd597cd229"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Ftorso-mesh-fit-regions#56c1722f33ed1eb8906896b1c5c59405ed1af9b8"
 dependencies = [
- "srs_model",
+ "srs_model 0.1.0 (git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Ftorso-mesh-fit-regions)",
  "thiserror 2.0.18",
  "urdf-rs",
 ]
@@ -2180,7 +2180,7 @@ dependencies = [
  "openarm_description",
  "peppygen",
  "peppylib",
- "srs_model",
+ "srs_model 0.1.0 (git+https://github.com/Peppy-bot/public-peppy-libs?branch=main)",
  "tempfile",
  "tokio",
  "tracing",
@@ -2270,18 +2270,16 @@ version = "0.0.1"
 dependencies = [
  "capnp",
  "clap",
- "const_format",
- "dirs",
  "indexmap 2.14.0",
  "serde",
  "serde_json",
  "serde_json5",
  "serde_path_to_error",
  "sha2 0.11.0",
- "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "walkdir",
+ "zenoh-keyexpr",
 ]
 
 [[package]]
@@ -2468,9 +2466,12 @@ dependencies = [
  "derive_more",
  "flume 0.12.0",
  "peppy-config-model",
+ "rustls-native-certs",
+ "rustls-pemfile",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "zenoh",
 ]
@@ -3494,6 +3495,16 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "srs_model"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Ftorso-mesh-fit-regions#56c1722f33ed1eb8906896b1c5c59405ed1af9b8"
+dependencies = [
+ "k",
+ "thiserror 2.0.18",
+ "urdf-rs",
 ]
 
 [[package]]
