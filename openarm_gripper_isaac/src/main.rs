@@ -45,13 +45,19 @@ fn main() -> Result<()> {
         let shared = state::new_shared();
 
         // Consume the sim's measured opening (gripper_states) to feed the move
-        // action's convergence/stall feedback.
-        tokio::spawn(state_stream::run(
-            node_runner.clone(),
-            gripper_id,
-            shared.clone(),
-            token.clone(),
-        ));
+        // action's convergence/stall feedback. Supervised: if the consumer ever
+        // exits, whether a clean close on shutdown or an unexpected error, the
+        // feedback path is dead, so cancel the node to restart it rather than
+        // leaving it healthy but inert.
+        {
+            let runner = node_runner.clone();
+            let shared = shared.clone();
+            let token = token.clone();
+            tokio::spawn(async move {
+                state_stream::run(runner, gripper_id, shared, token.clone()).await;
+                token.cancel();
+            });
+        }
 
         // One passthrough publisher and one busy gate, shared by the move action
         // and the follow loop so only one drives the sim at a time.
@@ -64,12 +70,16 @@ fn main() -> Result<()> {
         // Stream listener -> follow loop: the listener keeps the latest streamed
         // opening, the follow loop drives it between moves.
         let (cmd_tx, cmd_rx) = watch::channel(None);
-        tokio::spawn(stream::run(
-            node_runner.clone(),
-            gripper_id,
-            cmd_tx,
-            token.clone(),
-        ));
+        // Supervised like the state stream: a dead command consumer leaves the
+        // gripper unresponsive to streamed openings.
+        {
+            let runner = node_runner.clone();
+            let token = token.clone();
+            tokio::spawn(async move {
+                stream::run(runner, gripper_id, cmd_tx, token.clone()).await;
+                token.cancel();
+            });
+        }
         tokio::spawn(follow::run(
             passthrough_pub.clone(),
             gripper_id.as_u8(),

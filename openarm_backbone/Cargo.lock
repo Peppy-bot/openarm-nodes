@@ -243,9 +243,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "bimanual_collision_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm#58720db4b13982864854322ae3c8f75329e06bb3"
 dependencies = [
- "srs_model",
+ "srs_model 0.1.0 (git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm)",
  "thiserror 2.0.18",
  "urdf-rs",
 ]
@@ -2180,7 +2180,7 @@ dependencies = [
  "openarm_description",
  "peppygen",
  "peppylib",
- "srs_model",
+ "srs_model 0.1.0 (git+https://github.com/Peppy-bot/public-peppy-libs?branch=main)",
  "tempfile",
  "tokio",
  "tracing",
@@ -2190,7 +2190,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm#58720db4b13982864854322ae3c8f75329e06bb3"
 
 [[package]]
 name = "openssl-probe"
@@ -3500,6 +3500,16 @@ dependencies = [
 name = "srs_model"
 version = "0.1.0"
 source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e761c03d325f81a929a1d492ab11ea39728805a9"
+dependencies = [
+ "k",
+ "thiserror 2.0.18",
+ "urdf-rs",
+]
+
+[[package]]
+name = "srs_model"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm#58720db4b13982864854322ae3c8f75329e06bb3"
 dependencies = [
  "k",
  "thiserror 2.0.18",

@@ -191,12 +191,17 @@ fn main() -> Result<()> {
         // opening addressed to this gripper, the follow loop drives the motor
         // toward it between moves.
         let (cmd_tx, cmd_rx) = watch::channel(None);
-        tokio::spawn(command_stream::run(
-            node_runner.clone(),
-            gripper_id,
-            cmd_tx,
-            node_runner.cancellation_token().clone(),
-        ));
+        // Supervised: if the command consumer ever exits, whether a clean close
+        // on shutdown or an unexpected error, streamed openings are dead, so
+        // cancel the node to restart it rather than leaving it healthy but inert.
+        {
+            let runner = node_runner.clone();
+            let token = node_runner.cancellation_token().clone();
+            tokio::spawn(async move {
+                command_stream::run(runner, gripper_id, cmd_tx, token.clone()).await;
+                token.cancel();
+            });
+        }
         tokio::spawn(follow::run(
             gripper.clone(),
             busy.clone(),

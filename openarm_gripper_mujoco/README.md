@@ -1,8 +1,8 @@
 # openarm_gripper_mujoco
 
-Drives one side of the OpenArm V10 gripper inside MuJoCo. It conforms to `openarm_gripper:v1`, the same interface the real gripper driver implements, so backbone and the UI work with it unchanged.
+Drives one side of the OpenArm gripper (either hardware generation, selected by `hardware_version`) inside MuJoCo. It conforms to `openarm_gripper:v1`, the same interface the real gripper drivers implement, so backbone and the UI work with it unchanged.
 
-It attaches to the MuJoCo world that `openarm_robot_initializer_mujoco` owns, so that node has to be running first. `move_gripper` takes the total aperture in meters (0.0 closed, 0.044 fully open); each finger moves to half of it.
+It attaches to the MuJoCo world that `openarm_robot_initializer_mujoco` owns, so that node has to be running first. `move_gripper` takes the jaw opening in meters (0.0 closed, fully open at the generation's jaw width: 0.044 on v1, 0.0697 on v2); the sim maps it onto each finger joint's own travel.
 
 ## Build
 

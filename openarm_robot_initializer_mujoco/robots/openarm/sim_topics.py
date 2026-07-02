@@ -85,8 +85,10 @@ class SimTopicIO:
                 return
             except Exception as exc:
                 # A corrupt frame is dropped and logged rather than killing
-                # this consume task.
+                # this consume task; the pause keeps a persistent fault from
+                # hot-spinning the loop.
                 logger.warning(f"arm command consume error: {exc}")
+                await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
@@ -110,8 +112,10 @@ class SimTopicIO:
                 return
             except Exception as exc:
                 # A corrupt frame is dropped and logged rather than killing
-                # this consume task.
+                # this consume task; the pause keeps a persistent fault from
+                # hot-spinning the loop.
                 logger.warning(f"gripper command consume error: {exc}")
+                await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
             if not math.isfinite(msg.position):

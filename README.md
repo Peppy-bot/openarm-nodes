@@ -124,6 +124,7 @@ peppy node add /path/to/ws/openarm_nodes/<node> -sb --force --idle-timeout 1800
 
 **The stack launches but the arms don't respond**
 The sim keeps loading after `Launch complete`, and Isaac can take a minute. Watch its log until the world is up:
+
 ```sh
 peppy node info openarm_robot_initializer_mujoco:v1
 ```

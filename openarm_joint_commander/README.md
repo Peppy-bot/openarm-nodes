@@ -1,8 +1,8 @@
 # openarm_joint_commander
 
-The browser control panel for the OpenArm V10. It serves a page on port 8765 with a slider per joint and per gripper; pressing **Send** fires the matching `move_arm_joints` or `move_gripper` goal at `openarm_backbone`, and feedback streams back into the page while the arm moves.
+The browser control panel for the OpenArm (either hardware generation). It serves a page on port 8765 with a slider per joint and per gripper; pressing **Send** fires the matching `move_arm_joints` or `move_gripper` goal at `openarm_backbone`, and feedback streams back into the page while the arm moves.
 
-Slider ranges come from `config/joint_limits.json5`, which mirrors the robot model's joint limits, so the UI won't let you ask for an angle the arm can't physically reach. If the model's limits ever change, update that file and rebuild.
+Slider ranges come from the generation's description (`hardware_version` parameter): arm limits parse from the bundled URDF with the elbow held off its singularity floor, and the gripper spans the generation's jaw width. The UI won't let you ask for an angle the arm can't physically reach.
 
 ## Build
 
@@ -26,7 +26,7 @@ You can also run it alone against an existing backbone instance:
 peppy node run openarm_joint_commander:v1 --bind backbone@backbone_inst
 ```
 
-Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to fully open (0.044 m), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.
+Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to the generation's full jaw width (0.044 m on v1, 0.0697 m on v2), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.
 
 ## Troubleshooting
 

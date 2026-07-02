@@ -1,6 +1,6 @@
 # openarm_arm_mujoco
 
-Drives one side of the OpenArm V10 (7 joints) inside MuJoCo. It conforms to `openarm_arm:v1`, the same interface the real arm driver implements, so backbone and the UI work with it unchanged.
+Drives one side of the OpenArm (7 joints, either hardware generation) inside MuJoCo. It conforms to `openarm_arm_sim_passthrough:v1`, relabeling the backbone's governed setpoint stream onto the sim-internal passthrough topic, so backbone and the UI work with it unchanged.
 
 It attaches to the MuJoCo world that `openarm_robot_initializer_mujoco` owns, so that node has to be running first. Targets beyond a joint's physical range are clamped to the model's limits, so the arm always goes as far as it can and the result says so.
 

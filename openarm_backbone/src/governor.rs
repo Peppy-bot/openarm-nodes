@@ -564,17 +564,22 @@ fn dot(a: &[f64; DUAL_DOF], b: &[f64; DUAL_DOF]) -> f64 {
 mod tests {
     use super::*;
 
-    /// Materialize the bundled collision meshes so the file-based collision builder
-    /// can fit hulls; the URDF itself comes from `openarm_description::HardwareVersion::V1.urdf()`. Written
-    /// once into a unique tempdir held for the test process: `cargo test` runs these in
-    /// parallel, so re-writing per call would let one test truncate a mesh mid-read of
-    /// another's `build()`; a unique path also avoids clashing with a concurrent test
-    /// process on the same host.
-    fn fixture_meshes_dir() -> std::path::PathBuf {
-        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
-        DIR.get_or_init(|| {
+    /// Materialize a generation's bundled collision meshes so the file-based collision
+    /// builder can fit hulls; the URDF itself comes from the same `HardwareVersion`.
+    /// Written once per generation into a unique tempdir held for the test process:
+    /// `cargo test` runs these in parallel, so re-writing per call would let one test
+    /// truncate a mesh mid-read of another's `build()`; a unique path also avoids
+    /// clashing with a concurrent test process on the same host.
+    fn fixture_meshes_dir(version: openarm_description::HardwareVersion) -> std::path::PathBuf {
+        static V1_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static V2_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let cell = match version {
+            openarm_description::HardwareVersion::V1 => &V1_DIR,
+            openarm_description::HardwareVersion::V2 => &V2_DIR,
+        };
+        cell.get_or_init(|| {
             let dir = tempfile::tempdir().expect("create scratch dir for collision meshes");
-            openarm_description::HardwareVersion::V1.write_meshes_to(dir.path()).expect("materialize collision meshes");
+            version.write_meshes_to(dir.path()).expect("materialize collision meshes");
             dir
         })
         .path()
@@ -596,13 +601,19 @@ mod tests {
         )
     }
 
-    fn governor(enabled: bool) -> Governor {
-        let meshes_dir = fixture_meshes_dir();
+    fn governor_for(version: openarm_description::HardwareVersion, enabled: bool) -> Governor {
+        let meshes_dir = fixture_meshes_dir(version);
+        let (left_base, right_base) = match version {
+            openarm_description::HardwareVersion::V1 => ("openarm_left_link0", "openarm_right_link0"),
+            openarm_description::HardwareVersion::V2 => {
+                ("openarm_left_base_link", "openarm_right_base_link")
+            }
+        };
         Governor::build(
-            openarm_description::HardwareVersion::V1.urdf(),
+            version.urdf(),
             meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
-            "openarm_left_link0",
-            "openarm_right_link0",
+            left_base,
+            right_base,
             D_STOP,
             D_SAFE,
             MAX_JOINT_VELOCITY_RAD_S,
@@ -611,27 +622,17 @@ mod tests {
         .expect("build governor from bundled description")
     }
 
+    fn governor(enabled: bool) -> Governor {
+        governor_for(openarm_description::HardwareVersion::V1, enabled)
+    }
+
     #[test]
     fn v2_governor_builds_with_the_revolute_gripper() {
         // Regression: the OpenArm v2.0 revolute pinch gripper must not break the collision
         // model. Its finger links hang off revolute joints, which the builder now bounds by
         // sampling the arc (v1's prismatic fingers used the extremes). A build failure here
         // means the finger sweep is being rejected again.
-        let dir = tempfile::tempdir().expect("scratch dir for v2 collision meshes");
-        openarm_description::HardwareVersion::V2
-            .write_meshes_to(dir.path())
-            .expect("materialize v2 collision meshes");
-        Governor::build(
-            openarm_description::HardwareVersion::V2.urdf(),
-            dir.path().to_str().expect("meshes dir path is valid UTF-8"),
-            "openarm_left_base_link",
-            "openarm_right_base_link",
-            D_STOP,
-            D_SAFE,
-            MAX_JOINT_VELOCITY_RAD_S,
-            true,
-        )
-        .expect("v2 governor builds (revolute gripper fingers bounded by arc sampling)");
+        governor_for(openarm_description::HardwareVersion::V2, true);
     }
 
     #[test]
@@ -640,7 +641,7 @@ mod tests {
         // A tiny velocity makes the bound (max_joint_velocity * DT) 5e-4 rad, so any
         // real step exceeds it and the scan's velocity-limit assertion fires rather
         // than silently under-resolving the segment.
-        let meshes_dir = fixture_meshes_dir();
+        let meshes_dir = fixture_meshes_dir(openarm_description::HardwareVersion::V1);
         let mut g = Governor::build(
             openarm_description::HardwareVersion::V1.urdf(),
             meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
