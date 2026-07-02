@@ -2138,7 +2138,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openarm_can"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm#58720db4b13982864854322ae3c8f75329e06bb3"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm#3d3a761d5a962d8e340a5dadc7c95710a35ea9c5"
 dependencies = [
  "bindgen",
  "cc",
