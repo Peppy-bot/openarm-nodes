@@ -39,8 +39,9 @@ def _scene_path(hardware_version: str) -> Path:
 
 # Full-open jaw width (m) per generation: the bridge scales the aperture on the
 # gripper passthrough/state topics against each finger joint's DOF travel.
-# v2 is the modeled pad-gap width pending hardware calibration.
-_JAW_OPEN_M = {"v1": 0.044, "v2": 0.06}
+# Values mirror openarm_description::jaw_open_m; v2 is the modeled pad-gap
+# width pending hardware confirmation.
+_JAW_OPEN_M = {"v1": 0.044, "v2": 0.0697}
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
 
 _ready = threading.Event()

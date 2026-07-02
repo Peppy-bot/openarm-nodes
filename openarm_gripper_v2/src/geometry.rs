@@ -8,10 +8,10 @@ use openarm_can::v20;
 /// Fully-open jaw opening in meters. The revolute fingers reach [`OPEN_RAD`] at the motor;
 /// this is the corresponding jaw width.
 ///
-/// Placeholder pending hardware calibration of the finger linkage: measure the open jaw
-/// width and set this so the meters↔motor map is faithful. The motor-frame travel
-/// ([`OPEN_RAD`]) is the enactic reference and is correct; only this width is estimated.
-pub const OPEN_M: f64 = 0.06;
+/// Pad gap at full travel computed from the URDF pivots and the finger meshes' pad
+/// faces; confirm with one measurement on hardware. The motor-frame travel
+/// ([`OPEN_RAD`]) is the enactic reference and is correct.
+pub const OPEN_M: f64 = 0.0697;
 
 /// Motor angle in radians at full open; the closed end is 0. Sourced from openarm_can's
 /// v2 gripper constant (the motor opens toward a positive angle).
