@@ -63,14 +63,18 @@ const _: () = assert!(MONITOR_TRIP_FRACTION > 0.0 && MONITOR_TRIP_FRACTION < 1.0
 /// resolution fixed. Tied to the smallest hull feature the scan must resolve (a few
 /// mm of surface motion).
 const MAX_PROBE_ARC_RAD: f64 = 0.01;
-/// Probe-count floor: even a tiny step gets a dense scan. There is no fixed ceiling;
-/// the count scales with the step so the `MAX_PROBE_ARC_RAD` spacing holds for any
-/// step size, and `clip_to_floor` asserts the step never exceeds its velocity-limited
-/// bound, which is what caps the count.
-const SEGMENT_SAMPLES_MIN: usize = 16;
+/// Probe-count floor for near-zero steps, where the `MAX_PROBE_ARC_RAD` count
+/// rounds down to almost nothing. The spacing guarantee itself comes from the
+/// per-arc count (a full-speed step still gets `excursion / MAX_PROBE_ARC_RAD`
+/// probes); this floor only keeps a handful of probes on the smallest steps, so
+/// it is sized for per-tick cost at high control rates rather than density.
+/// There is no fixed ceiling; the count scales with the step, and
+/// `clip_to_floor` asserts the step never exceeds its velocity-limited bound,
+/// which is what caps the count.
+const SEGMENT_SAMPLES_MIN: usize = 4;
 
 /// Bisection iterations within a bracketing interval once the scan finds the first
-/// crossing: at the densest, `1/SEGMENT_SAMPLES_MIN / 2^8 ~= 1e-4` of the step.
+/// crossing: at the coarsest, `1/SEGMENT_SAMPLES_MIN / 2^8 ~= 1e-3` of the step.
 const FLOOR_BISECT_ITERS: usize = 8;
 
 /// Where the governor last sat, so throttle/stop/clear are logged on transition
@@ -282,7 +286,7 @@ impl Governor {
         // along the segment, so scan it rather than trusting either endpoint: a
         // single tick can pass through a pocket while both ends read clear.
         if d_now >= self.d_safe {
-            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, floor, dt) {
+            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, d_now, floor, dt) {
                 Clip::Clear => (Guard::Clear, *cand),
                 Clip::Clipped(q) => (Guard::Stopped, split(&q)),
             };
@@ -295,7 +299,8 @@ impl Governor {
         // backstop, since the first-order projection can still let surface curvature
         // carry the clamped step past it.
         let (projected14, throttled) = self.throttle_closing(&prev14, &cand14, &grad, d_now, dt);
-        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, floor, dt) {
+        let (governed14, limited) =
+            match self.clip_to_floor(&prev14, &projected14, d_now, floor, dt) {
             Clip::Clear => (projected14, throttled),
             Clip::Clipped(q) => (q, true),
         };
@@ -377,7 +382,7 @@ impl Governor {
         let Some(d_now) = self.distance_at(&prev14) else {
             return *prev;
         };
-        match self.clip_to_floor(&prev14, &cand14, self.step_floor(d_now), dt) {
+        match self.clip_to_floor(&prev14, &cand14, d_now, self.step_floor(d_now), dt) {
             Clip::Clear => split(&cand14),
             Clip::Clipped(q) => split(&q),
         }
@@ -469,11 +474,18 @@ impl Governor {
     /// fixed grid can step over one on a large jump) and bisects within that bracket
     /// for the boundary. A failed query counts as a breach (so a model-rejected
     /// configuration is never returned), retracting conservatively. Requires `prev`
-    /// itself to be clear (the caller's `d_now >= floor`).
+    /// itself to be clear (`d_now >= floor`, the caller's clearance at `prev`).
+    ///
+    /// Skips the scan outright when the step provably cannot reach the floor:
+    /// the model's Lipschitz step bound caps the clearance change anywhere along
+    /// the segment, so `d_now - floor > bound` means no interior point can cross.
+    /// This makes the common ticks (holding still, slow motion, ample clearance)
+    /// nearly free while fast in-band approaches keep the full scan.
     fn clip_to_floor(
         &mut self,
         prev: &[f64; DUAL_DOF],
         target: &[f64; DUAL_DOF],
+        d_now: f64,
         floor: f64,
         dt: f64,
     ) -> Clip {
@@ -497,6 +509,10 @@ impl Governor {
             max_excursion <= max_step * 1.01,
             "governed step {max_excursion:.4} rad exceeds the velocity-limited bound {max_step:.4} rad"
         );
+        let dq = split(&std::array::from_fn(|i| target[i] - prev[i]));
+        if d_now - floor > self.model.clearance_step_bound(&dq.left, &dq.right) {
+            return Clip::Clear;
+        }
         // One probe per `MAX_PROBE_ARC_RAD` of motion (floored for tiny steps); no fixed
         // ceiling, so the spacing guarantee holds for any step within the bound above.
         let samples =
