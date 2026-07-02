@@ -25,7 +25,9 @@ _CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
 class MujocoBridgeExtension:
     """Drives the engine from the typed command streams and publishes state."""
 
-    def __init__(self, model, data, io: SimTopicIO, state_rate_hz: int) -> None:
+    def __init__(
+        self, model, data, io: SimTopicIO, state_rate_hz: int, jaw_open_m: float
+    ) -> None:
         self._model = model
         self._data = data
         self._io = io
@@ -34,8 +36,14 @@ class MujocoBridgeExtension:
         # the physics step still run every tick.
         if state_rate_hz <= 0:
             raise ValueError(f"state_rate_hz must be positive, got {state_rate_hz}")
+        if not (jaw_open_m > 0.0):
+            raise ValueError(f"jaw_open_m must be positive, got {jaw_open_m}")
         self._telemetry_period_s = 1.0 / state_rate_hz
         self._last_publish_s = 0.0
+        # Full-open jaw width (m); finger targets and measured opening scale
+        # against each finger joint's own travel, read from the model at setup.
+        self._jaw_open_m = jaw_open_m
+        self._gripper_travels: dict[int, list[float]] = {}
 
         cfg = pyjson5.loads(_CONFIG_PATH.read_text())
         self._arms: list[dict] = cfg["arms"]
@@ -89,10 +97,29 @@ class MujocoBridgeExtension:
                     f"MujocoGripperSensor setup failed for gripper_id={gripper['gripper_id']}"
                 )
             self._gripper_sensors[gripper["gripper_id"]] = sensor
+            self._gripper_travels[gripper["gripper_id"]] = [
+                self._finger_travel(name) for name in gripper["fingers"]
+            ]
         logger.info(
             f"MujocoBridgeExtension ready with {len(self._arms)} arm(s), "
             f"{len(self._grippers)} gripper(s)"
         )
+
+    def _finger_travel(self, joint_name: str) -> float:
+        """Signed full-open travel of a finger joint from the model's own limit
+        range (prismatic meters or revolute radians; the right side's revolute
+        fingers open toward negative angles). Closed is 0 for every finger, so
+        one end of the range must be 0 and the other is the travel."""
+        import mujoco  # pylint: disable=C0415
+
+        jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        lo, hi = (float(v) for v in self._model.jnt_range[jid])
+        if min(abs(lo), abs(hi)) > 1e-9 or lo == hi:
+            raise RuntimeError(
+                f"finger joint '{joint_name}' range ({lo}, {hi}) does not run from"
+                " closed (0) to a full-open travel"
+            )
+        return lo + hi
 
     def step(self) -> None:
         import mujoco  # pylint: disable=C0415
@@ -124,9 +151,16 @@ class MujocoBridgeExtension:
             opening = self._io.latest_gripper_command(gripper["gripper_id"])
             if opening is None:
                 continue
-            # Both fingers hold half the aperture.
-            per_finger = opening / 2.0
-            self._actuator.write_targets({f: per_finger for f in gripper["fingers"]})
+            # Map the aperture (m) onto each finger's own signed travel, so the
+            # same command drives prismatic (v1) and revolute (v2) fingers.
+            fraction = opening / self._jaw_open_m
+            travels = self._gripper_travels[gripper["gripper_id"]]
+            self._actuator.write_targets(
+                {
+                    name: travel * fraction
+                    for name, travel in zip(gripper["fingers"], travels)
+                }
+            )
 
     def _publish_state(self) -> None:
         states = self._articulation.get_joint_states()
@@ -144,9 +178,14 @@ class MujocoBridgeExtension:
 
         for gripper_id, sensor in self._gripper_sensors.items():
             data = sensor.get_gripper_state()
-            if data and data["positions"]:
-                # Opening = total aperture = sum of finger positions.
-                self._io.publish_gripper_states(gripper_id, float(sum(data["positions"])))
+            travels = self._gripper_travels[gripper_id]
+            if data and len(data["positions"]) == len(travels):
+                # Aperture (m) = jaw width * mean per-finger travel fraction,
+                # the inverse of the command mapping above.
+                fractions = [q / t for q, t in zip(data["positions"], travels)]
+                self._io.publish_gripper_states(
+                    gripper_id, self._jaw_open_m * sum(fractions) / len(fractions)
+                )
 
     def shutdown(self) -> None:
         logger.info("MujocoBridgeExtension shutting down.")

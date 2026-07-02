@@ -25,9 +25,11 @@ class SimLauncher:
         stop: threading.Event,
         io,
         state_rate_hz: int,
+        jaw_open_m: float,
     ) -> None:
         self._sim_app = sim_app
         self._usd_path = usd_path
+        self._jaw_open_m = jaw_open_m
         self._ready = ready
         # `stop` is flipped by the NodeBuilder thread's finally when peppylib's
         # shutdown service runs (peppy node stop, SIGTERM). The sim loop owns
@@ -45,7 +47,9 @@ class SimLauncher:
             self._setup_lighting()
             self._warmup()
             self._start_timeline()
-            self._extension = IsaacBridgeExtension(self._io, self._state_rate_hz)
+            self._extension = IsaacBridgeExtension(
+                self._io, self._state_rate_hz, self._jaw_open_m
+            )
             logger.info("Scene loaded — waiting for bridge setup")
             self._run_loop()
         except FileNotFoundError as exc:

@@ -9,6 +9,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 peppygen = { path = ".peppy/libs/peppygen" }
 peppylib = { path = ".peppy/libs/peppylib" }
+openarm_description = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "rename/openarm01-to-openarm", package = "openarm_description" }
 
 [[bin]]
 name = "openarm_gripper_isaac"

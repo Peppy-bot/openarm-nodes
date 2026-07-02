@@ -38,13 +38,20 @@ class IsaacBridgeExtension:
     is ready, step() is a no-op except for the setup retry.
     """
 
-    def __init__(self, io: SimTopicIO, state_rate_hz: int) -> None:
+    def __init__(self, io: SimTopicIO, state_rate_hz: int, jaw_open_m: float) -> None:
         self._io = io
         # Telemetry is throttled to state_rate_hz: serializing every reader at
         # the physics tick saturates the single sim thread. Writers and the
         # physics step still run every tick.
         if state_rate_hz <= 0:
             raise ValueError(f"state_rate_hz must be positive, got {state_rate_hz}")
+        if not (jaw_open_m > 0.0):
+            raise ValueError(f"jaw_open_m must be positive, got {jaw_open_m}")
+        # Full-open jaw width (m); finger targets and measured opening scale
+        # against each finger joint's own travel, read from the articulation's
+        # DOF limits at setup.
+        self._jaw_open_m = jaw_open_m
+        self._gripper_travels: dict[int, list[float]] = {}
         self._telemetry_period_s = 1.0 / state_rate_hz
         self._last_publish_s = 0.0
 
@@ -119,6 +126,24 @@ class IsaacBridgeExtension:
             raise RuntimeError(
                 f"sim_bridge.json5 references joints not in the Isaac articulation: {missing}"
             )
+        limits = self._articulation.get_joint_limits()
+        if limits is None:
+            return False
+        lower, upper = limits
+        for gripper in self._grippers:
+            travels = []
+            for name in gripper["fingers"]:
+                lo, hi = lower[self._joint_index[name]], upper[self._joint_index[name]]
+                # Closed is 0 for every finger, so one end of the range must be 0
+                # and the other is the signed full-open travel (prismatic meters
+                # or revolute radians; the right side opens toward negative).
+                if min(abs(lo), abs(hi)) > 1e-9 or lo == hi:
+                    raise RuntimeError(
+                        f"finger joint '{name}' range ({lo}, {hi}) does not run"
+                        " from closed (0) to a full-open travel"
+                    )
+                travels.append(lo + hi)
+            self._gripper_travels[gripper["gripper_id"]] = travels
         self._ready = True
         logger.info(
             f"IsaacBridgeExtension ready with {len(self._arms)} arm(s), "
@@ -164,10 +189,15 @@ class IsaacBridgeExtension:
             opening = self._io.latest_gripper_command(gripper["gripper_id"])
             if opening is None:
                 continue
-            # Both fingers hold half the aperture.
-            per_finger = opening / 2.0
+            # Map the aperture (m) onto each finger's own signed travel, so the
+            # same command drives prismatic (v1) and revolute (v2) fingers.
+            fraction = opening / self._jaw_open_m
+            travels = self._gripper_travels[gripper["gripper_id"]]
             self._gripper_actuators[gripper["gripper_id"]].write_targets(
-                {f: per_finger for f in gripper["fingers"]}
+                {
+                    name: travel * fraction
+                    for name, travel in zip(gripper["fingers"], travels)
+                }
             )
 
     def _publish_state(self) -> None:
@@ -186,9 +216,14 @@ class IsaacBridgeExtension:
 
         for gripper_id, sensor in self._gripper_sensors.items():
             data = sensor.get_gripper_state()
-            if data and data["positions"]:
-                # Opening = total aperture = sum of finger positions.
-                self._io.publish_gripper_states(gripper_id, float(sum(data["positions"])))
+            travels = self._gripper_travels[gripper_id]
+            if data and len(data["positions"]) == len(travels):
+                # Aperture (m) = jaw width * mean per-finger travel fraction,
+                # the inverse of the command mapping above.
+                fractions = [q / t for q, t in zip(data["positions"], travels)]
+                self._io.publish_gripper_states(
+                    gripper_id, self._jaw_open_m * sum(fractions) / len(fractions)
+                )
 
     def shutdown(self) -> None:
         logger.info("IsaacBridgeExtension shutting down.")

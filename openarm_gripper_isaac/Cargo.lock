@@ -2081,9 +2081,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openarm_description"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=rename%2Fopenarm01-to-openarm#9c068f216b944e7c714aba7efc9c021a38026bbf"
+
+[[package]]
 name = "openarm_gripper_isaac"
 version = "0.1.0"
 dependencies = [
+ "openarm_description",
  "peppygen",
  "peppylib",
  "tokio",

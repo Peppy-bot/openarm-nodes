@@ -23,17 +23,24 @@ logger = logging.getLogger(__name__)
 _ASSETS_DIR = Path(
     os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets"))
 )
+def _version(hardware_version: str) -> str:
+    version = hardware_version.lower()
+    if version not in ("v1", "v2"):
+        raise ValueError(f"hardware_version must be v1 or v2, got {hardware_version!r}")
+    return version
+
+
 def _scene_path(hardware_version: str) -> Path:
-    # The v1 and v2 scenes are separate USD files (openarm_bimanual_v1.usd / _v2.usd);
-    # their meshes resolve from the same assets dir (PEPPY_ROBOT_ASSETS_DIR), materialized
-    # from openarm_description so nothing is baked into the container image.
-    versioned = _ASSETS_DIR / f"openarm_bimanual_{hardware_version}.usd"
-    # v1 falls back to the legacy unversioned scene so an image that predates per-version
-    # scenes still launches. v2 has no fallback: a missing v2 scene must fail loudly rather
-    # than silently simulate the v1 geometry.
-    if hardware_version == "v1" and not versioned.exists():
-        return _ASSETS_DIR / "openarm_bimanual.usd"
-    return versioned
+    # The v1 and v2 scenes are separate USD files (openarm_bimanual_v1.usd /
+    # _v2.usd) in the base image's assets dir. A missing scene fails loudly at
+    # load rather than silently simulating the other geometry.
+    return _ASSETS_DIR / f"openarm_bimanual_{_version(hardware_version)}.usd"
+
+
+# Full-open jaw width (m) per generation: the bridge scales the aperture on the
+# gripper passthrough/state topics against each finger joint's DOF travel.
+# v2 is the modeled pad-gap width pending hardware calibration.
+_JAW_OPEN_M = {"v1": 0.044, "v2": 0.06}
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
 
 _ready = threading.Event()
@@ -140,6 +147,7 @@ def main() -> None:
         _stop,
         handoff.io,
         handoff.state_rate_hz,
+        _JAW_OPEN_M[_version(handoff.hardware_version)],
     ).run()
 
 
