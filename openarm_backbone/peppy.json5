@@ -35,7 +35,8 @@
         // Measured gripper opening of both grippers, so the collision governor can
         // place the per-finger hulls at the live opening instead of their full
         // swept envelope. Wildcard + told apart by gripper_id; consumed every tick
-        // like arm_states, falling back to fully-open until the first reading.
+        // like arm_states, and the hub waits for each side's first reading before
+        // streaming (the same gate as the arms' first measured state).
         {
           name: "openarm_gripper_states",
           tag: "v1",

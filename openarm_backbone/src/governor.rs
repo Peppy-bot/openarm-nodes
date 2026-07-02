@@ -279,14 +279,13 @@ impl Governor {
             };
         let prev14 = concat(prev);
         let cand14 = concat(cand);
-        let floor = self.step_floor(d_now);
 
         // Outside the influence zone the barrier imposes no closing limit, but the
         // candidate must still not cross the stop floor. Distance is not monotone
         // along the segment, so scan it rather than trusting either endpoint: a
         // single tick can pass through a pocket while both ends read clear.
         if d_now >= self.d_safe {
-            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, d_now, floor, dt) {
+            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, d_now, dt) {
                 Clip::Clear => (Guard::Clear, *cand),
                 Clip::Clipped(q) => (Guard::Stopped, split(&q)),
             };
@@ -299,8 +298,7 @@ impl Governor {
         // backstop, since the first-order projection can still let surface curvature
         // carry the clamped step past it.
         let (projected14, throttled) = self.throttle_closing(&prev14, &cand14, &grad, d_now, dt);
-        let (governed14, limited) =
-            match self.clip_to_floor(&prev14, &projected14, d_now, floor, dt) {
+        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, d_now, dt) {
             Clip::Clear => (projected14, throttled),
             Clip::Clipped(q) => (q, true),
         };
@@ -382,7 +380,7 @@ impl Governor {
         let Some(d_now) = self.distance_at(&prev14) else {
             return *prev;
         };
-        match self.clip_to_floor(&prev14, &cand14, d_now, self.step_floor(d_now), dt) {
+        match self.clip_to_floor(&prev14, &cand14, d_now, dt) {
             Clip::Clear => split(&cand14),
             Clip::Clipped(q) => split(&q),
         }
@@ -466,15 +464,17 @@ impl Governor {
     }
 
     /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
-    /// point where the straight segment drops below `floor`, or [`Clip::Clear`] if
-    /// every probed point stays at or above it. Bimanual distance is not monotone
-    /// along a joint-space segment, so this probes interior points (one per
-    /// `MAX_PROBE_ARC_RAD` of joint motion, at least `SEGMENT_SAMPLES_MIN`) to
-    /// bracket the first breach (an endpoint check alone can step over a pocket, and a
-    /// fixed grid can step over one on a large jump) and bisects within that bracket
-    /// for the boundary. A failed query counts as a breach (so a model-rejected
-    /// configuration is never returned), retracting conservatively. Requires `prev`
-    /// itself to be clear (`d_now >= floor`, the caller's clearance at `prev`).
+    /// point where the straight segment drops below the step floor, or
+    /// [`Clip::Clear`] if every probed point stays at or above it. `d_now` is the
+    /// clearance at `prev`; the floor is [`step_floor`](Self::step_floor)`(d_now)`,
+    /// so `prev` itself is at or above it by construction. Bimanual distance is
+    /// not monotone along a joint-space segment, so this probes interior points
+    /// (one per `MAX_PROBE_ARC_RAD` of joint motion, at least
+    /// `SEGMENT_SAMPLES_MIN`) to bracket the first breach (an endpoint check
+    /// alone can step over a pocket, and a fixed grid can step over one on a
+    /// large jump) and bisects within that bracket for the boundary. A failed
+    /// query counts as a breach (so a model-rejected configuration is never
+    /// returned), retracting conservatively.
     ///
     /// Skips the scan outright when the step provably cannot reach the floor:
     /// the model's Lipschitz step bound caps the clearance change anywhere along
@@ -486,13 +486,9 @@ impl Governor {
         prev: &[f64; DUAL_DOF],
         target: &[f64; DUAL_DOF],
         d_now: f64,
-        floor: f64,
         dt: f64,
     ) -> Clip {
-        debug_assert!(
-            self.distance_at(prev).is_none_or(|d| d >= floor),
-            "clip_to_floor requires prev to be clear of the floor"
-        );
+        let floor = self.step_floor(d_now);
         let point_at = |t: f64| -> [f64; DUAL_DOF] {
             std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i]))
         };
@@ -652,11 +648,42 @@ mod tests {
 
     #[test]
     fn v2_governor_builds_with_the_revolute_gripper() {
-        // Regression: the OpenArm v2.0 revolute pinch gripper must not break the collision
-        // model. Its finger links hang off revolute joints, which the builder now bounds by
-        // sampling the arc (v1's prismatic fingers used the extremes). A build failure here
-        // means the finger sweep is being rejected again.
+        // The v2 revolute finger joints must parse into live-placed finger
+        // bodies; a build failure here means the revolute finger path regressed.
         governor_for(openarm_description::HardwareVersion::V2, true);
+    }
+
+    #[test]
+    fn v2_finger_opening_changes_live_clearance_on_both_sides() {
+        // The real v2 assets, not a fixture: sweep the wrists inward until a
+        // finger (ee_link) is the nearest body with the grippers open, then pin
+        // that closing the grippers strictly recovers clearance. v2 mirrors its
+        // right gripper by flipping the finger joint limit range, so this fails
+        // if either side's open/closed sense is read off the URDF limit order
+        // instead of the meshes.
+        let mut g = governor_for(openarm_description::HardwareVersion::V2, true);
+        let pose_at = |t: f64| {
+            let mut p = home();
+            p.left[2] = t;
+            p.right[2] = -t;
+            p
+        };
+        g.set_gripper_openings(1.0, 1.0);
+        let pose = (0..=40)
+            .map(|i| pose_at(i as f64 * 0.05))
+            .find(|p| {
+                g.proximity(p).is_some_and(|n| {
+                    n.link_a.contains("ee_link") || n.link_b.contains("ee_link")
+                })
+            })
+            .expect("some wrists-inward pose has a finger as the nearest body when open");
+        let d_open = g.proximity(&pose).expect("query").distance;
+        g.set_gripper_openings(0.0, 0.0);
+        let d_closed = g.proximity(&pose).expect("query").distance;
+        assert!(
+            d_closed > d_open + 1e-4,
+            "closing the v2 grippers should recover clearance: open {d_open:+.4}, closed {d_closed:+.4}"
+        );
     }
 
     #[test]

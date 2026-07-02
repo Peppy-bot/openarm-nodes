@@ -20,7 +20,7 @@ use tracing::{error, warn};
 
 use crate::{JointVec, Side};
 
-/// At most one unknown-`arm_id` warning per stream in this window, so a misrouted
+/// At most one unknown-id warning per stream in this window, so a misrouted
 /// producer is visible in the log without flooding it at the stream rate.
 const UNKNOWN_ARM_WARN_PERIOD: Duration = Duration::from_secs(1);
 
@@ -50,21 +50,22 @@ pub struct MeasuredState {
     pub positions: JointVec,
 }
 
-/// The latest measured opening of one gripper, fed by the `gripper_states` stream:
-/// the pad-gap width in metres. Consumed every tick like the measured arm state:
-/// the coordinator maps the width to a `[0, 1]` opening fraction and places the
-/// collision fingers there (fully open until the first reading arrives).
+/// The latest measured opening of one gripper as a fraction of the full jaw
+/// travel (0 = closed, 1 = fully open), parsed from the `gripper_states` width
+/// at ingestion so downstream consumers never see raw hardware units. Consumed
+/// every tick like the measured arm state; the collision model clamps into
+/// `[0, 1]` when placing the fingers.
 #[derive(Clone, Copy)]
 pub struct GripperOpening {
-    pub width_m: f64,
+    pub fraction: f64,
 }
 
-/// Warn that a message carried an out-of-range `arm_id`, throttled to at most once
-/// per [`UNKNOWN_ARM_WARN_PERIOD`].
-fn warn_unknown_arm(stream: &str, arm_id: u8, last: &mut Option<Instant>) {
+/// Warn that a message carried an out-of-range id (`field` names it: `arm_id`
+/// or `gripper_id`), throttled to at most once per [`UNKNOWN_ARM_WARN_PERIOD`].
+fn warn_unknown_id(stream: &str, field: &str, id: u8, last: &mut Option<Instant>) {
     let now = Instant::now();
     if last.is_none_or(|t| now.duration_since(t) >= UNKNOWN_ARM_WARN_PERIOD) {
-        warn!("{stream}: dropping message for unknown arm_id {arm_id}");
+        warn!("{stream}: dropping message for unknown {field} {id}");
         *last = Some(now);
     }
 }
@@ -93,7 +94,7 @@ pub async fn run_joint_command_listener(
             }
         };
         let Some(idx) = Side::from_arm_id(msg.arm_id).map(Side::index) else {
-            warn_unknown_arm("arm_joint_commands", msg.arm_id, &mut last_unknown_warn);
+            warn_unknown_id("arm_joint_commands", "arm_id", msg.arm_id, &mut last_unknown_warn);
             continue;
         };
         if !msg.positions.iter().all(|v| v.is_finite()) {
@@ -136,7 +137,7 @@ pub async fn run_joint_state_listener(
             }
         };
         let Some(idx) = Side::from_arm_id(msg.arm_id).map(Side::index) else {
-            warn_unknown_arm("arm_states", msg.arm_id, &mut last_unknown_warn);
+            warn_unknown_id("arm_states", "arm_id", msg.arm_id, &mut last_unknown_warn);
             continue;
         };
         let finite = msg
@@ -158,12 +159,13 @@ pub async fn run_joint_state_listener(
 }
 
 /// Receive `gripper_states` forever, keeping the latest measured opening per
-/// gripper. A non-finite position is dropped so the coordinator never places the
-/// collision fingers on a bad reading (it falls back to fully open when no fresh
-/// reading stands). The `force` field is not used by the governor.
+/// gripper as a fraction of `jaw_open_m` (the hardware's full jaw travel). A
+/// non-finite position is dropped so the coordinator never places the collision
+/// fingers on a bad reading. The `force` field is not used by the governor.
 pub async fn run_gripper_state_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<GripperOpening>>; 2],
+    jaw_open_m: f64,
 ) {
     let mut sub = match grippers_gripper_states::subscribe(&runner).await {
         Ok(s) => s,
@@ -181,7 +183,7 @@ pub async fn run_gripper_state_listener(
             }
         };
         let Some(idx) = Side::from_arm_id(msg.gripper_id).map(Side::index) else {
-            warn_unknown_arm("gripper_states", msg.gripper_id, &mut last_unknown_warn);
+            warn_unknown_id("gripper_states", "gripper_id", msg.gripper_id, &mut last_unknown_warn);
             continue;
         };
         if !msg.position.is_finite() {
@@ -192,7 +194,7 @@ pub async fn run_gripper_state_listener(
             continue;
         }
         latest[idx].send_replace(Some(GripperOpening {
-            width_m: msg.position,
+            fraction: msg.position / jaw_open_m,
         }));
     }
 }

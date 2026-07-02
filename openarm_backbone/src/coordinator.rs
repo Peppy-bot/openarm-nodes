@@ -29,11 +29,6 @@ use crate::{ArmPair, JointVec, Side};
 /// indefinite quiet stall.
 const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 
-/// The opening fraction the fingers sit at until the first gripper reading
-/// arrives: fully open, the widest finger envelope (analogous to the arm's
-/// measured state falling back to the held setpoint before its first reading).
-const FULLY_OPEN: f64 = 1.0;
-
 /// One arm's inbound channels into the coordinator: the operator command stream,
 /// the measured state, the measured gripper opening, the accepted-goal queue, and
 /// the single-flight busy flag.
@@ -49,7 +44,6 @@ pub struct ArmChannels {
 /// the node's cancellation token fires; returns `Err` if a publisher cannot be
 /// declared at bringup. Any return takes the node down (the supervisor in `main`
 /// treats it as fatal).
-#[allow(clippy::too_many_arguments)] // distinct loop inputs: runtime, governor, planners, channels, config, timing, token
 pub async fn run(
     runner: Arc<NodeRunner>,
     mut governor: Governor,
@@ -57,7 +51,6 @@ pub async fn run(
     mut channels: ArmPair<ArmChannels>,
     governor_config: watch::Receiver<GovernorConfig>,
     cycle_period: Duration,
-    jaw_open_m: f64,
     token: CancellationToken,
 ) -> peppygen::Result<()> {
     let publisher = match arm_governed_setpoints::declare_publisher(&runner).await {
@@ -135,10 +128,14 @@ pub async fn run(
         // Place the collision fingers at each gripper's live opening so the barrier
         // sees the fingers where they actually are, not their full swept envelope.
         // Treated like the measured arm state: the latest reading is used every
-        // tick, falling back to fully open only before the first reading arrives.
+        // tick, and `seed` gated streaming on each side's first reading, so the
+        // fully-open default below is a defensive fallback only.
+        let opening = |gripper: &watch::Receiver<Option<GripperOpening>>| {
+            gripper.borrow().map_or(1.0, |g| g.fraction)
+        };
         governor.set_gripper_openings(
-            opening_fraction(*channels.left.gripper.borrow(), jaw_open_m),
-            opening_fraction(*channels.right.gripper.borrow(), jaw_open_m),
+            opening(&channels.left.gripper),
+            opening(&channels.right.gripper),
         );
         let governed = governor.govern(&prev, &candidate, &measured, dt);
 
@@ -188,38 +185,22 @@ pub async fn run(
 /// state listener task), so no measurement will ever arrive: seeding is abandoned.
 struct Shutdown;
 
-/// Wait for the arm's first measured state and seed the planner's held setpoint
-/// there (clamped into the joint limits, so a power-up pose past a soft limit does
-/// not anchor the hub off-limit), so the hub never publishes a setpoint before a
-/// real measurement exists.
-/// Warns periodically while an arm stays silent so the wait is visible in the log;
-/// `Err(Shutdown)` if the measured-state channel closes first.
+/// Wait for the arm's first measured state and first gripper opening, then seed
+/// the planner's held setpoint from the measured pose (clamped into the joint
+/// limits, so a power-up pose past a soft limit does not anchor the hub
+/// off-limit). Gating on both means the hub never publishes a setpoint before a
+/// real arm measurement exists, and never governs on the fully-open finger
+/// default while the real jaws might be closed (open placement vacates the
+/// between-jaws space a closed finger occupies).
+/// Warns periodically while either stays silent so the wait is visible in the
+/// log; `Err(Shutdown)` if a channel closes first.
 async fn seed(
     channels: &mut ArmChannels,
     planner: &mut Planner,
     side: Side,
 ) -> Result<(), Shutdown> {
-    loop {
-        match tokio::time::timeout(
-            SEED_WAIT_WARN_PERIOD,
-            channels.measured.wait_for(Option::is_some),
-        )
-        .await
-        {
-            Ok(Ok(_)) => break,
-            Ok(Err(_)) => {
-                error!(
-                    "{} arm measured-state channel closed before first state",
-                    side.label()
-                );
-                return Err(Shutdown);
-            }
-            Err(_) => warn!(
-                "{} arm has not reported measured state yet; hub waiting to stream",
-                side.label()
-            ),
-        }
-    }
+    wait_for_first(&mut channels.measured, side, "arm measured state").await?;
+    wait_for_first(&mut channels.gripper, side, "gripper opening").await?;
     let q0 = channels
         .measured
         .borrow()
@@ -227,6 +208,29 @@ async fn seed(
         .positions;
     planner.seed_from_measured(q0);
     Ok(())
+}
+
+/// Block until `latest` holds its first value, warning every
+/// [`SEED_WAIT_WARN_PERIOD`] while `what` stays silent; `Err(Shutdown)` if the
+/// channel closes first (its listener task died).
+async fn wait_for_first<T>(
+    latest: &mut watch::Receiver<Option<T>>,
+    side: Side,
+    what: &str,
+) -> Result<(), Shutdown> {
+    loop {
+        match tokio::time::timeout(SEED_WAIT_WARN_PERIOD, latest.wait_for(Option::is_some)).await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(_)) => {
+                error!("{} {what} channel closed before its first value", side.label());
+                return Err(Shutdown);
+            }
+            Err(_) => warn!(
+                "{} {what} not reported yet; hub waiting to stream",
+                side.label()
+            ),
+        }
+    }
 }
 
 /// Advance one arm's planner to its candidate setpoint for this tick: anchor on the
@@ -249,41 +253,3 @@ async fn tick_arm(channels: &mut ArmChannels, planner: &mut Planner, now: Instan
         .await
 }
 
-/// Map a measured gripper opening to the `[0, 1]` fraction the collision model
-/// places its fingers at (0 = closed, 1 = fully open): `width / jaw_open_m`,
-/// clamped. A missing reading (none received yet) falls back to [`FULLY_OPEN`],
-/// the widest, most conservative envelope.
-fn opening_fraction(reading: Option<GripperOpening>, jaw_open_m: f64) -> f64 {
-    match reading {
-        Some(g) => (g.width_m / jaw_open_m).clamp(0.0, 1.0),
-        None => FULLY_OPEN,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const JAW_OPEN_M: f64 = 0.044;
-
-    #[test]
-    fn a_reading_maps_width_to_a_clamped_fraction() {
-        let half = GripperOpening {
-            width_m: JAW_OPEN_M / 2.0,
-        };
-        assert!((opening_fraction(Some(half), JAW_OPEN_M) - 0.5).abs() < 1e-9);
-        // Out-of-range widths clamp into [0, 1] rather than escaping the finger travel.
-        let over = GripperOpening {
-            width_m: JAW_OPEN_M * 1.5,
-        };
-        assert_eq!(opening_fraction(Some(over), JAW_OPEN_M), 1.0);
-        let under = GripperOpening { width_m: -0.01 };
-        assert_eq!(opening_fraction(Some(under), JAW_OPEN_M), 0.0);
-    }
-
-    #[test]
-    fn a_missing_reading_falls_back_to_fully_open() {
-        // No gripper telemetry yet: the fingers sit at the widest envelope.
-        assert_eq!(opening_fraction(None, JAW_OPEN_M), FULLY_OPEN);
-    }
-}

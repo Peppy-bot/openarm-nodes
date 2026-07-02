@@ -254,7 +254,6 @@ fn main() -> Result<()> {
                 channels,
                 config_rx,
                 cycle_period,
-                hardware_version.jaw_open_m(),
                 token.clone(),
             ));
             set.spawn(actions::arm::run_move_arm_joints(
@@ -285,7 +284,11 @@ fn main() -> Result<()> {
             );
             spawn_listener(
                 &mut set,
-                streams::run_gripper_state_listener(runner.clone(), [grip_tx0, grip_tx1]),
+                streams::run_gripper_state_listener(
+                    runner.clone(),
+                    [grip_tx0, grip_tx1],
+                    hardware_version.jaw_open_m(),
+                ),
             );
             spawn_listener(
                 &mut set,
