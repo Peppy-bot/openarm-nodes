@@ -18,8 +18,8 @@ One instance drives one side. `gripper_id` picks the side (0 = left, 1 = right),
 
 ```sh
 peppy node run openarm_robot_initializer_mujoco:v1 -i sim
-peppy node run openarm_gripper_mujoco:v1 gripper_id=0 -i left_grip_inst --bind sim@sim
-peppy node run openarm_gripper_mujoco:v1 gripper_id=1 -i right_grip_inst --bind sim@sim
+peppy node run openarm_gripper_mujoco:v1 gripper_id=0 hardware_version=v1 control_rate_hz=100 stream_timeout_s=0.5 -i left_grip_inst --bind sim@sim
+peppy node run openarm_gripper_mujoco:v1 gripper_id=1 hardware_version=v1 control_rate_hz=100 stream_timeout_s=0.5 -i right_grip_inst --bind sim@sim
 ```
 
 For the full stack, with the browser UI driving both arms and grippers, use the launcher instead; the [top-level README](../README.md) has the complete sequence:

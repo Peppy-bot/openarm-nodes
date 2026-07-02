@@ -15,14 +15,14 @@ export RCLONE_S3_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY:?RCLONE_S3_SEC
 # ── Version manifest ──────────────────────────────────────────────────────────
 ISAAC_VERSION="5.1.0"   # mirrors nvcr.io/nvidia/isaac-sim upstream version
 MUJOCO_VERSION="3.8.1"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
-IMAGE_REV="10"           # bump when image content changes without an upstream version bump
+IMAGE_REV="12"           # bump when image content changes without an upstream version bump
 IMAGE_NAMESPACE="jaredpeppy"  # Docker Hub namespace these base images are pushed to
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-ISAAC_IMAGE="${IMAGE_NAMESPACE}/openarm01-isaac-sim:${ISAAC_VERSION}-${IMAGE_REV}"
-MUJOCO_IMAGE="${IMAGE_NAMESPACE}/openarm01-mujoco-sim:${MUJOCO_VERSION}-${IMAGE_REV}"
+ISAAC_IMAGE="${IMAGE_NAMESPACE}/openarm-isaac-sim:${ISAAC_VERSION}-${IMAGE_REV}"
+MUJOCO_IMAGE="${IMAGE_NAMESPACE}/openarm-mujoco-sim:${MUJOCO_VERSION}-${IMAGE_REV}"
 
 echo "==> Building Isaac base image (${ISAAC_IMAGE})..."
 DOCKER_BUILDKIT=1 docker build \
@@ -49,4 +49,4 @@ docker push "${MUJOCO_IMAGE}"
 
 echo "==> Done."
 echo "    Update apptainer.def From: tags to match, then run:"
-echo "    peppy node build openarm01_robot_initializer:v1"
+echo "    peppy node build openarm_robot_initializer_mujoco:v1 (and _isaac)"
