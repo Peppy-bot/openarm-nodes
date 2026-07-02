@@ -37,4 +37,4 @@ Isaac isn't up yet; it keeps loading for a while after starting. Watch it with `
 That's success: the fingers closed onto something (or hit fully open) before reaching the exact target, which is exactly how gripping is supposed to work.
 
 **A goal is rejected with "position out of range"**
-`move_gripper` accepts 0.0 to 0.044 meters of total aperture.
+`move_gripper` accepts 0.0 up to the instance's jaw width: 0.044 meters on v1, 0.0697 meters on v2.
