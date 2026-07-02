@@ -11,7 +11,7 @@
 | [`openarm_backbone`](./openarm_backbone) | routes goals to the correct side |
 | [`openarm_joint_commander`](./openarm_joint_commander) | browser control panel |
 
-Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same interface. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter. The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
+Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same interface. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter (`"v1"` or `"v2"`). The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
 
 This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickest way to see everything working.
 
