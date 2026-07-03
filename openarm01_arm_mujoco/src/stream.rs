@@ -1,18 +1,20 @@
-// Listens for streamed joint setpoints (openarm01_joint_command_source) and
-// keeps the latest one addressed to this arm in a watch channel for the follow
-// loop. A message with any non-finite position is dropped, so a producer gone
-// bad lets the follow lock time out instead of driving the arm.
+// Listens for streamed joint setpoints from the paired commander (the
+// `commander` pairing slot of openarm01_arm_joint_link) and keeps the latest
+// one in a watch channel for the follow loop. Subscribing while unpaired is
+// legal: the subscription stays silent until a commander pairs, and only the
+// paired peer's messages surface, so there is no arm_id filter. A message
+// with any non-finite position is dropped, so a commander gone bad lets the
+// follow lock time out instead of driving the arm.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::commander_joint_commands;
+use peppygen::peers::commander::joint_commands;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tracing::{error, warn};
 
-use crate::config::ArmId;
 use crate::trajectory::JointVec;
 
 #[derive(Clone, Copy)]
@@ -23,11 +25,10 @@ pub struct JointCommand {
 
 pub async fn run(
     runner: Arc<NodeRunner>,
-    arm_id: ArmId,
     latest: watch::Sender<Option<JointCommand>>,
     token: CancellationToken,
 ) {
-    let mut subscription = match commander_joint_commands::subscribe(&runner).await {
+    let mut subscription = match joint_commands::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "joint_commands subscribe");
@@ -47,9 +48,6 @@ pub async fn run(
                 continue;
             }
         };
-        if msg.arm_id != arm_id.raw() {
-            continue;
-        }
         if !msg.positions.iter().all(|v| v.is_finite()) {
             warn!("joint_commands: dropping message with non-finite positions");
             continue;

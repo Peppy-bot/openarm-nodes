@@ -1,21 +1,25 @@
 // Always-on command publisher. For each enabled arm and gripper, streams its
-// target setpoint at command_rate_hz so the node follows it; a disabled side
-// emits nothing, so the node's stream timeout lapses and it holds. Re-publishing
-// every tick (even an unchanged target) keeps the node's producer lock alive
-// between operator inputs. The arm/gripper clamps and rate-limits what it
-// receives, so this only has to deliver the latest setpoint.
+// target setpoint at command_rate_hz on that side's pairing slot so the paired
+// node follows it; a disabled side emits nothing, so the node's stream timeout
+// lapses and it holds. Re-publishing every tick (even an unchanged target)
+// keeps the paired node's stream watchdog alive between operator inputs. The
+// arm/gripper clamps and rate-limits what it receives, so this only has to
+// deliver the latest setpoint. Publishing on an unpaired slot is a legal
+// no-op, so an operator enabling a side before its peer is paired is harmless.
 //
-// Each side+channel runs its own publish task on its own interval, sharing a
-// cloneable lock-free publisher per topic (one zenoh session). A single shared
-// loop publishing Left then Right would leave Right permanently second (zenoh
-// publish resolves synchronously), so independent tasks avoid that bias.
+// Each side+channel runs its own publish task on its own interval, with its
+// own slot-scoped publisher. A single shared loop publishing Left then Right
+// would leave Right permanently second (zenoh publish resolves synchronously),
+// so independent tasks avoid that bias.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm01_gripper_command_source::v1::gripper_commands;
-use peppygen::emitted_topics::openarm01_joint_command_source::v1::joint_commands;
+use peppygen::peers::left_arm::joint_commands as left_joint_commands;
+use peppygen::peers::left_gripper::gripper_commands as left_gripper_commands;
+use peppygen::peers::right_arm::joint_commands as right_joint_commands;
+use peppygen::peers::right_gripper::gripper_commands as right_gripper_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
@@ -29,21 +33,52 @@ pub async fn run(
     command_rate_hz: u32,
     token: CancellationToken,
 ) {
-    let arm_pub = match joint_commands::declare_publisher(&runner).await {
+    // One slot-scoped publisher per side+channel; each stamps its own slot's
+    // link_id on the wire, so the two arms' streams stay fully isolated.
+    let left_arm_pub = match left_joint_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare joint_commands publisher: {e}"),
+        Err(e) => return error!("declare left_arm joint_commands publisher: {e}"),
     };
-    let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
+    let right_arm_pub = match right_joint_commands::declare_publisher(&runner).await {
         Ok(p) => p,
-        Err(e) => return error!("declare gripper_commands publisher: {e}"),
+        Err(e) => return error!("declare right_arm joint_commands publisher: {e}"),
+    };
+    let left_gripper_pub = match left_gripper_commands::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => return error!("declare left_gripper gripper_commands publisher: {e}"),
+    };
+    let right_gripper_pub = match right_gripper_commands::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => return error!("declare right_gripper gripper_commands publisher: {e}"),
     };
 
+    type ArmBuilder = Box<dyn Fn([f64; 7]) -> Result<Payload, String> + Send>;
+    type GripperBuilder = Box<dyn Fn(f64) -> Result<Payload, String> + Send>;
+
     let mut tasks = Vec::new();
-    for side in [Side::Left, Side::Right] {
-        // Arm: stream the 7-joint setpoint while enabled.
+    // The four side+channel streams, each with its slot publisher and a
+    // builder producing that slot's message (no arm_id / gripper_id: the
+    // pairing scopes each stream to its peer).
+    let arm_channels: [(Side, TopicPublisher, ArmBuilder); 2] = [
+        (
+            Side::Left,
+            left_arm_pub,
+            Box::new(|target| {
+                left_joint_commands::build_message(target).map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            Side::Right,
+            right_arm_pub,
+            Box::new(|target| {
+                right_joint_commands::build_message(target).map_err(|e| e.to_string())
+            }),
+        ),
+    ];
+    for (side, publisher, build) in arm_channels {
         let arm_state = state.clone();
         tasks.push(tokio::spawn(stream_setpoints(
-            arm_pub.clone(),
+            publisher,
             command_rate_hz,
             token.clone(),
             format!("{} arm", side.label()),
@@ -55,15 +90,30 @@ pub async fn run(
                     }
                     s.arm(side).joints
                 };
-                Some(
-                    joint_commands::build_message(side.arm_id(), target).map_err(|e| e.to_string()),
-                )
+                Some(build(target))
             },
         )));
-        // Gripper: stream the opening setpoint while enabled.
+    }
+    let gripper_channels: [(Side, TopicPublisher, GripperBuilder); 2] = [
+        (
+            Side::Left,
+            left_gripper_pub,
+            Box::new(|target| {
+                left_gripper_commands::build_message(target).map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            Side::Right,
+            right_gripper_pub,
+            Box::new(|target| {
+                right_gripper_commands::build_message(target).map_err(|e| e.to_string())
+            }),
+        ),
+    ];
+    for (side, publisher, build) in gripper_channels {
         let gripper_state = state.clone();
         tasks.push(tokio::spawn(stream_setpoints(
-            gripper_pub.clone(),
+            publisher,
             command_rate_hz,
             token.clone(),
             format!("{} gripper", side.label()),
@@ -75,10 +125,7 @@ pub async fn run(
                     }
                     s.gripper(side).position
                 };
-                Some(
-                    gripper_commands::build_message(side.gripper_id(), target)
-                        .map_err(|e| e.to_string()),
-                )
+                Some(build(target))
             },
         )));
     }

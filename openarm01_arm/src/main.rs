@@ -258,7 +258,6 @@ fn main() -> Result<()> {
         let (measured_tx, measured_rx) = watch::channel(None);
         tokio::spawn(stream::run_joint_command_listener(
             node_runner.clone(),
-            arm_id,
             joint_command_tx,
         ));
         tokio::spawn(stream::run_state_publisher(

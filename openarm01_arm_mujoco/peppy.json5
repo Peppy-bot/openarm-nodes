@@ -8,16 +8,20 @@
     name: "openarm01_arm_mujoco",
     tag: "v1",
     depends_on: {
-      interfaces: [
-        // Streamed joint setpoints the arm follows between moves: optional and
-        // wildcard (`from_any`), so it binds to any conforming producer (the
-        // commander). Mirrors the real arm so both follow the same contract.
+      pairings: [
+        // The exclusive control conversation with ONE commander instance:
+        // streamed joint setpoints in, this arm's sim state relayed back,
+        // both scoped to the pair (no arm_id demux). Optional and mirrors
+        // the real arm, so both follow the same contract.
         {
-          name: "openarm01_joint_command_source",
+          name: "openarm01_arm_joint_link",
           tag: "v1",
+          role: "arm",
           link_id: "commander",
-          from_any: true,
+          optional: true,
         },
+      ],
+      interfaces: [
         // Measured joint state from the sim, used by the move action to anchor
         // trajectories and by the follow loop to re-anchor its chase. from_any:
         // the sim is the producer.
@@ -38,7 +42,6 @@
     ],
     topics: {
       consumes: [
-        { name: "joint_commands", link_id: "commander" },
         { name: "joint_states", link_id: "state" },
       ],
     },

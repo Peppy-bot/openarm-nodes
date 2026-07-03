@@ -18,44 +18,45 @@
           link_id: "backbone"
         }
       ],
-      interfaces: [
-        // Measured joint state of both arms, for live UI progress. Wildcard
-        // (`from_any`) so the panel binds to whatever arms are running and tells
-        // them apart by `arm_id`; optional, so the commander still boots with no
-        // arm up. This replaces reading move progress off the action feedback.
+      pairings: [
+        // One pairing slot per driven component: each holds exactly one paired
+        // peer, so setpoints and measured state are scoped per slot with no
+        // arm_id / gripper_id demux. All optional: the panel boots with any
+        // subset unpaired (those sliders just stay inert) and each pair is
+        // established at this instance's start (`--pair left_arm@<arm_inst>` /
+        // launcher `pairings:`).
         {
-          name: "openarm01_joint_state_source",
+          name: "openarm01_arm_joint_link",
           tag: "v1",
-          link_id: "arm_states",
-          from_any: true
+          role: "commander",
+          link_id: "left_arm",
+          optional: true
         },
-        // Measured opening of both grippers, for live UI progress. Same wildcard
-        // optional pattern as the arms; told apart by `gripper_id`. Replaces
-        // reading gripper move progress off the action feedback.
         {
-          name: "openarm01_gripper_state_source",
+          name: "openarm01_arm_joint_link",
           tag: "v1",
-          link_id: "gripper_states",
-          from_any: true
+          role: "commander",
+          link_id: "right_arm",
+          optional: true
+        },
+        {
+          name: "openarm01_gripper_link",
+          tag: "v1",
+          role: "commander",
+          link_id: "left_gripper",
+          optional: true
+        },
+        {
+          name: "openarm01_gripper_link",
+          tag: "v1",
+          role: "commander",
+          link_id: "right_gripper",
+          optional: true
         }
       ]
     }
   },
   interfaces: {
-    // Streams operator setpoints to the arms (joint_commands) and grippers
-    // (gripper_commands). Producing these is what lets the panel drive an enabled
-    // arm/gripper continuously instead of one move at a time; each node clamps,
-    // rate-limits, and times out the stream on its side.
-    conforms_to: [
-      {
-        name: "openarm01_joint_command_source",
-        tag: "v1"
-      },
-      {
-        name: "openarm01_gripper_command_source",
-        tag: "v1"
-      }
-    ],
     actions: {
       // Goals fired by the operator land on backbone, which forwards to the
       // arm / gripper instance whose id matches arm_id / gripper_id.
@@ -66,18 +67,6 @@
         }
       ]
     },
-    topics: {
-      consumes: [
-        {
-          name: "joint_states",
-          link_id: "arm_states"
-        },
-        {
-          name: "gripper_states",
-          link_id: "gripper_states"
-        }
-      ]
-    }
   },
   execution: {
     language: "rust",

@@ -65,7 +65,6 @@ fn main() -> Result<()> {
         let (cmd_tx, cmd_rx) = watch::channel(None);
         tokio::spawn(stream::run(
             node_runner.clone(),
-            gripper_id,
             cmd_tx,
             token.clone(),
         ));

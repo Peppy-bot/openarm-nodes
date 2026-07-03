@@ -1,6 +1,8 @@
 // Always-on gripper_states publisher: emits the measured opening at
-// state_rate_hz regardless of mode. Reads the motor's already-cached state (no
-// CAN traffic of its own), so it
+// state_rate_hz regardless of mode — to the paired commander on the pairing's
+// `gripper_states` topic (a legal no-op while unpaired) and to observers on
+// the broadcast stream (tagged with `gripper_id`). Reads the motor's
+// already-cached state (no CAN traffic of its own), so it
 // never contends with the move control loop for the bus; between moves the
 // gripper holds position, so the last cached reading stays correct.
 
@@ -10,6 +12,7 @@ use std::time::Duration;
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm01_gripper_state_source::v1::gripper_states;
+use peppygen::peers::commander::gripper_states as peer_gripper_states;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
@@ -25,6 +28,10 @@ pub async fn run(
     let publisher = match gripper_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare gripper_states publisher: {e}"),
+    };
+    let peer_pub = match peer_gripper_states::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => return error!("declare paired gripper_states publisher: {e}"),
     };
     let period = Duration::from_micros(1_000_000 / state_rate_hz as u64);
     let mut failing = false;
@@ -42,7 +49,10 @@ pub async fn run(
         let result = async {
             let msg =
                 gripper_states::build_message(gripper_id, opening).map_err(|e| e.to_string())?;
-            publisher.publish(msg).await.map_err(|e| e.to_string())
+            publisher.publish(msg).await.map_err(|e| e.to_string())?;
+            let peer_msg =
+                peer_gripper_states::build_message(opening).map_err(|e| e.to_string())?;
+            peer_pub.publish(peer_msg).await.map_err(|e| e.to_string())
         }
         .await;
         match result {

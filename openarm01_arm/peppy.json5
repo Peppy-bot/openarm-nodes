@@ -13,17 +13,20 @@
     name: "openarm01_arm",
     tag: "v1",
     depends_on: {
-      interfaces: [
-        // Streamed joint setpoints the arm follows between moves: optional and
-        // wildcard (`from_any`), so the arm boots with no producer bound and
-        // accepts any conforming one (teleop leader, planner, IK-solving
-        // commander). Task-space intent stays upstream: the producer solves IK
-        // and streams joints.
+      pairings: [
+        // The exclusive control conversation with ONE commander instance:
+        // streamed joint setpoints in, measured joint state back, both scoped
+        // to the pair (no arm_id demux, no producer lock-in). Optional: the
+        // arm boots unpaired (moves still work via backbone goals) and is
+        // paired at a commander's start (`--pair` / launcher `pairings:`).
+        // Task-space intent stays upstream: the commander solves IK and
+        // streams joints.
         {
-          name: "openarm01_joint_command_source",
+          name: "openarm01_arm_joint_link",
           tag: "v1",
+          role: "arm",
           link_id: "commander",
-          from_any: true
+          optional: true
         },
       ],
     },
@@ -111,13 +114,5 @@
         tag: "v1"
       }
     ],
-    topics: {
-      consumes: [
-        {
-          name: "joint_commands",
-          link_id: "commander"
-        }
-      ],
-    },
   },
 }

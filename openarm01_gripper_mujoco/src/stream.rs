@@ -1,18 +1,19 @@
-// Listens for streamed gripper opening setpoints (openarm01_gripper_command_source)
-// and keeps the latest one addressed to this gripper in a watch channel for the
-// follow loop. A non-finite position is dropped, so a producer gone bad lets the
-// follow lock time out instead of driving the gripper.
+// Listens for streamed opening setpoints from the paired commander (the
+// `commander` pairing slot of openarm01_gripper_link) and keeps the latest one
+// in a watch channel for the follow loop. Subscribing while unpaired is legal:
+// the subscription stays silent until a commander pairs, and only the paired
+// peer's messages surface, so there is no gripper_id filter. A non-finite
+// position is dropped, so a commander gone bad lets the follow lock time out
+// instead of driving the gripper.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::commander_gripper_commands;
+use peppygen::peers::commander::gripper_commands;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tracing::{error, warn};
-
-use crate::config::GripperId;
 
 #[derive(Clone, Copy)]
 pub struct GripperCommand {
@@ -22,11 +23,10 @@ pub struct GripperCommand {
 
 pub async fn run(
     runner: Arc<NodeRunner>,
-    gripper_id: GripperId,
     latest: watch::Sender<Option<GripperCommand>>,
     token: CancellationToken,
 ) {
-    let mut subscription = match commander_gripper_commands::subscribe(&runner).await {
+    let mut subscription = match gripper_commands::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "gripper_commands subscribe");
@@ -46,9 +46,6 @@ pub async fn run(
                 continue;
             }
         };
-        if msg.gripper_id != gripper_id.as_u8() {
-            continue;
-        }
         if !msg.position.is_finite() {
             warn!("gripper_commands: dropping message with non-finite position");
             continue;
