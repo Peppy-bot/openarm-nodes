@@ -1,0 +1,70 @@
+// This node represents a single gripper in the openarm robot, the user will instanciate two different gripper, each with a different `gripper_id` input parameter.
+// This is a root component node; openarm_backbone depends on it, not the other way around.
+// It is a "stupid" node that relays gripper commands from openarm_backbone to either the real robot or the sims.
+{
+  peppy_schema: "node/v1",
+  manifest: {
+    name: "openarm_gripper",
+    tag: "v1",
+    depends_on: {
+      pairings: [
+        // The exclusive control conversation with ONE commander instance:
+        // streamed opening setpoints in, measured aperture back, both scoped
+        // to the pair (no gripper_id demux). Optional: the gripper boots
+        // unpaired (moves still work via backbone goals) and is paired at a
+        // commander's start.
+        {
+          name: "openarm_gripper_link",
+          tag: "v1",
+          role: "gripper",
+          link_id: "commander",
+          optional: true,
+        },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    },
+    parameters: {
+      gripper_id: "u8",
+      can_interface: "string",
+      // Hardware-loop rate (Hz). Pick deliberately per deployment; the stack
+      // currently unifies on 100 Hz across arms and grippers.
+      control_rate_hz: "u32",
+      // Per-cycle CAN read deadline (μs). Must fit the cycle budget (10 ms at 100 Hz).
+      recv_timeout_us: { $type: "u32", $default: 1000 },
+      // Error threshold (m) for goal completion.
+      position_tolerance: { $type: "f64", $default: 0.001 },
+      motion_timeout_s: { $type: "f64", $default: 10.0 },
+      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
+      // consumers' needs vary too much for a default to be meaningful.
+      state_rate_hz: "u32",
+      // How long (s) the gripper keeps following a stream after its last message
+      // before holding. Safety watchdog.
+      stream_timeout_s: "f64"
+    }
+  },
+  interfaces: {
+    conforms_to: [
+      {
+        name: "openarm_gripper_actions",
+        tag: "v1"
+      },
+      // Always-on measured opening so teleop/monitoring consume sim and real
+      // grippers identically (by gripper_id).
+      {
+        name: "openarm_gripper_states",
+        tag: "v1"
+      },
+      // Per-component readiness the real robot_initializer aggregates: ready once
+      // the motor is enabled and the control loops are serving.
+      {
+        name: "openarm_hardware_ready",
+        tag: "v1"
+      }
+    ]
+  },
+}
