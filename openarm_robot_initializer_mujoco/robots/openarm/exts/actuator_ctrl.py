@@ -91,7 +91,8 @@ class MujocoActuatorCtrl:
         # the trajectory, so tracking is unaffected while deviations damp.
         mujoco.mj_forward(self._model, self._data)
         full_m = np.zeros((self._model.nv, self._model.nv))
-        mujoco.mj_fullM(self._model, full_m, self._data.qM)
+        # MuJoCo >= 3.10 binding: qM went CSR, so mj_fullM takes mjData.
+        mujoco.mj_fullM(self._model, self._data, full_m)
         for name, kp, kd in zip(joint_names, kps, kds):
             ctrl_id = self._name_to_id.get(name)
             if ctrl_id is None:
