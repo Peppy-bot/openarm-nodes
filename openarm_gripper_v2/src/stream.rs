@@ -34,7 +34,8 @@ pub async fn run(
         Err(e) => return error!("declare paired gripper_states publisher: {e}"),
     };
     let period = Duration::from_micros(1_000_000 / state_rate_hz as u64);
-    let mut failing = false;
+    let mut broadcast_failing = false;
+    let mut peer_failing = false;
     loop {
         tokio::select! {
             _ = token.cancelled() => return,
@@ -52,20 +53,30 @@ pub async fn run(
             warn!("gripper_states: skipping non-finite motor sample");
             continue;
         }
-        let result = async {
-            let msg = gripper_states::build_message(gripper_id, opening, force)
-                .map_err(|e| e.to_string())?;
-            publisher.publish(msg).await.map_err(|e| e.to_string())?;
-            let peer_msg =
-                commander::gripper_states::build_message(opening).map_err(|e| e.to_string())?;
-            peer_pub.publish(peer_msg).await.map_err(|e| e.to_string())
-        }
-        .await;
-        match result {
-            Ok(()) => failing = false,
-            Err(e) if !failing => {
-                failing = true;
+        // The broadcast and paired publishes serve unrelated consumers, so
+        // each runs and reports independently: one failing must not starve
+        // the other.
+        let broadcast_result = match gripper_states::build_message(gripper_id, opening, force) {
+            Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match broadcast_result {
+            Ok(()) => broadcast_failing = false,
+            Err(e) if !broadcast_failing => {
+                broadcast_failing = true;
                 warn!("gripper_states publish failing, suppressing repeats: {e}");
+            }
+            Err(_) => {}
+        }
+        let peer_result = match commander::gripper_states::build_message(opening) {
+            Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match peer_result {
+            Ok(()) => peer_failing = false,
+            Err(e) if !peer_failing => {
+                peer_failing = true;
+                warn!("paired gripper_states publish failing, suppressing repeats: {e}");
             }
             Err(_) => {}
         }
