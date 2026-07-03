@@ -9,51 +9,88 @@ use std::sync::Arc;
 use peppygen::NodeRunner;
 use peppygen::pairings::{left_gripper, right_gripper};
 use peppylib::runtime::CancellationToken;
+use tokio::task::JoinHandle;
 use tracing::error;
 
 use crate::state::{SharedState, Side};
 
-/// One receive loop per pairing slot; a macro stamps out the per-slot body
-/// (the generated modules are distinct types with identical shapes). The
-/// `use $module as topic` re-import is how a `:path` fragment gets extended
-/// with `::subscribe` — appending segments to it directly does not parse.
-macro_rules! side_loop {
-    ($module:path, $side:expr, $runner:expr, $state:expr, $token:expr) => {{
-        use $module as topic;
-        let runner = $runner.clone();
-        let state = $state.clone();
-        let token = $token.clone();
-        tokio::spawn(async move {
-            let mut subscription = match topic::subscribe(&runner).await {
-                Ok(subscription) => subscription,
-                Err(e) => {
-                    error!(error = %e, side = $side.label(), "gripper_states subscribe");
-                    return;
-                }
-            };
-            loop {
-                let received = tokio::select! {
-                    _ = token.cancelled() => return,
-                    received = subscription.next() => received,
-                };
-                let (_producer, msg) = match received {
-                    Ok(Some(pair)) => pair,
-                    Ok(None) => return,
-                    Err(e) => {
-                        error!(error = %e, side = $side.label(), "gripper_states receive");
-                        continue;
-                    }
-                };
-                let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-                s.gripper_mut($side).last_feedback = Some(msg.position);
+/// The generated pairing modules are distinct types with identical shapes;
+/// this is the one surface the receive loop needs from either side's
+/// subscription.
+trait GripperStatesSubscription: Send + 'static {
+    /// The next paired peer's gripper position, or `None` on shutdown.
+    /// Spelled as an RPITIT rather than `async fn` so the future is `Send`
+    /// even where the implementor is opaque, as `tokio::spawn` requires.
+    fn next_position(&mut self) -> impl Future<Output = peppygen::Result<Option<f64>>> + Send;
+}
+
+impl GripperStatesSubscription for left_gripper::gripper_states::Subscription {
+    async fn next_position(&mut self) -> peppygen::Result<Option<f64>> {
+        Ok(self.next().await?.map(|(_producer, msg)| msg.position))
+    }
+}
+
+impl GripperStatesSubscription for right_gripper::gripper_states::Subscription {
+    async fn next_position(&mut self) -> peppygen::Result<Option<f64>> {
+        Ok(self.next().await?.map(|(_producer, msg)| msg.position))
+    }
+}
+
+fn spawn_side(
+    subscription: peppygen::Result<impl GripperStatesSubscription>,
+    side: Side,
+    state: &SharedState,
+    token: &CancellationToken,
+) -> Option<JoinHandle<()>> {
+    match subscription {
+        Ok(subscription) => Some(tokio::spawn(side_loop(
+            subscription,
+            side,
+            state.clone(),
+            token.clone(),
+        ))),
+        Err(e) => {
+            error!(error = %e, side = side.label(), "gripper_states subscribe");
+            None
+        }
+    }
+}
+
+async fn side_loop(
+    mut subscription: impl GripperStatesSubscription,
+    side: Side,
+    state: SharedState,
+    token: CancellationToken,
+) {
+    loop {
+        let received = tokio::select! {
+            _ = token.cancelled() => return,
+            received = subscription.next_position() => received,
+        };
+        let position = match received {
+            Ok(Some(position)) => position,
+            Ok(None) => return,
+            Err(e) => {
+                error!(error = %e, side = side.label(), "gripper_states receive");
+                continue;
             }
-        })
-    }};
+        };
+        let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+        s.gripper_mut(side).last_feedback = Some(position);
+    }
 }
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
-    let left = side_loop!(left_gripper::gripper_states, Side::Left, runner, state, token);
-    let right = side_loop!(right_gripper::gripper_states, Side::Right, runner, state, token);
-    let _ = left.await;
-    let _ = right.await;
+    let (left, right) = tokio::join!(
+        left_gripper::gripper_states::subscribe(&runner),
+        right_gripper::gripper_states::subscribe(&runner),
+    );
+    let left = spawn_side(left, Side::Left, &state, &token);
+    let right = spawn_side(right, Side::Right, &state, &token);
+    if let Some(task) = left {
+        let _ = task.await;
+    }
+    if let Some(task) = right {
+        let _ = task.await;
+    }
 }
