@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: peppybot/openarm-isaac-sim:5.1.0-15
+From: peppybot/openarm-isaac-sim:5.1.0-16
 
 %labels
     Name openarm-robot-initializer-isaac
