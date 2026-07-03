@@ -92,7 +92,12 @@ class MujocoActuatorCtrl:
         mujoco.mj_forward(self._model, self._data)
         full_m = np.zeros((self._model.nv, self._model.nv))
         # MuJoCo >= 3.10 binding: qM went CSR, so mj_fullM takes mjData.
-        mujoco.mj_fullM(self._model, self._data, full_m)
+        # Older bindings (the current base image ships 3.8.1 despite its
+        # 3.10.0 tag — requirements.mujoco.txt was never bumped) take qM.
+        try:
+            mujoco.mj_fullM(self._model, self._data, full_m)
+        except TypeError:
+            mujoco.mj_fullM(self._model, full_m, self._data.qM)
         for name, kp, kd in zip(joint_names, kps, kds):
             ctrl_id = self._name_to_id.get(name)
             if ctrl_id is None:
