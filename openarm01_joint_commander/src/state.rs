@@ -19,29 +19,6 @@ impl Side {
         }
     }
 
-    pub fn from_arm_id(arm_id: u8) -> Option<Self> {
-        match arm_id {
-            0 => Some(Self::Left),
-            1 => Some(Self::Right),
-            _ => None,
-        }
-    }
-
-    pub fn from_gripper_id(gripper_id: u8) -> Option<Self> {
-        match gripper_id {
-            0 => Some(Self::Left),
-            1 => Some(Self::Right),
-            _ => None,
-        }
-    }
-
-    pub fn gripper_id(self) -> u8 {
-        match self {
-            Self::Left => 0,
-            Self::Right => 1,
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Left => "left",

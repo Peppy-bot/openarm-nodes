@@ -63,11 +63,7 @@ fn main() -> Result<()> {
         // Stream listener -> follow loop: the listener keeps the latest streamed
         // opening, the follow loop drives it between moves.
         let (cmd_tx, cmd_rx) = watch::channel(None);
-        tokio::spawn(stream::run(
-            node_runner.clone(),
-            cmd_tx,
-            token.clone(),
-        ));
+        tokio::spawn(stream::run(node_runner.clone(), cmd_tx, token.clone()));
         tokio::spawn(follow::run(
             passthrough_pub.clone(),
             gripper_id.as_u8(),

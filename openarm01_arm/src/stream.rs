@@ -133,7 +133,10 @@ pub async fn run_state_publisher(
             joint_pub.publish(joints).await.map_err(|e| e.to_string())?;
             let peer_joints = peer_joint_states::build_message(m.positions, m.velocities)
                 .map_err(|e| e.to_string())?;
-            peer_pub.publish(peer_joints).await.map_err(|e| e.to_string())?;
+            peer_pub
+                .publish(peer_joints)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok::<(), String>(())
         }
         .await;
