@@ -62,9 +62,9 @@
       // Run without the viewer window (the deployment default); set false for a
       // local debugging session that opens the viser viewer.
       headless: { $type: "bool", $default: true },
-      // Viewer bind address + port, used only when headless is false. Loopback
-      // by default so the viewer is not exposed by accident.
-      viewer_host: { $type: "string", $default: "127.0.0.1" },
+      // Viewer bind address + port, used only when headless is false. All
+      // interfaces by default so the viewer is reachable from other machines.
+      viewer_host: { $type: "string", $default: "0.0.0.0" },
       viewer_port: { $type: "u32", $default: 8080 },
     },
   },
