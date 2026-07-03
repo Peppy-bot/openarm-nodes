@@ -12,7 +12,7 @@ use std::time::Duration;
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_gripper_states::v1::gripper_states;
-use peppygen::peers::commander::gripper_states as peer_gripper_states;
+use peppygen::pairings::commander;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
@@ -29,7 +29,7 @@ pub async fn run(
         Ok(p) => p,
         Err(e) => return error!("declare gripper_states publisher: {e}"),
     };
-    let peer_pub = match peer_gripper_states::declare_publisher(&runner).await {
+    let peer_pub = match commander::gripper_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare paired gripper_states publisher: {e}"),
     };
@@ -59,7 +59,7 @@ pub async fn run(
                 .map_err(|e| e.to_string())?;
             publisher.publish(msg).await.map_err(|e| e.to_string())?;
             let peer_msg =
-                peer_gripper_states::build_message(opening).map_err(|e| e.to_string())?;
+                commander::gripper_states::build_message(opening).map_err(|e| e.to_string())?;
             peer_pub.publish(peer_msg).await.map_err(|e| e.to_string())
         }
         .await;

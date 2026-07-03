@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use peppygen::NodeRunner;
-use peppygen::peers::commander::gripper_commands;
+use peppygen::pairings::commander;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tracing::{error, warn};
@@ -27,7 +27,7 @@ pub async fn run(
     latest: watch::Sender<Option<GripperCommand>>,
     token: CancellationToken,
 ) {
-    let mut subscription = match gripper_commands::subscribe(&runner).await {
+    let mut subscription = match commander::gripper_commands::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "gripper_commands subscribe");

@@ -22,8 +22,7 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_arm_joint_commands::v1::arm_joint_commands;
 use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
-use peppygen::peers::left_gripper::gripper_commands as left_gripper_commands;
-use peppygen::peers::right_gripper::gripper_commands as right_gripper_commands;
+use peppygen::pairings::{left_gripper, right_gripper};
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
@@ -48,14 +47,15 @@ pub async fn run(
     };
     // One slot-scoped publisher per gripper side; each stamps its own slot's
     // link_id on the wire, so the two grippers' streams stay fully isolated.
-    let left_gripper_pub = match left_gripper_commands::declare_publisher(&runner).await {
+    let left_gripper_pub = match left_gripper::gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
             error!("declare left_gripper gripper_commands publisher: {e}");
             return token.cancel();
         }
     };
-    let right_gripper_pub = match right_gripper_commands::declare_publisher(&runner).await {
+    let right_gripper_pub = match right_gripper::gripper_commands::declare_publisher(&runner).await
+    {
         Ok(p) => p,
         Err(e) => {
             error!("declare right_gripper gripper_commands publisher: {e}");
@@ -128,14 +128,14 @@ pub async fn run(
             Side::Left,
             left_gripper_pub,
             Box::new(|target| {
-                left_gripper_commands::build_message(target).map_err(|e| e.to_string())
+                left_gripper::gripper_commands::build_message(target).map_err(|e| e.to_string())
             }),
         ),
         (
             Side::Right,
             right_gripper_pub,
             Box::new(|target| {
-                right_gripper_commands::build_message(target).map_err(|e| e.to_string())
+                right_gripper::gripper_commands::build_message(target).map_err(|e| e.to_string())
             }),
         ),
     ];

@@ -7,22 +7,24 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::peers::left_gripper::gripper_states as left_gripper_states;
-use peppygen::peers::right_gripper::gripper_states as right_gripper_states;
+use peppygen::pairings::{left_gripper, right_gripper};
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 
 use crate::state::{SharedState, Side};
 
 /// One receive loop per pairing slot; a macro stamps out the per-slot body
-/// (the generated modules are distinct types with identical shapes).
+/// (the generated modules are distinct types with identical shapes). The
+/// `use $module as topic` re-import is how a `:path` fragment gets extended
+/// with `::subscribe` — appending segments to it directly does not parse.
 macro_rules! side_loop {
-    ($module:ident, $side:expr, $runner:expr, $state:expr, $token:expr) => {{
+    ($module:path, $side:expr, $runner:expr, $state:expr, $token:expr) => {{
+        use $module as topic;
         let runner = $runner.clone();
         let state = $state.clone();
         let token = $token.clone();
         tokio::spawn(async move {
-            let mut subscription = match $module::subscribe(&runner).await {
+            let mut subscription = match topic::subscribe(&runner).await {
                 Ok(subscription) => subscription,
                 Err(e) => {
                     error!(error = %e, side = $side.label(), "gripper_states subscribe");
@@ -50,8 +52,8 @@ macro_rules! side_loop {
 }
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
-    let left = side_loop!(left_gripper_states, Side::Left, runner, state, token);
-    let right = side_loop!(right_gripper_states, Side::Right, runner, state, token);
+    let left = side_loop!(left_gripper::gripper_states, Side::Left, runner, state, token);
+    let right = side_loop!(right_gripper::gripper_states, Side::Right, runner, state, token);
     let _ = left.await;
     let _ = right.await;
 }

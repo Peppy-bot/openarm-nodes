@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::state_gripper_states;
-use peppygen::peers::commander::gripper_states as peer_gripper_states;
+use peppygen::pairings::commander;
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 
@@ -30,7 +30,7 @@ pub async fn run(
             return;
         }
     };
-    let peer_pub = match peer_gripper_states::declare_publisher(&runner).await {
+    let peer_pub = match commander::gripper_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "declare paired gripper_states publisher");
@@ -64,7 +64,7 @@ pub async fn run(
             });
         }
         // Relay to the paired commander; silently dropped while unpaired.
-        match peer_gripper_states::build_message(msg.position) {
+        match commander::gripper_states::build_message(msg.position) {
             Ok(payload) => {
                 if let Err(e) = peer_pub.publish(payload).await {
                     error!(error = %e, "paired gripper_states publish");
