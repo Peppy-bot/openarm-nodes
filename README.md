@@ -18,7 +18,7 @@ This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickes
 ## 1. Prerequisites
 
 - Ubuntu 22.04 or 24.04
-- [PeppyOS](https://peppy.bot) 0.10 or newer, installed with `curl -fsSL https://peppy.bot/install.sh | sh`
+- [Peppy](https://peppy.bot) 0.10 or newer, installed with `curl -fsSL https://peppy.bot/install.sh | sh`
 - Docker, running
 - For Isaac only: an NVIDIA GPU with the [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) configured
 
