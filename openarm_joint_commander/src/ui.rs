@@ -1,6 +1,6 @@
-// HTTP+WS UI on 127.0.0.1:PEPPY_JC_PORT (default 8765). Loopback only because
-// the WS exposes unauthenticated motion control; set PEPPY_JC_BIND_IP for a
-// remote operator on a trusted network.
+// HTTP+WS UI on 0.0.0.0:PEPPY_JC_PORT (default 8765). The WS exposes
+// unauthenticated motion control, so only run on a trusted network; set
+// PEPPY_JC_BIND_IP=127.0.0.1 to restrict to loopback.
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -110,7 +110,7 @@ pub async fn run(
     let bind_ip = env::var("PEPPY_JC_BIND_IP")
         .ok()
         .and_then(|s| s.parse::<IpAddr>().ok())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     let addr = SocketAddr::new(bind_ip, port);
 
     let app_state = AppState {

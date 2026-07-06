@@ -8,14 +8,18 @@
     name: "openarm_gripper_v2",
     tag: "v1",
     depends_on: {
-      interfaces: [
-        // Streamed opening setpoints the gripper follows between moves: optional
-        // and wildcard (`from_any`) so it binds to any conforming producer.
+      pairings: [
+        // The exclusive control conversation with ONE commander instance:
+        // streamed opening setpoints in, measured aperture back, both scoped
+        // to the pair (no gripper_id demux). Optional: the gripper boots
+        // unpaired (moves still work via backbone goals) and is paired at a
+        // commander's start.
         {
-          name: "openarm_gripper_commands",
+          name: "openarm_gripper_link",
           tag: "v1",
+          role: "gripper",
           link_id: "commander",
-          from_any: true,
+          optional: true,
         },
       ],
     },
@@ -68,11 +72,6 @@
         name: "openarm_hardware_ready",
         tag: "v1"
       }
-    ],
-    topics: {
-      consumes: [
-        { name: "gripper_commands", link_id: "commander" }
-      ]
-    }
+    ]
   },
 }

@@ -14,9 +14,9 @@ export RCLONE_S3_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY:?RCLONE_S3_SEC
 
 # ── Version manifest ──────────────────────────────────────────────────────────
 ISAAC_VERSION="5.1.0"   # mirrors nvcr.io/nvidia/isaac-sim upstream version
-MUJOCO_VERSION="3.8.1"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
-IMAGE_REV="12"           # bump when image content changes without an upstream version bump
-IMAGE_NAMESPACE="jaredpeppy"  # Docker Hub namespace these base images are pushed to
+MUJOCO_VERSION="3.10.0"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
+IMAGE_REV="16"           # bump when image content changes without an upstream version bump
+IMAGE_NAMESPACE="peppybot"  # Docker Hub namespace these base images are pushed to
 # ─────────────────────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

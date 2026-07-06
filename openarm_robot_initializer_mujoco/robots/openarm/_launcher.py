@@ -88,8 +88,8 @@ class SimLauncher:
 
         server = None
         try:
-            # Loopback by default (viewer_host param); binding to all interfaces
-            # is an explicit opt-in so the viewer is not exposed by accident.
+            # Bind address comes from the viewer_host param (all interfaces by
+            # default so the viewer is reachable from other machines).
             host = self._viewer_host
             port = self._viewer_port
             server = viser.ViserServer(host=host, port=port)

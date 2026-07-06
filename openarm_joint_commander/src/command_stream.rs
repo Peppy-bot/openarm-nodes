@@ -1,14 +1,20 @@
-// Always-on command publisher. For each enabled arm and gripper, streams its
-// target setpoint at command_rate_hz so the node follows it; a disabled side
-// emits nothing, so the node's stream timeout lapses and it holds. Re-publishing
-// every tick (even an unchanged target) keeps the node's producer lock alive
-// between operator inputs. The arm/gripper clamps and rate-limits what it
-// receives, so this only has to deliver the latest setpoint.
+// Always-on command publisher. For each enabled arm, streams its target
+// setpoint at command_rate_hz on `arm_joint_commands` (tagged with `arm_id`;
+// the hub governs it into per-arm setpoints); for each enabled gripper,
+// streams its opening on that side's pairing slot so the paired gripper
+// follows it. A disabled side emits nothing, so the node's stream timeout
+// lapses and it holds. Re-publishing every tick (even an unchanged target)
+// keeps the consumer's stream watchdog alive between operator inputs. The
+// arm/gripper clamps and rate-limits what it receives, so this only has to
+// deliver the latest setpoint. Publishing on an unpaired gripper slot is a
+// legal no-op, so an operator enabling a side before its peer is paired is
+// harmless.
 //
-// Each side+channel runs its own publish task on its own interval, sharing a
-// cloneable lock-free publisher per topic (one zenoh session). A single shared
-// loop publishing Left then Right would leave Right permanently second (zenoh
-// publish resolves synchronously), so independent tasks avoid that bias.
+// Each side+channel runs its own publish task on its own interval, with its
+// own publisher (slot-scoped for the grippers, a clone of the shared hub
+// publisher for the arms). A single shared loop publishing Left then Right
+// would leave Right permanently second (zenoh publish resolves synchronously),
+// so independent tasks avoid that bias.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +22,7 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_arm_joint_commands::v1::arm_joint_commands;
 use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
-use peppygen::emitted_topics::openarm_gripper_commands::v1::gripper_commands;
+use peppygen::pairings::{left_gripper, right_gripper};
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
@@ -39,10 +45,20 @@ pub async fn run(
             return token.cancel();
         }
     };
-    let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
+    // One slot-scoped publisher per gripper side; each stamps its own slot's
+    // link_id on the wire, so the two grippers' streams stay fully isolated.
+    let left_gripper_pub = match left_gripper::gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare gripper_commands publisher: {e}");
+            error!("declare left_gripper gripper_commands publisher: {e}");
+            return token.cancel();
+        }
+    };
+    let right_gripper_pub = match right_gripper::gripper_commands::declare_publisher(&runner).await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare right_gripper gripper_commands publisher: {e}");
             return token.cancel();
         }
     };
@@ -53,6 +69,8 @@ pub async fn run(
             return token.cancel();
         }
     };
+
+    type GripperBuilder = Box<dyn Fn(f64) -> Result<Payload, String> + Send>;
 
     let mut tasks = Vec::new();
 
@@ -101,10 +119,30 @@ pub async fn run(
                 )
             },
         )));
-        // Gripper: stream the opening setpoint while enabled.
+    }
+    // The two gripper pairing streams, each with its slot publisher and a
+    // builder producing that slot's message (no gripper_id: the pairing scopes
+    // each stream to its peer).
+    let gripper_channels: [(Side, TopicPublisher, GripperBuilder); 2] = [
+        (
+            Side::Left,
+            left_gripper_pub,
+            Box::new(|target| {
+                left_gripper::gripper_commands::build_message(target).map_err(|e| e.to_string())
+            }),
+        ),
+        (
+            Side::Right,
+            right_gripper_pub,
+            Box::new(|target| {
+                right_gripper::gripper_commands::build_message(target).map_err(|e| e.to_string())
+            }),
+        ),
+    ];
+    for (side, publisher, build) in gripper_channels {
         let gripper_state = state.clone();
         tasks.push(tokio::spawn(stream_setpoints(
-            gripper_pub.clone(),
+            publisher,
             command_rate_hz,
             token.clone(),
             format!("{} gripper", side.label()),
@@ -116,10 +154,7 @@ pub async fn run(
                     }
                     s.gripper(side).position
                 };
-                Some(
-                    gripper_commands::build_message(side.gripper_id(), target)
-                        .map_err(|e| e.to_string()),
-                )
+                Some(build(target))
             },
         )));
     }

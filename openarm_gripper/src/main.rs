@@ -187,7 +187,7 @@ fn main() -> Result<()> {
             let runner = node_runner.clone();
             let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
-                command_stream::run(runner, gripper_id, cmd_tx, token.clone()).await;
+                command_stream::run(runner, cmd_tx, token.clone()).await;
                 token.cancel();
             });
         }
