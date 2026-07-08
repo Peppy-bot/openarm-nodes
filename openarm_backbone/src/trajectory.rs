@@ -304,7 +304,11 @@ mod tests {
     // --- plan_cartesian_duration (real arm model) ------------------------
 
     fn left_arm() -> Arm {
-        crate::arm_model(openarm_description::HardwareVersion::V1, "openarm_left_link0").expect("build left arm from bundled URDF")
+        crate::arm_model(
+            openarm_description::HardwareVersion::V1,
+            "openarm_left_link0",
+        )
+        .expect("build left arm from bundled URDF")
     }
 
     #[test]

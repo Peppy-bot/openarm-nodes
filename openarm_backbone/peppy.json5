@@ -1,8 +1,9 @@
 // openarm_backbone: the bimanual coordination hub node. Consumes the operator
-// arm_joint_commands stream and both arms' arm_states; exposes the joint /
-// Cartesian / gripper move actions; conforms to arm_governed_setpoints (the
-// per-arm stream the arms follow) and collision_status; and relays move_gripper
-// to the per-side grippers. See src/main.rs for the architecture.
+// arm_joint_commands and gripper_commands streams and both arms' arm_states;
+// exposes the joint / Cartesian / gripper move actions and executes them itself;
+// conforms to arm_governed_setpoints (the per-arm stream the arms follow) and
+// collision_status; and drives each gripper over its gripper_link pairing with
+// the governed opening. See src/main.rs for the architecture.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -23,6 +24,16 @@
           link_id: "commander",
           from_any: true
         },
+        // Operator gripper opening stream, `from_any`: the same commander streams
+        // the desired opening per side (gripper_id); the hub governs it (the finger
+        // opening barrier) and drives each gripper over its pairing slot below,
+        // exactly as it does for the arm joint stream.
+        {
+          name: "openarm_gripper_commands",
+          tag: "v1",
+          link_id: "commander_gripper",
+          from_any: true
+        },
         // Measured joint state of both arms, the governor's d_now and the
         // trajectory anchor. Wildcard: both arm/sim instances publish it, told
         // apart by arm_id.
@@ -32,17 +43,6 @@
           link_id: "arm_states",
           from_any: true
         },
-        // Measured gripper opening of both grippers, so the collision governor can
-        // place the per-finger hulls at the live opening instead of their full
-        // swept envelope. Wildcard + told apart by gripper_id; consumed every tick
-        // like arm_states, and the hub waits for each side's first reading before
-        // streaming (the same gate as the arms' first measured state).
-        {
-          name: "openarm_gripper_states",
-          tag: "v1",
-          link_id: "grippers",
-          from_any: true
-        },
         // Runtime on/off for the governor. Wildcard + optional: the hub holds its
         // launch-time default until the first message.
         {
@@ -50,17 +50,31 @@
           tag: "v1",
           link_id: "collision_ctrl",
           from_any: true
-        },
-        // Per-side gripper move targets (relay unchanged).
+        }
+      ],
+      pairings: [
+        // The exclusive command loop with each gripper: the hub plays the
+        // commander role, streams the governed opening down each slot's
+        // gripper_commands, and reads that gripper's measured aperture back on
+        // the slot's gripper_states; the slot scopes both directions, so no
+        // gripper_id demux and no other producer can pose as the fingers.
+        // Optional: the hub boots with either gripper unpaired (that side's
+        // governed openings go nowhere and no aperture arrives, so streaming
+        // stays gated) and each pair is established at this instance's start
+        // (launcher `pairings:`).
         {
-          name: "openarm_gripper_actions",
+          name: "openarm_gripper_link",
           tag: "v1",
-          link_id: "left_gripper"
+          role: "commander",
+          link_id: "left_gripper_link",
+          optional: true
         },
         {
-          name: "openarm_gripper_actions",
+          name: "openarm_gripper_link",
           tag: "v1",
-          link_id: "right_gripper"
+          role: "commander",
+          link_id: "right_gripper_link",
+          optional: true
         }
       ]
     }
@@ -113,17 +127,6 @@
           }
         }
       ],
-      // Downstream gripper move actions the hub relays to, per side.
-      consumes: [
-        {
-          link_id: "left_gripper",
-          name: "move_gripper"
-        },
-        {
-          link_id: "right_gripper",
-          name: "move_gripper"
-        }
-      ]
     },
     topics: {
       consumes: [
@@ -132,12 +135,12 @@
           link_id: "commander"
         },
         {
-          name: "arm_states",
-          link_id: "arm_states"
+          name: "gripper_commands",
+          link_id: "commander_gripper"
         },
         {
-          name: "gripper_states",
-          link_id: "grippers"
+          name: "arm_states",
+          link_id: "arm_states"
         },
         {
           name: "governor_control",
@@ -205,6 +208,12 @@
       // How long (s) the hub keeps following an operator stream after its last
       // message before releasing the lock and holding.
       stream_timeout_s: "f64",
+      // Completion tolerance (m) for hub-executed move_gripper goals: the goal
+      // completes when the measured opening is within this of the target.
+      gripper_position_tolerance: { $type: "f64", $default: 0.001 },
+      // Deadline (s) for hub-executed move_gripper goals; a goal the governed
+      // opening cannot reach (a collision clamp) fails here.
+      gripper_motion_timeout_s: { $type: "f64", $default: 10.0 },
     }
   }
 }

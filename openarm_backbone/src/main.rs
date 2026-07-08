@@ -2,9 +2,12 @@
 //! consumes the operator joint stream and exposes the joint / Cartesian move
 //! actions, generates the trajectories, runs the self-collision governor over
 //! both arms together, and streams the governed per-arm setpoints the arms
-//! follow. Grippers are unchanged: it still relays move_gripper to the per-side
-//! gripper instances. The governor is URDF-based, so it runs identically for the
-//! sim and the real arms.
+//! follow. Grippers run through the hub the same way: the operator opening
+//! stream and move_gripper goals both feed the coordinator, the openings ride
+//! the same governed configuration as the arm joints (a gripper cannot open its
+//! fingers into the other arm), and the governed opening streams to each
+//! gripper over its gripper_link pairing slot. The governor is URDF-based, so
+//! it runs identically for the sim and the real arms.
 
 mod actions;
 mod arm_pair;
@@ -159,6 +162,7 @@ fn main() -> Result<()> {
                 .iter()
                 .copied()
                 .fold(0.0_f64, f64::max),
+            hardware_version.jaw_open_m(),
             params.collision_governor_enabled,
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));
@@ -201,13 +205,21 @@ fn main() -> Result<()> {
         // accepted goals; the coordinator reads all of it.
         let (cmd_tx0, cmd_rx0) = watch::channel(None);
         let (cmd_tx1, cmd_rx1) = watch::channel(None);
+        let (gripcmd_tx0, gripcmd_rx0) = watch::channel(None);
+        let (gripcmd_tx1, gripcmd_rx1) = watch::channel(None);
         let (meas_tx0, meas_rx0) = watch::channel(None);
         let (meas_tx1, meas_rx1) = watch::channel(None);
         let (grip_tx0, grip_rx0) = watch::channel(None);
         let (grip_tx1, grip_rx1) = watch::channel(None);
         let (goal_tx0, goal_rx0) = mpsc::channel(1);
         let (goal_tx1, goal_rx1) = mpsc::channel(1);
+        let (grip_goal_tx0, grip_goal_rx0) = mpsc::channel(1);
+        let (grip_goal_tx1, grip_goal_rx1) = mpsc::channel(1);
         let busy = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let gripper_busy = [
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         ];
@@ -221,17 +233,23 @@ fn main() -> Result<()> {
         let channels = ArmPair::new(
             ArmChannels {
                 command: cmd_rx0,
+                gripper_command: gripcmd_rx0,
                 measured: meas_rx0,
                 gripper: grip_rx0,
                 goals: goal_rx0,
                 busy: busy[0].clone(),
+                gripper_goals: grip_goal_rx0,
+                gripper_busy: gripper_busy[0].clone(),
             },
             ArmChannels {
                 command: cmd_rx1,
+                gripper_command: gripcmd_rx1,
                 measured: meas_rx1,
                 gripper: grip_rx1,
                 goals: goal_rx1,
                 busy: busy[1].clone(),
+                gripper_goals: grip_goal_rx1,
+                gripper_busy: gripper_busy[1].clone(),
             },
         );
 
@@ -253,7 +271,12 @@ fn main() -> Result<()> {
                 planners,
                 channels,
                 config_rx,
-                cycle_period,
+                coordinator::RunConfig {
+                    cycle_period,
+                    stream_timeout,
+                    gripper_tolerance_m: params.gripper_position_tolerance,
+                    gripper_move_timeout: Duration::from_secs_f64(params.gripper_motion_timeout_s),
+                },
                 token.clone(),
             ));
             set.spawn(actions::arm::run_move_arm_joints(
@@ -267,7 +290,12 @@ fn main() -> Result<()> {
                 [goal_tx0, goal_tx1],
                 [goal_busy[0].clone(), goal_busy[1].clone()],
             ));
-            set.spawn(actions::gripper::run(runner.clone(), token.clone()));
+            set.spawn(actions::gripper::run_move_gripper(
+                runner.clone(),
+                [grip_goal_tx0, grip_goal_tx1],
+                [gripper_busy[0].clone(), gripper_busy[1].clone()],
+                hardware_version.jaw_open_m(),
+            ));
 
             // Inbound listeners buffer the latest message into the watch slots. They
             // run under the same fatal-first-exit supervision as the rest of the hub,
@@ -277,6 +305,10 @@ fn main() -> Result<()> {
             spawn_listener(
                 &mut set,
                 streams::run_joint_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]),
+            );
+            spawn_listener(
+                &mut set,
+                streams::run_gripper_command_listener(runner.clone(), [gripcmd_tx0, gripcmd_tx1]),
             );
             spawn_listener(
                 &mut set,

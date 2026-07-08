@@ -18,11 +18,7 @@ use tracing::error;
 use crate::planner::Goal;
 use crate::{ARM_DOF, JointVec, Side};
 
-/// Claim the arm's single-flight slot, or report it already busy.
-fn claim(busy: &AtomicBool) -> bool {
-    busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-}
+use crate::actions::claim;
 
 fn target_in_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> bool {
     q.iter().zip(limits).all(|(&v, l)| v >= l.lo && v <= l.hi)
