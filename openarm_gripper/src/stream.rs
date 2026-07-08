@@ -1,5 +1,5 @@
 // Always-on gripper_states publisher: emits the measured opening at
-// state_rate_hz regardless of mode — to the paired commander on the pairing's
+// state_rate_hz regardless of mode: to the paired commander on the pairing's
 // `gripper_states` topic (a legal no-op while unpaired) and to observers on
 // the broadcast stream (tagged with `gripper_id`). Reads the motor's
 // already-cached state (no CAN traffic of its own), so it
