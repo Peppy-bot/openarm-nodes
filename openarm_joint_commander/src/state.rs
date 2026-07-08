@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-pub const ARM_DOF: usize = 7;
-// Range bounds live in config/joint_limits.json5 (loaded by ui.rs); this is
-// only the startup default for the gripper target.
+pub const ARM_DOF: usize = openarm_description::ARM_DOF;
+// Range bounds come from the description's URDF (resolved by ui::init_limits);
+// this is only the startup default for the gripper target.
 pub const GRIPPER_CLOSED_M: f64 = 0.0;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

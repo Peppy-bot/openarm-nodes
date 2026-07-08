@@ -1,5 +1,5 @@
 [package]
-name = "openarm_joint_commander"
+name = "openarm_ker"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,10 +7,8 @@ edition = "2024"
 peppygen = { path = ".peppy/libs/peppygen" }
 peppylib = { path = ".peppy/libs/peppylib" }
 openarm_description = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "openarm_description" }
+rusb = "0.9"
+serialport = "4"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-axum = { version = "0.8", features = ["ws"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio-util = "0.7"
