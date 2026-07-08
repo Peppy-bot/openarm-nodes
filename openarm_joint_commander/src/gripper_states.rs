@@ -11,6 +11,7 @@ use peppygen::consumed_topics::gripper_states_gripper_states;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
+use crate::joint_states::RECEIVE_ERROR_BACKOFF;
 use crate::state::{SharedState, Side};
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
@@ -31,6 +32,7 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "gripper_states receive");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
