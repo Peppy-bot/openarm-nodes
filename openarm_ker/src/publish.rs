@@ -79,11 +79,11 @@ pub async fn run(
 
     type GripperBuilder = Box<dyn Fn(f64) -> Result<Payload, String> + Send>;
 
-    let mut tasks = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
 
     for side in [Side::Left, Side::Right] {
         let sample_rx = rx.clone();
-        tasks.push(tokio::spawn(stream_setpoints(
+        tasks.spawn(stream_setpoints(
             arm_pub.clone(),
             command_rate_hz,
             token.clone(),
@@ -95,7 +95,7 @@ pub async fn run(
                         .map_err(|e| e.to_string()),
                 )
             },
-        )));
+        ));
     }
     // The two gripper pairing streams, each with its slot publisher and a
     // builder producing that slot's message (no gripper_id: the pairing scopes
@@ -119,7 +119,7 @@ pub async fn run(
     ];
     for (side, publisher, build) in gripper_channels {
         let sample_rx = rx.clone();
-        tasks.push(tokio::spawn(stream_setpoints(
+        tasks.spawn(stream_setpoints(
             publisher,
             command_rate_hz,
             token.clone(),
@@ -128,10 +128,16 @@ pub async fn run(
                 let opening = streamable(&sample_rx, stale_timeout)?.opening_m(side);
                 Some(build(opening))
             },
-        )));
+        ));
     }
-    for task in tasks {
-        let _ = task.await;
+    // join_next surfaces tasks in completion order, so a panicked stream is
+    // seen immediately. A dead channel would silently hold its side while the
+    // node reports healthy, which is worse than a restart: cancel the node.
+    while let Some(result) = tasks.join_next().await {
+        if let Err(e) = result {
+            error!("command stream task died: {e}; cancelling the node");
+            token.cancel();
+        }
     }
 }
 
