@@ -2163,7 +2163,10 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#b8c846b9190455e1ff4ac9e8d72c63dd597cd229"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#f123769123281f08fc6262f0d13665208cfeb9a3"
+dependencies = [
+ "urdf-rs",
+]
 
 [[package]]
 name = "openarm_joint_commander"
@@ -2179,7 +2182,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "urdf-rs",
 ]
 
 [[package]]

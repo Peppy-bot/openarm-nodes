@@ -48,39 +48,25 @@ impl JointLimits {
             Side::Right => &self.right,
         }
     }
+
+    fn resolve(version: HardwareVersion) -> Self {
+        Self {
+            gripper: [0.0, version.jaw_open_m()],
+            left: version.joint_limits(openarm_description::Side::Left),
+            right: version.joint_limits(openarm_description::Side::Right),
+        }
+    }
 }
 
 static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
 
 /// Resolve the panel's clamp/display ranges from the generation's description:
-/// arm joints from the bundled URDF (with the elbow held off its singularity
-/// floor, matching the hub's clamp) and the gripper from the jaw width. Must
-/// run before the UI serves.
+/// arm joints via its `joint_limits` (URDF limits with the elbow held off its
+/// singularity floor, matching the hub's clamp) and the gripper from the jaw
+/// width. Must run before the UI serves.
 pub fn init_limits(version: HardwareVersion) {
-    let robot = urdf_rs::read_from_string(version.urdf()).expect("bundled URDF must parse");
-    let side_limits = |side: &str| -> [[f64; 2]; ARM_DOF] {
-        std::array::from_fn(|i| {
-            let name = format!("openarm_{side}_joint{}", i + 1);
-            let joint = robot
-                .joints
-                .iter()
-                .find(|j| j.name == name)
-                .unwrap_or_else(|| panic!("URDF missing joint {name}"));
-            [joint.limit.lower, joint.limit.upper]
-        })
-    };
-    let (mut left, mut right) = (side_limits("left"), side_limits("right"));
-    let elbow = version.elbow_joint_index();
-    let floor = version.elbow_singularity_floor_rad();
-    left[elbow][0] = left[elbow][0].max(floor);
-    right[elbow][0] = right[elbow][0].max(floor);
-    let limits = JointLimits {
-        gripper: [0.0, version.jaw_open_m()],
-        left,
-        right,
-    };
     assert!(
-        LIMITS.set(limits).is_ok(),
+        LIMITS.set(JointLimits::resolve(version)).is_ok(),
         "init_limits must run exactly once"
     );
 }
@@ -526,8 +512,15 @@ impl From<SideWire> for Side {
 mod tests {
     use super::*;
 
+    /// Tests have no main() to run init_limits, so resolve the v2 limits on
+    /// first use; concurrent tests settle benignly through get_or_init.
+    fn init_limits_for_tests() {
+        LIMITS.get_or_init(|| JointLimits::resolve(HardwareVersion::V2));
+    }
+
     #[test]
     fn clamp_pins_each_joint_into_its_range() {
+        init_limits_for_tests();
         for side in [Side::Left, Side::Right] {
             let limits = joint_limits().arm(side);
 
@@ -547,6 +540,7 @@ mod tests {
 
     #[test]
     fn clamp_leaves_in_range_values_untouched() {
+        init_limits_for_tests();
         for side in [Side::Left, Side::Right] {
             let limits = joint_limits().arm(side);
             let mut mid = [0.0; ARM_DOF];
@@ -613,6 +607,7 @@ mod tests {
 
     #[test]
     fn config_joint_limits_are_well_formed() {
+        init_limits_for_tests();
         // Each range must be non-empty so clamp and the slider bounds are valid.
         for side in [Side::Left, Side::Right] {
             for &[lo, hi] in joint_limits().arm(side).iter() {
