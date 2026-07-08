@@ -857,6 +857,49 @@ mod tests {
     }
 
     #[test]
+    fn floor_holds_on_both_sides_of_the_scan_skip_boundary() {
+        // The Lipschitz early-out skips the floor scan when the margin above
+        // the floor exceeds the model's step bound. Engineer one closing step
+        // whose bound sits just under that margin (skip may fire) and one just
+        // over (the scan must run), and require the floor contract to hold on
+        // both sides, so an off-by-margin or an underestimating bound cannot
+        // silently reintroduce endpoint-trusting.
+        let mut g = governor(true);
+        let q = drive_into_band(&mut g);
+        let d_now = distance(&mut g, &q);
+        let margin = d_now - D_STOP;
+        assert!(margin > 0.0, "setup: in band, above the stop");
+
+        let prev14 = concat(&q);
+        let toward14 = concat(&chase(&q, &wrists_inward(1.5), 0.02));
+        let step14: [f64; DUAL_DOF] = std::array::from_fn(|i| toward14[i] - prev14[i]);
+        let dq = split(&step14);
+        let bound = g.model.clearance_step_bound(&dq.left, &dq.right);
+        assert!(bound > 0.0, "setup: a closing step has a positive bound");
+
+        for scale in [0.9 * margin / bound, 1.1 * margin / bound] {
+            let target14: [f64; DUAL_DOF] =
+                std::array::from_fn(|i| prev14[i] + scale * step14[i]);
+            match g.clip_to_floor(&prev14, &target14, d_now, DT) {
+                Clip::Clear => {
+                    // Whether cleared by the skip or by the scan, no point of
+                    // the accepted segment may sit below the stop floor.
+                    assert!(
+                        segment_min(&mut g, &q, &split(&target14), 32) >= D_STOP - 1e-3,
+                        "cleared segment dips below the stop at scale {scale}"
+                    );
+                }
+                Clip::Clipped(p) => {
+                    assert!(
+                        distance(&mut g, &split(&p)) >= D_STOP - 1e-9,
+                        "clipped point below the stop at scale {scale}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn barrier_keeps_clearance_above_stop() {
         let mut g = governor(true);
         let target = wrists_inward(1.5);

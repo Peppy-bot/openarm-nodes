@@ -186,16 +186,18 @@ pub async fn run_gripper_state_listener(
             warn_unknown_id("gripper_states", "gripper_id", msg.gripper_id, &mut last_unknown_warn);
             continue;
         };
-        if !msg.position.is_finite() {
+        // Gate on the value actually published (the parsed fraction), so a bad
+        // width and a bad jaw travel are caught by the same check.
+        let fraction = msg.position / jaw_open_m;
+        if !fraction.is_finite() {
             warn!(
-                "gripper_states: dropping gripper {} message with non-finite position",
-                msg.gripper_id
+                "gripper_states: dropping gripper {} message with non-finite opening \
+                 (position {})",
+                msg.gripper_id, msg.position
             );
             continue;
         }
-        latest[idx].send_replace(Some(GripperOpening {
-            fraction: msg.position / jaw_open_m,
-        }));
+        latest[idx].send_replace(Some(GripperOpening { fraction }));
     }
 }
 
