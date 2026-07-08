@@ -1,8 +1,8 @@
 // openarm_joint_commander: operator entry point. Serves a browser-based
 // control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that streams
-// operator setpoints to the arms and grippers and fires move_arm_joints goals at
-// openarm_backbone. MVP scope is slider-driven joint-space; pose_estimation
-// will land as a sibling node.
+// operator arm and gripper setpoints to the hub (which governs and re-streams
+// them) and fires move_arm_joints goals at openarm_backbone. MVP scope is
+// slider-driven joint-space; pose_estimation will land as a sibling node.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -34,42 +34,32 @@
           tag: "v1",
           link_id: "proximity",
           from_any: true
-        }
-      ],
-      pairings: [
-        // One pairing slot per driven gripper: each holds exactly one paired
-        // peer, so opening setpoints and measured aperture are scoped per slot
-        // with no gripper_id demux. Both optional: the panel boots with any
-        // subset unpaired (those sliders just stay inert) and each pair is
-        // established at this instance's start (`--pair left_gripper@<inst>` /
-        // launcher `pairings:`). The arms are not paired: their command path
-        // runs through the hub (arm_joint_commands -> governed_setpoints).
-        {
-          name: "openarm_gripper_link",
-          tag: "v1",
-          role: "commander",
-          link_id: "left_gripper",
-          optional: true
         },
+        // Measured gripper opening of both grippers, for the live aperture
+        // readout. Wildcard (`from_any`) + told apart by gripper_id, like
+        // arm_states; the grippers stream this to the hub and the panel alike.
         {
-          name: "openarm_gripper_link",
+          name: "openarm_gripper_states",
           tag: "v1",
-          role: "commander",
-          link_id: "right_gripper",
-          optional: true
+          link_id: "gripper_states",
+          from_any: true
         }
       ]
     }
   },
   interfaces: {
-    // Streams operator arm setpoints to the hub (arm_joint_commands); the
-    // grippers are driven over their pairing slots instead. Producing these is
-    // what lets the panel drive an enabled arm/gripper continuously instead of
-    // one move at a time; each node clamps, rate-limits, and times out the
-    // stream on its side.
+    // Streams operator setpoints to the hub: arm targets on arm_joint_commands and
+    // gripper openings on gripper_commands, both told apart by id. Producing these
+    // is what lets the panel drive an enabled arm/gripper continuously instead of
+    // one move at a time; the hub governs each and re-streams the governed value,
+    // so a follower clamps, rate-limits, and times out on its side.
     conforms_to: [
       {
         name: "openarm_arm_joint_commands",
+        tag: "v1"
+      },
+      {
+        name: "openarm_gripper_commands",
         tag: "v1"
       },
       // Runtime on/off for the hub's self-collision governor, driven by the UI
@@ -99,6 +89,10 @@
         {
           name: "collision_status",
           link_id: "proximity"
+        },
+        {
+          name: "gripper_states",
+          link_id: "gripper_states"
         }
       ]
     }

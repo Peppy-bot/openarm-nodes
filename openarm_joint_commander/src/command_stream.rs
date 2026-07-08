@@ -1,20 +1,16 @@
-// Always-on command publisher. For each enabled arm, streams its target
-// setpoint at command_rate_hz on `arm_joint_commands` (tagged with `arm_id`;
-// the hub governs it into per-arm setpoints); for each enabled gripper,
-// streams its opening on that side's pairing slot so the paired gripper
-// follows it. A disabled side emits nothing, so the node's stream timeout
-// lapses and it holds. Re-publishing every tick (even an unchanged target)
-// keeps the consumer's stream watchdog alive between operator inputs. The
-// arm/gripper clamps and rate-limits what it receives, so this only has to
-// deliver the latest setpoint. Publishing on an unpaired gripper slot is a
-// legal no-op, so an operator enabling a side before its peer is paired is
-// harmless.
+// Always-on command publisher. For each enabled arm, streams its 7-joint target
+// on `arm_joint_commands`; for each enabled gripper, streams its opening (m) on
+// `gripper_commands`. Both are tagged with their id (arm_id / gripper_id) and go
+// to the hub, which governs each and re-streams the governed value the followers
+// track. A disabled side emits nothing, so the hub's stream timeout lapses and it
+// holds. Re-publishing every tick (even an unchanged target) keeps the hub's
+// stream watchdog alive between operator inputs; the hub clamps and rate-limits
+// what it receives, so this only has to deliver the latest setpoint.
 //
-// Each side+channel runs its own publish task on its own interval, with its
-// own publisher (slot-scoped for the grippers, a clone of the shared hub
-// publisher for the arms). A single shared loop publishing Left then Right
-// would leave Right permanently second (zenoh publish resolves synchronously),
-// so independent tasks avoid that bias.
+// Each side+stream runs its own publish task on its own interval, cloning the
+// shared per-topic publisher. A single shared loop publishing Left then Right
+// would leave Right permanently second (zenoh publish resolves synchronously), so
+// independent tasks avoid that bias.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +18,7 @@ use std::time::Duration;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_arm_joint_commands::v1::arm_joint_commands;
 use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
-use peppygen::pairings::{left_gripper, right_gripper};
+use peppygen::emitted_topics::openarm_gripper_commands::v1::gripper_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
@@ -45,20 +41,12 @@ pub async fn run(
             return token.cancel();
         }
     };
-    // One slot-scoped publisher per gripper side; each stamps its own slot's
-    // link_id on the wire, so the two grippers' streams stay fully isolated.
-    let left_gripper_pub = match left_gripper::gripper_commands::declare_publisher(&runner).await {
+    // One shared gripper publisher, cloned per side like the arm publisher; each
+    // side's stream tags its own gripper_id, so the hub tells them apart.
+    let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare left_gripper gripper_commands publisher: {e}");
-            return token.cancel();
-        }
-    };
-    let right_gripper_pub = match right_gripper::gripper_commands::declare_publisher(&runner).await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("declare right_gripper gripper_commands publisher: {e}");
+            error!("declare gripper_commands publisher: {e}");
             return token.cancel();
         }
     };
@@ -69,8 +57,6 @@ pub async fn run(
             return token.cancel();
         }
     };
-
-    type GripperBuilder = Box<dyn Fn(f64) -> Result<Payload, String> + Send>;
 
     let mut tasks = Vec::new();
 
@@ -119,42 +105,26 @@ pub async fn run(
                 )
             },
         )));
-    }
-    // The two gripper pairing streams, each with its slot publisher and a
-    // builder producing that slot's message (no gripper_id: the pairing scopes
-    // each stream to its peer).
-    let gripper_channels: [(Side, TopicPublisher, GripperBuilder); 2] = [
-        (
-            Side::Left,
-            left_gripper_pub,
-            Box::new(|target| {
-                left_gripper::gripper_commands::build_message(target).map_err(|e| e.to_string())
-            }),
-        ),
-        (
-            Side::Right,
-            right_gripper_pub,
-            Box::new(|target| {
-                right_gripper::gripper_commands::build_message(target).map_err(|e| e.to_string())
-            }),
-        ),
-    ];
-    for (side, publisher, build) in gripper_channels {
+        // Gripper: stream the opening (m) while enabled, tagged with gripper_id
+        // for the hub to demux (mirror of the arm stream above).
         let gripper_state = state.clone();
         tasks.push(tokio::spawn(stream_setpoints(
-            publisher,
+            gripper_pub.clone(),
             command_rate_hz,
             token.clone(),
             format!("{} gripper", side.label()),
             move || {
-                let target = {
+                let position = {
                     let s = gripper_state.lock().unwrap_or_else(|p| p.into_inner());
                     if !s.enabled(side) {
                         return None;
                     }
                     s.gripper(side).position
                 };
-                Some(build(target))
+                Some(
+                    gripper_commands::build_message(side.gripper_id(), position)
+                        .map_err(|e| e.to_string()),
+                )
             },
         )));
     }
