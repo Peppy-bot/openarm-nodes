@@ -877,9 +877,19 @@ mod tests {
         let bound = g.model.clearance_step_bound(&dq.left, &dq.right);
         assert!(bound > 0.0, "setup: a closing step has a positive bound");
 
-        for scale in [0.9 * margin / bound, 1.1 * margin / bound] {
+        for (scale, expect_skip) in [(0.9 * margin / bound, true), (1.1 * margin / bound, false)] {
             let target14: [f64; DUAL_DOF] =
                 std::array::from_fn(|i| prev14[i] + scale * step14[i]);
+            // The two cases must actually straddle the skip predicate
+            // (margin > bound of the scaled step), or a reshaped bound would
+            // quietly turn this into a generic floor sweep.
+            let scaled = split(&std::array::from_fn(|i| target14[i] - prev14[i]));
+            let scaled_bound = g.model.clearance_step_bound(&scaled.left, &scaled.right);
+            assert_eq!(
+                margin > scaled_bound,
+                expect_skip,
+                "scale {scale} does not straddle the skip predicate (margin {margin:.5}, bound {scaled_bound:.5})"
+            );
             match g.clip_to_floor(&prev14, &target14, d_now, DT) {
                 Clip::Clear => {
                     // Whether cleared by the skip or by the scan, no point of
