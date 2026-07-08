@@ -26,7 +26,10 @@ use crate::transport::{self, TransportConfig};
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);
 const PING_INTERVAL: Duration = Duration::from_millis(500);
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
-/// A streaming device gone silent this long is re-handshaken, not just stale.
+/// A connected device yielding no valid frame for this long is re-handshaken,
+/// not just stale. Gated on frame age alone so it also covers a device that
+/// keeps sending bytes that never frame (headerless garbage evades both the
+/// read-timeout and the checksum counter).
 const SILENCE_RECONNECT: Duration = Duration::from_secs(5);
 /// This many corrupt frames in a row means framing is lost; reconnect.
 const MAX_CONSECUTIVE_BAD_CHECKSUMS: u32 = 50;
@@ -183,9 +186,9 @@ fn session(
             Ok(n) => n,
             Err(e) => return SessionEnd::Transient(format!("read: {e}")),
         };
-        if read == 0 && last_frame_at.elapsed() > SILENCE_RECONNECT {
+        if last_frame_at.elapsed() > SILENCE_RECONNECT {
             return SessionEnd::Transient(format!(
-                "no frames for {SILENCE_RECONNECT:?} while connected"
+                "no valid frames for {SILENCE_RECONNECT:?} while connected"
             ));
         }
         deframer.push(&chunk[..read]);
