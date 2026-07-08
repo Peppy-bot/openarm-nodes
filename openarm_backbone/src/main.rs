@@ -77,6 +77,18 @@ fn main() -> Result<()> {
             params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
             "stream_timeout_s must be a positive finite number"
         );
+        // The move timeout feeds Duration::from_secs_f64 (which panics on a bad
+        // value mid-spawn) and a non-positive tolerance would keep any gripper
+        // goal from ever converging; both fail at bringup instead.
+        assert!(
+            params.gripper_position_tolerance.is_finite()
+                && params.gripper_position_tolerance > 0.0,
+            "gripper_position_tolerance must be a positive finite number"
+        );
+        assert!(
+            params.gripper_motion_timeout_s.is_finite() && params.gripper_motion_timeout_s > 0.0,
+            "gripper_motion_timeout_s must be a positive finite number"
+        );
         let max_joint_velocity_rad_s: JointVec = [
             params.max_joint_velocity_rad_s_1,
             params.max_joint_velocity_rad_s_2,
