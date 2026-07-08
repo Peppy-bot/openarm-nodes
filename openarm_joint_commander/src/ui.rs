@@ -21,6 +21,7 @@ use tracing::{info, warn};
 
 use crate::actions::move_arm_joints;
 use crate::error::Result;
+use crate::pose::{ArmModels, Pose};
 use crate::state::{
     ARM_DOF, ArmTarget, Disposition, GripperTarget, Proximity, SharedState, Side, UiState,
 };
@@ -84,12 +85,15 @@ struct AppState {
     runner: Arc<NodeRunner>,
     state: SharedState,
     token: CancellationToken,
+    // Per-side arm kinematics for the panel's Cartesian pose fields.
+    models: ArmModels,
 }
 
 pub async fn run(
     runner: Arc<NodeRunner>,
     state: SharedState,
     token: CancellationToken,
+    models: ArmModels,
 ) -> Result<()> {
     let port = env::var("PEPPY_JC_PORT")
         .ok()
@@ -105,6 +109,7 @@ pub async fn run(
         runner,
         state,
         token: token.clone(),
+        models,
     };
     let app = Router::new()
         .route("/", get(index))
@@ -137,7 +142,7 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             _ = tick.tick() => {
                 let snap = {
                     let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                    Snapshot::build(&s, Instant::now())
+                    Snapshot::build(&s, Instant::now(), &app.models)
                 };
                 let json = match serde_json::to_string(&snap) {
                     Ok(j) => j,
@@ -245,6 +250,40 @@ async fn handle_command(text: &str, app: &AppState) {
                 s.arm_mut(side).joints = joints;
             }
         }
+        Command::SetArmPose {
+            side,
+            position,
+            rpy,
+        } => {
+            let side: Side = side.into();
+            // Mirror set_arm_target: a pose only jogs an enabled arm. Seed IK from the
+            // current joint target so the arm angle stays put and the branch is unique.
+            let seed = {
+                let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                if !s.enabled(side) {
+                    return;
+                }
+                s.arm(side).joints
+            };
+            let pose: Pose = [
+                position[0],
+                position[1],
+                position[2],
+                rpy[0],
+                rpy[1],
+                rpy[2],
+            ];
+            let resolved = pose_to_joints(&app.models, side, &pose, &seed);
+            let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+            // Re-check: the deadman may have flipped between the seed read and here.
+            if !s.enabled(side) {
+                return;
+            }
+            match resolved {
+                Ok(joints) => s.arm_mut(side).joints = joints,
+                Err(reason) => s.set_status(format!("{}: {reason}", side.label())),
+            }
+        }
         Command::SetGripperTarget { side, position } => {
             let side: Side = side.into();
             let [lo, hi] = joint_limits().gripper;
@@ -300,6 +339,22 @@ fn clamp_to_limits(joints: &mut [f64; ARM_DOF], side: Side) {
     for (j, &[lo, hi]) in joints.iter_mut().zip(joint_limits().arm(side).iter()) {
         *j = j.clamp(lo, hi);
     }
+}
+
+/// Resolve a world-frame `pose` to a clamped joint target for `side`, seeded from
+/// `seed` (the current joint target). `Err` carries the operator-facing reason when
+/// the pose admits no in-limit solution, so the caller only writes a real target.
+fn pose_to_joints(
+    models: &ArmModels,
+    side: Side,
+    pose: &Pose,
+    seed: &[f64; ARM_DOF],
+) -> std::result::Result<[f64; ARM_DOF], &'static str> {
+    let mut joints = models
+        .solve_pose_ik(side, pose, seed)
+        .ok_or("pose unreachable / singular")?;
+    clamp_to_limits(&mut joints, side);
+    Ok(joints)
 }
 
 async fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s: f64) {
@@ -395,6 +450,12 @@ struct ArmView {
     in_flight: bool,
     // Per-joint [min, max] (rad); the browser bounds its sliders with these.
     limits: [[f64; 2]; ARM_DOF],
+    // World-frame end-effector pose [x, y, z, roll, pitch, yaw] of the joint target
+    // (FK), so moving a joint updates the panel's pose fields.
+    pose: Pose,
+    // Same for the measured joints, `null` until the first state arrives; the panel
+    // shows it beside the target pose the way it does per-joint feedback.
+    pose_feedback: Option<Pose>,
 }
 
 #[derive(Serialize)]
@@ -407,10 +468,10 @@ struct GripperView {
 }
 
 impl Snapshot {
-    fn build(s: &UiState, now: Instant) -> Self {
+    fn build(s: &UiState, now: Instant, models: &ArmModels) -> Self {
         Self {
-            left_arm: arm_view(&s.left_arm, Side::Left),
-            right_arm: arm_view(&s.right_arm, Side::Right),
+            left_arm: arm_view(&s.left_arm, Side::Left, models),
+            right_arm: arm_view(&s.right_arm, Side::Right, models),
             left_gripper: gripper_view(&s.left_gripper),
             right_gripper: gripper_view(&s.right_gripper),
             left_enabled: s.left_enabled,
@@ -439,12 +500,14 @@ fn live_proximity(s: &UiState, now: Instant) -> Option<&Proximity> {
         .filter(|p| now.duration_since(p.received_at) < PROXIMITY_STALE_AFTER)
 }
 
-fn arm_view(a: &ArmTarget, side: Side) -> ArmView {
+fn arm_view(a: &ArmTarget, side: Side, models: &ArmModels) -> ArmView {
     ArmView {
         joints: a.joints,
         feedback: a.last_feedback,
         in_flight: a.in_flight,
         limits: *joint_limits().arm(side),
+        pose: models.ee_pose_world(side, &a.joints),
+        pose_feedback: a.last_feedback.map(|fb| models.ee_pose_world(side, &fb)),
     }
 }
 
@@ -480,6 +543,15 @@ enum Command {
     SetArmTarget {
         side: SideWire,
         joints: [f64; ARM_DOF],
+    },
+    // Update an enabled arm's streamed target from a world-frame end-effector pose:
+    // position (metres) + orientation as intrinsic-XYZ roll/pitch/yaw (radians),
+    // solved to joints by IK. Handled exactly like set_arm_target (ignored while
+    // disabled); an unreachable pose leaves the target and reports it in the status.
+    SetArmPose {
+        side: SideWire,
+        position: [f64; 3],
+        rpy: [f64; 3],
     },
     // Update an enabled gripper's streamed opening. Ignored while disabled.
     SetGripperTarget {
@@ -622,5 +694,23 @@ mod tests {
         }
         let [lo, hi] = joint_limits().gripper;
         assert!(lo < hi, "gripper range [{lo}, {hi}] must be non-empty");
+    }
+
+    #[test]
+    fn pose_to_joints_resolves_a_reachable_pose_and_rejects_an_unreachable_one() {
+        // Build the models from the same generation the shared clamp limits use, so
+        // the clamp inside pose_to_joints agrees with the chain the pose came from.
+        init_limits_for_tests();
+        let models = ArmModels::from_version(HardwareVersion::V2);
+        // A mid-range config is in-limit by construction and generically non-singular,
+        // so its own FK pose is reachable; the handler core must resolve it (the exact
+        // FK<->IK round-trip precision is covered in pose.rs).
+        let lims = joint_limits().arm(Side::Left);
+        let seed: [f64; ARM_DOF] = std::array::from_fn(|i| (lims[i][0] + lims[i][1]) / 2.0);
+        let reachable = models.ee_pose_world(Side::Left, &seed);
+        assert!(pose_to_joints(&models, Side::Left, &reachable, &seed).is_ok());
+        // A pose far out of reach surfaces the operator-facing error, not a target.
+        let far = [10.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        assert!(pose_to_joints(&models, Side::Left, &far, &seed).is_err());
     }
 }

@@ -4,6 +4,7 @@ mod command_stream;
 mod error;
 mod gripper_states;
 mod joint_states;
+mod pose;
 mod state;
 mod ui;
 
@@ -29,6 +30,9 @@ fn main() -> Result<()> {
             .parse()
             .unwrap_or_else(|e| panic!("hardware_version: {e}"));
         ui::init_limits(version);
+        // Arm models for the panel's Cartesian pose fields (pose <-> joints), built
+        // from the same generation the ranges came from so FK/IK match the hub's chain.
+        let models = pose::ArmModels::from_version(version);
         // The operator streams the governor controls live; their launch defaults are
         // node parameters, kept in step with the hub's, so the real arm starts
         // conservative (tight band, slow cap) and the sim launchers start fast.
@@ -87,7 +91,7 @@ fn main() -> Result<()> {
         // the setup closure returns, so awaiting a forever-task starves the
         // health probe and the daemon SIGKILLs the instance after ~10s.
         tokio::spawn(async move {
-            if let Err(e) = ui::run(node_runner, shared, token).await {
+            if let Err(e) = ui::run(node_runner, shared, token, models).await {
                 error!(error = %e, "ui server exited with error");
             }
         });

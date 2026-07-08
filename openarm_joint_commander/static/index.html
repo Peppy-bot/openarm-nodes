@@ -98,6 +98,29 @@
     align-items: center; margin: 10px 0 4px; font-variant-numeric: tabular-nums;
   }
 
+  /* World-frame end-effector pose: target inputs (x/y/z + roll/pitch/yaw) with a
+     measured readout, coupled to the joint sliders both ways. `display: contents`
+     lets every row's cells share the one grid so the columns line up. */
+  .pose-head {
+    margin: 16px 0 8px; font: 600 11px/1 'Inter Tight', sans-serif;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-50);
+  }
+  .pose {
+    display: grid; grid-template-columns: 48px 1fr 76px 34px; gap: 8px 12px;
+    align-items: center; font-variant-numeric: tabular-nums;
+  }
+  .prow { display: contents; }
+  .pose .name { color: var(--ink-50); font-weight: 600; font-size: 12px; }
+  .pose .fb { text-align: right; color: var(--ink-50); }
+  .pose .unit { color: var(--ink-50); font-size: 11px; }
+  .pose input[type=number] {
+    width: 100%; padding: 7px 9px; border: none; border-radius: 9px;
+    background: var(--bg-soft); color: var(--ink);
+    font: 500 13px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+    outline: none;
+  }
+
   input[type=range] {
     -webkit-appearance: none; appearance: none;
     width: 100%; height: 8px; border-radius: 999px; outline: none;
@@ -200,6 +223,16 @@ const HOME_DURATION_S = 3;
 // Home is all zeros except the elbow (j4), held at a small positive angle so it
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
+// World-frame pose fields shown per arm: three positions (m) then roll/pitch/yaw
+// (rad), indexing the arm view's `pose` / `pose_feedback` arrays [x,y,z,r,p,y].
+const POSE_AXES = [
+  {i: 0, label: 'x', unit: 'm', step: 0.005},
+  {i: 1, label: 'y', unit: 'm', step: 0.005},
+  {i: 2, label: 'z', unit: 'm', step: 0.005},
+  {i: 3, label: 'roll', unit: 'rad', step: 0.02},
+  {i: 4, label: 'pitch', unit: 'rad', step: 0.02},
+  {i: 5, label: 'yaw', unit: 'rad', step: 0.02},
+];
 let ws = null;
 let latestSnap = null;
 // One streaming deadman per side, shared by that side's arm and gripper.
@@ -213,6 +246,8 @@ function build_arm(side, label) {
   root.innerHTML = `
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
     <div id="${side}_arm_joints"></div>
+    <div class="pose-head">pose · world</div>
+    <div class="pose" id="${side}_arm_pose"></div>
     <div class="actions">
       <button onclick="reset_arm('${side}')">Home</button>
       <button class="primary" id="${side}_arm_btn" onclick="toggle_enable('${side}')">Enable</button>
@@ -234,6 +269,18 @@ function build_arm(side, label) {
       <span class="target" id="${side}_t${i}">+0.000</span>
       <span class="fb" id="${side}_f${i}">---</span>`;
     joints.appendChild(row);
+  }
+  const pose = $(`${side}_arm_pose`);
+  for (const ax of POSE_AXES) {
+    const row = document.createElement('div');
+    row.className = 'prow';
+    row.innerHTML = `
+      <span class="name">${ax.label}</span>
+      <input type="number" step="${ax.step}" value="0" id="${side}_p${ax.i}"
+             oninput="on_pose_input('${side}')" />
+      <span class="fb" id="${side}_pf${ax.i}">---</span>
+      <span class="unit">${ax.unit}</span>`;
+    pose.appendChild(row);
   }
 }
 
@@ -270,6 +317,20 @@ function on_joint_input(side, i) {
 function send_arm_target(side) {
   if (!ws || ws.readyState !== 1) return;
   ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side)}));
+}
+
+function read_pose(side) {
+  const v = POSE_AXES.map(ax => parseFloat($(`${side}_p${ax.i}`).value));
+  return {position: v.slice(0, 3), rpy: v.slice(3, 6)};
+}
+
+// Pose field edited: while enabled, the server solves it to joints (IK) and streams
+// them. A half-typed field parses to NaN; skip the send rather than push a null pose.
+function on_pose_input(side) {
+  if (!enabled[side] || !ws || ws.readyState !== 1) return;
+  const {position, rpy} = read_pose(side);
+  if (![...position, ...rpy].every(Number.isFinite)) return;
+  ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, rpy}));
 }
 
 // Enable: snap both the arm sliders and the gripper slider to the measured pose
@@ -345,10 +406,16 @@ function apply_snapshot(snap) {
         $(`${side}_hi${i}`).textContent = fmt(hi);
       }
       // While disabled the slider mirrors the measured pose (you must enable to
-      // move), so the thumb shows where the arm is and enabling never jumps.
+      // move), so the thumb shows where the arm is and enabling never jumps. While
+      // enabled it mirrors the streamed target, so a pose-field edit (solved to
+      // joints server-side) shows on the sliders too - except the joint the operator
+      // is actively dragging, which we must not fight.
       if (!on && a.feedback) {
         el.value = a.feedback[i];
         $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
+      } else if (on && document.activeElement !== el) {
+        el.value = a.joints[i];
+        $(`${side}_t${i}`).textContent = fmt(a.joints[i]);
       }
       // Actual-position caret on the track.
       const sh = $(`${side}_sh${i}`);
@@ -359,6 +426,17 @@ function apply_snapshot(snap) {
       } else {
         sh.classList.add('off');
       }
+    }
+
+    // Pose fields: the measured readout always; the target inputs mirror the FK of
+    // the joint target while enabled (so moving a joint updates them) and the
+    // measured pose while disabled. Skip a field the operator is actively editing.
+    for (const ax of POSE_AXES) {
+      $(`${side}_pf${ax.i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[ax.i]) : '---';
+      const pin = $(`${side}_p${ax.i}`);
+      if (document.activeElement === pin) continue;
+      const src = on ? a.pose : a.pose_feedback;
+      if (src) pin.value = src[ax.i].toFixed(4);
     }
 
     const g = snap[`${side}_gripper`];
