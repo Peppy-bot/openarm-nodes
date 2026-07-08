@@ -17,11 +17,12 @@
 //!
 //! The barrier above shapes only the commanded stream and is blind to how well the
 //! arms track it. A second, independent measured-state monitor (defense in depth)
-//! holds the last setpoint whenever the real clearance, from the measured joint
-//! state, has closed past `MONITOR_TRIP_FRACTION * d_stop`, until it recovers past
-//! `d_stop` (hysteresis, so jitter at the wall cannot chatter the hold). It shares
-//! the governor enable, so the operator toggle gates the commanded barrier and this
-//! tripwire together.
+//! holds closing motion, judged per arm, whenever the real clearance, from the
+//! measured joint state, has closed past `MONITOR_TRIP_FRACTION * d_stop`, until
+//! it recovers past `d_stop` (hysteresis, so jitter at the wall cannot chatter
+//! the hold); an arm whose own motion opens the real gap always stays free. It
+//! shares the governor enable, so the operator toggle gates the commanded
+//! barrier and this tripwire together.
 
 use bimanual_collision_model::{BimanualCollisionModel, CollisionError};
 use tracing::{error, info, warn};
@@ -244,12 +245,16 @@ impl Governor {
         }
         // Measured-state tripwire: the commanded barrier below shapes only the
         // commanded stream and cannot see tracking error, so if the arms have
-        // actually closed past the monitor floor, block a command that would close
-        // the gap further. Separation is never blocked, so the operator can always
-        // retreat from a near-collision.
-        if let Some(held) = self.monitor_hold(prev, cand, measured) {
-            return held;
-        }
+        // actually closed past the monitor floor, hold the closing motion. The
+        // gate is per arm: an arm whose own motion opens the real gap stays
+        // free even while the other arm's push is held, so neither operator can
+        // trap the other's escape.
+        let cand = match self.monitor_gate(prev, cand, measured) {
+            Some(gated) if gated == *prev => return *prev,
+            Some(gated) => gated,
+            None => *cand,
+        };
+        let cand = &cand;
         // One analytic query yields both the current clearance and its gradient.
         let (d_now, grad, link_a, link_b) =
             match self.model.distance_gradient(&prev.left, &prev.right) {
@@ -317,15 +322,22 @@ impl Governor {
     /// Measured-state monitor (defense in depth): the commanded barrier shapes only
     /// the commanded stream and cannot see tracking error, so this watches the real
     /// clearance from the measured joint state. When the arms have actually closed
-    /// past `MONITOR_TRIP_FRACTION * d_stop` it blocks a command that would close the
+    /// past `MONITOR_TRIP_FRACTION * d_stop` it blocks commands that would close the
     /// gap further, until the clearance recovers past `d_stop` (hysteresis, latched
     /// in `monitor_tripped`, so a measurement hovering at the wall cannot chatter).
-    /// Separation is never blocked: a command that increases the real clearance
-    /// always passes, so the operator can always retreat from a near-collision.
-    /// Returns `Some(prev)` to hold, `None` to let the normal governing proceed. A
-    /// failed distance query counts as a breach (fail-safe). Only consulted while
-    /// enabled.
-    fn monitor_hold(
+    ///
+    /// Separation is never blocked, and it is judged PER ARM: one operator's
+    /// closing push must not trap the other arm's escape, so when the joint
+    /// candidate closes, each arm's motion is re-judged with the other held and
+    /// any sub-motion that opens the measured clearance passes. Two individually
+    /// opening motions can still jointly close (both arms converging on one
+    /// gap); the joint candidate was already confirmed closing in that case, so
+    /// the gate keeps only the single better escape.
+    ///
+    /// Returns `None` to pass the candidate unchanged, or `Some(gated)` with the
+    /// closing arms held at `prev` (both held means a full hold). A failed
+    /// distance query counts as closing (fail-safe). Only consulted while enabled.
+    fn monitor_gate(
         &mut self,
         prev: &ArmPair<JointVec>,
         cand: &ArmPair<JointVec>,
@@ -355,13 +367,34 @@ impl Governor {
         if !breached {
             return None;
         }
-        // Hold only a command confirmed to close the gap further. A command that opens
-        // it, or one whose clearance cannot be confirmed, is never held, so the
-        // operator can always retreat from a near-collision.
-        let closes = self
-            .distance_at(&concat(cand))
-            .is_some_and(|d_cand| d_cand <= d_measured);
-        if closes { Some(*prev) } else { None }
+        // The common escape: a joint candidate that opens the gap passes whole.
+        let opens = |g: &mut Self, pair: &ArmPair<JointVec>| -> Option<f64> {
+            g.distance_at(&concat(pair)).filter(|d| *d > d_measured)
+        };
+        if opens(self, cand).is_some() {
+            return None;
+        }
+        // The joint candidate closes: judge each arm's motion with the other
+        // held, so the closing arm is held while an escaping arm stays free.
+        let solo_left = ArmPair::new(cand.left, prev.right);
+        let solo_right = ArmPair::new(prev.left, cand.right);
+        let d_left = (cand.left != prev.left).then(|| opens(self, &solo_left)).flatten();
+        let d_right = (cand.right != prev.right)
+            .then(|| opens(self, &solo_right))
+            .flatten();
+        Some(match (d_left, d_right) {
+            // Both open alone yet close together: keep the better single escape.
+            (Some(dl), Some(dr)) => {
+                if dl >= dr {
+                    solo_left
+                } else {
+                    solo_right
+                }
+            }
+            (Some(_), None) => solo_left,
+            (None, Some(_)) => solo_right,
+            (None, None) => *prev,
+        })
     }
 
     /// Gradient-free fallback for deep penetration: with no usable gradient, allow
@@ -1050,6 +1083,67 @@ mod tests {
         let mut p = home();
         p.left[1] = 1.4;
         p
+    }
+
+    #[test]
+    fn monitor_frees_a_retreating_arm_while_the_other_pushes() {
+        // The field scenario: with the monitor tripped, one operator keeps
+        // pushing arm A into the breach while the other retreats arm B. The
+        // joint candidate closes (A dominates), but B's own motion opens the
+        // real gap, so the per-arm gate must hold A and let B escape; a
+        // whole-candidate hold would freeze B for as long as A pushes.
+        let mut g = governor(true);
+        // A shallow breach (positive clearance under the trip floor) keeps the
+        // distance field smooth, and this asymmetric converging pose binds a
+        // CROSS-ARM pair, so both arms' motion genuinely moves the gap (a
+        // torso-bound pair would make the retreating arm irrelevant).
+        let deep = ArmPair::new(
+            [0.0, 0.0, 1.15, 0.4, 0.1, 0.0, 0.2],
+            [0.0, 0.0, -1.25, 0.4, -0.1, 0.1, 0.0],
+        );
+        assert!(
+            distance(&mut g, &deep) < 0.5 * MONITOR_TRIP_FRACTION * D_STOP,
+            "setup: the deep pose must pass the breach target"
+        );
+        let measured = config_at_distance(
+            &mut g,
+            &home(),
+            &deep,
+            0.5 * MONITOR_TRIP_FRACTION * D_STOP,
+        );
+        let d_measured = distance(&mut g, &measured);
+        assert!(
+            d_measured < MONITOR_TRIP_FRACTION * D_STOP,
+            "setup: measured pose must breach the monitor floor"
+        );
+        let prev = measured;
+        // Find a push/pull step pair where the joint candidate closes (the push
+        // dominates) while the retreating arm alone opens: the mixed case the
+        // per-arm gate exists for.
+        let mut found = None;
+        for (push_step, pull_step) in [(0.05, 0.01), (0.1, 0.01), (0.15, 0.02), (0.2, 0.02)] {
+            let push = chase(&measured, &deep, push_step);
+            let pull = chase(&measured, &home(), pull_step);
+            let cand = ArmPair::new(push.left, pull.right);
+            let solo_right = ArmPair::new(prev.left, cand.right);
+            let solo_left = ArmPair::new(cand.left, prev.right);
+            if distance(&mut g, &cand) <= d_measured
+                && distance(&mut g, &solo_right) > d_measured
+                && distance(&mut g, &solo_left) <= d_measured
+            {
+                found = Some(cand);
+                break;
+            }
+        }
+        let cand = found.expect("setup: some push/pull pair produces the mixed case");
+
+        let governed = g.govern(&prev, &cand, &measured, DT);
+        assert_eq!(governed.left, prev.left, "the pushing arm must be held");
+        assert_ne!(governed.right, prev.right, "the retreating arm was frozen");
+        assert!(
+            distance(&mut g, &governed) > d_measured,
+            "the freed motion must open the real gap"
+        );
     }
 
     #[test]
