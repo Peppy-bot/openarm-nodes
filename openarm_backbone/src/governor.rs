@@ -290,7 +290,8 @@ impl Governor {
         // along the segment, so scan it rather than trusting either endpoint: a
         // single tick can pass through a pocket while both ends read clear.
         if d_now >= self.d_safe {
-            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, d_now, dt) {
+            let hold = self.separating_hold(&prev14, &cand14, d_now);
+            let (guard, governed) = match self.clip_to_floor(&prev14, &cand14, &hold, d_now, dt) {
                 Clip::Clear => (Guard::Clear, *cand),
                 Clip::Clipped(q) => (Guard::Stopped, split(&q)),
             };
@@ -301,9 +302,11 @@ impl Governor {
         // In the band: throttle only the closing component (the velocity-damper
         // barrier), then hold the realized clearance at the floor with the exact
         // backstop, since the first-order projection can still let surface curvature
-        // carry the clamped step past it.
+        // carry the clamped step past it. The backstop holds a separating arm at its
+        // target so one operator's push cannot clip the other's retreat.
         let (projected14, throttled) = self.throttle_closing(&prev14, &cand14, &grad, d_now, dt);
-        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, d_now, dt) {
+        let hold = self.separating_hold(&prev14, &projected14, d_now);
+        let (governed14, limited) = match self.clip_to_floor(&prev14, &projected14, &hold, d_now, dt) {
             Clip::Clear => (projected14, throttled),
             Clip::Clipped(q) => (q, true),
         };
@@ -413,7 +416,8 @@ impl Governor {
         let Some(d_now) = self.distance_at(&prev14) else {
             return *prev;
         };
-        match self.clip_to_floor(&prev14, &cand14, d_now, dt) {
+        let hold = self.separating_hold(&prev14, &cand14, d_now);
+        match self.clip_to_floor(&prev14, &cand14, &hold, d_now, dt) {
             Clip::Clear => split(&cand14),
             Clip::Clipped(q) => split(&q),
         }
@@ -496,6 +500,37 @@ impl Governor {
             .map(|p| p.distance)
     }
 
+    /// The per-joint hold mask for [`clip_to_floor`]. When exactly one arm's own
+    /// motion (the other held at `prev`) opens the clearance, that separating arm
+    /// is held at `target` while the floor scan clips the other, so the
+    /// approaching arm's clip cannot drag the separating arm's escape back with
+    /// it: the shared segment parameter would otherwise retract both to the same
+    /// point. Two operators can then retreat independently even while one pushes
+    /// in. When both arms approach (nothing separates), or both separate alone
+    /// yet may jointly close, nothing is held and the shared-segment backstop
+    /// governs both. A held arm's base (`t = 0`) is its solo-separating config,
+    /// which is at or above `d_prev` and so above the floor, keeping the scan's
+    /// clear-start precondition.
+    fn separating_hold(
+        &mut self,
+        prev: &[f64; DUAL_DOF],
+        target: &[f64; DUAL_DOF],
+        d_prev: f64,
+    ) -> [bool; DUAL_DOF] {
+        let mut solo_left = *prev;
+        solo_left[..ARM_DOF].copy_from_slice(&target[..ARM_DOF]);
+        let mut solo_right = *prev;
+        solo_right[ARM_DOF..].copy_from_slice(&target[ARM_DOF..]);
+        let opens = |g: &mut Self, q: &[f64; DUAL_DOF]| g.distance_at(q).is_some_and(|d| d >= d_prev);
+        let sep_left = opens(self, &solo_left);
+        let sep_right = opens(self, &solo_right);
+        std::array::from_fn(|i| match (sep_left, sep_right) {
+            (true, false) => i < ARM_DOF,
+            (false, true) => i >= ARM_DOF,
+            _ => false,
+        })
+    }
+
     /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
     /// point where the straight segment drops below the step floor, or
     /// [`Clip::Clear`] if every probed point stays at or above it. `d_now` is the
@@ -518,12 +553,21 @@ impl Governor {
         &mut self,
         prev: &[f64; DUAL_DOF],
         target: &[f64; DUAL_DOF],
+        hold: &[bool; DUAL_DOF],
         d_now: f64,
         dt: f64,
     ) -> Clip {
         let floor = self.step_floor(d_now);
+        // Held joints (a separating arm) sit at `target` for the whole scan; the
+        // rest interpolate, so the clip retracts only the approaching arm.
         let point_at = |t: f64| -> [f64; DUAL_DOF] {
-            std::array::from_fn(|i| prev[i] + t * (target[i] - prev[i]))
+            std::array::from_fn(|i| {
+                if hold[i] {
+                    target[i]
+                } else {
+                    prev[i] + t * (target[i] - prev[i])
+                }
+            })
         };
         let max_excursion = (0..DUAL_DOF)
             .map(|i| (target[i] - prev[i]).abs())
@@ -538,8 +582,12 @@ impl Governor {
             max_excursion <= max_step * 1.01,
             "governed step {max_excursion:.4} rad exceeds the velocity-limited bound {max_step:.4} rad"
         );
+        // The Lipschitz early-out is keyed to `d_now` at `prev` (all-prev); a hold
+        // starts the scan from a different base, so only skip when nothing is held.
         let dq = split(&std::array::from_fn(|i| target[i] - prev[i]));
-        if d_now - floor > self.model.clearance_step_bound(&dq.left, &dq.right) {
+        if hold.iter().all(|&h| !h)
+            && d_now - floor > self.model.clearance_step_bound(&dq.left, &dq.right)
+        {
             return Clip::Clear;
         }
         // One probe per `MAX_PROBE_ARC_RAD` of motion (floored for tiny steps); no fixed
@@ -923,7 +971,8 @@ mod tests {
                 expect_skip,
                 "scale {scale} does not straddle the skip predicate (margin {margin:.5}, bound {scaled_bound:.5})"
             );
-            match g.clip_to_floor(&prev14, &target14, d_now, DT) {
+            // No hold: this exercises the shared-segment skip predicate directly.
+            match g.clip_to_floor(&prev14, &target14, &[false; DUAL_DOF], d_now, DT) {
                 Clip::Clear => {
                     // Whether cleared by the skip or by the scan, no point of
                     // the accepted segment may sit below the stop floor.
@@ -1083,6 +1132,53 @@ mod tests {
         let mut p = home();
         p.left[1] = 1.4;
         p
+    }
+
+    #[test]
+    fn barrier_frees_a_retreating_arm_while_the_other_pushes() {
+        // The field scenario at the BARRIER (monitor untripped): parked at the
+        // wall, one operator keeps pushing an arm in (its solo motion closes)
+        // while the other retreats (its solo motion opens). The shared-segment
+        // clip once retracted both to the same parameter, freezing the escape;
+        // the separating-arm hold must let the retreating arm move nearly its
+        // full commanded step while the pushing arm is held at the floor.
+        let mut g = governor(true);
+        let q = drive_into_band(&mut g);
+        let d_wall = distance(&mut g, &q);
+        assert!(
+            (D_STOP..D_SAFE).contains(&d_wall),
+            "setup: parked in-band near the wall, got {d_wall:+.5}"
+        );
+        // Search a push/retreat pair that is genuinely mixed: solo-left closes
+        // below the floor while solo-right opens.
+        let mut found = None;
+        for (push, pull) in [(0.05, 0.02), (0.1, 0.02), (0.15, 0.03), (0.2, 0.02), (0.2, 0.05)] {
+            let cl = chase(&q, &wrists_inward(1.6), push).left;
+            let cr = chase(&q, &home(), pull).right;
+            let solo_left = distance(&mut g, &ArmPair::new(cl, q.right));
+            let solo_right = distance(&mut g, &ArmPair::new(q.left, cr));
+            if solo_left < d_wall && solo_right > d_wall {
+                found = Some((ArmPair::new(cl, cr), solo_right));
+                break;
+            }
+        }
+        let (cand, solo_right) = found.expect("setup: some push/retreat pair is mixed");
+
+        let governed = g.govern(&q, &cand, &q, DT);
+        // The retreating (right) arm must actually move; the governed config
+        // stays at or above the stop floor.
+        assert_ne!(governed.right, q.right, "the retreating arm was frozen");
+        assert!(
+            distance(&mut g, &governed) >= D_STOP - 1e-6,
+            "the governed step breached the stop floor"
+        );
+        // It should recover most of the way to the solo-retreat clearance, not a
+        // token sliver (the frozen-arm bug clipped it to a few percent).
+        let opened = distance(&mut g, &ArmPair::new(q.left, governed.right));
+        assert!(
+            opened >= d_wall + 0.5 * (solo_right - d_wall),
+            "retreat barely moved: opened to {opened:+.5} of solo {solo_right:+.5} from wall {d_wall:+.5}"
+        );
     }
 
     #[test]
