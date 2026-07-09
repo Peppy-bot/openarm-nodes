@@ -1,7 +1,8 @@
-// Spawned per Enter keypress when an arm is focused. Fires move_arm_joints at
-// backbone, streams feedback back into the shared UiState, and writes the
-// result into the status line. Each goal is its own task; cancel-aware so a
-// shutdown can't wedge an in-flight goal.
+// Spawned per fire_arm command (the panel's Home button, which parks the arm
+// as a discrete governed move). Fires move_arm_joints at the hub, streams
+// feedback back into the shared UiState, and writes the result into the status
+// line. Each goal is its own task; cancel-aware so a shutdown can't wedge an
+// in-flight goal.
 
 use std::sync::Arc;
 use std::time::Duration;
