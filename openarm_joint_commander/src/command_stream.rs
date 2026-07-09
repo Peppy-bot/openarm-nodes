@@ -58,14 +58,14 @@ pub async fn run(
         }
     };
 
-    let mut tasks = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
 
     // Re-publish the operator's governor controls every tick. Unlike the arm/gripper
     // streams these have no deadman: the hub's governor must always know the
     // operator's intent, and the lossy QoS means a one-shot publish could be
     // dropped, so the latest state is re-sent continuously.
     let governor_state = state.clone();
-    tasks.push(tokio::spawn(stream_setpoints(
+    tasks.spawn(stream_setpoints(
         governor_pub,
         command_rate_hz,
         token.clone(),
@@ -82,11 +82,11 @@ pub async fn run(
                 .map_err(|e| e.to_string()),
             )
         },
-    )));
+    ));
     for side in [Side::Left, Side::Right] {
         // Arm: stream the 7-joint setpoint while enabled.
         let arm_state = state.clone();
-        tasks.push(tokio::spawn(stream_setpoints(
+        tasks.spawn(stream_setpoints(
             arm_pub.clone(),
             command_rate_hz,
             token.clone(),
@@ -104,11 +104,11 @@ pub async fn run(
                         .map_err(|e| e.to_string()),
                 )
             },
-        )));
+        ));
         // Gripper: stream the opening (m) while enabled, tagged with gripper_id
         // for the hub to demux (mirror of the arm stream above).
         let gripper_state = state.clone();
-        tasks.push(tokio::spawn(stream_setpoints(
+        tasks.spawn(stream_setpoints(
             gripper_pub.clone(),
             command_rate_hz,
             token.clone(),
@@ -126,10 +126,16 @@ pub async fn run(
                         .map_err(|e| e.to_string()),
                 )
             },
-        )));
+        ));
     }
-    for task in tasks {
-        let _ = task.await;
+    // join_next surfaces tasks in completion order, so a panicked stream is
+    // seen immediately. A dead channel would silently hold its side while the
+    // node reports healthy, which is worse than a restart: cancel the node.
+    while let Some(result) = tasks.join_next().await {
+        if let Err(e) = result {
+            error!("command stream task died: {e}; cancelling the node");
+            token.cancel();
+        }
     }
 }
 

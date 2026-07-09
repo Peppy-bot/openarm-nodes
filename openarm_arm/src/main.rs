@@ -222,16 +222,29 @@ fn main() -> Result<()> {
         // own rate (the hub consumes it).
         let (governed_tx, governed_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
-        tokio::spawn(stream::run_governed_setpoint_listener(
+        let listener = tokio::spawn(stream::run_governed_setpoint_listener(
             node_runner.clone(),
             governed_tx,
         ));
-        tokio::spawn(stream::run_state_publisher(
+        let publisher = tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
             arm_id,
             Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
             measured_rx,
         ));
+        // Cancel the node the moment either stream task stops: a dead listener
+        // or publisher would otherwise hold the arm silently while is_ready
+        // stays true (same supervision as the sim followers).
+        {
+            let token = node_runner.cancellation_token().clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = listener => {}
+                    _ = publisher => {}
+                }
+                token.cancel();
+            });
+        }
         let wiring = stream::StreamWiring {
             governed: governed_rx,
             measured: measured_tx,
