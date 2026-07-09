@@ -1,12 +1,7 @@
-// Ambient following of a streamed gripper opening. While no move is running
-// (busy gate clear), publish the latest fresh opening to the sim; when the stream
-// goes stale, hold by publishing nothing so the sim keeps its last setpoint. The
-// move action and this loop share the busy gate, so they never both drive the
-// gripper. The opening is published directly; the sim splits it across the
-// fingers and its servo eases to it.
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+// Ambient following of a streamed gripper opening: publish the latest fresh
+// opening to the sim; when the stream goes stale, hold by publishing nothing so
+// the sim keeps its last setpoint. The opening is published directly; the sim
+// splits it across the fingers and its servo eases to it.
 
 use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
@@ -22,7 +17,6 @@ pub async fn run(
     passthrough_pub: TopicPublisher,
     gripper_id: u8,
     open_m: f64,
-    busy: Arc<AtomicBool>,
     cmd: watch::Receiver<Option<GripperCommand>>,
     params: ControlParams,
     token: CancellationToken,
@@ -35,11 +29,6 @@ pub async fn run(
         tokio::select! {
             _ = token.cancelled() => return,
             _ = ticker.tick() => {}
-        }
-
-        // A move owns the gripper: yield so the action stays the only writer.
-        if busy.load(Ordering::Acquire) {
-            continue;
         }
 
         // Follow only a command still within the stream timeout; otherwise hold

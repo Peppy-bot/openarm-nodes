@@ -16,6 +16,9 @@ pub const OPEN_M: f64 = 0.0697;
 /// Motor angle in radians at full open; the closed end is 0. Sourced from openarm_can's
 /// v2 gripper constant (the motor opens toward a positive angle).
 pub const OPEN_RAD: f64 = v20::GRIPPER_OPEN_RAD;
+// v2 opens toward a positive motor angle (unlike v1's negative convention);
+// the meters <-> radians mapping divides by it, so it must never be zero.
+const _: () = assert!(OPEN_RAD > 0.0);
 
 /// Inclusive position window `[lo, hi]` (meters) for the gripper.
 #[derive(Debug, Clone, Copy)]
@@ -27,12 +30,6 @@ pub struct Limit {
 impl Limit {
     const fn new(lo: f64, hi: f64) -> Self {
         Self { lo, hi }
-    }
-
-    /// True if `x` lies within `[lo, hi]`. Non-finite values (NaN/inf) are never
-    /// finite-bounded, so they are rejected.
-    pub fn contains(&self, x: f64) -> bool {
-        x.is_finite() && x >= self.lo && x <= self.hi
     }
 }
 
@@ -62,19 +59,7 @@ mod tests {
     }
 
     #[test]
-    fn contains_rejects_out_of_range_and_non_finite() {
-        assert!(GRIPPER_LIMITS_M.contains(0.0));
-        assert!(GRIPPER_LIMITS_M.contains(OPEN_M)); // inclusive
-        assert!(!GRIPPER_LIMITS_M.contains(-0.001));
-        assert!(!GRIPPER_LIMITS_M.contains(OPEN_M + 0.001));
-        assert!(!GRIPPER_LIMITS_M.contains(f64::NAN));
-        assert!(!GRIPPER_LIMITS_M.contains(f64::INFINITY));
-    }
-
-    #[test]
     fn mapping_round_trips_and_opens_positive() {
-        // v2 opens toward a positive motor angle (unlike v1's negative convention).
-        assert!(OPEN_RAD > 0.0);
         for m in [0.0, OPEN_M / 2.0, OPEN_M] {
             let back = motor_rad_to_meters(meters_to_motor_rad(m));
             assert!((back - m).abs() < 1e-9, "round trip {m} -> {back}");

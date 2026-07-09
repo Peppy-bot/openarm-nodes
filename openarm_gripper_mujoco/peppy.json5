@@ -1,6 +1,6 @@
 // MuJoCo sim implementation of openarm_gripper. Follows streamed
 // gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
-// the sim to actuate; consumes the sim's gripper_states for move-action feedback.
+// the sim to actuate; relays the sim's gripper_states to the paired commander.
 // Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node/v1",
@@ -22,8 +22,8 @@
         },
       ],
       interfaces: [
-        // Measured opening from the sim, used by the move action for convergence
-        // feedback. from_any: the sim is the producer.
+        // Measured opening from the sim, relayed to the paired commander.
+        // from_any: the sim is the producer.
         {
           name: "openarm_gripper_states",
           tag: "v1",
@@ -35,7 +35,6 @@
   },
   interfaces: {
     conforms_to: [
-      { name: "openarm_gripper_actions", tag: "v1" },
       // The resolved aperture handed to the sim engine (sim-internal passthrough).
       { name: "openarm_gripper_sim_passthrough", tag: "v1" },
     ],

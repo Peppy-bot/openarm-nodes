@@ -1,10 +1,9 @@
 mod command_stream;
-mod control;
 mod follow;
 mod geometry;
 mod stream;
 
-use control::{ControlConfig, run_move_gripper};
+use follow::ControlConfig;
 use openarm_can::{CallbackMode, GripperCan, v10};
 use peppygen::exposed_services::openarm_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
@@ -53,8 +52,6 @@ fn main() -> Result<()> {
                     params.recv_timeout_us
                 )
             }),
-            position_tolerance_m: params.position_tolerance,
-            motion_timeout: Duration::from_secs_f64(params.motion_timeout_s),
             stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
         };
 
@@ -114,7 +111,7 @@ fn main() -> Result<()> {
 
         // Return to closed (motor angle = 0.0 rad) before serving requests.
         info!("returning to zero");
-        gripper.mit_control(control::KP, control::KD, 0.0, 0.0, 0.0);
+        gripper.mit_control(follow::KP, follow::KD, 0.0, 0.0, 0.0);
         gripper.recv_all(BRINGUP_RECV_US);
         info!("gripper ready");
 
@@ -172,13 +169,9 @@ fn main() -> Result<()> {
             });
         }
 
-        // One busy gate, shared by the move action and the follow loop so only one
-        // drives the CAN bus at a time.
-        let busy = Arc::new(AtomicBool::new(false));
-
         // Stream listener -> follow loop: the listener keeps the latest streamed
         // opening addressed to this gripper, the follow loop drives the motor
-        // toward it between moves.
+        // toward it.
         let (cmd_tx, cmd_rx) = watch::channel(None);
         // Supervised: if the command consumer ever exits, whether a clean close
         // on shutdown or an unexpected error, streamed openings are dead, so
@@ -192,17 +185,13 @@ fn main() -> Result<()> {
             });
         }
         tokio::spawn(follow::run(
-            gripper.clone(),
-            busy.clone(),
+            gripper,
             cmd_rx,
-            cfg.clone(),
+            cfg,
             node_runner.cancellation_token().clone(),
         ));
 
-        // move_gripper: direct-setpoint control loop.
-        tokio::spawn(run_move_gripper(node_runner, gripper, cfg, busy));
-
-        // Motor enabled, follow and move loops running: report ready so the
+        // Motor enabled and follow loop running: report ready so the
         // robot_initializer can release the gate.
         ready.store(true, Ordering::SeqCst);
 
