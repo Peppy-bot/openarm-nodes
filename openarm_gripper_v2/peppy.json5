@@ -9,7 +9,7 @@
     tag: "v1",
     depends_on: {
       pairings: [
-        // The exclusive control conversation with ONE commander instance:
+        // The exclusive control conversation with ONE hub instance:
         // streamed opening setpoints in, measured aperture back, both scoped
         // to the pair (no gripper_id demux). Optional: the gripper boots
         // unpaired (moves still work via backbone goals) and is paired at a
@@ -18,7 +18,7 @@
           name: "openarm_gripper_link",
           tag: "v1",
           role: "gripper",
-          link_id: "commander",
+          link_id: "hub",
           optional: true,
         },
       ],

@@ -9,7 +9,7 @@
     tag: "v1",
     depends_on: {
       pairings: [
-        // The exclusive control conversation with ONE commander instance:
+        // The exclusive control conversation with ONE hub instance:
         // streamed opening setpoints in, this gripper's sim aperture relayed
         // back, both scoped to the pair (no gripper_id demux). Optional and
         // mirrors the real gripper, so both follow the same contract.
@@ -17,7 +17,7 @@
           name: "openarm_gripper_link",
           tag: "v1",
           role: "gripper",
-          link_id: "commander",
+          link_id: "hub",
           optional: true,
         },
       ],
