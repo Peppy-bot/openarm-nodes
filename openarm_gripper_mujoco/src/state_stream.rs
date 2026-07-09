@@ -1,6 +1,6 @@
 // Consume the sim's measured gripper opening (gripper_states) for this
 // gripper and relay it to the paired hub on the pairing's
-// `gripper_states` topic (a legal no-op while unpaired), so the commander
+// `gripper_states` topic (a legal no-op while unpaired), so the hub
 // sees this gripper's aperture without any gripper_id demux.
 
 use std::sync::Arc;
