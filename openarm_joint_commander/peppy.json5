@@ -10,10 +10,10 @@
     tag: "v1",
     depends_on: {
       interfaces: [
-        // The hub's arm move actions; the commander fires move_arm_joints (the
+        // The hub's move actions; the commander fires move_arm_joints (the
         // "Send" button). Bound to the backbone instance in the launcher.
         {
-          name: "openarm_arm_actions",
+          name: "openarm_move_actions",
           tag: "v1",
           link_id: "backbone"
         },

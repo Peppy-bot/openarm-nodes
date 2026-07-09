@@ -98,43 +98,14 @@
         name: "openarm_collision_status",
         tag: "v1"
       },
-      // The joint / Cartesian arm move actions (move_arm_joints, move_arm),
-      // addressed by arm_id. The hub runs each move itself (trajectory + governor
-      // + governed stream); progress is observed on arm_states.
+      // The hub's move actions (move_arm_joints, move_arm, move_gripper),
+      // addressed by side id. The hub runs each move itself (trajectory +
+      // governor + governed stream); progress is observed on the state streams.
       {
-        name: "openarm_arm_actions",
+        name: "openarm_move_actions",
         tag: "v1"
       }
     ],
-    actions: {
-      exposes: [
-        {
-          // Gripper motion. gripper_id selects the target gripper (0 = left,
-          // 1 = right).
-          name: "move_gripper",
-          goal_service: {
-            request_message_format: {
-              gripper_id: "u8",
-              position: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64"
-              },
-              action_time: "f64"
-            }
-          }
-        }
-      ],
-    },
     topics: {
       consumes: [
         {
