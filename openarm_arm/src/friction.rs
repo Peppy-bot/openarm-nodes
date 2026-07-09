@@ -99,12 +99,7 @@ mod tests {
 
     #[test]
     fn nominal_constants_are_complete_and_finite() {
-        for arr in [
-            &NOMINAL.fc,
-            &NOMINAL.fv,
-            &NOMINAL.fo,
-            &NOMINAL.k,
-        ] {
+        for arr in [&NOMINAL.fc, &NOMINAL.fv, &NOMINAL.fo, &NOMINAL.k] {
             assert!(arr.iter().all(|x| x.is_finite()));
         }
     }

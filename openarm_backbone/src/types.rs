@@ -34,6 +34,12 @@ impl Side {
         }
     }
 
+    /// Parse a wire `gripper_id` (0 = left, 1 = right), or `None` if out of range.
+    /// The gripper wire uses the same 0/1 encoding as the arm.
+    pub fn from_gripper_id(gripper_id: u8) -> Option<Self> {
+        Self::from_arm_id(gripper_id)
+    }
+
     /// Index into a left-then-right `[T; 2]`.
     pub fn index(self) -> usize {
         self.arm_id() as usize

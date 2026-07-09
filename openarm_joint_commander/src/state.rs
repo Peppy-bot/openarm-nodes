@@ -28,6 +28,16 @@ impl Side {
         }
     }
 
+    /// The wire `gripper_id` (0 = left, 1 = right); the same 0/1 encoding as the arm.
+    pub fn gripper_id(self) -> u8 {
+        self.arm_id()
+    }
+
+    /// Parse a wire `gripper_id` (0 = left, 1 = right), or `None` if out of range.
+    pub fn from_gripper_id(gripper_id: u8) -> Option<Self> {
+        Self::from_arm_id(gripper_id)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Left => "left",
@@ -107,14 +117,34 @@ pub struct UiState {
 }
 
 /// The hub's reported nearest checked pair: signed surface distance (m, positive
-/// is clearance), the two link names, and the local time it was received (for the
-/// readout's staleness check).
+/// is clearance), the two link names, the governor's disposition of the commanded
+/// motion, and the local time it was received (for the readout's staleness check).
 #[derive(Clone, Debug)]
 pub struct Proximity {
     pub distance: f64,
     pub link_a: String,
     pub link_b: String,
+    pub disposition: Disposition,
     pub received_at: Instant,
+}
+
+/// The governor's disposition of the commanded motion, parsed from the wire's
+/// mutually exclusive booleans. Stopped wins if a producer ever set both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    Clear,
+    Throttled,
+    Stopped,
+}
+
+impl Disposition {
+    pub fn from_wire(throttled: bool, stopped: bool) -> Self {
+        match (throttled, stopped) {
+            (_, true) => Self::Stopped,
+            (true, false) => Self::Throttled,
+            (false, false) => Self::Clear,
+        }
+    }
 }
 
 impl UiState {

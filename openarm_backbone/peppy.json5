@@ -1,8 +1,9 @@
 // openarm_backbone: the bimanual coordination hub node. Consumes the operator
-// arm_joint_commands stream and both arms' arm_states; exposes the joint /
-// Cartesian / gripper move actions; conforms to arm_governed_setpoints (the
-// per-arm stream the arms follow) and collision_status; and relays move_gripper
-// to the per-side grippers. See src/main.rs for the architecture.
+// arm_joint_commands and gripper_commands streams; exposes the joint /
+// Cartesian / gripper move actions and executes them itself; conforms to
+// collision_status; and drives each arm and each gripper over its own pairing
+// (arm_link / gripper_link): governed setpoints stream down each pair and the
+// measured state streams back on it. See src/main.rs for the architecture.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -23,13 +24,14 @@
           link_id: "commander",
           from_any: true
         },
-        // Measured joint state of both arms, the governor's d_now and the
-        // trajectory anchor. Wildcard: both arm/sim instances publish it, told
-        // apart by arm_id.
+        // Operator gripper opening stream, `from_any`: the same commander streams
+        // the desired opening per side (gripper_id); the hub governs it (the finger
+        // opening barrier) and drives each gripper over its pairing slot below,
+        // exactly as it does for the arm joint stream.
         {
-          name: "openarm_arm_states",
+          name: "openarm_gripper_commands",
           tag: "v1",
-          link_id: "arm_states",
+          link_id: "commander_gripper",
           from_any: true
         },
         // Runtime on/off for the governor. Wildcard + optional: the hub holds its
@@ -39,50 +41,159 @@
           tag: "v1",
           link_id: "collision_ctrl",
           from_any: true
-        },
-        // Per-side gripper move targets (relay unchanged).
+        }
+      ],
+      pairings: [
+        // The exclusive command loop with each arm: the hub plays the commander
+        // role, streams the governed joint setpoint down each slot's
+        // arm_setpoints, and reads that arm's measured state back on the slot's
+        // arm_states (the governor's d_now and the trajectory anchor); the slot
+        // scopes both directions, so no arm_id demux and no other producer can
+        // drive an arm or pose as its state. Optional like the gripper slots
+        // below, established at this instance's start (launcher `pairings:`).
         {
-          name: "openarm_gripper_actions",
+          name: "openarm_arm_link",
           tag: "v1",
-          link_id: "left_gripper"
+          role: "commander",
+          link_id: "left_arm_link",
+          optional: true
         },
         {
-          name: "openarm_gripper_actions",
+          name: "openarm_arm_link",
           tag: "v1",
-          link_id: "right_gripper"
+          role: "commander",
+          link_id: "right_arm_link",
+          optional: true
+        },
+        // The exclusive command loop with each gripper: the hub plays the
+        // commander role, streams the governed opening down each slot's
+        // gripper_commands, and reads that gripper's measured aperture back on
+        // the slot's gripper_states; the slot scopes both directions, so no
+        // gripper_id demux and no other producer can pose as the fingers.
+        // Optional: the hub boots with either gripper unpaired (that side's
+        // governed openings go nowhere and no aperture arrives, so streaming
+        // stays gated) and each pair is established at this instance's start
+        // (launcher `pairings:`).
+        {
+          name: "openarm_gripper_link",
+          tag: "v1",
+          role: "commander",
+          link_id: "left_gripper_link",
+          optional: true
+        },
+        {
+          name: "openarm_gripper_link",
+          tag: "v1",
+          role: "commander",
+          link_id: "right_gripper_link",
+          optional: true
         }
       ]
     }
   },
   interfaces: {
     conforms_to: [
-      // The governed per-arm setpoint stream (positions + velocity feedforward).
       {
-        name: "openarm_arm_governed_setpoints",
-        tag: "v1"
-      },
-      {
-        // Live nearest-pair distance + links, for the operator readout.
+        // Emits the live nearest-pair distance + links, for the operator readout.
         name: "openarm_collision_status",
-        tag: "v1"
-      },
-      // The joint / Cartesian arm move actions (move_arm_joints, move_arm),
-      // addressed by arm_id. The hub runs each move itself (trajectory + governor
-      // + governed stream); progress is observed on arm_states.
-      {
-        name: "openarm_arm_actions",
         tag: "v1"
       }
     ],
     actions: {
+      // The hub's move actions, addressed by side id. The hub runs each move
+      // itself (trajectory + governor + governed stream); progress is observed
+      // on the state streams. Discrete goals that return a result, distinct
+      // from the arm_joint_commands / gripper_commands streams.
       exposes: [
         {
-          // Gripper motion. gripper_id selects the target gripper (0 = left,
-          // 1 = right).
+          name: "move_arm_joints",
+          goal_service: {
+            request_message_format: {
+              // Which arm (0 = left, 1 = right).
+              arm_id: "u8",
+              // Target joint positions (rad), j1..j7.
+              joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              },
+              // Requested trajectory duration (s); floored at the per-joint
+              // velocity-limit duration. 0 = fastest.
+              duration_s: "f64"
+            },
+            response_message_format: {
+              accepted: "bool"
+            }
+          },
+          result_service: {
+            response_message_format: {
+              success: "bool",
+              message: "string",
+              // Measured joint positions (rad) when the action ended, j1..j7.
+              final_joint_positions: {
+                $type: "array",
+                $items: "f64",
+                $length: 7
+              },
+              // Wall-clock duration of the action (s).
+              action_time: "f64"
+            }
+          }
+        },
+        {
+          name: "move_arm",
+          goal_service: {
+            request_message_format: {
+              // Which arm (0 = left, 1 = right).
+              arm_id: "u8",
+              // Target end-effector position in the world frame: x, y, z (m).
+              position: {
+                $type: "array",
+                $items: "f64",
+                $length: 3
+              },
+              // Target end-effector orientation, quaternion [x, y, z, w].
+              orientation: {
+                $type: "array",
+                $items: "f64",
+                $length: 4
+              },
+              // Requested trajectory duration (s); floored at the velocity-limit
+              // duration. 0 = fastest.
+              duration_s: "f64"
+            },
+            response_message_format: {
+              accepted: "bool"
+            }
+          },
+          result_service: {
+            response_message_format: {
+              success: "bool",
+              message: "string",
+              // Measured end-effector position when the action ended: x, y, z (m).
+              final_position: {
+                $type: "array",
+                $items: "f64",
+                $length: 3
+              },
+              // Measured end-effector orientation, quaternion [x, y, z, w].
+              final_orientation: {
+                $type: "array",
+                $items: "f64",
+                $length: 4
+              },
+              // Wall-clock duration of the action (s).
+              action_time: "f64"
+            }
+          }
+        },
+        {
           name: "move_gripper",
           goal_service: {
             request_message_format: {
+              // Which gripper (0 = left, 1 = right).
               gripper_id: "u8",
+              // Target opening (m): 0.0 = closed, increasing toward fully open.
               position: "f64"
             },
             response_message_format: {
@@ -93,24 +204,15 @@
             response_message_format: {
               success: "bool",
               message: "string",
+              // Measured opening (m) when the action ended.
               final_joint_positions: {
                 $type: "array",
                 $items: "f64"
               },
+              // Wall-clock duration of the action (s).
               action_time: "f64"
             }
           }
-        }
-      ],
-      // Downstream gripper move actions the hub relays to, per side.
-      consumes: [
-        {
-          link_id: "left_gripper",
-          name: "move_gripper"
-        },
-        {
-          link_id: "right_gripper",
-          name: "move_gripper"
         }
       ]
     },
@@ -121,8 +223,8 @@
           link_id: "commander"
         },
         {
-          name: "arm_states",
-          link_id: "arm_states"
+          name: "gripper_commands",
+          link_id: "commander_gripper"
         },
         {
           name: "governor_control",
@@ -190,6 +292,12 @@
       // How long (s) the hub keeps following an operator stream after its last
       // message before releasing the lock and holding.
       stream_timeout_s: "f64",
+      // Completion tolerance (m) for hub-executed move_gripper goals: the goal
+      // completes when the measured opening is within this of the target.
+      gripper_position_tolerance: { $type: "f64", $default: 0.001 },
+      // Deadline (s) for hub-executed move_gripper goals; a goal the governed
+      // opening cannot reach (a collision clamp) fails here.
+      gripper_motion_timeout_s: { $type: "f64", $default: 10.0 },
     }
   }
 }

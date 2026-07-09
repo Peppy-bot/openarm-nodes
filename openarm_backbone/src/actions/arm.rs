@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use peppygen::exposed_actions::openarm_arm_actions::v1::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
 use srs_model::Limit;
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
@@ -18,11 +18,7 @@ use tracing::error;
 use crate::planner::Goal;
 use crate::{ARM_DOF, JointVec, Side};
 
-/// Claim the arm's single-flight slot, or report it already busy.
-fn claim(busy: &AtomicBool) -> bool {
-    busy.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-}
+use crate::actions::claim;
 
 fn target_in_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> bool {
     q.iter().zip(limits).all(|(&v, l)| v >= l.lo && v <= l.hi)

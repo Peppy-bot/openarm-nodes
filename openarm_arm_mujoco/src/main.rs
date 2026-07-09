@@ -1,12 +1,14 @@
-//! MuJoCo sim follower: republish the hub's governed setpoints for this arm onto
-//! the sim's arm_sim_passthrough topic. All motion, trajectory, and collision
-//! logic lives in openarm_backbone; this node only relabels the governed
-//! stream for the engine. A held subscription receives every setpoint in order
-//! with no re-subscribe gap; a separate task publishes the latest, so neither
-//! arm is starved (the same shape the real arm uses).
+//! MuJoCo sim follower: republish the paired hub's governed setpoints onto the
+//! sim's arm_sim_passthrough topic, and relay the engine's measured state back
+//! to the hub on the pairing. All motion, trajectory, and collision logic lives
+//! in openarm_backbone; this node only relabels the governed stream for the
+//! engine and the engine's state for the hub. A held subscription receives
+//! every setpoint in order with no re-subscribe gap; a separate task publishes
+//! the latest, so neither arm is starved (the same shape the real arm uses).
 
-use peppygen::consumed_topics::hub_arm_governed_setpoints;
+use peppygen::consumed_topics::state_arm_states;
 use peppygen::emitted_topics::openarm_arm_sim_passthrough::v1::arm_sim_passthrough;
+use peppygen::pairings::hub;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -32,32 +34,29 @@ fn main() -> Result<()> {
         info!("starting openarm_arm_mujoco follower arm_id={arm_id}");
 
         let (latest_tx, latest_rx) = watch::channel::<Option<Setpoint>>(None);
-        // Supervise both follower tasks: if either ever exits, whether a clean Ok(None)
+        // Supervise the follower tasks: if any ever exits, whether a clean Ok(None)
         // on shutdown or an unexpected error/panic, this relabel path is dead, so cancel
         // the node to restart it rather than leaving it healthy but inert.
         let token = node_runner.cancellation_token().clone();
 
-        // Receive task: one held subscription, looped. Holding the subscription
-        // means no re-subscribe gap between messages, so a setpoint for this arm is
-        // never dropped while the other arm's message is in flight.
+        // Receive task: one held pairing subscription, looped. The slot delivers
+        // only the paired hub's setpoints, so there is no arm_id filter; holding
+        // the subscription means no re-subscribe gap between messages.
         let rx_runner = node_runner.clone();
         let receive = tokio::spawn(async move {
-            let mut sub = match hub_arm_governed_setpoints::subscribe(&rx_runner).await {
+            let mut sub = match hub::arm_setpoints::subscribe(&rx_runner).await {
                 Ok(s) => s,
-                Err(e) => return error!("governed_setpoints subscribe: {e}"),
+                Err(e) => return error!("arm_setpoints subscribe: {e}"),
             };
             loop {
                 let msg = match sub.next().await {
                     Ok(Some((_, msg))) => msg,
                     Ok(None) => return, // subscription closed: node shutting down
                     Err(e) => {
-                        error!("governed_setpoints receive: {e}");
+                        error!("arm_setpoints receive: {e}");
                         continue;
                     }
                 };
-                if msg.arm_id != arm_id {
-                    continue;
-                }
                 // Clear the latest on any non-finite governed setpoint, matching the
                 // real arm, so a bad value never reaches the sim engine and the sim
                 // holds its last commanded pose.
@@ -67,7 +66,7 @@ fn main() -> Result<()> {
                     .chain(msg.velocities.iter())
                     .all(|v| v.is_finite());
                 if !finite {
-                    warn!("governed_setpoints: clearing target on non-finite values");
+                    warn!("arm_setpoints: clearing target on non-finite values");
                     let _ = latest_tx.send(None);
                     continue;
                 }
@@ -78,8 +77,9 @@ fn main() -> Result<()> {
         // Publish task: relabel each new setpoint onto arm_sim_passthrough. No
         // shutdown handler: never publish a zero setpoint on exit, which would
         // command the arm into a self-collision pose.
+        let pub_runner = node_runner.clone();
         let publish = tokio::spawn(async move {
-            let publisher = match arm_sim_passthrough::declare_publisher(&node_runner).await {
+            let publisher = match arm_sim_passthrough::declare_publisher(&pub_runner).await {
                 Ok(p) => p,
                 Err(e) => return error!("declare arm_sim_passthrough publisher: {e}"),
             };
@@ -109,11 +109,60 @@ fn main() -> Result<()> {
             }
         });
 
-        // Cancel the node the moment either task stops.
+        // State relay task: this arm's engine measurements (the broadcast
+        // arm_states the sim emits, demuxed by arm_id) flow to the paired hub on
+        // the pairing's arm_states, the command loop's state input. Non-finite
+        // samples are dropped so the hub never anchors on a bad measurement.
+        let relay = tokio::spawn(async move {
+            let mut sub = match state_arm_states::subscribe(&node_runner).await {
+                Ok(s) => s,
+                Err(e) => return error!("arm_states subscribe: {e}"),
+            };
+            let peer_pub = match hub::arm_states::declare_publisher(&node_runner).await {
+                Ok(p) => p,
+                Err(e) => return error!("declare paired arm_states publisher: {e}"),
+            };
+            let mut failing = false;
+            loop {
+                let msg = match sub.next().await {
+                    Ok(Some((_, msg))) => msg,
+                    Ok(None) => return, // subscription closed: node shutting down
+                    Err(e) => {
+                        error!("arm_states receive: {e}");
+                        continue;
+                    }
+                };
+                let finite = msg
+                    .positions
+                    .iter()
+                    .chain(msg.velocities.iter())
+                    .all(|v| v.is_finite());
+                if msg.arm_id != arm_id || !finite {
+                    continue;
+                }
+                let result = async {
+                    let payload = hub::arm_states::build_message(msg.positions, msg.velocities)
+                        .map_err(|e| e.to_string())?;
+                    peer_pub.publish(payload).await.map_err(|e| e.to_string())
+                }
+                .await;
+                match result {
+                    Ok(()) => failing = false,
+                    Err(e) if !failing => {
+                        failing = true;
+                        warn!("paired arm_states publish failing, suppressing repeats: {e}");
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+
+        // Cancel the node the moment any task stops.
         tokio::spawn(async move {
             tokio::select! {
                 _ = receive => {}
                 _ = publish => {}
+                _ = relay => {}
             }
             token.cancel();
         });

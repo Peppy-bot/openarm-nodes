@@ -2,7 +2,8 @@
 //! side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
 //! hardware control loop (gravity/Coriolis/friction feedforward from the
 //! in-process srs_model, plus MIT control) and tracks the hub's governed
-//! setpoint, reporting measured state on the always-on `arm_states` stream. The
+//! setpoint over the arm_link pairing, reporting measured state back on the
+//! same pairing and on the always-on broadcast `arm_states` stream. The
 //! hub (openarm_backbone) owns all trajectory generation, stream following, and
 //! self-collision governing, so this node carries no motion logic of its own; on
 //! shutdown it disables the motors and lets the arm go limp.
@@ -31,8 +32,8 @@ pub const ARM_DOF: usize = 7;
 pub type JointVec = [f64; ARM_DOF];
 
 /// `arm_id` values (0 = left, 1 = right). Geometry and joint limits come from the
-/// URDF via `base_link`; `arm_id` selects which governed setpoints to follow and
-/// which arm the measured state is tagged with.
+/// URDF via `base_link`; `arm_id` tags the broadcast measured state (the command
+/// loop itself is scoped by the arm_link pairing, no id needed).
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
@@ -91,8 +92,16 @@ fn main() -> Result<()> {
                     hardware_version.elbow_singularity_floor_rad(),
                 )
             })
-            .unwrap_or_else(|e| panic!("build {hardware_version} arm model from base '{}': {e}", params.base_link));
-        info!("model loaded ({hardware_version}, base '{}')", params.base_link);
+            .unwrap_or_else(|e| {
+                panic!(
+                    "build {hardware_version} arm model from base '{}': {e}",
+                    params.base_link
+                )
+            });
+        info!(
+            "model loaded ({hardware_version}, base '{}')",
+            params.base_link
+        );
 
         // Gravity acts along world -Z, so it is only correct if the URDF carries the
         // mount tree above base_link to orient that frame. We do not force one (a
@@ -213,17 +222,29 @@ fn main() -> Result<()> {
         // own rate (the hub consumes it).
         let (governed_tx, governed_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
-        tokio::spawn(stream::run_governed_setpoint_listener(
+        let listener = tokio::spawn(stream::run_governed_setpoint_listener(
             node_runner.clone(),
-            arm_id,
             governed_tx,
         ));
-        tokio::spawn(stream::run_state_publisher(
+        let publisher = tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
             arm_id,
             Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
             measured_rx,
         ));
+        // Cancel the node the moment either stream task stops: a dead listener
+        // or publisher would otherwise hold the arm silently while is_ready
+        // stays true (same supervision as the sim followers).
+        {
+            let token = node_runner.cancellation_token().clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = listener => {}
+                    _ = publisher => {}
+                }
+                token.cancel();
+            });
+        }
         let wiring = stream::StreamWiring {
             governed: governed_rx,
             measured: measured_tx,

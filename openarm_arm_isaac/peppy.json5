@@ -1,23 +1,37 @@
-// Isaac Sim follower for one openarm arm. A thin bridge: it consumes the hub's
-// governed per-arm setpoints (collision-governed, rate-limited, the hub owns all
-// trajectory generation) and republishes the resolved (q_des, dq_des) on the
-// sim-internal arm_sim_passthrough topic for the engine to actuate. No
-// trajectory, follow, or collision logic of its own - that all lives in
-// openarm_backbone, so the sim and the real arm follow the same governed
-// stream. Two instances, one per side, told apart by arm_id.
+// Isaac sim follower for one openarm arm. A thin bridge: it follows the hub's
+// governed setpoints over the arm_link pairing (collision-governed,
+// rate-limited, the hub owns all trajectory generation) and republishes the
+// resolved (q_des, dq_des) on the sim-internal arm_sim_passthrough topic for
+// the engine to actuate, relaying the engine's measured state back to the
+// paired hub. No trajectory, follow, or collision logic of its own - that all
+// lives in openarm_backbone, so the sim and the real arm follow the same
+// governed stream. Two instances, one per side.
 {
   peppy_schema: "node/v1",
   manifest: {
     name: "openarm_arm_isaac",
     tag: "v1",
     depends_on: {
-      interfaces: [
-        // The hub's governed per-arm setpoint stream, `from_any` (entries told
-        // apart by arm_id).
+      pairings: [
+        // The exclusive command loop with the hub: governed setpoints stream in
+        // and the engine's measured state is relayed back, both scoped to the
+        // pair (no arm_id demux). Optional: the follower boots and idles with no
+        // hub paired; the pair is established at the hub's start.
         {
-          name: "openarm_arm_governed_setpoints",
+          name: "openarm_arm_link",
           tag: "v1",
+          role: "arm",
           link_id: "hub",
+          optional: true,
+        },
+      ],
+      interfaces: [
+        // Measured joint state from the sim engine, relayed to the paired hub.
+        // from_any: the sim is the producer; entries told apart by arm_id.
+        {
+          name: "openarm_arm_states",
+          tag: "v1",
+          link_id: "state",
           from_any: true,
         },
       ],
@@ -30,7 +44,7 @@
     ],
     topics: {
       consumes: [
-        { name: "arm_governed_setpoints", link_id: "hub" },
+        { name: "arm_states", link_id: "state" },
       ],
     },
   },
@@ -40,7 +54,8 @@
       def_file: "apptainer.def",
     },
     parameters: {
-      // The arm_id at runtime (0 = left, 1 = right).
+      // The arm_id at runtime (0 = left, 1 = right): selects which engine state
+      // entries to relay and tags the passthrough for the engine.
       arm_id: "u8",
     },
   },

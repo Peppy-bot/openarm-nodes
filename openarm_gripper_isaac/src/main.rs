@@ -1,13 +1,8 @@
-mod actions;
 mod config;
 mod follow;
 mod passthrough;
-mod state;
 mod state_stream;
 mod stream;
-
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use openarm_description::HardwareVersion;
 use peppygen::{NodeBuilder, Parameters, Result};
@@ -42,33 +37,27 @@ fn main() -> Result<()> {
             .await
             .expect("peppygen::clock::init");
 
-        let shared = state::new_shared();
-
-        // Consume the sim's measured opening (gripper_states) to feed the move
-        // action's convergence/stall feedback. Supervised: if the consumer ever
-        // exits, whether a clean close on shutdown or an unexpected error, the
-        // feedback path is dead, so cancel the node to restart it rather than
-        // leaving it healthy but inert.
+        // Relay the sim's measured opening (gripper_states) to the paired
+        // hub. Supervised: if the consumer ever exits, whether a clean
+        // close on shutdown or an unexpected error, the state relay is dead, so
+        // cancel the node to restart it rather than leaving it healthy but inert.
         {
             let runner = node_runner.clone();
-            let shared = shared.clone();
             let token = token.clone();
             tokio::spawn(async move {
-                state_stream::run(runner, gripper_id, shared, token.clone()).await;
+                state_stream::run(runner, gripper_id, token.clone()).await;
                 token.cancel();
             });
         }
 
-        // One passthrough publisher and one busy gate, shared by the move action
-        // and the follow loop so only one drives the sim at a time.
+        // The passthrough publisher the follow loop drives the sim through.
         let passthrough_pub = passthrough::declare_publisher(&node_runner)
             .await
             .expect("declare passthrough publisher");
-        let busy = Arc::new(AtomicBool::new(false));
         let control = ControlParams::from_params(&params);
 
         // Stream listener -> follow loop: the listener keeps the latest streamed
-        // opening, the follow loop drives it between moves.
+        // opening, the follow loop drives the sim toward it.
         let (cmd_tx, cmd_rx) = watch::channel(None);
         // Supervised like the state stream: a dead command consumer leaves the
         // gripper unresponsive to streamed openings.
@@ -81,23 +70,12 @@ fn main() -> Result<()> {
             });
         }
         tokio::spawn(follow::run(
-            passthrough_pub.clone(),
-            gripper_id.as_u8(),
-            open_m,
-            busy.clone(),
-            cmd_rx,
-            control,
-            token.clone(),
-        ));
-
-        tokio::spawn(actions::move_gripper::run(
-            node_runner.clone(),
-            shared.clone(),
-            token.clone(),
             passthrough_pub,
             gripper_id.as_u8(),
             open_m,
-            busy,
+            cmd_rx,
+            control,
+            token.clone(),
         ));
 
         Ok(())

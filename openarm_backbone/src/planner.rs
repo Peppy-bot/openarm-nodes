@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use peppygen::exposed_actions::openarm_arm_actions::v1::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::{move_arm, move_arm_joints};
 use peppylib::messaging::ProducerRef;
 use srs_model::nalgebra::{Isometry3, SVector};
 use srs_model::{Arm, ArmAnglePolicy, Jacobian, Limit};
@@ -58,11 +58,11 @@ pub enum Goal {
     },
 }
 
-/// Releases the arm's single-flight busy flag on drop. Held for the lifetime of a
-/// move mode, so a move can never end (success, failure, cancel, or an unreachable
-/// plan) without freeing the slot the action handler claimed: no terminal path can
-/// leak it.
-struct BusyGuard(Arc<AtomicBool>);
+/// Releases a single-flight busy flag on drop. Held for the lifetime of a move
+/// (an arm's mode here, a gripper move in the coordinator), so a move can never
+/// end (success, failure, cancel, or an unreachable plan) without freeing the
+/// slot the action handler claimed: no terminal path can leak it.
+pub(crate) struct BusyGuard(pub(crate) Arc<AtomicBool>);
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -461,8 +461,9 @@ impl Planner {
 }
 
 /// Whether `recv_at` is within `timeout` of `now`: the watchdog window telling a
-/// live stream from a stale leftover.
-fn fresh(recv_at: Instant, now: Instant, timeout: Duration) -> bool {
+/// live stream from a stale leftover (shared with the coordinator's gripper
+/// follow, whose lock uses the same window).
+pub(crate) fn fresh(recv_at: Instant, now: Instant, timeout: Duration) -> bool {
     now.duration_since(recv_at) <= timeout
 }
 
@@ -590,8 +591,11 @@ mod tests {
         // of ~0.05 (the singularity floor applied by crate::arm_model), hard against the
         // boundary singularity. A power-up pose with the elbow below it must seed at the
         // limit, not off it.
-        let model =
-            crate::arm_model(openarm_description::HardwareVersion::V1, "openarm_left_link0").expect("build left arm from bundled URDF");
+        let model = crate::arm_model(
+            openarm_description::HardwareVersion::V1,
+            "openarm_left_link0",
+        )
+        .expect("build left arm from bundled URDF");
         let limits = model.limits();
         let cfg = PlanConfig {
             limits,

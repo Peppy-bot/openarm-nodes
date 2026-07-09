@@ -13,6 +13,11 @@ use tracing::{error, warn};
 
 use crate::state::{SharedState, Side};
 
+/// Pause after a receive error before retrying, so a persistently broken
+/// subscription cannot spin a listener at full CPU or flood the log at the
+/// stream rate (shared with the gripper-states listener).
+pub(crate) const RECEIVE_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
     let mut subscription = match arm_states_arm_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
@@ -31,6 +36,7 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "arm_states receive");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };

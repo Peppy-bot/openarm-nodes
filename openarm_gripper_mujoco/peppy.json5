@@ -1,6 +1,6 @@
 // MuJoCo sim implementation of openarm_gripper. Follows streamed
 // gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
-// the sim to actuate; consumes the sim's gripper_states for move-action feedback.
+// the sim to actuate; relays the sim's gripper_states to the paired hub.
 // Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node/v1",
@@ -9,7 +9,7 @@
     tag: "v1",
     depends_on: {
       pairings: [
-        // The exclusive control conversation with ONE commander instance:
+        // The exclusive control conversation with ONE hub instance:
         // streamed opening setpoints in, this gripper's sim aperture relayed
         // back, both scoped to the pair (no gripper_id demux). Optional and
         // mirrors the real gripper, so both follow the same contract.
@@ -17,13 +17,13 @@
           name: "openarm_gripper_link",
           tag: "v1",
           role: "gripper",
-          link_id: "commander",
+          link_id: "hub",
           optional: true,
         },
       ],
       interfaces: [
-        // Measured opening from the sim, used by the move action for convergence
-        // feedback. from_any: the sim is the producer.
+        // Measured opening from the sim, relayed to the paired hub.
+        // from_any: the sim is the producer.
         {
           name: "openarm_gripper_states",
           tag: "v1",
@@ -35,7 +35,6 @@
   },
   interfaces: {
     conforms_to: [
-      { name: "openarm_gripper_actions", tag: "v1" },
       // The resolved aperture handed to the sim engine (sim-internal passthrough).
       { name: "openarm_gripper_sim_passthrough", tag: "v1" },
     ],

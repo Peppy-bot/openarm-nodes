@@ -1,5 +1,5 @@
 // Always-on gripper_states publisher: emits the measured opening at
-// state_rate_hz regardless of mode — to the paired commander on the pairing's
+// state_rate_hz regardless of mode: to the paired hub on the pairing's
 // `gripper_states` topic (a legal no-op while unpaired) and to observers on
 // the broadcast stream (tagged with `gripper_id`). Reads the motor's
 // already-cached state (no CAN traffic of its own), so it
@@ -12,7 +12,7 @@ use std::time::Duration;
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_gripper_states::v1::gripper_states;
-use peppygen::pairings::commander;
+use peppygen::pairings::hub;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
@@ -29,7 +29,7 @@ pub async fn run(
         Ok(p) => p,
         Err(e) => return error!("declare gripper_states publisher: {e}"),
     };
-    let peer_pub = match commander::gripper_states::declare_publisher(&runner).await {
+    let peer_pub = match hub::gripper_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare paired gripper_states publisher: {e}"),
     };
@@ -70,7 +70,7 @@ pub async fn run(
             }
             Err(_) => {}
         }
-        let peer_result = match commander::gripper_states::build_message(opening) {
+        let peer_result = match hub::gripper_states::build_message(opening) {
             Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };

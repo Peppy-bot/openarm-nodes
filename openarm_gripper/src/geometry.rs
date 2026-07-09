@@ -21,12 +21,6 @@ impl Limit {
     const fn new(lo: f64, hi: f64) -> Self {
         Self { lo, hi }
     }
-
-    /// True if `x` lies within `[lo, hi]`. Non-finite values (NaN/inf) are never
-    /// finite-bounded, so they are rejected.
-    pub fn contains(&self, x: f64) -> bool {
-        x.is_finite() && x >= self.lo && x <= self.hi
-    }
 }
 
 /// Physical travel window of the gripper: fully closed (0) to fully open.
@@ -52,16 +46,6 @@ mod tests {
         assert!((GRIPPER_LIMITS_M.lo - 0.0).abs() < 1e-12);
         assert!((GRIPPER_LIMITS_M.hi - OPEN_M).abs() < 1e-12);
         const { assert!(GRIPPER_LIMITS_M.lo < GRIPPER_LIMITS_M.hi) };
-    }
-
-    #[test]
-    fn contains_rejects_out_of_range_and_non_finite() {
-        assert!(GRIPPER_LIMITS_M.contains(0.0));
-        assert!(GRIPPER_LIMITS_M.contains(OPEN_M)); // inclusive
-        assert!(!GRIPPER_LIMITS_M.contains(-0.001));
-        assert!(!GRIPPER_LIMITS_M.contains(OPEN_M + 0.001));
-        assert!(!GRIPPER_LIMITS_M.contains(f64::NAN));
-        assert!(!GRIPPER_LIMITS_M.contains(f64::INFINITY));
     }
 
     #[test]
