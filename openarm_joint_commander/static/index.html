@@ -252,11 +252,9 @@
 const PI = Math.PI;
 const ARM_DOF = 7;
 const GRIPPER_MAX = 0.044;
-const HOME_DURATION_S = 3;
 // Home is all zeros except the elbow (j4), held at a small positive angle so it
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
-const READY_DURATION_S = 3;
 // A natural workspace pose (elbows bent, forearms angled toward each other),
 // denoised from the operator's by-eye pose and made left/right symmetric. The mirror
 // flips the shoulder / upper-arm joints (j1,j2,j3); the elbow (j4) and wrist keep sign.
@@ -301,6 +299,9 @@ function build_arm(side, label) {
     <div id="${side}_arm_pos"></div>
     <div class="dials" id="${side}_arm_dials"></div>
     <div class="actions">
+      <label id="${side}_dur_l" style="display:none; align-items:center; gap:5px; margin-right:auto; text-transform:none; letter-spacing:0; font-size:11px; color:var(--ink-50);">
+        move (s)<input type="number" id="${side}_dur" value="0" min="0" step="0.5" style="width:3.8em;">
+      </label>
       <button id="${side}_home_btn" style="display:none" onclick="reset_arm('${side}')">Home Pose</button>
       <button id="${side}_ready_btn" style="display:none" onclick="ready_arm('${side}')">Ready Pose</button>
       <button class="primary" id="${side}_arm_btn" onclick="primary_arm('${side}')">Enable</button>
@@ -520,7 +521,7 @@ function ready_arm(side) {
     $(`${side}_j${i}`).value = preset[i];
     $(`${side}_t${i}`).textContent = fmt(preset[i]);
   }
-  fire_arm(side, READY_DURATION_S);
+  fire_arm(side, arm_duration(side));
 }
 
 // Enable: snap both the arm sliders and the gripper slider to the measured pose
@@ -553,7 +554,7 @@ function reset_arm(side) {
     $(`${side}_j${i}`).value = v;
     $(`${side}_t${i}`).textContent = fmt(v);
   }
-  fire_arm(side, HOME_DURATION_S);
+  fire_arm(side, arm_duration(side));
 }
 
 // Read all seven joint sliders directly. Used by the discrete fires (Home, Ready,
@@ -598,9 +599,9 @@ function execute_arm(side) {
     const position = POS_AXES.map(ax => parseFloat($(`${side}_p${ax.i}`).value));
     const rpy = ROT_AXES.map(ax => dialTarget[side][ax.i]);
     if (![...position, ...rpy].every(Number.isFinite)) return;
-    ws.send(JSON.stringify({cmd: 'fire_arm_pose', side, position, rpy, duration_s: 0}));
+    ws.send(JSON.stringify({cmd: 'fire_arm_pose', side, position, rpy, duration_s: arm_duration(side)}));
   } else {
-    ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s: 0}));
+    ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s: arm_duration(side)}));
   }
 }
 
@@ -662,9 +663,17 @@ function refresh_primary(side) {
 
 // Home / Ready are discrete joint-space actions, so they show only in actions mode.
 function refresh_mode_buttons(side) {
-  const show = uiMode === 'actions' ? '' : 'none';
-  $(`${side}_home_btn`).style.display = show;
-  $(`${side}_ready_btn`).style.display = show;
+  const on = uiMode === 'actions';
+  $(`${side}_home_btn`).style.display = on ? '' : 'none';
+  $(`${side}_ready_btn`).style.display = on ? '' : 'none';
+  $(`${side}_dur_l`).style.display = on ? 'inline-flex' : 'none';
+}
+
+// Requested duration (s) for this arm's discrete moves; 0 = as fast as the EE-speed
+// cap allows. Read by Home, Ready, and Execute.
+function arm_duration(side) {
+  const v = parseFloat($(`${side}_dur`).value);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
 }
 
 function apply_snapshot(snap) {

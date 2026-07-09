@@ -203,12 +203,21 @@ async fn handle_command(text: &str, app: &AppState) {
                 }
             }
             clamp_to_limits(&mut joints, side);
-            // The arm floors the duration at its velocity-limit minimum; this
-            // guard only catches garbage input (NaN, negative, absurd).
-            let duration_s = if duration_s.is_finite() {
-                duration_s.clamp(0.0, 30.0)
-            } else {
-                0.0
+            let (measured, max_ee) = {
+                let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                (s.arm(side).last_feedback, s.max_ee_velocity_m_s)
+            };
+            // Floor the requested duration so the end-effector never crosses the
+            // workspace faster than the governor cap; the hub floors again at its
+            // joint-velocity limit.
+            let duration_s = match measured {
+                Some(m) => {
+                    let from = app.models.ee_pose_world(side, &m);
+                    let to = app.models.ee_pose_world(side, &joints);
+                    let dist = dist3([from[0], from[1], from[2]], [to[0], to[1], to[2]]);
+                    ee_speed_floored(sane_duration(duration_s), dist, max_ee)
+                }
+                None => sane_duration(duration_s),
             };
             fire_arm(app, side, joints, duration_s);
         }
@@ -307,7 +316,7 @@ async fn handle_command(text: &str, app: &AppState) {
             duration_s,
         } => {
             let side: Side = side.into();
-            {
+            let (seed, measured, max_ee) = {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
                 if s.enabled(side) {
                     s.set_status(format!(
@@ -316,19 +325,41 @@ async fn handle_command(text: &str, app: &AppState) {
                     ));
                     return;
                 }
-            }
+                (
+                    s.arm(side).joints,
+                    s.arm(side).last_feedback,
+                    s.max_ee_velocity_m_s,
+                )
+            };
             if !position.iter().chain(rpy.iter()).all(|v| v.is_finite()) {
                 return;
             }
-            let duration_s = if duration_s.is_finite() {
-                duration_s.clamp(0.0, 30.0)
-            } else {
-                0.0
+            let rotation = UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]);
+            // Preview the pose as joints (seeded from the current target) so both the
+            // joint sliders and the pose FK show where it is going, and reject an
+            // unreachable pose up front rather than firing a goal the hub will refuse.
+            let Some(mut target_joints) = app.models.solve_ik(side, position, rotation, &seed)
+            else {
+                let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                s.set_status(format!(
+                    "{} arm: pose unreachable, not firing",
+                    side.label()
+                ));
+                return;
             };
-            // The wire carries a quaternion; the hub validates reachability and
-            // plans the straight-line path itself.
-            let q = UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]);
-            fire_arm_pose(app, side, position, [q.i, q.j, q.k, q.w], duration_s);
+            clamp_to_limits(&mut target_joints, side);
+            // Floor the duration to the governor's EE-speed cap over the straight-line
+            // distance; the hub floors again at its joint-velocity limit.
+            let duration_s = match measured {
+                Some(m) => {
+                    let from = app.models.ee_pose_world(side, &m);
+                    let dist = dist3([from[0], from[1], from[2]], position);
+                    ee_speed_floored(sane_duration(duration_s), dist, max_ee)
+                }
+                None => sane_duration(duration_s),
+            };
+            let q = [rotation.i, rotation.j, rotation.k, rotation.w];
+            fire_arm_pose(app, side, position, q, target_joints, duration_s);
         }
         Command::SetGripperTarget { side, position } => {
             let side: Side = side.into();
@@ -387,6 +418,27 @@ fn clamp_to_limits(joints: &mut [f64; ARM_DOF], side: Side) {
     }
 }
 
+// Clamp a requested move duration to a sane range (finite, 0..=30 s). 0 = fastest.
+fn sane_duration(duration_s: f64) -> f64 {
+    if duration_s.is_finite() {
+        duration_s.clamp(0.0, 30.0)
+    } else {
+        0.0
+    }
+}
+
+// A discrete move's duration: the operator's request, floored so the straight-line
+// EE speed never exceeds the governor cap (time >= distance / cap). The hub floors
+// again at its joint-velocity limit, so this only ever slows a move, never speeds it.
+fn ee_speed_floored(user_s: f64, ee_distance_m: f64, max_ee_velocity_m_s: f64) -> f64 {
+    (ee_distance_m / max_ee_velocity_m_s).max(user_s)
+}
+
+// Euclidean distance between two world-frame points (m).
+fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
 fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s: f64) {
     fire_discrete(
         app,
@@ -412,20 +464,27 @@ fn fire_arm_pose(
     side: Side,
     position: [f64; 3],
     orientation: [f64; 4],
+    target_joints: [f64; ARM_DOF],
     duration_s: f64,
 ) {
-    fire_discrete(app, side, "move_arm", None, move |app, preempt| {
-        move_arm::spawn(
-            app.runner.clone(),
-            app.state.clone(),
-            app.token.clone(),
-            preempt,
-            side,
-            position,
-            orientation,
-            duration_s,
-        );
-    });
+    fire_discrete(
+        app,
+        side,
+        "move_arm",
+        Some(target_joints),
+        move |app, preempt| {
+            move_arm::spawn(
+                app.runner.clone(),
+                app.state.clone(),
+                app.token.clone(),
+                preempt,
+                side,
+                position,
+                orientation,
+                duration_s,
+            );
+        },
+    );
 }
 
 /// The shared gate every discrete move fires through. The preempt round-trip can

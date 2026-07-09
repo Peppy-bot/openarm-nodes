@@ -12,8 +12,8 @@
 use std::sync::{Arc, Mutex};
 
 use openarm_description::HardwareVersion;
-use srs_model::nalgebra::{Isometry3, UnitQuaternion, Vector3, Vector6};
-use srs_model::{Arm, damped_pseudo_inverse};
+use srs_model::nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3, Vector6};
+use srs_model::{Arm, ArmAnglePolicy, damped_pseudo_inverse};
 
 use crate::state::{ARM_DOF, Side};
 
@@ -58,6 +58,29 @@ impl ArmModels {
         let mut model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
         let base = model.at(joints).ee_pose();
         decompose(&model.world_pose(&base))
+    }
+
+    /// Solve inverse kinematics for a world-frame end-effector pose (position in
+    /// metres, orientation as a unit quaternion), seeded from `seed` so the branch
+    /// nearest the current configuration is chosen. `None` when the pose is
+    /// unreachable or admits no in-limit solution. Used to preview an Actions-mode
+    /// pose move as joints; the hub re-solves and plans the move itself.
+    pub fn solve_ik(
+        &self,
+        side: Side,
+        position: [f64; 3],
+        rotation: UnitQuaternion<f64>,
+        seed: &[f64; ARM_DOF],
+    ) -> Option<[f64; ARM_DOF]> {
+        let model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+        let world = Isometry3::from_parts(
+            Translation3::new(position[0], position[1], position[2]),
+            rotation,
+        );
+        let base_target = model.base_pose(&world);
+        model
+            .solve_ik(&base_target, ArmAnglePolicy::FromSeed, seed)
+            .map(|s| s.q)
     }
 
     /// One damped-least-squares joint step realizing a world-frame task increment
