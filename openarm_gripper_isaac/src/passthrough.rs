@@ -1,7 +1,6 @@
 // Emit the resolved gripper aperture (m) to the sim on the typed
-// gripper_sim_passthrough topic. Shared by the follow loop and the move action
-// so a single publisher drives the sim. The sim bridge maps the aperture onto
-// its finger joints' own travel.
+// gripper_sim_passthrough topic. The sim bridge maps the aperture onto its
+// finger joints' own travel.
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_gripper_sim_passthrough::v1::gripper_sim_passthrough;
