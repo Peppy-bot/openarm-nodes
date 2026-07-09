@@ -1,16 +1,16 @@
-// Listens for streamed opening setpoints from the paired commander (the
+// Listens for streamed opening setpoints from the paired hub (the
 // `commander` pairing slot of openarm_gripper_link) and keeps the latest one
 // in a watch channel for the follow loop. Subscribing while unpaired is legal:
-// the subscription stays silent until a commander pairs, and only the paired
+// the subscription stays silent until a hub pairs, and only the paired
 // peer's messages surface, so there is no gripper_id filter. A non-finite
-// position is dropped, so a commander gone bad lets the follow lock time out
+// position is dropped, so a hub gone bad lets the follow lock time out
 // instead of driving the gripper.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use peppygen::NodeRunner;
-use peppygen::pairings::commander;
+use peppygen::pairings::hub;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tracing::{error, warn};
@@ -26,7 +26,7 @@ pub async fn run(
     latest: watch::Sender<Option<GripperCommand>>,
     token: CancellationToken,
 ) {
-    let mut subscription = match commander::gripper_commands::subscribe(&runner).await {
+    let mut subscription = match hub::gripper_commands::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "gripper_commands subscribe");
