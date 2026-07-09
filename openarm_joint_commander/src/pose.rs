@@ -1,19 +1,19 @@
-//! Cartesian pose <-> joints glue for the panel. The joint vector stays the single
-//! source of truth: the UI reads a pose off forward kinematics and writes joints
-//! back through inverse kinematics, so a pose is only ever an input/display lens,
-//! never stored state.
+//! Cartesian jog for the panel: differential (resolved-rate) servoing only. The
+//! joint vector stays the single source of truth: the UI reads a pose off forward
+//! kinematics and writes joints back through damped-least-squares steps, so a pose
+//! is only ever an input/display lens, never stored state. Exact point-to-point
+//! pose moves are the hub's move_arm action, not this module.
 //!
-//! Poses are in the world frame (matching the hub's `move_arm` action) and
+//! Poses are in the world frame (matching the hub's move_arm action) and
 //! orientation is exposed as intrinsic-XYZ roll/pitch/yaw via nalgebra's
-//! `euler_angles` / `from_euler_angles` round-trip; the canonical type carried into
-//! IK is a quaternion `Isometry3`, re-derived each read so the RPY form never
-//! accumulates.
+//! `euler_angles` round-trip for display; every orientation computation runs on
+//! quaternions, so no control path ever interpolates euler components.
 
 use std::sync::{Arc, Mutex};
 
 use openarm_description::HardwareVersion;
-use srs_model::nalgebra::{Isometry3, Translation3, UnitQuaternion};
-use srs_model::{Arm, ArmAnglePolicy};
+use srs_model::nalgebra::{Isometry3, UnitQuaternion, Vector3, Vector6};
+use srs_model::{Arm, damped_pseudo_inverse};
 
 use crate::state::{ARM_DOF, Side};
 
@@ -21,28 +21,35 @@ use crate::state::{ARM_DOF, Side};
 /// radians): the form the panel edits and displays.
 pub type Pose = [f64; 6];
 
-/// The two per-side arm models (FK/IK/limits) behind mutexes.
+/// The two per-side arm models (FK/Jacobian/limits) behind mutexes, plus each
+/// side's URDF joint velocity limits for step clamping.
 ///
-/// Each lock is held only for a single synchronous FK or IK call and never across
-/// an `.await`. The only nesting is snapshot building, which holds the [`UiState`]
-/// lock and then briefly takes a model lock; no path takes the locks in the reverse
-/// order, so they cannot deadlock.
+/// Each lock is held only for a single synchronous FK or Jacobian call and never
+/// across an `.await`. The only nesting is snapshot building, which holds the
+/// [`UiState`] lock and then briefly takes a model lock; no path takes the locks
+/// in the reverse order, so they cannot deadlock.
 ///
 /// [`UiState`]: crate::state::UiState
 #[derive(Clone)]
 pub struct ArmModels {
     left: Arc<Mutex<Arm>>,
     right: Arc<Mutex<Arm>>,
+    left_velocity_limits: [f64; ARM_DOF],
+    right_velocity_limits: [f64; ARM_DOF],
 }
 
 impl ArmModels {
     /// Build both arm models from the generation's embedded description, mirroring
     /// the hub's `arm_model` (same URDF, same elbow singularity floor) so the panel
-    /// solves against the identical chain the hub governs.
+    /// solves against the identical chain the hub governs. Joint velocity limits
+    /// come from the same URDF, so a jog step never demands more per tick than the
+    /// hub's chase can follow.
     pub fn from_version(version: HardwareVersion) -> Self {
         Self {
             left: Arc::new(Mutex::new(build_arm(version, Side::Left))),
             right: Arc::new(Mutex::new(build_arm(version, Side::Right))),
+            left_velocity_limits: velocity_limits(version.urdf(), Side::Left),
+            right_velocity_limits: velocity_limits(version.urdf(), Side::Right),
         }
     }
 
@@ -53,20 +60,74 @@ impl ArmModels {
         decompose(&model.world_pose(&base))
     }
 
-    /// Joints achieving world-frame `pose` for `side`, seeded from `seed` for
-    /// arm-angle continuity. `None` when the pose is unreachable, singular, or admits
-    /// no in-limit solution.
-    pub fn solve_pose_ik(
+    /// One damped-least-squares joint step realizing a world-frame task increment
+    /// at the configuration `joints`. The untasked half of the twist is commanded
+    /// to zero, so a position step softly holds orientation (and an orientation
+    /// step softly holds position); the damping trades that hold away only where
+    /// the geometry forces it. The step is scaled so no joint exceeds its URDF
+    /// velocity limit over `dt_s`, and clamped into position limits. `None` when
+    /// limits pin the step (the free-space envelope boundary).
+    fn resolved_rate_step(
         &self,
         side: Side,
-        pose: &Pose,
-        seed: &[f64; ARM_DOF],
+        joints: &[f64; ARM_DOF],
+        task: RateTask,
+        dt_s: f64,
     ) -> Option<[f64; ARM_DOF]> {
-        let model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
-        let target = model.base_pose(&compose(pose));
-        model
-            .solve_ik(&target, ArmAnglePolicy::FromSeed, seed)
-            .map(|sol| sol.q)
+        let mut model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+        let jacobian = model.at(joints).jacobian();
+        // The Jacobian lives in the arm base frame; rotate the world-frame task in.
+        let to_base = model.base_from_world().rotation;
+        let dx_world = match task {
+            RateTask::Linear(dx) | RateTask::Angular(dx) => dx,
+        };
+        let dx = to_base * dx_world;
+        let twist = match task {
+            RateTask::Linear(_) => Vector6::new(dx.x, dx.y, dx.z, 0.0, 0.0, 0.0),
+            RateTask::Angular(_) => Vector6::new(0.0, 0.0, 0.0, dx.x, dx.y, dx.z),
+        };
+        let mut dq = damped_pseudo_inverse(&jacobian, DLS_LAMBDA) * twist;
+        // Velocity-consistent clamping (not accept/reject): scale the whole step
+        // down so every joint stays inside its velocity budget for this tick,
+        // preserving the step direction. The hub chases under the same limits, so
+        // a clamped step is always followable within one tick.
+        let budget = self.velocity_limits(side);
+        let scale = (0..ARM_DOF)
+            .map(|i| {
+                let cap = budget[i] * dt_s;
+                if dq[i].abs() > cap {
+                    cap / dq[i].abs()
+                } else {
+                    1.0
+                }
+            })
+            .fold(1.0_f64, f64::min);
+        dq *= scale;
+        let limits = model.limits();
+        let q: [f64; ARM_DOF] =
+            std::array::from_fn(|i| (joints[i] + dq[i]).clamp(limits[i].lo, limits[i].hi));
+        drop(model);
+        // Limits may have eaten the step: measure what actually moved along the
+        // demanded direction and treat a mostly-pinned step as the boundary.
+        let achieved = self.ee_pose_world(side, &q);
+        let before = self.ee_pose_world(side, joints);
+        let moved = match task {
+            RateTask::Linear(_) => Vector3::new(
+                achieved[0] - before[0],
+                achieved[1] - before[1],
+                achieved[2] - before[2],
+            ),
+            RateTask::Angular(_) => {
+                let q_a = UnitQuaternion::from_euler_angles(achieved[3], achieved[4], achieved[5]);
+                let q_b = UnitQuaternion::from_euler_angles(before[3], before[4], before[5]);
+                let err = q_a * q_b.inverse();
+                err.axis()
+                    .map(|a| a.into_inner() * err.angle())
+                    .unwrap_or_default()
+            }
+        };
+        let progress = moved.dot(&dx_world) / dx_world.norm_squared().max(1e-12);
+        (progress > MIN_STEP_PROGRESS).then_some(q)
     }
 
     fn get(&self, side: Side) -> &Arc<Mutex<Arm>> {
@@ -75,6 +136,143 @@ impl ArmModels {
             Side::Right => &self.right,
         }
     }
+
+    fn velocity_limits(&self, side: Side) -> &[f64; ARM_DOF] {
+        match side {
+            Side::Left => &self.left_velocity_limits,
+            Side::Right => &self.right_velocity_limits,
+        }
+    }
+}
+
+/// A world-frame task increment for one resolved-rate step: a linear metre-step or
+/// an angular axis-angle step (radians).
+enum RateTask {
+    Linear(Vector3<f64>),
+    Angular(Vector3<f64>),
+}
+
+/// Angular jog rate (rad/s). The linear rate is the operator's live EE speed cap
+/// (one knob governs both the jog and the hub's enforcement); rotation has no
+/// operator knob, so it jogs at this fixed, comfortable rate.
+const JOG_ROT_RATE_RAD_S: f64 = 1.5;
+/// Damping for the resolved-rate steps: heavy enough to stay bounded through
+/// singular postures, light enough not to visibly lag a jog step.
+const DLS_LAMBDA: f64 = 0.05;
+
+/// Per-tick Cartesian step caps, derived from the actual tick period and the
+/// operator's live EE speed cap, so a different `command_rate_hz` or a retuned
+/// speed knob changes the step size, never the speed.
+#[derive(Clone, Copy)]
+pub struct JogCaps {
+    pub pos_step_m: f64,
+    pub rot_step_rad: f64,
+    pub dt_s: f64,
+}
+
+impl JogCaps {
+    /// Caps for one tick of length `dt` seconds at `max_ee_velocity_m_s`. The
+    /// speed is the operator's governor knob, validated positive-finite at entry;
+    /// the clamp here only bounds a degenerate combination, it is not a tuning.
+    pub fn per_tick(dt_s: f64, max_ee_velocity_m_s: f64) -> Self {
+        Self {
+            pos_step_m: (max_ee_velocity_m_s * dt_s).clamp(1e-5, 0.05),
+            rot_step_rad: (JOG_ROT_RATE_RAD_S * dt_s).clamp(1e-4, 0.2),
+            dt_s,
+        }
+    }
+}
+
+/// Which pose components a jog tracks: `Position` tracks x/y/z and softly holds
+/// orientation; `Orientation` tracks r/p/y and softly holds position. Whatever
+/// control the operator touches leads; the rest follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JogMode {
+    Position,
+    Orientation,
+}
+
+/// One jog tick's outcome.
+pub enum JogStep {
+    /// The commanded pose reached the desired pose; the jog is complete.
+    Converged,
+    /// Advanced one capped Cartesian step: the new joint target to stream.
+    Stepped([f64; ARM_DOF]),
+    /// The next step is pinned by limits or the envelope boundary: hold this tick.
+    /// The jog stays armed, so pulling the desired pose back into reach resumes it.
+    Blocked,
+}
+
+/// Position / angle slack within which a pose component counts as arrived. Half a
+/// millimetre and ~0.1 degrees: invisible on the panel, far above FK round-trip noise.
+const POS_CONVERGED_M: f64 = 5e-4;
+const ROT_CONVERGED_RAD: f64 = 2e-3;
+/// A resolved-rate step that achieves less than this fraction of its demanded
+/// motion is pinned by joint limits: the envelope boundary in free space.
+const MIN_STEP_PROGRESS: f64 = 0.2;
+
+/// Advance one jog tick for `side`: step the pose of `joints` one capped Cartesian
+/// increment toward `desired` under `mode`. Steps are velocity-clamped in joint
+/// space, so the target walks toward the desired values and stops exactly where
+/// reach or limits end.
+pub fn jog_tick(
+    models: &ArmModels,
+    side: Side,
+    joints: &[f64; ARM_DOF],
+    desired: &Pose,
+    mode: JogMode,
+    caps: JogCaps,
+) -> JogStep {
+    let current = models.ee_pose_world(side, joints);
+    let step = match mode {
+        JogMode::Position => {
+            let Some(dx) = position_step(&current, desired, caps.pos_step_m) else {
+                return JogStep::Converged;
+            };
+            models.resolved_rate_step(side, joints, RateTask::Linear(dx), caps.dt_s)
+        }
+        JogMode::Orientation => {
+            let Some(dw) = orientation_step(&current, desired, caps.rot_step_rad) else {
+                return JogStep::Converged;
+            };
+            models.resolved_rate_step(side, joints, RateTask::Angular(dw), caps.dt_s)
+        }
+    };
+    match step {
+        Some(q) => JogStep::Stepped(q),
+        None => JogStep::Blocked,
+    }
+}
+
+/// One tick's world-frame linear step toward the desired position, capped in
+/// norm; `None` once within the convergence slack.
+fn position_step(current: &Pose, desired: &Pose, cap_m: f64) -> Option<Vector3<f64>> {
+    let delta = Vector3::new(
+        desired[0] - current[0],
+        desired[1] - current[1],
+        desired[2] - current[2],
+    );
+    let dist = delta.norm();
+    if dist < POS_CONVERGED_M {
+        return None;
+    }
+    Some(delta * (cap_m.min(dist) / dist))
+}
+
+/// One tick's world-frame angular step (axis-angle vector) toward the desired
+/// orientation, capped in angle; `None` once within the convergence slack. The
+/// error is a quaternion geodesic, so it is chart-independent: no euler seam or
+/// gimbal alias can inflate it.
+fn orientation_step(current: &Pose, desired: &Pose, cap_rad: f64) -> Option<Vector3<f64>> {
+    let q_cur = UnitQuaternion::from_euler_angles(current[3], current[4], current[5]);
+    let q_des = UnitQuaternion::from_euler_angles(desired[3], desired[4], desired[5]);
+    let err = q_des * q_cur.inverse();
+    let angle = err.angle();
+    if angle < ROT_CONVERGED_RAD {
+        return None;
+    }
+    let axis = err.axis()?;
+    Some(axis.into_inner() * cap_rad.min(angle))
 }
 
 /// Build one arm model from the generation's embedded description, with the elbow
@@ -106,18 +304,31 @@ fn base_link(urdf: &str, side: Side) -> String {
         .unwrap_or_else(|| panic!("URDF missing joint {joint1}"))
 }
 
+/// Per-joint velocity limits (rad/s) for `side`, j1..j7, from the bundled URDF:
+/// the same numbers the hub's chase enforces, so commander steps and hub follow
+/// capability agree by construction.
+fn velocity_limits(urdf: &str, side: Side) -> [f64; ARM_DOF] {
+    let robot = urdf_rs::read_from_string(urdf).expect("bundled URDF must parse");
+    std::array::from_fn(|i| {
+        let name = format!("openarm_{}_joint{}", side.label(), i + 1);
+        let joint = robot
+            .joints
+            .iter()
+            .find(|j| j.name == name)
+            .unwrap_or_else(|| panic!("URDF missing joint {name}"));
+        let v = joint.limit.velocity;
+        assert!(
+            v.is_finite() && v > 0.0,
+            "URDF velocity limit for {name} must be positive"
+        );
+        v
+    })
+}
+
 fn decompose(pose: &Isometry3<f64>) -> Pose {
     let t = pose.translation.vector;
     let (roll, pitch, yaw) = pose.rotation.euler_angles();
     [t.x, t.y, t.z, roll, pitch, yaw]
-}
-
-fn compose(pose: &Pose) -> Isometry3<f64> {
-    let [x, y, z, roll, pitch, yaw] = *pose;
-    Isometry3::from_parts(
-        Translation3::new(x, y, z),
-        UnitQuaternion::from_euler_angles(roll, pitch, yaw),
-    )
 }
 
 #[cfg(test)]
@@ -125,44 +336,173 @@ mod tests {
     use super::*;
 
     fn models() -> ArmModels {
-        let version: HardwareVersion = "v1".parse().expect("v1 parses");
-        ArmModels::from_version(version)
+        ArmModels::from_version(HardwareVersion::V2)
+    }
+
+    // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
+    fn test_caps() -> JogCaps {
+        JogCaps::per_tick(0.01, 0.5)
+    }
+
+    fn geodesic(a: &Pose, b: &Pose) -> f64 {
+        let q_a = UnitQuaternion::from_euler_angles(a[3], a[4], a[5]);
+        let q_b = UnitQuaternion::from_euler_angles(b[3], b[4], b[5]);
+        (q_a * q_b.inverse()).angle()
     }
 
     #[test]
-    fn fk_then_ik_recovers_the_configuration() {
-        // A hand-picked in-limit, non-singular config (values inside both arms'
-        // mirrored ranges): FK to a world pose, then IK back seeded from the same
-        // config must land on it. Seeded IK keeps the arm angle, so the branch is
-        // unique. (v2 FK/IK is exercised end-to-end by the ui pose_to_joints test.)
+    fn caps_scale_with_rate_and_speed() {
+        // Same speed at 100 Hz vs 500 Hz: a 5x smaller step, the identical velocity.
+        let hz100 = JogCaps::per_tick(0.01, 0.5);
+        let hz500 = JogCaps::per_tick(0.002, 0.5);
+        assert!((hz100.pos_step_m - 0.005).abs() < 1e-12);
+        assert!((hz500.pos_step_m - 0.001).abs() < 1e-12);
+        assert!((hz100.pos_step_m / 0.01 - hz500.pos_step_m / 0.002).abs() < 1e-12);
+        // Retuning the operator knob rescales the step 1:1.
+        assert!((JogCaps::per_tick(0.01, 0.25).pos_step_m - 0.0025).abs() < 1e-12);
+        // The angular rate is the fixed jog constant, likewise per-tick.
+        assert!((hz100.rot_step_rad - JOG_ROT_RATE_RAD_S * 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn velocity_limits_load_from_the_urdf() {
         let m = models();
-        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
         for side in [Side::Left, Side::Right] {
-            let pose = m.ee_pose_world(side, &q);
-            let solved = m
-                .solve_pose_ik(side, &pose, &q)
-                .expect("reachable pose solves");
-            for (i, (s, e)) in solved.iter().zip(q.iter()).enumerate() {
-                assert!((s - e).abs() < 1e-6, "{side:?} joint {i}: {s} vs {e}");
+            let v = m.velocity_limits(side);
+            assert!(v.iter().all(|x| x.is_finite() && *x > 0.0));
+            // j3/j4 are the slow pair in both generations' datasheets; sanity-pin
+            // that we read per-joint values, not one shared number.
+            assert!(
+                v[2] < v[0],
+                "j3 ({}) should be slower than j1 ({})",
+                v[2],
+                v[0]
+            );
+        }
+    }
+
+    #[test]
+    fn steps_never_exceed_joint_velocity_budgets() {
+        // Demand an aggressive 5 cm/tick step; the returned joint delta must stay
+        // inside every joint's URDF velocity budget for the tick.
+        let m = models();
+        let q0 = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let p0 = m.ee_pose_world(Side::Left, &q0);
+        let caps = JogCaps {
+            pos_step_m: 0.05,
+            rot_step_rad: 0.2,
+            dt_s: 0.01,
+        };
+        let desired = [p0[0] + 1.0, p0[1], p0[2], p0[3], p0[4], p0[5]];
+        if let JogStep::Stepped(q) =
+            jog_tick(&m, Side::Left, &q0, &desired, JogMode::Position, caps)
+        {
+            let budget = m.velocity_limits(Side::Left);
+            for i in 0..ARM_DOF {
+                let v = (q[i] - q0[i]).abs() / caps.dt_s;
+                assert!(
+                    v <= budget[i] * 1.0001,
+                    "joint {i} at {v:.2} rad/s exceeds its {:.2} rad/s budget",
+                    budget[i]
+                );
+            }
+        } else {
+            panic!("aggressive but reachable step must advance");
+        }
+    }
+
+    #[test]
+    fn position_jog_from_home_reaches_far_and_holds_orientation() {
+        // The original from-home x drag scenario: the jog must walk deep into the
+        // workspace with orientation softly held, then hold at the envelope.
+        let m = models();
+        let start = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
+        let p0 = m.ee_pose_world(Side::Left, &start);
+        let desired = [p0[0] + 0.3, p0[1], p0[2], p0[3], p0[4], p0[5]];
+        let mut q = start;
+        for _ in 0..3000 {
+            match jog_tick(&m, Side::Left, &q, &desired, JogMode::Position, test_caps()) {
+                JogStep::Stepped(next) => q = next,
+                JogStep::Blocked | JogStep::Converged => break,
             }
         }
+        let p = m.ee_pose_world(Side::Left, &q);
+        assert!(
+            p[0] - p0[0] > 0.15,
+            "must cover real distance, got {:.4}",
+            p[0] - p0[0]
+        );
+        assert!(
+            geodesic(&p, &p0) < 0.2,
+            "orientation must hold softly, drifted {:.4} rad",
+            geodesic(&p, &p0)
+        );
     }
 
     #[test]
-    fn rpy_round_trips_through_a_quaternion() {
-        let pose = [0.1, -0.2, 0.3, 0.4, -0.5, 0.6];
-        let back = decompose(&compose(&pose));
-        for (i, (b, p)) in back.iter().zip(pose.iter()).enumerate() {
-            assert!((b - p).abs() < 1e-12, "component {i}: {b} vs {p}");
+    fn orientation_jog_turns_the_hand_while_position_holds() {
+        let m = models();
+        let q0 = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let p0 = m.ee_pose_world(Side::Left, &q0);
+        let desired = [p0[0], p0[1], p0[2], p0[3], p0[4], p0[5] + 0.3];
+        let mut q = q0;
+        for _ in 0..200 {
+            match jog_tick(
+                &m,
+                Side::Left,
+                &q,
+                &desired,
+                JogMode::Orientation,
+                test_caps(),
+            ) {
+                JogStep::Stepped(next) => q = next,
+                JogStep::Converged | JogStep::Blocked => break,
+            }
+        }
+        let p = m.ee_pose_world(Side::Left, &q);
+        assert!(geodesic(&p, &p0) > 0.15, "hand must actually turn");
+        let drift =
+            ((p[0] - p0[0]).powi(2) + (p[1] - p0[1]).powi(2) + (p[2] - p0[2]).powi(2)).sqrt();
+        assert!(
+            drift < 0.05,
+            "position drift under an orientation jog stays small, got {drift:.4}"
+        );
+    }
+
+    #[test]
+    fn jog_converges_on_the_current_pose() {
+        let m = models();
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let p = m.ee_pose_world(Side::Left, &q);
+        for mode in [JogMode::Position, JogMode::Orientation] {
+            assert!(matches!(
+                jog_tick(&m, Side::Left, &q, &p, mode, test_caps()),
+                JogStep::Converged
+            ));
         }
     }
 
     #[test]
-    fn unreachable_pose_yields_no_solution() {
+    fn jog_blocks_at_the_envelope_and_never_converges_short() {
+        // Far past reach: the jog must end Blocked (never Converged) and every
+        // step along the way must be velocity-bounded.
         let m = models();
-        let seed = [0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0];
-        // Ten metres out is well beyond the arm's reach.
-        let pose = [10.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        assert!(m.solve_pose_ik(Side::Left, &pose, &seed).is_none());
+        let mut q = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
+        let p0 = m.ee_pose_world(Side::Left, &q);
+        let desired = [p0[0] + 2.0, p0[1], p0[2], p0[3], p0[4], p0[5]];
+        let budget = m.velocity_limits(Side::Left);
+        for _ in 0..5000 {
+            match jog_tick(&m, Side::Left, &q, &desired, JogMode::Position, test_caps()) {
+                JogStep::Stepped(next) => {
+                    for i in 0..ARM_DOF {
+                        assert!((next[i] - q[i]).abs() / 0.01 <= budget[i] * 1.0001);
+                    }
+                    q = next;
+                }
+                JogStep::Blocked => return,
+                JogStep::Converged => panic!("must not converge on an unreachable pose"),
+            }
+        }
+        panic!("jog neither blocked nor converged within 5000 ticks");
     }
 }

@@ -79,6 +79,12 @@
         {
           link_id: "backbone",
           name: "move_arm_joints"
+        },
+        // Cartesian point-to-point: Execute-pose in the panel's Actions mode fires
+        // the hub's planned straight-line move rather than jogging there.
+        {
+          link_id: "backbone",
+          name: "move_arm"
         }
       ]
     },

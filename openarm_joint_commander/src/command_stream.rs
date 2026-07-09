@@ -22,15 +22,17 @@ use peppygen::emitted_topics::openarm_gripper_commands::v1::gripper_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
-use crate::state::{SharedState, Side};
+use crate::pose::{ArmModels, JogCaps, JogStep, jog_tick};
+use crate::state::{SharedState, Side, UiState};
 
 pub async fn run(
     runner: Arc<NodeRunner>,
     state: SharedState,
     command_rate_hz: u32,
     token: CancellationToken,
+    models: ArmModels,
 ) {
     // A failed publisher declaration leaves the node serving UI/health but unable to
     // command anything, so cancel the node to restart it rather than returning quietly.
@@ -83,9 +85,14 @@ pub async fn run(
             )
         },
     ));
+    // The tick period every stream runs at; jog steps derive from it so a different
+    // command_rate_hz changes the step size, never the jog speed.
+    let tick_dt_s = 1.0 / command_rate_hz as f64;
     for side in [Side::Left, Side::Right] {
-        // Arm: stream the 7-joint setpoint while enabled.
+        // Arm: advance any active Cartesian jog one capped step, then stream the
+        // 7-joint setpoint while enabled.
         let arm_state = state.clone();
+        let arm_models = models.clone();
         tasks.spawn(stream_setpoints(
             arm_pub.clone(),
             command_rate_hz,
@@ -93,10 +100,14 @@ pub async fn run(
             format!("{} arm", side.label()),
             move || {
                 let target = {
-                    let s = arm_state.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut s = arm_state.lock().unwrap_or_else(|p| p.into_inner());
                     if !s.enabled(side) {
                         return None;
                     }
+                    // Caps re-derive each tick from the operator's live EE speed cap,
+                    // so retuning the knob mid-jog changes the jog speed with it.
+                    let caps = JogCaps::per_tick(tick_dt_s, s.max_ee_velocity_m_s);
+                    advance_jog(&mut s, side, &arm_models, caps);
                     s.arm(side).joints
                 };
                 Some(
@@ -135,6 +146,46 @@ pub async fn run(
         if let Err(e) = result {
             error!("command stream task died: {e}; cancelling the node");
             token.cancel();
+        }
+    }
+}
+
+// Advance one side's Cartesian jog by one tick, if one is armed: step the joint
+// target a capped increment toward the desired pose, hold it at the reach boundary,
+// and retire the jog once it has converged. Status lines fire only on the
+// moving <-> blocked transitions, so a held boundary reports once, not at 100 Hz.
+// Called under the UiState lock; jog_tick briefly takes the model lock inside it,
+// the same state -> model order as the UI snapshot, so the two cannot deadlock.
+fn advance_jog(s: &mut UiState, side: Side, models: &ArmModels, caps: JogCaps) {
+    let Some(jog) = s.arm(side).pose_jog else {
+        return;
+    };
+    match jog_tick(
+        models,
+        side,
+        &s.arm(side).joints,
+        &jog.desired,
+        jog.mode,
+        caps,
+    ) {
+        JogStep::Converged => {
+            s.arm_mut(side).pose_jog = None;
+            s.arm_mut(side).pose_blocked = false;
+        }
+        JogStep::Stepped(q) => {
+            s.arm_mut(side).joints = q;
+            if s.arm(side).pose_blocked {
+                s.arm_mut(side).pose_blocked = false;
+                s.set_status(format!("{}: pose jog moving", side.label()));
+                info!(side = side.label(), mode = ?jog.mode, "pose jog resumed");
+            }
+        }
+        JogStep::Blocked => {
+            if !s.arm(side).pose_blocked {
+                s.arm_mut(side).pose_blocked = true;
+                s.set_status(format!("{}: pose at reach limit, holding", side.label()));
+                info!(side = side.label(), mode = ?jog.mode, desired = ?jog.desired, "pose jog at reach limit");
+            }
         }
     }
 }

@@ -98,27 +98,36 @@
     align-items: center; margin: 10px 0 4px; font-variant-numeric: tabular-nums;
   }
 
-  /* World-frame end-effector pose: target inputs (x/y/z + roll/pitch/yaw) with a
-     measured readout, coupled to the joint sliders both ways. `display: contents`
-     lets every row's cells share the one grid so the columns line up. */
+  /* Section labels: "pose · joints" over the joint sliders, "pose · world" over the
+     world-frame controls. The x/y/z rows reuse the joint slider layout above. */
   .pose-head {
     margin: 16px 0 8px; font: 600 11px/1 'Inter Tight', sans-serif;
     letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-50);
   }
-  .pose {
-    display: grid; grid-template-columns: 48px 1fr 76px 34px; gap: 8px 12px;
-    align-items: center; font-variant-numeric: tabular-nums;
+
+  /* Roll/pitch/yaw angle dials: a circular knob you drag to set the angle (wraps at
+     +/-pi), with an orange measured-angle tick on the rim, matching the caret. */
+  .dials { display: flex; justify-content: space-around; gap: 10px; margin: 12px 0 2px; }
+  .dial { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .dial svg { width: 84px; height: 84px; touch-action: none; cursor: grab; }
+  .dial svg:active { cursor: grabbing; }
+  .dial-rim {
+    fill: var(--bg-soft); stroke: var(--lo); stroke-width: 2.5;
   }
-  .prow { display: contents; }
-  .pose .name { color: var(--ink-50); font-weight: 600; font-size: 12px; }
-  .pose .fb { text-align: right; color: var(--ink-50); }
-  .pose .unit { color: var(--ink-50); font-size: 11px; }
-  .pose input[type=number] {
-    width: 100%; padding: 7px 9px; border: none; border-radius: 9px;
-    background: var(--bg-soft); color: var(--ink);
-    font: 500 13px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
-    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
-    outline: none;
+  .dial-hand { stroke: var(--ink-50); stroke-width: 2.5; stroke-linecap: round; }
+  .dial-knob { fill: #d8dbe0; stroke: var(--hi); stroke-width: 1; }
+  .dial-tick { stroke: var(--warn); stroke-width: 3.5; stroke-linecap: round; }
+  /* Travel indicators: the unreachable half of the pitch dial (euler pitch lives in
+     [-pi/2, pi/2]) and the +/-pi wrap seam on roll/yaw. */
+  .dial-dead { fill: none; stroke: rgba(155, 53, 53, 0.28); stroke-width: 5; }
+  .dial-seam { stroke: var(--ink-50); stroke-width: 2; }
+  .dial-label {
+    font: 600 11px/1 'Inter Tight', sans-serif; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--ink-50);
+  }
+  .dial-val {
+    font: 500 12px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
+    color: var(--ink-70);
   }
 
   input[type=range] {
@@ -172,6 +181,23 @@
     box-shadow: inset 2px 2px 6px rgba(0, 0, 0, 0.6);
   }
 
+  /* Streaming | Actions segmented toggle. */
+  .modeseg {
+    display: inline-flex; padding: 4px; border-radius: 12px;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  }
+  .seg {
+    background: transparent; box-shadow: none; color: var(--ink-50);
+    padding: 8px 22px; border-radius: 9px;
+  }
+  .seg:hover { color: var(--ink-70); }
+  .seg:active { transform: none; box-shadow: none; }
+  .seg.on {
+    color: var(--ink); background: var(--card);
+    box-shadow: -2px -2px 5px var(--hi), 2px 2px 5px var(--lo);
+  }
+
   .status {
     padding: 13px 18px; border-radius: 14px;
     background: var(--bg-soft);
@@ -183,6 +209,13 @@
 </head>
 <body>
   <h1>openarm01 joint commander <span id="conn" class="conn closed">disconnected</span></h1>
+
+  <div class="row" style="justify-content:center; margin-bottom:20px;">
+    <div class="modeseg">
+      <button class="seg on" id="mode_streaming" onclick="set_ui_mode('streaming')">Streaming</button>
+      <button class="seg" id="mode_actions" onclick="set_ui_mode('actions')">Actions</button>
+    </div>
+  </div>
 
   <div class="row">
     <div class="panel" id="left_arm"></div>
@@ -223,16 +256,33 @@ const HOME_DURATION_S = 3;
 // Home is all zeros except the elbow (j4), held at a small positive angle so it
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
-// World-frame pose fields shown per arm: three positions (m) then roll/pitch/yaw
-// (rad), indexing the arm view's `pose` / `pose_feedback` arrays [x,y,z,r,p,y].
-const POSE_AXES = [
-  {i: 0, label: 'x', unit: 'm', step: 0.005},
-  {i: 1, label: 'y', unit: 'm', step: 0.005},
-  {i: 2, label: 'z', unit: 'm', step: 0.005},
-  {i: 3, label: 'roll', unit: 'rad', step: 0.02},
-  {i: 4, label: 'pitch', unit: 'rad', step: 0.02},
-  {i: 5, label: 'yaw', unit: 'rad', step: 0.02},
+const READY_DURATION_S = 3;
+// A natural workspace pose (elbows bent, forearms angled toward each other),
+// denoised from the operator's by-eye pose and made left/right symmetric. The mirror
+// flips the shoulder / upper-arm joints (j1,j2,j3); the elbow (j4) and wrist keep sign.
+const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
+const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
+// World-frame pose controls: x/y/z as sliders (indices 0..2 of the arm view's
+// `pose`/`pose_feedback` = [x,y,z,roll,pitch,yaw]), roll/pitch/yaw as angle dials
+// (indices 3..5). Slider bounds are a generous fixed window over the workspace.
+const POS_AXES = [
+  {i: 0, label: 'x', min: -0.4, max: 0.9},
+  {i: 1, label: 'y', min: -0.9, max: 0.9},
+  {i: 2, label: 'z', min: -0.3, max: 1.0},
 ];
+const ROT_AXES = [
+  {i: 3, label: 'roll'},
+  {i: 4, label: 'pitch'},
+  {i: 5, label: 'yaw'},
+];
+// Target angle (rad) held by each side's dials, and which dial is mid-drag.
+const dialTarget = { left: {3: 0, 4: 0, 5: 0}, right: {3: 0, 4: 0, 5: 0} };
+let dialDrag = { side: null, i: null, pid: null };
+// Interaction mode: 'streaming' follows controls live (deadman-gated); 'actions'
+// composes a target and fires it as a discrete hub move on Execute.
+let uiMode = 'streaming';
+// Last control space the operator touched per side; picks what Execute fires.
+const touched = { left: 'joints', right: 'joints' };
 let ws = null;
 let latestSnap = null;
 // One streaming deadman per side, shared by that side's arm and gripper.
@@ -245,43 +295,79 @@ function build_arm(side, label) {
   const root = $(`${side}_arm`);
   root.innerHTML = `
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
+    <div class="pose-head">pose · joints</div>
     <div id="${side}_arm_joints"></div>
     <div class="pose-head">pose · world</div>
-    <div class="pose" id="${side}_arm_pose"></div>
+    <div id="${side}_arm_pos"></div>
+    <div class="dials" id="${side}_arm_dials"></div>
     <div class="actions">
-      <button onclick="reset_arm('${side}')">Home</button>
-      <button class="primary" id="${side}_arm_btn" onclick="toggle_enable('${side}')">Enable</button>
+      <button onclick="reset_arm('${side}')">Home Pose</button>
+      <button onclick="ready_arm('${side}')">Ready Pose</button>
+      <button class="primary" id="${side}_arm_btn" onclick="primary_arm('${side}')">Enable</button>
     </div>`;
   const joints = $(`${side}_arm_joints`);
   for (let i = 0; i < ARM_DOF; i++) {
-    const row = document.createElement('div');
-    row.className = 'joint';
-    row.innerHTML = `
-      <span class="name">j${i+1}</span>
-      <div class="scol">
-        <div class="srow">
-          <input type="range" min="${-PI}" max="${PI}" step="0.01" value="0" id="${side}_j${i}"
-                 oninput="on_joint_input('${side}', ${i})" />
-          <div class="ghost off" id="${side}_sh${i}"></div>
-        </div>
-        <div class="lim"><span id="${side}_lo${i}">--</span><span id="${side}_hi${i}">--</span></div>
+    joints.appendChild(slider_row(`${side}_j${i}`, `j${i+1}`, -PI, PI, 0.01,
+      `on_joint_input('${side}', ${i})`, `${side}_sh${i}`, `${side}_lo${i}`, `${side}_hi${i}`,
+      `${side}_t${i}`, `${side}_f${i}`));
+  }
+  const pos = $(`${side}_arm_pos`);
+  for (const ax of POS_AXES) {
+    pos.appendChild(slider_row(`${side}_p${ax.i}`, ax.label, ax.min, ax.max, 0.002,
+      `on_pose_input('${side}', 'position', ${ax.i})`, `${side}_ph${ax.i}`, `${side}_plo${ax.i}`, `${side}_phi${ax.i}`,
+      `${side}_pt${ax.i}`, `${side}_pf${ax.i}`));
+  }
+  const dials = $(`${side}_arm_dials`);
+  for (const ax of ROT_AXES) dials.appendChild(dial_widget(side, ax));
+}
+
+// A joint-style slider row: name, track with a measured caret over a min/max readout,
+// then the commanded and measured numeric columns. Shared by the joints and by the
+// world-frame x/y/z so both read exactly the same.
+function slider_row(id, name, min, max, step, oninput, caretId, loId, hiId, tId, fId) {
+  const row = document.createElement('div');
+  row.className = 'joint';
+  row.innerHTML = `
+    <span class="name">${name}</span>
+    <div class="scol">
+      <div class="srow">
+        <input type="range" min="${min}" max="${max}" step="${step}" value="0" id="${id}" oninput="${oninput}" />
+        <div class="ghost off" id="${caretId}"></div>
       </div>
-      <span class="target" id="${side}_t${i}">+0.000</span>
-      <span class="fb" id="${side}_f${i}">---</span>`;
-    joints.appendChild(row);
-  }
-  const pose = $(`${side}_arm_pose`);
-  for (const ax of POSE_AXES) {
-    const row = document.createElement('div');
-    row.className = 'prow';
-    row.innerHTML = `
-      <span class="name">${ax.label}</span>
-      <input type="number" step="${ax.step}" value="0" id="${side}_p${ax.i}"
-             oninput="on_pose_input('${side}')" />
-      <span class="fb" id="${side}_pf${ax.i}">---</span>
-      <span class="unit">${ax.unit}</span>`;
-    pose.appendChild(row);
-  }
+      <div class="lim"><span id="${loId}">${fmt(min)}</span><span id="${hiId}">${fmt(max)}</span></div>
+    </div>
+    <span class="target" id="${tId}">+0.000</span>
+    <span class="fb" id="${fId}">---</span>`;
+  return row;
+}
+
+// One roll/pitch/yaw dial: an SVG knob you drag around to set the angle. The viewBox
+// is centred at 0,0; the hand points at the commanded angle and the orange tick marks
+// the measured angle. Angles use the math convention (0 at 3 o'clock, CCW positive).
+function dial_widget(side, ax) {
+  const d = document.createElement('div');
+  d.className = 'dial';
+  // Pitch's euler range is (-pi/2, pi/2): shade its impossible left half. Roll and
+  // yaw span the full circle; mark the +/-pi seam where the value wraps.
+  const marks = ax.label === 'pitch'
+    ? '<path class="dial-dead" d="M 0 -40 A 40 40 0 0 0 0 40" />'
+    : '<line class="dial-seam" x1="-40" y1="0" x2="-32" y2="0" />';
+  d.innerHTML = `
+    <svg viewBox="-50 -50 100 100" id="${side}_d${ax.i}">
+      <circle class="dial-rim" cx="0" cy="0" r="40" />
+      ${marks}
+      <line class="dial-tick" id="${side}_dtick${ax.i}" x1="0" y1="0" x2="0" y2="0" />
+      <line class="dial-hand" id="${side}_dhand${ax.i}" x1="0" y1="0" x2="0" y2="0" />
+      <circle class="dial-knob" id="${side}_dknob${ax.i}" cx="0" cy="0" r="6" />
+    </svg>
+    <span class="dial-label">${ax.label}</span>
+    <span class="dial-val" id="${side}_dval${ax.i}">+0.000</span>`;
+  const svg = d.querySelector('svg');
+  svg.addEventListener('pointerdown', e => dial_down(side, ax.i, e));
+  svg.addEventListener('pointermove', e => dial_move(side, ax.i, e));
+  svg.addEventListener('pointerup', dial_up);
+  svg.addEventListener('pointercancel', dial_up);
+  return d;
 }
 
 function build_gripper(side, label) {
@@ -302,35 +388,139 @@ function build_gripper(side, label) {
     </div>`;
 }
 
-function read_joints(side) {
+// Compose a joint target from the latest server floats, overriding only the
+// joint being dragged: untouched values never round-trip through the sliders'
+// step grid, so a one-joint drag cannot nudge the other six.
+function read_joints(side, overrideIdx) {
+  const snap = latestSnap && latestSnap[`${side}_arm`];
   const joints = [];
-  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
+  for (let i = 0; i < ARM_DOF; i++) {
+    joints.push(i === overrideIdx || !snap
+      ? parseFloat($(`${side}_j${i}`).value)
+      : snap.joints[i]);
+  }
   return joints;
 }
 
 // Slider moved: update the readout, and while enabled stream the new setpoint.
 function on_joint_input(side, i) {
   $(`${side}_t${i}`).textContent = fmt(parseFloat($(`${side}_j${i}`).value));
-  if (enabled[side]) send_arm_target(side);
+  touched[side] = 'joints';
+  if (uiMode === 'streaming') {
+    if (enabled[side]) send_arm_target(side, i);
+  } else {
+    refresh_primary(side);
+  }
 }
 
-function send_arm_target(side) {
+function send_arm_target(side, overrideIdx) {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side)}));
+  throttled(`${side}_joints`, () =>
+    ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side, overrideIdx)})));
 }
 
-function read_pose(side) {
-  const v = POSE_AXES.map(ax => parseFloat($(`${side}_p${ax.i}`).value));
-  return {position: v.slice(0, 3), rpy: v.slice(3, 6)};
+// Compose the desired pose from the latest server floats plus the control being
+// dragged: only the touched axis takes the DOM value, so the sliders' step grid
+// never feeds 1 mm parasitic jogs back on the other axes.
+function read_pose(side, overrideAxis) {
+  const snap = latestSnap && latestSnap[`${side}_arm`];
+  const position = POS_AXES.map(ax =>
+    ax.i === overrideAxis || !snap
+      ? parseFloat($(`${side}_p${ax.i}`).value)
+      : snap.pose[ax.i]);
+  const rpy = ROT_AXES.map(ax => dialTarget[side][ax.i]);
+  return {position, rpy};
 }
 
-// Pose field edited: while enabled, the server solves it to joints (IK) and streams
-// them. A half-typed field parses to NaN; skip the send rather than push a null pose.
-function on_pose_input(side) {
+// Pose control moved (an x/y/z slider or a dial): refresh the x/y/z target
+// readouts, then while streaming-enabled arm the server's jog. The touched
+// control leads (position or orientation); the untouched half is softly held.
+function on_pose_input(side, lead, overrideAxis) {
+  for (const ax of POS_AXES) $(`${side}_pt${ax.i}`).textContent = fmt(parseFloat($(`${side}_p${ax.i}`).value));
+  touched[side] = 'pose';
+  if (uiMode !== 'streaming') { refresh_primary(side); return; }
   if (!enabled[side] || !ws || ws.readyState !== 1) return;
-  const {position, rpy} = read_pose(side);
+  const {position, rpy} = read_pose(side, overrideAxis);
   if (![...position, ...rpy].every(Number.isFinite)) return;
-  ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, rpy}));
+  throttled(`${side}_pose`, () =>
+    ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, rpy, mode: lead})));
+}
+
+// Trailing-edge throttle per channel: input events fire per pixel, but one jog
+// re-arm per interval is plenty and keeps the WS/command load flat.
+const THROTTLE_MS = 33;
+const throttles = {};
+function throttled(key, send) {
+  const t = throttles[key] || (throttles[key] = {last: 0, timer: null, fn: null});
+  t.fn = send;
+  const now = performance.now();
+  if (now - t.last >= THROTTLE_MS) {
+    t.last = now;
+    t.fn();
+  } else if (!t.timer) {
+    t.timer = setTimeout(() => {
+      t.timer = null;
+      t.last = performance.now();
+      t.fn();
+    }, THROTTLE_MS - (now - t.last));
+  }
+}
+
+// Pointer position on a dial's SVG -> angle in [-pi, pi] (0 at 3 o'clock, CCW positive).
+function dial_angle(side, i, e) {
+  const r = $(`${side}_d${i}`).getBoundingClientRect();
+  return Math.atan2((r.top + r.height / 2) - e.clientY, e.clientX - (r.left + r.width / 2));
+}
+function dial_down(side, i, e) {
+  $(`${side}_d${i}`).setPointerCapture(e.pointerId);
+  dialDrag = { side, i, pid: e.pointerId };
+  dial_move(side, i, e);
+}
+function dial_move(side, i, e) {
+  if (dialDrag.side !== side || dialDrag.i !== i || dialDrag.pid !== e.pointerId) return;
+  let a = dial_angle(side, i, e);
+  // Pitch's euler range is (-pi/2, pi/2). A drag into the dead half pins to the
+  // edge on the side the target already sits (hysteresis): pointer jitter across
+  // the pi seam can then never flip the pin to the opposite edge.
+  if (i === 4 && Math.abs(a) > PI / 2 - 0.01) {
+    const edge = Math.sign(dialTarget[side][i] || a);
+    a = edge * (PI / 2 - 0.01);
+  }
+  dialTarget[side][i] = a;
+  render_dial(side, i, dialTarget[side][i], null);
+  on_pose_input(side, 'orientation');
+}
+function dial_up(e) {
+  if (dialDrag.pid === e.pointerId) dialDrag = { side: null, i: null, pid: null };
+}
+
+// Draw a dial: hand at `target`; measured tick at `meas` (hidden when null). SVG y is
+// down, so the vertical component is negated to keep CCW-positive on screen.
+function render_dial(side, i, target, meas) {
+  const R = 40;
+  const hand = $(`${side}_dhand${i}`), knob = $(`${side}_dknob${i}`);
+  const hx = R * Math.cos(target), hy = -R * Math.sin(target);
+  hand.setAttribute('x2', hx.toFixed(2)); hand.setAttribute('y2', hy.toFixed(2));
+  knob.setAttribute('cx', hx.toFixed(2)); knob.setAttribute('cy', hy.toFixed(2));
+  $(`${side}_dval${i}`).textContent = fmt(target);
+  const tick = $(`${side}_dtick${i}`);
+  if (meas == null) { tick.style.display = 'none'; return; }
+  tick.style.display = '';
+  const c = Math.cos(meas), s = Math.sin(meas);
+  tick.setAttribute('x1', ((R - 9) * c).toFixed(2)); tick.setAttribute('y1', (-(R - 9) * s).toFixed(2));
+  tick.setAttribute('x2', (R * c).toFixed(2)); tick.setAttribute('y2', (-R * s).toFixed(2));
+}
+
+function ready_arm(side) {
+  // Like Home, but to a natural workspace pose: disable so the stream stops, then
+  // drive to the symmetric Ready preset as a discrete, time-bounded move.
+  if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
+  const preset = side === 'left' ? READY_LEFT : READY_RIGHT;
+  for (let i = 0; i < ARM_DOF; i++) {
+    $(`${side}_j${i}`).value = preset[i];
+    $(`${side}_t${i}`).textContent = fmt(preset[i]);
+  }
+  fire_arm(side, READY_DURATION_S);
 }
 
 // Enable: snap both the arm sliders and the gripper slider to the measured pose
@@ -366,9 +556,19 @@ function reset_arm(side) {
   fire_arm(side, HOME_DURATION_S);
 }
 
+// Read all seven joint sliders directly. Used by the discrete fires (Home, Ready,
+// Execute), where every slider is a deliberate operator/preset value - unlike the
+// streaming read_joints, which composes from the snapshot and overrides only the one
+// joint being dragged.
+function slider_joints(side) {
+  const joints = [];
+  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
+  return joints;
+}
+
 function fire_arm(side, duration_s) {
   if (!ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: read_joints(side), duration_s}));
+  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s}));
 }
 
 // Slider moved: update the readout, and while enabled stream the new opening.
@@ -382,6 +582,84 @@ function send_gripper_target(side) {
   ws.send(JSON.stringify({cmd: 'set_gripper_target', side, position: parseFloat($(`${side}_g`).value)}));
 }
 
+// The arm card's primary button: Enable/Disable in streaming, Execute in actions.
+function primary_arm(side) {
+  if (uiMode === 'streaming') toggle_enable(side);
+  else execute_arm(side);
+}
+
+// Fire the composed target for one side as a discrete governed hub move. The last
+// control space the operator touched picks which: the x/y/z sliders + dials fire a
+// straight-line Cartesian move_arm; the joint sliders fire move_arm_joints. Refused
+// server-side while a side streams, but actions mode holds both deadmen down.
+function execute_arm(side) {
+  if (!ws || ws.readyState !== 1) return;
+  if (touched[side] === 'pose') {
+    const position = POS_AXES.map(ax => parseFloat($(`${side}_p${ax.i}`).value));
+    const rpy = ROT_AXES.map(ax => dialTarget[side][ax.i]);
+    if (![...position, ...rpy].every(Number.isFinite)) return;
+    ws.send(JSON.stringify({cmd: 'fire_arm_pose', side, position, rpy, duration_s: 0}));
+  } else {
+    ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s: 0}));
+  }
+}
+
+// Switch interaction mode. Actions fires discrete moves, which the server refuses
+// while a side streams, so entering actions drops both deadmen and seeds the controls
+// from the measured pose (a fresh canvas to compose from). The mode also gates whether
+// control input streams live (streaming) or is held for Execute (actions).
+function set_ui_mode(mode) {
+  if (mode === uiMode) return;
+  uiMode = mode;
+  $('mode_streaming').classList.toggle('on', mode === 'streaming');
+  $('mode_actions').classList.toggle('on', mode === 'actions');
+  if (mode === 'actions') {
+    for (const side of ['left', 'right']) {
+      if (enabled[side] && ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
+      }
+      seed_controls_from_measured(side);
+    }
+  }
+  for (const side of ['left', 'right']) refresh_primary(side);
+}
+
+// Snap one side's joint sliders, x/y/z sliders and dials to its measured pose, so a
+// compose in actions mode starts from where the arm actually is.
+function seed_controls_from_measured(side) {
+  const a = latestSnap && latestSnap[`${side}_arm`];
+  if (!a) return;
+  if (a.feedback) for (let i = 0; i < ARM_DOF; i++) {
+    $(`${side}_j${i}`).value = a.feedback[i];
+    $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
+  }
+  if (a.pose_feedback) {
+    for (const ax of POS_AXES) {
+      $(`${side}_p${ax.i}`).value = a.pose_feedback[ax.i];
+      $(`${side}_pt${ax.i}`).textContent = fmt(a.pose_feedback[ax.i]);
+    }
+    for (const ax of ROT_AXES) {
+      dialTarget[side][ax.i] = a.pose_feedback[ax.i];
+      render_dial(side, ax.i, dialTarget[side][ax.i], a.pose_feedback[ax.i]);
+    }
+  }
+}
+
+// Set the arm card's primary button to its role for the current mode: the streaming
+// deadman toggle (Enable/Disable) or the actions Execute (labelled with the space it
+// will fire).
+function refresh_primary(side) {
+  const btn = $(`${side}_arm_btn`);
+  if (uiMode === 'streaming') {
+    const on = enabled[side];
+    btn.textContent = on ? 'Disable' : 'Enable';
+    btn.classList.toggle('enabled', on);
+  } else {
+    btn.textContent = touched[side] === 'pose' ? 'Execute · pose' : 'Execute · joints';
+    btn.classList.remove('enabled');
+  }
+}
+
 function apply_snapshot(snap) {
   latestSnap = snap;
   for (const side of ['left', 'right']) {
@@ -391,9 +669,7 @@ function apply_snapshot(snap) {
     const b = $(`${side}_arm_badge`);
     b.textContent = on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
     b.className = 'badge' + (on ? ' stream' : (a.in_flight ? ' flight' : ''));
-    const armBtn = $(`${side}_arm_btn`);
-    armBtn.textContent = on ? 'Disable' : 'Enable';
-    armBtn.classList.toggle('enabled', on);
+    refresh_primary(side);
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
       // Slider bounds + the visible min/max readout come from joint_limits.
@@ -410,7 +686,7 @@ function apply_snapshot(snap) {
       // enabled it mirrors the streamed target, so a pose-field edit (solved to
       // joints server-side) shows on the sliders too - except the joint the operator
       // is actively dragging, which we must not fight.
-      if (!on && a.feedback) {
+      if (uiMode === 'streaming' && !on && a.feedback) {
         el.value = a.feedback[i];
         $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
       } else if (on && document.activeElement !== el) {
@@ -428,15 +704,34 @@ function apply_snapshot(snap) {
       }
     }
 
-    // Pose fields: the measured readout always; the target inputs mirror the FK of
-    // the joint target while enabled (so moving a joint updates them) and the
-    // measured pose while disabled. Skip a field the operator is actively editing.
-    for (const ax of POSE_AXES) {
-      $(`${side}_pf${ax.i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[ax.i]) : '---';
-      const pin = $(`${side}_p${ax.i}`);
-      if (document.activeElement === pin) continue;
-      const src = on ? a.pose : a.pose_feedback;
-      if (src) pin.value = src[ax.i].toFixed(4);
+    // World pose: x/y/z sliders and roll/pitch/yaw dials mirror the FK of the joint
+    // target while enabled (so a joint move updates them) or the measured pose while
+    // disabled, each with the measured value marked. Skip a control being edited.
+    for (const ax of POS_AXES) {
+      const i = ax.i;
+      $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
+      const el = $(`${side}_p${i}`);
+      if (uiMode === 'streaming' && document.activeElement !== el) {
+        const src = on ? a.pose : a.pose_feedback;
+        if (src) { el.value = src[i]; $(`${side}_pt${i}`).textContent = fmt(src[i]); }
+      }
+      const ph = $(`${side}_ph${i}`);
+      if (a.pose_feedback) {
+        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - ax.min) / (ax.max - ax.min)));
+        ph.style.setProperty('--at', (pct * 100) + '%');
+        ph.classList.remove('off');
+      } else {
+        ph.classList.add('off');
+      }
+    }
+    for (const ax of ROT_AXES) {
+      const i = ax.i;
+      const meas = a.pose_feedback ? a.pose_feedback[i] : null;
+      if (uiMode === 'streaming' && !(dialDrag.side === side && dialDrag.i === i)) {
+        const src = on ? a.pose : a.pose_feedback;
+        if (src) dialTarget[side][i] = src[i];
+      }
+      render_dial(side, i, dialTarget[side][i], meas);
     }
 
     const g = snap[`${side}_gripper`];

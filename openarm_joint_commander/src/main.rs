@@ -78,12 +78,14 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // Stream operator joint setpoints to the enabled arms (deadman in UiState).
+        // Stream operator joint setpoints to the enabled arms (deadman in UiState),
+        // advancing any armed Cartesian jog one capped step per tick.
         tokio::spawn(command_stream::run(
             node_runner.clone(),
             shared.clone(),
             params.command_rate_hz,
             token.clone(),
+            models.clone(),
         ));
 
         // ui::run is the long-lived HTTP + WebSocket server. It must be spawned
