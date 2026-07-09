@@ -92,13 +92,17 @@
     }
   },
   interfaces: {
+    // Provider side: conforming to an interface here is what EXPOSES its
+    // contents from this node. Topic interfaces are emitted, action interfaces
+    // are served (peppygen generates the exposed-action handlers); callers
+    // consume them by interface name.
     conforms_to: [
       {
-        // Live nearest-pair distance + links, for the operator readout.
+        // Emits the live nearest-pair distance + links, for the operator readout.
         name: "openarm_collision_status",
         tag: "v1"
       },
-      // The hub's move actions (move_arm_joints, move_arm, move_gripper),
+      // Serves the hub's move actions (move_arm_joints, move_arm, move_gripper),
       // addressed by side id. The hub runs each move itself (trajectory +
       // governor + governed stream); progress is observed on the state streams.
       {
