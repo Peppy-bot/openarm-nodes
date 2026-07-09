@@ -11,15 +11,17 @@
     name: "openarm_arm",
     tag: "v1",
     depends_on: {
-      interfaces: [
-        // The hub's governed per-arm setpoint stream the arm tracks. Wildcard
-        // (`from_any`): the backbone is the producer; this arm reads the entries
-        // for its arm_id. Optional, so the arm boots and holds with no hub up.
+      pairings: [
+        // The exclusive command loop with the hub: governed setpoints stream in
+        // and the measured state streams back, both scoped to the pair (no
+        // arm_id demux). Optional: the arm boots and holds with no hub paired,
+        // and the pair is established at the hub's start (launcher `pairings:`).
         {
-          name: "openarm_arm_governed_setpoints",
+          name: "openarm_arm_link",
           tag: "v1",
+          role: "arm",
           link_id: "hub",
-          from_any: true,
+          optional: true,
         },
       ],
     },
@@ -82,13 +84,5 @@
         tag: "v1"
       }
     ],
-    topics: {
-      consumes: [
-        {
-          name: "arm_governed_setpoints",
-          link_id: "hub"
-        }
-      ],
-    },
   },
 }
