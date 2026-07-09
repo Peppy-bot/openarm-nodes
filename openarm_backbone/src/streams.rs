@@ -1,8 +1,8 @@
 //! Inbound stream plumbing for the hub: the operator arm and gripper command
-//! streams, both arms' measured joint state, both paired grippers' measured
-//! aperture, and the runtime governor controls. Each listener holds one
-//! subscription and keeps the latest well-formed message in a watch channel the
-//! coordinator reads every tick. One held subscription per stream means no
+//! streams, both paired arms' measured joint state, both paired grippers'
+//! measured aperture, and the runtime governor controls. Each listener holds
+//! one subscription and keeps the latest well-formed message in a watch channel
+//! the coordinator reads every tick. One held subscription per stream means no
 //! re-subscribe gap, so a message is never dropped between receives.
 
 use std::sync::Arc;
@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::{
-    arm_states_arm_states, collision_ctrl_governor_control, commander_arm_joint_commands,
+    collision_ctrl_governor_control, commander_arm_joint_commands,
     commander_gripper_gripper_commands,
 };
-use peppygen::pairings::{left_gripper_link, right_gripper_link};
+use peppygen::pairings::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
 use peppylib::messaging::ProducerRef;
 use tokio::sync::watch;
 use tracing::{error, warn};
@@ -57,10 +57,11 @@ pub struct GripperCommand {
     pub position_m: f64,
 }
 
-/// The latest measured joint position for one arm, fed by the `arm_states` stream.
-/// The hub anchors trajectories and governor queries on position; the governed
-/// velocity feedforward is the commanded step, not a measurement, so the stream's
-/// velocities are validated but not retained.
+/// The latest measured joint position for one arm, fed by the arm_link
+/// pairing's `arm_states` back-channel. The hub anchors trajectories and
+/// governor queries on position; the governed velocity feedforward is the
+/// commanded step, not a measurement, so the stream's velocities are validated
+/// but not retained.
 #[derive(Clone, Copy)]
 pub struct MeasuredState {
     pub positions: JointVec,
@@ -195,33 +196,65 @@ id_demux_listener!(
     }
 );
 
-id_demux_listener!(
-    /// Receive `arm_states` forever, keeping the latest measured state per arm.
-    /// Non-finite states are dropped so the coordinator never anchors a trajectory or
-    /// a governor query on a bad measurement.
-    run_joint_state_listener,
-    arm_states_arm_states,
-    "arm_states",
-    arm_id,
-    MeasuredState,
-    |_seq, _producer, msg| {
-        let finite = msg
-            .positions
+/// Receive both paired arms' measured state forever (the arm_link back-channel),
+/// keeping the latest per side. The slot IS the side (a pairing delivers only
+/// its one peer), so there is no id demux, and the governor anchors only on its
+/// exclusive command-loop peers: a stray broadcast producer cannot pose as an
+/// arm. Non-finite states are dropped so the coordinator never anchors a
+/// trajectory or a governor query on a bad measurement.
+pub async fn run_joint_state_listener(
+    runner: Arc<NodeRunner>,
+    latest: [watch::Sender<Option<MeasuredState>>; 2],
+) {
+    let (left, right) = tokio::join!(
+        left_arm_link::arm_states::subscribe(&runner),
+        right_arm_link::arm_states::subscribe(&runner),
+    );
+    let (mut left, mut right) = match (left, right) {
+        (Ok(l), Ok(r)) => (l, r),
+        (l, r) => {
+            return error!(
+                "arm_states subscribe: left {:?}, right {:?}",
+                l.err(),
+                r.err()
+            );
+        }
+    };
+    let parse = |side: Side, positions: JointVec, velocities: JointVec| -> Option<MeasuredState> {
+        let finite = positions
             .iter()
-            .chain(msg.velocities.iter())
+            .chain(velocities.iter())
             .all(|v| v.is_finite());
         if !finite {
             warn!(
-                "arm_states: dropping arm {} message with non-finite state",
-                msg.arm_id
+                "arm_states: dropping {} message with non-finite state",
+                side.label()
             );
             return None;
         }
-        Some(MeasuredState {
-            positions: msg.positions,
-        })
+        Some(MeasuredState { positions })
+    };
+    loop {
+        // Whichever slot delivers next wins the select; the other stays queued in
+        // its own subscription, so neither side can starve the other.
+        let (side, received) = tokio::select! {
+            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.positions, msg.velocities)))),
+            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.positions, msg.velocities)))),
+        };
+        match received {
+            Ok(Some((positions, velocities))) => {
+                if let Some(state) = parse(side, positions, velocities) {
+                    latest[side.index()].send_replace(Some(state));
+                }
+            }
+            Ok(None) => return, // subscription closed: node shutting down
+            Err(e) => {
+                error!("arm_states receive ({}): {e}", side.label());
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
+            }
+        }
     }
-);
+}
 
 /// Receive both paired grippers' measured aperture forever (the gripper_link
 /// back-channel), keeping the latest opening fraction per side. The slot IS the

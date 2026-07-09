@@ -1,9 +1,9 @@
 // openarm_backbone: the bimanual coordination hub node. Consumes the operator
-// arm_joint_commands and gripper_commands streams and both arms' arm_states;
-// exposes the joint / Cartesian / gripper move actions and executes them itself;
-// conforms to arm_governed_setpoints (the per-arm stream the arms follow) and
-// collision_status; and drives each gripper over its gripper_link pairing with
-// the governed opening. See src/main.rs for the architecture.
+// arm_joint_commands and gripper_commands streams; exposes the joint /
+// Cartesian / gripper move actions and executes them itself; conforms to
+// collision_status; and drives each arm and each gripper over its own pairing
+// (arm_link / gripper_link): governed setpoints stream down each pair and the
+// measured state streams back on it. See src/main.rs for the architecture.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -34,15 +34,6 @@
           link_id: "commander_gripper",
           from_any: true
         },
-        // Measured joint state of both arms, the governor's d_now and the
-        // trajectory anchor. Wildcard: both arm/sim instances publish it, told
-        // apart by arm_id.
-        {
-          name: "openarm_arm_states",
-          tag: "v1",
-          link_id: "arm_states",
-          from_any: true
-        },
         // Runtime on/off for the governor. Wildcard + optional: the hub holds its
         // launch-time default until the first message.
         {
@@ -53,6 +44,27 @@
         }
       ],
       pairings: [
+        // The exclusive command loop with each arm: the hub plays the commander
+        // role, streams the governed joint setpoint down each slot's
+        // arm_setpoints, and reads that arm's measured state back on the slot's
+        // arm_states (the governor's d_now and the trajectory anchor); the slot
+        // scopes both directions, so no arm_id demux and no other producer can
+        // drive an arm or pose as its state. Optional like the gripper slots
+        // below, established at this instance's start (launcher `pairings:`).
+        {
+          name: "openarm_arm_link",
+          tag: "v1",
+          role: "commander",
+          link_id: "left_arm_link",
+          optional: true
+        },
+        {
+          name: "openarm_arm_link",
+          tag: "v1",
+          role: "commander",
+          link_id: "right_arm_link",
+          optional: true
+        },
         // The exclusive command loop with each gripper: the hub plays the
         // commander role, streams the governed opening down each slot's
         // gripper_commands, and reads that gripper's measured aperture back on
@@ -81,11 +93,6 @@
   },
   interfaces: {
     conforms_to: [
-      // The governed per-arm setpoint stream (positions + velocity feedforward).
-      {
-        name: "openarm_arm_governed_setpoints",
-        tag: "v1"
-      },
       {
         // Live nearest-pair distance + links, for the operator readout.
         name: "openarm_collision_status",
@@ -137,10 +144,6 @@
         {
           name: "gripper_commands",
           link_id: "commander_gripper"
-        },
-        {
-          name: "arm_states",
-          link_id: "arm_states"
         },
         {
           name: "governor_control",

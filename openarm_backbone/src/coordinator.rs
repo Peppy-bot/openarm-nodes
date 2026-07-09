@@ -13,10 +13,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_arm_governed_setpoints::v1::arm_governed_setpoints;
 use peppygen::emitted_topics::openarm_collision_status::v1::collision_status;
 use peppygen::exposed_actions::move_gripper;
-use peppygen::pairings::{left_gripper_link, right_gripper_link};
+use peppygen::pairings::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
@@ -100,16 +99,24 @@ pub async fn run(
         gripper_tolerance_m,
         gripper_move_timeout,
     } = config;
-    let publisher = match arm_governed_setpoints::declare_publisher(&runner).await {
+    // One publisher per pairing slot (arms and grippers alike). Publishing while
+    // a slot is unpaired is a legal no-op, so the hub streams governed setpoints
+    // regardless and a follower simply starts tracking once its pair is
+    // established.
+    let left_arm_pub = match left_arm_link::arm_setpoints::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare governed_setpoints publisher: {e}");
+            error!("declare left arm_setpoints publisher: {e}");
             return Err(e);
         }
     };
-    // One publisher per gripper pairing slot. Publishing while a slot is unpaired
-    // is a legal no-op, so the hub streams governed openings regardless and a
-    // gripper simply starts following once its pair is established.
+    let right_arm_pub = match right_arm_link::arm_setpoints::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare right arm_setpoints publisher: {e}");
+            return Err(e);
+        }
+    };
     let left_gripper_pub =
         match left_gripper_link::gripper_commands::declare_publisher(&runner).await {
             Ok(p) => p,
@@ -295,33 +302,36 @@ pub async fn run(
         let governed = governor.govern(&prev, &cand, &measured, dt);
         governed_openings = governed.openings;
 
-        // Publish one governed setpoint per arm. The single publisher just changes
-        // arm_id; each follower keeps its own arm. A follower never starves as long
-        // as it consumes in a tight loop (receive decoupled from publish), the way
-        // the hub's own state listeners and the real arm already do.
-        for (side, planner, prev_q, governed_q) in [
+        // Publish one governed setpoint per arm on its pairing slot; the slot
+        // scopes the stream to its paired arm, so the message carries no arm_id.
+        type BuildSetpoint = fn(JointVec, JointVec) -> peppygen::Result<peppylib::Payload>;
+        for (side, planner, arm_pub, build, prev_q, governed_q) in [
             (
                 Side::Left,
                 &mut planners.left,
+                &left_arm_pub,
+                left_arm_link::arm_setpoints::build_message as BuildSetpoint,
                 prev.arms.left,
                 governed.arms.left,
             ),
             (
                 Side::Right,
                 &mut planners.right,
+                &right_arm_pub,
+                right_arm_link::arm_setpoints::build_message as BuildSetpoint,
                 prev.arms.right,
                 governed.arms.right,
             ),
         ] {
             let dq: JointVec = std::array::from_fn(|j| (governed_q[j] - prev_q[j]) / dt);
             planner.commit(governed_q);
-            match arm_governed_setpoints::build_message(side.arm_id(), governed_q, dq) {
+            match build(governed_q, dq) {
                 Ok(msg) => {
-                    if let Err(e) = publisher.publish(msg).await {
-                        warn!("governed_setpoints publish ({} arm): {e}", side.label());
+                    if let Err(e) = arm_pub.publish(msg).await {
+                        warn!("arm_setpoints publish ({} arm): {e}", side.label());
                     }
                 }
-                Err(e) => error!("build governed_setpoints ({} arm): {e}", side.label()),
+                Err(e) => error!("build arm_setpoints ({} arm): {e}", side.label()),
             }
         }
 
