@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use peppygen::exposed_actions::openarm_move_actions::v1::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
 use srs_model::Limit;
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};

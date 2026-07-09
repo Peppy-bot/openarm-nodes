@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_collision_status::v1::collision_status;
-use peppygen::exposed_actions::openarm_move_actions::v1::move_gripper;
+use peppygen::exposed_actions::move_gripper;
 use peppygen::pairings::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};

@@ -9,9 +9,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use peppygen::exposed_actions::openarm_move_actions::v1::move_gripper::{
-    ActionHandle, GoalResponse,
-};
+use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalResponse};
 use peppygen::{NodeRunner, Result};
 use tokio::sync::mpsc;
 use tracing::error;

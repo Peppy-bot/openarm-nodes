@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use peppygen::exposed_actions::openarm_move_actions::v1::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::{move_arm, move_arm_joints};
 use peppylib::messaging::ProducerRef;
 use srs_model::nalgebra::{Isometry3, SVector};
 use srs_model::{Arm, ArmAnglePolicy, Jacobian, Limit};

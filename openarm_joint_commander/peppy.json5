@@ -9,14 +9,16 @@
     name: "openarm_joint_commander",
     tag: "v1",
     depends_on: {
-      interfaces: [
-        // The hub's move actions; the commander fires move_arm_joints (the
-        // "Send" button). Bound to the backbone instance in the launcher.
+      nodes: [
+        // The hub; the commander fires its move_arm_joints action (the "Send"
+        // button). Bound to the backbone instance in the launcher.
         {
-          name: "openarm_move_actions",
+          name: "openarm_backbone",
           tag: "v1",
           link_id: "backbone"
-        },
+        }
+      ],
+      interfaces: [
         // Measured joint state of both arms, for live UI progress. Wildcard
         // (`from_any`) so the panel binds to whatever arms are running and tells
         // them apart by `arm_id`; optional, so the commander still boots with no
@@ -71,8 +73,8 @@
       }
     ],
     actions: {
-      // Goals fired by the operator land on backbone, which forwards to the
-      // arm / gripper instance whose id matches arm_id / gripper_id.
+      // Goals fired by the operator land on the hub, which runs the move itself
+      // for the arm whose id matches arm_id.
       consumes: [
         {
           link_id: "backbone",
