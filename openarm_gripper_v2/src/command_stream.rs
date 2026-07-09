@@ -1,5 +1,5 @@
 // Listens for streamed opening setpoints from the paired hub (the
-// `commander` pairing slot of openarm_gripper_link) and keeps the latest one
+// `hub` pairing slot of openarm_gripper_link) and keeps the latest one
 // in a watch channel for the follow loop. Subscribing while unpaired is legal:
 // the subscription stays silent until a hub pairs, and only the paired
 // peer's messages surface, so there is no gripper_id filter. A non-finite
