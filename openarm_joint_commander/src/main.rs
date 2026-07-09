@@ -1,9 +1,10 @@
-mod actions;
 mod collision_status;
 mod command_stream;
 mod error;
 mod gripper_states;
 mod joint_states;
+mod move_arm;
+mod move_arm_joints;
 mod pose;
 mod state;
 mod ui;

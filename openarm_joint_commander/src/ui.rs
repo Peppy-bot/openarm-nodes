@@ -20,19 +20,15 @@ use srs_model::nalgebra::UnitQuaternion;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-use crate::actions::{move_arm, move_arm_joints};
 use crate::error::Result;
 use crate::pose::{ArmModels, JogMode, Pose};
 use crate::state::{
     ARM_DOF, ArmTarget, Disposition, GripperTarget, PoseJog, Proximity, SharedState, Side, UiState,
 };
+use crate::{move_arm, move_arm_joints};
 
 const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
-// How close (rad, per joint) the measured pose must be to the retained joint
-// target for Enable to keep that target (bumpless transfer): within this, the gap
-// is PD sag, not real displacement, and the hub still holds the same setpoint.
-const GOAL_SEED_TOLERANCE_RAD: f64 = 0.05;
 // The hub publishes the proximity readout at ~20 Hz; treat it as stale after this
 // long with no update (a dead hub) so the panel falls back to n/a instead of
 // latching the last distance.
@@ -238,21 +234,11 @@ async fn handle_command(text: &str, app: &AppState) {
                     ));
                     return;
                 };
-                // Bumpless transfer: the retained joint target is what this panel
-                // last streamed or fired, which is the setpoint the hub still holds
-                // whenever the arm measures near it (the gap is PD sag). Re-seeding
-                // from measured in that case would walk every motor onto the sag;
-                // keep the target instead. A far-off target (arm moved by other
-                // means, first boot) falls back to the measured seed.
-                let held_matches = s
-                    .arm(side)
-                    .joints
-                    .iter()
-                    .zip(arm_measured.iter())
-                    .all(|(t, m)| (t - m).abs() < GOAL_SEED_TOLERANCE_RAD);
-                if !held_matches {
-                    s.arm_mut(side).joints = arm_measured;
-                }
+                // Zero-jump bumpless transfer: seed both targets from the measured
+                // pose, so enabling commands exactly where the arm already is. The
+                // retained target may sit a hair off under PD sag; adopting measured
+                // holds position instead of springing the motors back to the setpoint.
+                s.arm_mut(side).joints = arm_measured;
                 s.gripper_mut(side).position = gripper_measured;
             }
             // A jog must not survive across a deadman edge in either direction: on

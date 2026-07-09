@@ -301,8 +301,8 @@ function build_arm(side, label) {
     <div id="${side}_arm_pos"></div>
     <div class="dials" id="${side}_arm_dials"></div>
     <div class="actions">
-      <button onclick="reset_arm('${side}')">Home Pose</button>
-      <button onclick="ready_arm('${side}')">Ready Pose</button>
+      <button id="${side}_home_btn" style="display:none" onclick="reset_arm('${side}')">Home Pose</button>
+      <button id="${side}_ready_btn" style="display:none" onclick="ready_arm('${side}')">Ready Pose</button>
       <button class="primary" id="${side}_arm_btn" onclick="primary_arm('${side}')">Enable</button>
     </div>`;
   const joints = $(`${side}_arm_joints`);
@@ -621,7 +621,7 @@ function set_ui_mode(mode) {
       seed_controls_from_measured(side);
     }
   }
-  for (const side of ['left', 'right']) refresh_primary(side);
+  for (const side of ['left', 'right']) { refresh_primary(side); refresh_mode_buttons(side); }
 }
 
 // Snap one side's joint sliders, x/y/z sliders and dials to its measured pose, so a
@@ -658,6 +658,13 @@ function refresh_primary(side) {
     btn.textContent = touched[side] === 'pose' ? 'Execute · pose' : 'Execute · joints';
     btn.classList.remove('enabled');
   }
+}
+
+// Home / Ready are discrete joint-space actions, so they show only in actions mode.
+function refresh_mode_buttons(side) {
+  const show = uiMode === 'actions' ? '' : 'none';
+  $(`${side}_home_btn`).style.display = show;
+  $(`${side}_ready_btn`).style.display = show;
 }
 
 function apply_snapshot(snap) {
