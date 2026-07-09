@@ -118,16 +118,33 @@ pub struct UiState {
 
 /// The hub's reported nearest checked pair: signed surface distance (m, positive
 /// is clearance), the two link names, the governor's disposition of the commanded
-/// motion (throttled and stopped are mutually exclusive), and the local time it
-/// was received (for the readout's staleness check).
+/// motion, and the local time it was received (for the readout's staleness check).
 #[derive(Clone, Debug)]
 pub struct Proximity {
     pub distance: f64,
     pub link_a: String,
     pub link_b: String,
-    pub throttled: bool,
-    pub stopped: bool,
+    pub disposition: Disposition,
     pub received_at: Instant,
+}
+
+/// The governor's disposition of the commanded motion, parsed from the wire's
+/// mutually exclusive booleans. Stopped wins if a producer ever set both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    Clear,
+    Throttled,
+    Stopped,
+}
+
+impl Disposition {
+    pub fn from_wire(throttled: bool, stopped: bool) -> Self {
+        match (throttled, stopped) {
+            (_, true) => Self::Stopped,
+            (true, false) => Self::Throttled,
+            (false, false) => Self::Clear,
+        }
+    }
 }
 
 impl UiState {

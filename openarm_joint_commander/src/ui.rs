@@ -21,7 +21,9 @@ use tracing::{info, warn};
 
 use crate::actions::move_arm_joints;
 use crate::error::Result;
-use crate::state::{ARM_DOF, ArmTarget, GripperTarget, Proximity, SharedState, Side, UiState};
+use crate::state::{
+    ARM_DOF, ArmTarget, Disposition, GripperTarget, Proximity, SharedState, Side, UiState,
+};
 
 const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
@@ -421,8 +423,8 @@ impl Snapshot {
                 distance: p.distance,
                 link_a: p.link_a.clone(),
                 link_b: p.link_b.clone(),
-                throttled: p.throttled,
-                stopped: p.stopped,
+                throttled: p.disposition == Disposition::Throttled,
+                stopped: p.disposition == Disposition::Stopped,
             }),
             status: s.status.clone(),
         }

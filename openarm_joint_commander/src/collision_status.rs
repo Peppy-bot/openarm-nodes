@@ -10,7 +10,7 @@ use peppygen::consumed_topics::proximity_collision_status;
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 
-use crate::state::{Proximity, SharedState};
+use crate::state::{Disposition, Proximity, SharedState};
 
 pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
     let mut subscription = match proximity_collision_status::subscribe(&runner).await {
@@ -38,8 +38,7 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             distance: msg.distance,
             link_a: msg.link_a,
             link_b: msg.link_b,
-            throttled: msg.throttled,
-            stopped: msg.stopped,
+            disposition: Disposition::from_wire(msg.throttled, msg.stopped),
             received_at: Instant::now(),
         });
     }
