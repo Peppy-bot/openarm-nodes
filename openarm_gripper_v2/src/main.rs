@@ -130,7 +130,7 @@ fn main() -> Result<()> {
 
         // Always-on gripper_states publisher: reads the motor's cached state at
         // state_rate_hz and emits the opening. It issues no CAN traffic of its
-        // own, so it never contends with the move control loop for the bus.
+        // own, so it never contends with the follow loop for the bus.
         tokio::spawn(stream::run(
             node_runner.clone(),
             gripper_id,
@@ -148,7 +148,7 @@ fn main() -> Result<()> {
             node_runner.on_shutdown(async move {
                 info!("shutdown: disabling motor");
                 // Hold the lock across the whole disable -> settle -> drain so a
-                // still-live follow/move loop can't interleave CAN traffic before
+                // still-live follow loop can't interleave CAN traffic before
                 // the disable ACKs are drained. Blocking sleep (not tokio) keeps the
                 // guard held, which it could not be across an await.
                 // unwrap_or_else: recover even if poisoned (panic in control loop)
