@@ -117,13 +117,16 @@ pub struct UiState {
 }
 
 /// The hub's reported nearest checked pair: signed surface distance (m, positive
-/// is clearance), the two link names, and the local time it was received (for the
-/// readout's staleness check).
+/// is clearance), the two link names, the governor's disposition of the commanded
+/// motion (throttled and stopped are mutually exclusive), and the local time it
+/// was received (for the readout's staleness check).
 #[derive(Clone, Debug)]
 pub struct Proximity {
     pub distance: f64,
     pub link_a: String,
     pub link_b: String,
+    pub throttled: bool,
+    pub stopped: bool,
     pub received_at: Instant,
 }
 

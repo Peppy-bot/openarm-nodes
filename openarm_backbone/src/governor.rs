@@ -117,10 +117,12 @@ const SEGMENT_SAMPLES_MIN: usize = 4;
 /// crossing: at the coarsest, `1/SEGMENT_SAMPLES_MIN / 2^8 ~= 1e-3` of the step.
 const FLOOR_BISECT_ITERS: usize = 8;
 
-/// Where the governor last sat, so throttle/stop/clear are logged on transition
-/// rather than at the control rate.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Guard {
+/// Disposition of the last governed cycle: the commanded motion passed
+/// unrestricted, was scaled down to hold the band, or was denied entirely
+/// (stop floor, measured-state monitor hold, or a fault hold). Ordered by
+/// severity; transitions are logged once, not at the control rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Guard {
     Clear,
     Throttling,
     Stopped,
@@ -248,6 +250,13 @@ impl Governor {
             })
     }
 
+    /// Disposition of the last governed cycle, for the status readout. Clear
+    /// while disabled (passthrough restricts nothing), except the non-finite
+    /// candidate hold, which reports Stopped in either mode.
+    pub fn guard(&self) -> Guard {
+        self.guard
+    }
+
     /// Retune the band at runtime (the operator's stop/safe controls). Rejects an
     /// invalid band (`0 < d_stop < d_safe` required), keeping the current one, and
     /// is a no-op when unchanged so it can be called every tick.
@@ -290,6 +299,7 @@ impl Governor {
         // query, but the disabled and far-apart fast paths return `cand` directly,
         // so guard here so every path holds `prev` rather than passing it through.
         if concat(cand).iter().any(|x| !x.is_finite()) {
+            self.guard = Guard::Stopped;
             return *prev;
         }
         if !self.enabled {
@@ -301,10 +311,20 @@ impl Governor {
         // gate is per side: a side whose own motion opens the real gap stays
         // free even while the other side's push is held, so neither operator can
         // trap the other's escape.
+        let monitor_held;
         let cand = match self.monitor_gate(prev, cand, measured) {
-            Some(gated) if gated == *prev => return *prev,
-            Some(gated) => gated,
-            None => *cand,
+            Some(gated) if gated == *prev => {
+                self.guard = Guard::Stopped;
+                return *prev;
+            }
+            Some(gated) => {
+                monitor_held = true;
+                gated
+            }
+            None => {
+                monitor_held = false;
+                *cand
+            }
         };
         let cand = &cand;
         // One analytic query yields the current clearance and its gradient over
@@ -344,6 +364,7 @@ impl Governor {
                 // NonFinite / NoPairs cannot arise from a finite, governed prev with
                 // pairs configured; treat as a fault and hold rather than steer on it.
                 error!("collision: distance_gradient: {e}; holding");
+                self.guard = Guard::Stopped;
                 return *prev;
             }
         };
@@ -354,13 +375,21 @@ impl Governor {
         // candidate must still not cross the stop floor. Distance is not monotone
         // along the segment, so scan it rather than trusting either endpoint: a
         // single tick can pass through a pocket while both ends read clear.
+        // A partial monitor hold (one side kept at prev) restricts the operator
+        // even when the barrier below finds the gated candidate free, so the
+        // reported disposition is never Clear while it is active.
+        let monitor_floor = if monitor_held {
+            Guard::Throttling
+        } else {
+            Guard::Clear
+        };
         if d_now >= self.d_safe {
             let hold = self.separating_hold(&prev_q, &cand_q, d_now, dt);
             let (guard, governed) = match self.clip_to_floor(&prev_q, &cand_q, &hold, d_now, dt) {
                 Clip::Clear => (Guard::Clear, *cand),
                 Clip::Clipped(q) => (Guard::Stopped, split(&q)),
             };
-            self.log_transition(guard, d_now, &link_a, &link_b);
+            self.log_transition(guard.max(monitor_floor), d_now, &link_a, &link_b);
             return governed;
         }
 
@@ -384,7 +413,7 @@ impl Governor {
         } else {
             Guard::Throttling
         };
-        self.log_transition(guard, d_now, &link_a, &link_b);
+        self.log_transition(guard.max(monitor_floor), d_now, &link_a, &link_b);
         split(&governed_q)
     }
 
@@ -1009,6 +1038,7 @@ mod tests {
         let mut g = governor(false);
         let deep = at(wrists_inward(1.2));
         assert_eq!(g.govern(&at(home()), &deep, &at(home()), DT), deep);
+        assert_eq!(g.guard(), Guard::Clear, "passthrough restricts nothing");
     }
 
     #[test]
@@ -1021,6 +1051,7 @@ mod tests {
             "home should sit outside the band"
         );
         assert_eq!(g.govern(&at(home()), &cand, &at(home()), DT), cand);
+        assert_eq!(g.guard(), Guard::Clear, "unrestricted motion reads clear");
     }
 
     #[test]
@@ -1247,6 +1278,7 @@ mod tests {
         bad.arms.left[0] = f64::NAN;
         // Enabled: the up-front guard holds prev rather than steering on NaN.
         assert_eq!(g.govern(&prev, &bad, &prev, DT), prev);
+        assert_eq!(g.guard(), Guard::Stopped, "a fault hold reads stopped");
         // A non-finite OPENING is the same class of upstream glitch.
         let mut bad_opening = at(wrists_inward(0.2));
         bad_opening.openings.left = f64::NAN;
@@ -1267,8 +1299,14 @@ mod tests {
             "near pose should be in the band"
         );
         assert_ne!(g.govern(&near, &closer, &near, DT), closer);
+        assert_ne!(
+            g.guard(),
+            Guard::Clear,
+            "a limited step must read restricted"
+        );
         g.set_enabled(false);
         assert_eq!(g.govern(&near, &closer, &near, DT), closer);
+        assert_eq!(g.guard(), Guard::Clear, "disabling resets the readout");
     }
 
     /// Interpolate from `lo_pose` (clearance >= target) toward `hi_pose` (clearance <
@@ -1808,6 +1846,11 @@ mod tests {
             d < D_STOP + 4e-3,
             "did not settle near the stop distance: d={d:+.5}"
         );
+        assert_ne!(
+            g.guard(),
+            Guard::Clear,
+            "parked at the floor with open still commanded must read restricted"
+        );
     }
 
     #[test]
@@ -1976,6 +2019,7 @@ mod tests {
             prev,
             "the monitor passed an opening during a measured finger breach"
         );
+        assert_eq!(g.guard(), Guard::Stopped, "a monitor hold reads stopped");
         // Closing (separation) still passes: the operator is never trapped.
         let close = GovState::new(arms, ArmPair::new(0.1 - opening_step, 0.0));
         assert_ne!(

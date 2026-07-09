@@ -38,6 +38,8 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             distance: msg.distance,
             link_a: msg.link_a,
             link_b: msg.link_b,
+            throttled: msg.throttled,
+            stopped: msg.stopped,
             received_at: Instant::now(),
         });
     }

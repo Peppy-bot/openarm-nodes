@@ -398,7 +398,8 @@ function apply_snapshot(snap) {
 }
 
 // Closest self-collision pair: distance in mm + the two links, colored black
-// (clear, d >= d_safe) -> orange (inside d_safe) -> red (inside d_stop).
+// (clear, d >= d_safe) -> orange (inside d_safe) -> red (inside d_stop), with
+// the governor's disposition (THROTTLED / STOPPED) appended while it restricts.
 function update_proximity(snap) {
   const el = $('proximity');
   const p = snap.proximity;
@@ -408,7 +409,8 @@ function update_proximity(snap) {
   let color = '#000', bg = 'transparent';
   if (p.distance < snap.d_stop) { color = '#fff'; bg = '#c0392b'; }       // red: inside stop
   else if (p.distance < snap.d_safe) { color = '#fff'; bg = '#e67e22'; }  // orange: inside safe
-  el.textContent = `closest pair: ${mm} mm   ${short(p.link_a)} ↔ ${short(p.link_b)}`;
+  const disposition = p.stopped ? '   STOPPED' : p.throttled ? '   THROTTLED' : '';
+  el.textContent = `closest pair: ${mm} mm   ${short(p.link_a)} ↔ ${short(p.link_b)}${disposition}`;
   el.style.color = color;
   el.style.background = bg;
 }

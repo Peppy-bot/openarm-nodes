@@ -382,6 +382,8 @@ struct ProximityView {
     distance: f64,
     link_a: String,
     link_b: String,
+    throttled: bool,
+    stopped: bool,
 }
 
 #[derive(Serialize)]
@@ -419,6 +421,8 @@ impl Snapshot {
                 distance: p.distance,
                 link_a: p.link_a.clone(),
                 link_b: p.link_b.clone(),
+                throttled: p.throttled,
+                stopped: p.stopped,
             }),
             status: s.status.clone(),
         }

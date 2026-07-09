@@ -24,7 +24,7 @@ use control_core::Pacer;
 
 use peppylib::messaging::ProducerRef;
 
-use crate::governor::{GovState, Governor};
+use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner, fresh};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
 use crate::{ArmPair, JointVec, Side};
@@ -369,12 +369,20 @@ pub async fn run(
             }
         }
 
-        // Operator proximity readout (throttled): the nearest checked pair's
-        // signed distance and link names, live regardless of the governor state.
+        // Operator proximity readout (rate-limited): the nearest checked pair's
+        // signed distance and link names, live regardless of the governor state,
+        // plus the governor's current disposition of the commanded motion.
         if tick.is_multiple_of(readout_every)
             && let Some(p) = governor.proximity(&prev)
         {
-            match collision_status::build_message(p.distance, p.link_a, p.link_b) {
+            let guard = governor.guard();
+            match collision_status::build_message(
+                p.distance,
+                p.link_a,
+                p.link_b,
+                guard == Guard::Throttling,
+                guard == Guard::Stopped,
+            ) {
                 Ok(msg) => {
                     if let Err(e) = status_publisher.publish(msg).await {
                         warn!("collision_status publish: {e}");
