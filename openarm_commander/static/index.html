@@ -386,7 +386,7 @@ function arcball_widget(side) {
       <line class="ab-t ab-z" id="${side}_abtz" x1="0" y1="0" x2="0" y2="0" />
       <circle class="ab-knob" cx="0" cy="0" r="4" />
     </svg>
-    <span class="ab-hint">drag: aim · rim: roll</span>`;
+    <span class="ab-hint">drag to aim · rim to roll</span>`;
   const svg = d.querySelector('svg');
   svg.addEventListener('pointerdown', e => arcball_down(side, e));
   svg.addEventListener('pointermove', e => arcball_move(side, e));
