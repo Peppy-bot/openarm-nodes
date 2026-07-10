@@ -60,6 +60,15 @@ impl ArmModels {
         decompose(&model.world_pose(&base))
     }
 
+    /// World-frame end-effector orientation of `joints` as a quaternion `[x, y, z, w]`,
+    /// for the panel's arcball (which composes orientation on quaternions, never euler).
+    pub fn ee_quat_world(&self, side: Side, joints: &[f64; ARM_DOF]) -> [f64; 4] {
+        let mut model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+        let base = model.at(joints).ee_pose();
+        let q = model.world_pose(&base).rotation;
+        [q.i, q.j, q.k, q.w]
+    }
+
     /// Solve inverse kinematics for a world-frame end-effector pose (position in
     /// metres, orientation as a unit quaternion), seeded from `seed` so the branch
     /// nearest the current configuration is chosen. `None` when the pose is

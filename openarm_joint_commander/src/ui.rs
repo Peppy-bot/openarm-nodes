@@ -16,7 +16,7 @@ use openarm_description::HardwareVersion;
 use peppygen::NodeRunner;
 use peppylib::runtime::CancellationToken;
 use serde::{Deserialize, Serialize};
-use srs_model::nalgebra::UnitQuaternion;
+use srs_model::nalgebra::{Quaternion, UnitQuaternion};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -283,21 +283,22 @@ async fn handle_command(text: &str, app: &AppState) {
         Command::SetArmPose {
             side,
             position,
-            rpy,
+            orientation,
             mode,
         } => {
             let side: Side = side.into();
-            let pose: Pose = [
-                position[0],
-                position[1],
-                position[2],
-                rpy[0],
-                rpy[1],
-                rpy[2],
-            ];
-            if !pose.iter().all(|v| v.is_finite()) {
+            if !position
+                .iter()
+                .chain(orientation.iter())
+                .all(|v| v.is_finite())
+            {
                 return;
             }
+            // The wire carries orientation as a quaternion; store the desired pose as
+            // euler for the jog, which re-derives a quaternion each step (so the euler
+            // encoding never drives interpolation).
+            let (roll, pitch, yaw) = quat_to_euler(orientation);
+            let pose: Pose = [position[0], position[1], position[2], roll, pitch, yaw];
             // Arm the Cartesian jog: the command stream walks the joint target toward
             // this pose a capped step per tick (holding at the reach boundary), so a
             // slider drag can never command a teleport or a branch flip. Enabled-gated
@@ -313,7 +314,7 @@ async fn handle_command(text: &str, app: &AppState) {
         Command::FireArmPose {
             side,
             position,
-            rpy,
+            orientation,
             duration_s,
         } => {
             let side: Side = side.into();
@@ -332,10 +333,19 @@ async fn handle_command(text: &str, app: &AppState) {
                     s.max_ee_velocity_m_s,
                 )
             };
-            if !position.iter().chain(rpy.iter()).all(|v| v.is_finite()) {
+            if !position
+                .iter()
+                .chain(orientation.iter())
+                .all(|v| v.is_finite())
+            {
                 return;
             }
-            let rotation = UnitQuaternion::from_euler_angles(rpy[0], rpy[1], rpy[2]);
+            let rotation = UnitQuaternion::from_quaternion(Quaternion::new(
+                orientation[3],
+                orientation[0],
+                orientation[1],
+                orientation[2],
+            ));
             // Preview the pose as joints (seeded from the current target) so both the
             // joint sliders and the pose FK show where it is going, and reject an
             // unreachable pose up front rather than firing a goal the hub will refuse.
@@ -475,6 +485,12 @@ fn ee_speed_floored(user_s: f64, ee_distance_m: f64, max_ee_velocity_m_s: f64) -
 // Euclidean distance between two world-frame points (m).
 fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+// Intrinsic-XYZ roll/pitch/yaw of a `[x, y, z, w]` quaternion, via nalgebra so the
+// convention matches the panel's FK readout and the jog's `from_euler_angles`.
+fn quat_to_euler(q: [f64; 4]) -> (f64, f64, f64) {
+    UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2])).euler_angles()
 }
 
 fn fire_arm(app: &AppState, side: Side, joints: [f64; ARM_DOF], duration_s: f64) {
@@ -642,6 +658,11 @@ struct ArmView {
     // Same for the measured joints, `null` until the first state arrives; the panel
     // shows it beside the target pose the way it does per-joint feedback.
     pose_feedback: Option<Pose>,
+    // World-frame end-effector orientation as a quaternion [x, y, z, w] for the target
+    // (FK of the joint target) and the measured pose. The arcball composes on these,
+    // so orientation never round-trips through euler on the wire.
+    orientation: [f64; 4],
+    orientation_feedback: Option<[f64; 4]>,
 }
 
 #[derive(Serialize)]
@@ -696,6 +717,8 @@ fn arm_view(a: &ArmTarget, side: Side, models: &ArmModels) -> ArmView {
         limits: *joint_limits().arm(side),
         pose: models.ee_pose_world(side, &a.joints),
         pose_feedback: a.last_feedback.map(|fb| models.ee_pose_world(side, &fb)),
+        orientation: models.ee_quat_world(side, &a.joints),
+        orientation_feedback: a.last_feedback.map(|fb| models.ee_quat_world(side, &fb)),
     }
 }
 
@@ -734,14 +757,14 @@ enum Command {
         joints: [f64; ARM_DOF],
     },
     // Arm a Cartesian jog toward a world-frame end-effector pose: position (metres)
-    // + orientation as intrinsic-XYZ roll/pitch/yaw (radians), plus which components
-    // the jog tracks (the touched control leads; the rest is softly held). The
-    // command stream walks the joint target toward it and holds at the reach
-    // boundary. Ignored while disabled, like set_arm_target.
+    // + orientation as a quaternion [x, y, z, w], plus which half the jog tracks (the
+    // touched control leads; the rest is softly held). The command stream walks the
+    // joint target toward it and holds at the reach boundary. Ignored while disabled,
+    // like set_arm_target.
     SetArmPose {
         side: SideWire,
         position: [f64; 3],
-        rpy: [f64; 3],
+        orientation: [f64; 4],
         mode: JogModeWire,
     },
     // Fire the hub's planned Cartesian move_arm to a composed world-frame pose
@@ -750,7 +773,7 @@ enum Command {
     FireArmPose {
         side: SideWire,
         position: [f64; 3],
-        rpy: [f64; 3],
+        orientation: [f64; 4],
         // Requested move duration (s); 0 = fastest safe.
         duration_s: f64,
     },

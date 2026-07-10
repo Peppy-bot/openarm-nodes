@@ -105,29 +105,22 @@
     letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-50);
   }
 
-  /* Roll/pitch/yaw angle dials: a circular knob you drag to set the angle (wraps at
-     +/-pi), with an orange measured-angle tick on the rim, matching the caret. */
-  .dials { display: flex; justify-content: space-around; gap: 10px; margin: 12px 0 2px; }
-  .dial { display: flex; flex-direction: column; align-items: center; gap: 5px; }
-  .dial svg { width: 84px; height: 84px; touch-action: none; cursor: grab; }
-  .dial svg:active { cursor: grabbing; }
-  .dial-rim {
-    fill: var(--bg-soft); stroke: var(--lo); stroke-width: 2.5;
-  }
-  .dial-hand { stroke: var(--ink-50); stroke-width: 2.5; stroke-linecap: round; }
-  .dial-knob { fill: #d8dbe0; stroke: var(--hi); stroke-width: 1; }
-  .dial-tick { stroke: var(--warn); stroke-width: 3.5; stroke-linecap: round; }
-  /* Travel indicators: the unreachable half of the pitch dial (euler pitch lives in
-     [-pi/2, pi/2]) and the +/-pi wrap seam on roll/yaw. */
-  .dial-dead { fill: none; stroke: rgba(155, 53, 53, 0.28); stroke-width: 5; }
-  .dial-seam { stroke: var(--ink-50); stroke-width: 2; }
-  .dial-label {
-    font: 600 11px/1 'Inter Tight', sans-serif; letter-spacing: 0.06em;
+  /* World-orientation arcball: drag the sphere to aim the hand (spin about the in-plane
+     axes) and drag near the rim to roll about the view axis. The bright triad is the
+     target orientation, the faint one is measured; z (blue) is the gripper approach. */
+  .arcball { display: flex; flex-direction: column; align-items: center; gap: 5px; margin: 14px 0 2px; }
+  .arcball svg { width: 128px; height: 128px; touch-action: none; cursor: grab; }
+  .arcball svg:active { cursor: grabbing; }
+  .ab-rim { fill: var(--bg-soft); stroke: var(--lo); stroke-width: 2.5; }
+  .ab-t { stroke-width: 3.5; stroke-linecap: round; }
+  .ab-m { stroke-width: 2.5; stroke-linecap: round; }
+  .ab-x { stroke: #c0392b; }
+  .ab-y { stroke: #2e7d4f; }
+  .ab-z { stroke: #2c5aa0; }
+  .ab-knob { fill: #d8dbe0; stroke: var(--hi); stroke-width: 1; }
+  .ab-hint {
+    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.06em;
     text-transform: uppercase; color: var(--ink-50);
-  }
-  .dial-val {
-    font: 500 12px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
-    color: var(--ink-70);
   }
 
   input[type=range] {
@@ -260,22 +253,19 @@ const HOME_ELBOW_J4 = 0.1;
 // flips the shoulder / upper-arm joints (j1,j2,j3); the elbow (j4) and wrist keep sign.
 const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
 const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
-// World-frame pose controls: x/y/z as sliders (indices 0..2 of the arm view's
-// `pose`/`pose_feedback` = [x,y,z,roll,pitch,yaw]), roll/pitch/yaw as angle dials
-// (indices 3..5). Slider bounds are a generous fixed window over the workspace.
+// World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
+// `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
+// arcball composes it on quaternions instead. Slider bounds are a generous window.
 const POS_AXES = [
   {i: 0, label: 'x', min: -0.4, max: 0.9},
   {i: 1, label: 'y', min: -0.9, max: 0.9},
   {i: 2, label: 'z', min: -0.3, max: 1.0},
 ];
-const ROT_AXES = [
-  {i: 3, label: 'roll'},
-  {i: 4, label: 'pitch'},
-  {i: 5, label: 'yaw'},
-];
-// Target angle (rad) held by each side's dials, and which dial is mid-drag.
-const dialTarget = { left: {3: 0, 4: 0, 5: 0}, right: {3: 0, 4: 0, 5: 0} };
-let dialDrag = { side: null, i: null, pid: null };
+// Target end-effector orientation each side's arcball composes, in the camera frame
+// (see VQ): quaternion [x, y, z, w]. Snapshots sync it from the setpoint when not
+// composing; the drag updates it directly.
+const quatTargetCam = { left: [0, 0, 0, 1], right: [0, 0, 0, 1] };
+let arcballDrag = { side: null, p0: null, start: null, pid: null };
 // Interaction mode: 'streaming' follows controls live (deadman-gated); 'actions'
 // composes a target and fires it as a discrete hub move on Execute.
 let uiMode = 'streaming';
@@ -297,7 +287,7 @@ function build_arm(side, label) {
     <div id="${side}_arm_joints"></div>
     <div class="pose-head">pose · world</div>
     <div id="${side}_arm_pos"></div>
-    <div class="dials" id="${side}_arm_dials"></div>
+    <div id="${side}_arm_orient"></div>
     <div class="actions">
       <label id="${side}_dur_l" style="display:none; align-items:center; gap:5px; margin-right:auto; text-transform:none; letter-spacing:0; font-size:11px; color:var(--ink-50);">
         move (s)<input type="number" id="${side}_dur" value="2" min="0" step="0.5" style="width:3.8em;">
@@ -318,8 +308,7 @@ function build_arm(side, label) {
       `on_pose_input('${side}', 'position', ${ax.i})`, `${side}_ph${ax.i}`, `${side}_plo${ax.i}`, `${side}_phi${ax.i}`,
       `${side}_pt${ax.i}`, `${side}_pf${ax.i}`));
   }
-  const dials = $(`${side}_arm_dials`);
-  for (const ax of ROT_AXES) dials.appendChild(dial_widget(side, ax));
+  $(`${side}_arm_orient`).appendChild(arcball_widget(side));
 }
 
 // A joint-style slider row: name, track with a measured caret over a min/max readout,
@@ -345,29 +334,29 @@ function slider_row(id, name, min, max, step, oninput, caretId, loId, hiId, tId,
 // One roll/pitch/yaw dial: an SVG knob you drag around to set the angle. The viewBox
 // is centred at 0,0; the hand points at the commanded angle and the orange tick marks
 // the measured angle. Angles use the math convention (0 at 3 o'clock, CCW positive).
-function dial_widget(side, ax) {
+// The orientation arcball: a sphere showing the target hand frame (bright triad) over
+// the measured frame (faint), which you drag to reorient. Measured lines are drawn
+// first so the target renders on top.
+function arcball_widget(side) {
   const d = document.createElement('div');
-  d.className = 'dial';
-  // Pitch's euler range is (-pi/2, pi/2): shade its impossible left half. Roll and
-  // yaw span the full circle; mark the +/-pi seam where the value wraps.
-  const marks = ax.label === 'pitch'
-    ? '<path class="dial-dead" d="M 0 -40 A 40 40 0 0 0 0 40" />'
-    : '<line class="dial-seam" x1="-40" y1="0" x2="-32" y2="0" />';
+  d.className = 'arcball';
   d.innerHTML = `
-    <svg viewBox="-50 -50 100 100" id="${side}_d${ax.i}">
-      <circle class="dial-rim" cx="0" cy="0" r="40" />
-      ${marks}
-      <line class="dial-tick" id="${side}_dtick${ax.i}" x1="0" y1="0" x2="0" y2="0" />
-      <line class="dial-hand" id="${side}_dhand${ax.i}" x1="0" y1="0" x2="0" y2="0" />
-      <circle class="dial-knob" id="${side}_dknob${ax.i}" cx="0" cy="0" r="6" />
+    <svg viewBox="-50 -50 100 100" id="${side}_ab">
+      <circle class="ab-rim" cx="0" cy="0" r="40" />
+      <line class="ab-m ab-x" id="${side}_abmx" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-m ab-y" id="${side}_abmy" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-m ab-z" id="${side}_abmz" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-t ab-x" id="${side}_abtx" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-t ab-y" id="${side}_abty" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-t ab-z" id="${side}_abtz" x1="0" y1="0" x2="0" y2="0" />
+      <circle class="ab-knob" cx="0" cy="0" r="4" />
     </svg>
-    <span class="dial-label">${ax.label}</span>
-    <span class="dial-val" id="${side}_dval${ax.i}">+0.000</span>`;
+    <span class="ab-hint">drag: aim · rim: roll</span>`;
   const svg = d.querySelector('svg');
-  svg.addEventListener('pointerdown', e => dial_down(side, ax.i, e));
-  svg.addEventListener('pointermove', e => dial_move(side, ax.i, e));
-  svg.addEventListener('pointerup', dial_up);
-  svg.addEventListener('pointercancel', dial_up);
+  svg.addEventListener('pointerdown', e => arcball_down(side, e));
+  svg.addEventListener('pointermove', e => arcball_move(side, e));
+  svg.addEventListener('pointerup', arcball_up);
+  svg.addEventListener('pointercancel', arcball_up);
   return d;
 }
 
@@ -432,11 +421,11 @@ function read_pose(side, overrideAxis) {
     ax.i === overrideAxis || !snap
       ? parseFloat($(`${side}_p${ax.i}`).value)
       : snap.pose[ax.i]);
-  const rpy = ROT_AXES.map(ax => dialTarget[side][ax.i]);
-  return {position, rpy};
+  const orientation = qnorm(qmul(qconj(VQ), quatTargetCam[side]));  // camera -> world
+  return {position, orientation};
 }
 
-// Pose control moved (an x/y/z slider or a dial): refresh the x/y/z target
+// Pose control moved (an x/y/z slider or the arcball): refresh the x/y/z target
 // readouts, then while streaming-enabled arm the server's jog. The touched
 // control leads (position or orientation); the untouched half is softly held.
 function on_pose_input(side, lead, overrideAxis) {
@@ -444,10 +433,10 @@ function on_pose_input(side, lead, overrideAxis) {
   touched[side] = 'pose';
   if (uiMode !== 'streaming') { refresh_primary(side); return; }
   if (!enabled[side] || !ws || ws.readyState !== 1) return;
-  const {position, rpy} = read_pose(side, overrideAxis);
-  if (![...position, ...rpy].every(Number.isFinite)) return;
+  const {position, orientation} = read_pose(side, overrideAxis);
+  if (![...position, ...orientation].every(Number.isFinite)) return;
   throttled(`${side}_pose`, () =>
-    ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, rpy, mode: lead})));
+    ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, orientation, mode: lead})));
 }
 
 // Trailing-edge throttle per channel: input events fire per pixel, but one jog
@@ -470,49 +459,104 @@ function throttled(key, send) {
   }
 }
 
-// Pointer position on a dial's SVG -> angle in [-pi, pi] (0 at 3 o'clock, CCW positive).
-function dial_angle(side, i, e) {
-  const r = $(`${side}_d${i}`).getBoundingClientRect();
-  return Math.atan2((r.top + r.height / 2) - e.clientY, e.clientX - (r.left + r.width / 2));
+// --- Quaternion helpers ([x, y, z, w]) and the arcball ---------------------------
+// World -> camera rotation: the operator faces the robot's front, so screen x = world
+// +Y, screen y (up) = world +Z, screen z (toward viewer) = world +X. As a quaternion
+// that is [0.5, 0.5, 0.5, -0.5]. The arcball works entirely in this camera frame (drags
+// are view-space rotations) and converts to/from world only at the wire.
+const VQ = [0.5, 0.5, 0.5, -0.5];
+
+function qmul(a, b) {
+  return [
+    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+  ];
 }
-function dial_down(side, i, e) {
-  $(`${side}_d${i}`).setPointerCapture(e.pointerId);
-  dialDrag = { side, i, pid: e.pointerId };
-  dial_move(side, i, e);
+function qnorm(q) {
+  const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0]/n, q[1]/n, q[2]/n, q[3]/n];
 }
-function dial_move(side, i, e) {
-  if (dialDrag.side !== side || dialDrag.i !== i || dialDrag.pid !== e.pointerId) return;
-  let a = dial_angle(side, i, e);
-  // Pitch's euler range is (-pi/2, pi/2). A drag into the dead half pins to the
-  // edge on the side the target already sits (hysteresis): pointer jitter across
-  // the pi seam can then never flip the pin to the opposite edge.
-  if (i === 4 && Math.abs(a) > PI / 2 - 0.01) {
-    const edge = Math.sign(dialTarget[side][i] || a);
-    a = edge * (PI / 2 - 0.01);
-  }
-  dialTarget[side][i] = a;
-  render_dial(side, i, dialTarget[side][i], null);
-  on_pose_input(side, 'orientation');
-}
-function dial_up(e) {
-  if (dialDrag.pid === e.pointerId) dialDrag = { side: null, i: null, pid: null };
+function qconj(q) { return [-q[0], -q[1], -q[2], q[3]]; }
+// Rotate vector v by quaternion q.
+function qrot(q, v) {
+  const [x, y, z, w] = q;
+  const tx = 2*(y*v[2] - z*v[1]);
+  const ty = 2*(z*v[0] - x*v[2]);
+  const tz = 2*(x*v[1] - y*v[0]);
+  return [
+    v[0] + w*tx + (y*tz - z*ty),
+    v[1] + w*ty + (z*tx - x*tz),
+    v[2] + w*tz + (x*ty - y*tx),
+  ];
 }
 
-// Draw a dial: hand at `target`; measured tick at `meas` (hidden when null). SVG y is
-// down, so the vertical component is negated to keep CCW-positive on screen.
-function render_dial(side, i, target, meas) {
+// Map a normalized screen point (cam frame, y up) onto the arcball sphere: inside the
+// unit circle it lifts to the near hemisphere; outside it clamps to the rim (z = 0), so
+// a rim drag becomes a pure roll about the view axis.
+function arcball_point(nx, ny) {
+  const r2 = nx*nx + ny*ny;
+  if (r2 <= 1) return [nx, ny, Math.sqrt(1 - r2)];
+  const s = 1 / Math.sqrt(r2);
+  return [nx*s, ny*s, 0];
+}
+// The rotation taking sphere point p0 to p1: [cross(p0,p1), dot(p0,p1)], normalized.
+function arcball_quat(p0, p1) {
+  return qnorm([
+    p0[1]*p1[2] - p0[2]*p1[1],
+    p0[2]*p1[0] - p0[0]*p1[2],
+    p0[0]*p1[1] - p0[1]*p1[0],
+    p0[0]*p1[0] + p0[1]*p1[1] + p0[2]*p1[2],
+  ]);
+}
+
+// Pointer -> normalized cam-frame coords (rim = radius 1). The rim (viewBox r=40 in a
+// 100-unit box) sits at 0.4 of the pixel width; SVG y is down, so negate for y-up.
+function arcball_xy(side, e) {
+  const r = $(`${side}_ab`).getBoundingClientRect();
+  const rim = 0.4 * r.width;
+  return [(e.clientX - (r.left + r.width/2)) / rim, -(e.clientY - (r.top + r.height/2)) / rim];
+}
+function arcball_down(side, e) {
+  $(`${side}_ab`).setPointerCapture(e.pointerId);
+  const [nx, ny] = arcball_xy(side, e);
+  arcballDrag = { side, p0: arcball_point(nx, ny), start: quatTargetCam[side].slice(), pid: e.pointerId };
+}
+function arcball_move(side, e) {
+  if (arcballDrag.side !== side || arcballDrag.pid !== e.pointerId) return;
+  const [nx, ny] = arcball_xy(side, e);
+  const delta = arcball_quat(arcballDrag.p0, arcball_point(nx, ny));
+  quatTargetCam[side] = qnorm(qmul(delta, arcballDrag.start));
+  render_arcball(side);
+  on_pose_input(side, 'orientation');
+}
+function arcball_up(e) {
+  if (arcballDrag.pid === e.pointerId) arcballDrag = { side: null, p0: null, start: null, pid: null };
+}
+
+// Draw the target frame (bright) and, beneath it, the measured frame (faint), each a
+// projected XYZ triad (z/blue is the gripper approach axis). Axes pointing away from
+// the viewer (cam z < 0) are dimmed, a depth cue that disambiguates toward vs away.
+function render_arcball(side) {
   const R = 40;
-  const hand = $(`${side}_dhand${i}`), knob = $(`${side}_dknob${i}`);
-  const hx = R * Math.cos(target), hy = -R * Math.sin(target);
-  hand.setAttribute('x2', hx.toFixed(2)); hand.setAttribute('y2', hy.toFixed(2));
-  knob.setAttribute('cx', hx.toFixed(2)); knob.setAttribute('cy', hy.toFixed(2));
-  $(`${side}_dval${i}`).textContent = fmt(target);
-  const tick = $(`${side}_dtick${i}`);
-  if (meas == null) { tick.style.display = 'none'; return; }
-  tick.style.display = '';
-  const c = Math.cos(meas), s = Math.sin(meas);
-  tick.setAttribute('x1', ((R - 9) * c).toFixed(2)); tick.setAttribute('y1', (-(R - 9) * s).toFixed(2));
-  tick.setAttribute('x2', (R * c).toFixed(2)); tick.setAttribute('y2', (-R * s).toFixed(2));
+  const setAxis = (id, camQuat, axis, base) => {
+    const el = $(id);
+    if (!camQuat) { el.style.opacity = 0; return; }
+    const v = qrot(camQuat, axis);
+    el.setAttribute('x2', (R * v[0]).toFixed(2));
+    el.setAttribute('y2', (-R * v[1]).toFixed(2));
+    el.style.opacity = (v[2] >= 0 ? base : base * 0.4).toFixed(2);
+  };
+  const t = quatTargetCam[side];
+  setAxis(`${side}_abtx`, t, [1,0,0], 1);
+  setAxis(`${side}_abty`, t, [0,1,0], 1);
+  setAxis(`${side}_abtz`, t, [0,0,1], 1);
+  const a = latestSnap && latestSnap[`${side}_arm`];
+  const m = (a && a.orientation_feedback) ? qmul(VQ, a.orientation_feedback) : null;
+  setAxis(`${side}_abmx`, m, [1,0,0], 0.5);
+  setAxis(`${side}_abmy`, m, [0,1,0], 0.5);
+  setAxis(`${side}_abmz`, m, [0,0,1], 0.5);
 }
 
 function ready_arm(side) {
@@ -524,6 +568,9 @@ function ready_arm(side) {
     $(`${side}_j${i}`).value = preset[i];
     $(`${side}_t${i}`).textContent = fmt(preset[i]);
   }
+  // A joint-space action: mark joints as the composed space so the pose controls
+  // (arcball, x/y/z) track the FK of the preset instead of staying frozen.
+  touched[side] = 'joints';
   fire_arm(side, arm_duration(side));
 }
 
@@ -557,6 +604,7 @@ function reset_arm(side) {
     $(`${side}_j${i}`).value = v;
     $(`${side}_t${i}`).textContent = fmt(v);
   }
+  touched[side] = 'joints';
   fire_arm(side, arm_duration(side));
 }
 
@@ -600,9 +648,9 @@ function execute_arm(side) {
   if (!ws || ws.readyState !== 1) return;
   if (touched[side] === 'pose') {
     const position = POS_AXES.map(ax => parseFloat($(`${side}_p${ax.i}`).value));
-    const rpy = ROT_AXES.map(ax => dialTarget[side][ax.i]);
-    if (![...position, ...rpy].every(Number.isFinite)) return;
-    ws.send(JSON.stringify({cmd: 'fire_arm_pose', side, position, rpy, duration_s: arm_duration(side)}));
+    const orientation = qnorm(qmul(qconj(VQ), quatTargetCam[side]));
+    if (![...position, ...orientation].every(Number.isFinite)) return;
+    ws.send(JSON.stringify({cmd: 'fire_arm_pose', side, position, orientation, duration_s: arm_duration(side)}));
   } else {
     ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s: arm_duration(side)}));
   }
@@ -740,16 +788,15 @@ function apply_snapshot(snap) {
         ph.classList.add('off');
       }
     }
-    for (const ax of ROT_AXES) {
-      const i = ax.i;
-      const meas = a.pose_feedback ? a.pose_feedback[i] : null;
-      const composingPoseDial = uiMode === 'actions' && touched[side] === 'pose';
-      if (!composingPoseDial && !(dialDrag.side === side && dialDrag.i === i)) {
-        const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
-        if (src) dialTarget[side][i] = src[i];
-      }
-      render_dial(side, i, dialTarget[side][i], meas);
+    // Orientation arcball: sync the target from the setpoint's orientation quaternion
+    // (or measured while streaming-disabled) unless composing orientation or mid-drag;
+    // render always, so the measured frame shows beneath the target.
+    const composingOrient = uiMode === 'actions' && touched[side] === 'pose';
+    if (!composingOrient && arcballDrag.side !== side) {
+      const src = (uiMode === 'streaming' && !on) ? a.orientation_feedback : a.orientation;
+      if (src) quatTargetCam[side] = qmul(VQ, src);
     }
+    render_arcball(side);
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);
