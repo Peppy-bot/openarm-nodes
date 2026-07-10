@@ -24,8 +24,8 @@ use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
-use crate::pose::{ArmModels, Jog, JogCaps, JogStep, jog_tick};
-use crate::state::{SharedState, Side, UiState};
+use crate::pose::{ArmModels, Jog, JogCaps, JogMode, JogStep, Pose, jog_tick};
+use crate::state::{ARM_DOF, ArmTarget, SharedState, Side, UiState};
 
 pub async fn run(
     runner: Arc<NodeRunner>,
@@ -107,7 +107,8 @@ pub async fn run(
                     // Caps re-derive each tick from the operator's live EE speed cap,
                     // so retuning the knob mid-jog changes the jog speed with it.
                     let caps = JogCaps::per_tick(tick_dt_s, s.max_ee_velocity_m_s);
-                    advance_jog(&mut s, side, &arm_models, caps);
+                    let advance = advance_jog(&s.arms[side], side, &arm_models, caps);
+                    apply_jog(&mut s, side, advance);
                     s.arms[side].joints
                 };
                 Some(
@@ -150,44 +151,97 @@ pub async fn run(
     }
 }
 
-// Advance one side's active jog by one tick, if one is armed. A joint jog reconciles
-// in a single step (the streamed joints are the target; the hub governs the ramp); a
-// Cartesian jog steps the joint target a capped increment toward the desired pose,
-// holds it at the reach boundary, and retires once converged. Status lines fire only
-// on the moving <-> blocked transitions, so a held boundary reports once, not at
-// 100 Hz. Called under the UiState lock; jog_tick briefly takes the model lock inside
-// it, the same state -> model order as the UI snapshot, so the two cannot deadlock.
-fn advance_jog(s: &mut UiState, side: Side, models: &ArmModels, caps: JogCaps) {
-    let cartesian = match s.arms[side].jog {
-        None => return,
+/// The outcome of advancing one side's jog a tick, ready for the caller to apply: the
+/// reconciled joint setpoint, the jog to retain (`None` once it retires or reaches its
+/// target), whether it is held at the reach boundary, and any moving <-> blocked
+/// transition to announce. Pure, so the tick decision is testable without a live
+/// [`UiState`] and the mutation is a straight assignment in [`apply_jog`].
+#[derive(Clone, Copy, Debug)]
+struct JogAdvance {
+    joints: [f64; ARM_DOF],
+    jog: Option<Jog>,
+    blocked: bool,
+    event: Option<JogEvent>,
+}
+
+/// A one-shot jog status transition. Emitted only on the edge, so a held boundary
+/// reports once, not at the command rate.
+#[derive(Clone, Copy, Debug)]
+enum JogEvent {
+    Moving { mode: JogMode },
+    Blocked { mode: JogMode, desired: Pose },
+}
+
+// Advance one side's active jog by one tick. A joint jog reconciles in a single step
+// (the streamed joints are the target; the hub governs the ramp); a Cartesian jog
+// steps the joint target a capped increment toward the desired pose, holds it at the
+// reach boundary, and retires once converged. Pure: `jog_tick` briefly takes the model
+// lock inside it, but no UiState lock is held here, so the caller applies the result.
+fn advance_jog(arm: &ArmTarget, side: Side, models: &ArmModels, caps: JogCaps) -> JogAdvance {
+    let hold = |jog, blocked| JogAdvance {
+        joints: arm.joints,
+        jog,
+        blocked,
+        event: None,
+    };
+    let cartesian = match arm.jog {
+        None => return hold(None, arm.jog_blocked),
+        // The hub governs the joint ramp, so reconcile in one step and retire.
         Some(Jog::Joints(target)) => {
-            s.arms[side].joints = target;
-            s.arms[side].jog = None;
-            s.arms[side].jog_blocked = false;
-            return;
+            return JogAdvance {
+                joints: target,
+                jog: None,
+                blocked: false,
+                event: None,
+            };
         }
         Some(Jog::Cartesian(cartesian)) => cartesian,
     };
-    match jog_tick(models, side, &s.arms[side].joints, &cartesian, caps) {
-        JogStep::Converged => {
-            s.arms[side].jog = None;
-            s.arms[side].jog_blocked = false;
+    match jog_tick(models, side, &arm.joints, &cartesian, caps) {
+        JogStep::Converged => hold(None, false),
+        JogStep::Stepped(joints) => JogAdvance {
+            joints,
+            jog: arm.jog,
+            blocked: false,
+            // Announce resumption only when leaving a held boundary.
+            event: arm.jog_blocked.then_some(JogEvent::Moving {
+                mode: cartesian.mode,
+            }),
+        },
+        JogStep::Blocked => JogAdvance {
+            joints: arm.joints,
+            jog: arm.jog,
+            blocked: true,
+            // Announce the boundary once, on entry.
+            event: (!arm.jog_blocked).then_some(JogEvent::Blocked {
+                mode: cartesian.mode,
+                desired: cartesian.desired,
+            }),
+        },
+    }
+}
+
+// Apply a computed jog advance to the side's target and emit its status transition, if
+// any. The only mutation half of the pure/apply split above.
+fn apply_jog(s: &mut UiState, side: Side, adv: JogAdvance) {
+    s.arms[side].joints = adv.joints;
+    s.arms[side].jog = adv.jog;
+    s.arms[side].jog_blocked = adv.blocked;
+    match adv.event {
+        Some(JogEvent::Moving { mode }) => {
+            s.set_status(format!("{}: pose jog moving", side.label()));
+            info!(side = side.label(), ?mode, "pose jog resumed");
         }
-        JogStep::Stepped(q) => {
-            s.arms[side].joints = q;
-            if s.arms[side].jog_blocked {
-                s.arms[side].jog_blocked = false;
-                s.set_status(format!("{}: pose jog moving", side.label()));
-                info!(side = side.label(), mode = ?cartesian.mode, "pose jog resumed");
-            }
+        Some(JogEvent::Blocked { mode, desired }) => {
+            s.set_status(format!("{}: pose at reach limit, holding", side.label()));
+            info!(
+                side = side.label(),
+                ?mode,
+                ?desired,
+                "pose jog at reach limit"
+            );
         }
-        JogStep::Blocked => {
-            if !s.arms[side].jog_blocked {
-                s.arms[side].jog_blocked = true;
-                s.set_status(format!("{}: pose at reach limit, holding", side.label()));
-                info!(side = side.label(), mode = ?cartesian.mode, desired = ?cartesian.desired, "pose jog at reach limit");
-            }
-        }
+        None => {}
     }
 }
 
@@ -230,5 +284,141 @@ async fn stream_setpoints(
             }
             Err(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pose::CartesianJog;
+    use openarm_description::HardwareVersion;
+
+    fn models() -> ArmModels {
+        ArmModels::from_version(HardwareVersion::V2)
+    }
+
+    // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
+    fn caps() -> JogCaps {
+        JogCaps::per_tick(0.01, 0.5)
+    }
+
+    fn arm(joints: [f64; ARM_DOF], jog: Option<Jog>, jog_blocked: bool) -> ArmTarget {
+        let mut a = ArmTarget::home();
+        a.joints = joints;
+        a.jog = jog;
+        a.jog_blocked = jog_blocked;
+        a
+    }
+
+    fn position_jog(desired: Pose) -> Jog {
+        Jog::Cartesian(CartesianJog {
+            mode: JogMode::Position,
+            desired,
+            arm_angle: 0.0,
+        })
+    }
+
+    #[test]
+    fn joint_jog_reconciles_in_one_step_and_retires() {
+        let target = [0.1, -0.2, 0.3, 0.9, -0.1, 0.2, 0.05];
+        let a = arm([0.0; ARM_DOF], Some(Jog::Joints(target)), false);
+        let adv = advance_jog(&a, Side::Left, &models(), caps());
+        assert_eq!(
+            adv.joints, target,
+            "a joint jog snaps the setpoint to the target"
+        );
+        assert!(
+            adv.jog.is_none(),
+            "a joint jog retires after its single step"
+        );
+        assert!(!adv.blocked);
+        assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn idle_arm_holds_its_setpoint() {
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let adv = advance_jog(&arm(q, None, false), Side::Left, &models(), caps());
+        assert_eq!(adv.joints, q, "an idle side keeps its setpoint");
+        assert!(adv.jog.is_none());
+        assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn cartesian_jog_on_the_current_pose_converges() {
+        let m = models();
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let here = m.ee_pose_world(Side::Left, &q);
+        let adv = advance_jog(
+            &arm(q, Some(position_jog(here)), false),
+            Side::Left,
+            &m,
+            caps(),
+        );
+        assert!(
+            adv.jog.is_none(),
+            "reaching the desired pose retires the jog"
+        );
+        assert!(!adv.blocked);
+        assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn boundary_is_announced_on_entry_not_while_held() {
+        let m = models();
+        let start = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
+        let here = m.ee_pose_world(Side::Left, &start);
+        let far = position_jog([here[0] + 2.0, here[1], here[2], here[3], here[4], here[5]]);
+        // Drive the jog to the envelope, threading each advance back into the arm
+        // exactly as the stream does, until it first reports the boundary.
+        let mut a = arm(start, Some(far), false);
+        let entry = loop_to_boundary(&m, &mut a);
+        assert!(
+            matches!(entry.event, Some(JogEvent::Blocked { .. })),
+            "the boundary is announced when first entered"
+        );
+        assert!(
+            a.jog.is_some(),
+            "the jog stays armed so pulling back into reach resumes it"
+        );
+        // Held at the boundary (jog_blocked now set): the joints are pinned, so the
+        // next tick blocks identically but must stay quiet.
+        let held = advance_jog(&a, Side::Left, &m, caps());
+        assert!(held.blocked, "the pinned arm stays at the boundary");
+        assert!(held.event.is_none(), "a held boundary does not re-announce");
+    }
+
+    // Advance until the jog first reports the boundary, applying each result to `a`
+    // like [`apply_jog`] does. Returns the entering advance; panics if it never blocks.
+    fn loop_to_boundary(m: &ArmModels, a: &mut ArmTarget) -> JogAdvance {
+        for _ in 0..5000 {
+            let adv = advance_jog(a, Side::Left, m, caps());
+            a.joints = adv.joints;
+            a.jog = adv.jog;
+            a.jog_blocked = adv.blocked;
+            if adv.blocked {
+                return adv;
+            }
+            assert!(
+                a.jog.is_some(),
+                "the jog retired before reaching the boundary"
+            );
+        }
+        panic!("jog never reached the boundary within 5000 ticks");
+    }
+
+    #[test]
+    fn resuming_from_a_held_boundary_announces_moving() {
+        let m = models();
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let here = m.ee_pose_world(Side::Left, &q);
+        // A reachable nudge so the step advances, flagged as previously held.
+        let near = position_jog([here[0] + 0.02, here[1], here[2], here[3], here[4], here[5]]);
+        let adv = advance_jog(&arm(q, Some(near), true), Side::Left, &m, caps());
+        assert!(!adv.blocked);
+        assert!(
+            matches!(adv.event, Some(JogEvent::Moving { .. })),
+            "leaving the boundary announces movement"
+        );
     }
 }
