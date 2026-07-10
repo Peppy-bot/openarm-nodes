@@ -28,7 +28,7 @@ use crate::chase::{chase_step, clamp_to_limits};
 use crate::streams::JointCommand;
 use crate::trajectory::{
     ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory,
-    plan_cartesian,
+    plan_cartesian, subdivided_blends,
 };
 use crate::{ARM_DOF, JointVec, Side};
 
@@ -111,10 +111,13 @@ enum MovePath {
         traj: CartesianTrajectory,
         seed: JointVec,
         prev_sample_at: Instant,
-        // Blend parameter at the previous solve: each tick's elbow step budget is
-        // the blend progressed since, so the executed elbow travel matches the
-        // plan's.
+        // Blend parameter at the previous tick: the walk resumes from here, and a
+        // steered line's elbow budget scales with the blend progressed since, so
+        // the executed elbow travel matches the plan's.
         prev_blend: f64,
+        // Resolve the elbow the way the plan validated: steered (manipulability
+        // budget) or held at the seed angle (the quiet default).
+        steer_elbow: bool,
     },
     Reconfigure {
         traj: JointTrajectory,
@@ -324,36 +327,50 @@ impl Planner {
                 seed,
                 prev_sample_at,
                 prev_blend,
+                steer_elbow,
             } => {
+                // Walk the blend progressed this tick at no coarser than the plan's
+                // validated resolution (a short move's quintic can outpace the plan
+                // grid), seed-chaining each sample; the last solution is the tick's
+                // setpoint. A steered line budgets the elbow per sub-step exactly
+                // like the plan's per-sample cap; a held line pins it to the seed.
                 let blend = traj.blend(now);
-                let base_target = self.model.base_pose(&traj.sample(now));
-                // Elbow steering under the same per-blend budget the plan was
-                // sized with, so the executed arm-angle path tracks the planned one.
-                let policy = ArmAnglePolicy::MaxManipulability {
-                    max_step_rad: ARM_ANGLE_STEP_PER_BLEND_RAD * (blend - *prev_blend),
-                };
-                let Some(sol) = self.model.solve_ik(&base_target, policy, seed) else {
-                    self.finish_cartesian(
-                        &m.ctx,
-                        measured_q,
-                        false,
-                        "IK failed mid-trajectory (unreachable / singular)",
-                        elapsed,
-                        false,
-                    )
-                    .await;
-                    return Advance {
-                        target: m.prev_q_des,
-                        next_mode: Mode::Follow { lock: None },
-                        is_follow: false,
+                let mut q_next = *seed;
+                let mut s_prev = *prev_blend;
+                for s_k in subdivided_blends(*prev_blend, blend) {
+                    let policy = if *steer_elbow {
+                        ArmAnglePolicy::MaxManipulability {
+                            max_step_rad: ARM_ANGLE_STEP_PER_BLEND_RAD * (s_k - s_prev),
+                        }
+                    } else {
+                        ArmAnglePolicy::FromSeed
                     };
-                };
+                    let base_target = self.model.base_pose(&traj.sample_at_blend(s_k));
+                    let Some(sol) = self.model.solve_ik(&base_target, policy, &q_next) else {
+                        self.finish_cartesian(
+                            &m.ctx,
+                            measured_q,
+                            false,
+                            "IK failed mid-trajectory (unreachable / singular)",
+                            elapsed,
+                            false,
+                        )
+                        .await;
+                        return Advance {
+                            target: m.prev_q_des,
+                            next_mode: Mode::Follow { lock: None },
+                            is_follow: false,
+                        };
+                    };
+                    q_next = sol.q;
+                    s_prev = s_k;
+                }
                 let dt = now
                     .duration_since(*prev_sample_at)
                     .as_secs_f64()
                     .max(self.cfg.cycle_period.as_secs_f64() * 0.5);
                 if exceeds_velocity_limits(
-                    &sol.q,
+                    &q_next,
                     &m.prev_q_des,
                     &self.cfg.max_joint_velocity_rad_s,
                     dt,
@@ -373,10 +390,10 @@ impl Planner {
                         is_follow: false,
                     };
                 }
-                *seed = sol.q;
+                *seed = q_next;
                 *prev_sample_at = now;
                 *prev_blend = blend;
-                (sol.q, traj.is_complete(now))
+                (q_next, traj.is_complete(now))
             }
             // The planned reconfiguration: a quintic in joint space, sized to the
             // velocity limits analytically, so no per-tick IK or velocity guard.
@@ -466,16 +483,21 @@ impl Planner {
                     return Mode::Follow { lock: None };
                 };
                 let path = match plan {
-                    CartesianPlan::Line { duration_s } => {
+                    CartesianPlan::Line {
+                        duration_s,
+                        steer_elbow,
+                    } => {
                         info!(
-                            "{}: move_arm start, duration={duration_s:.3}s",
-                            self.side.label()
+                            "{}: move_arm start{}, duration={duration_s:.3}s",
+                            self.side.label(),
+                            if steer_elbow { " (steered elbow)" } else { "" }
                         );
                         MovePath::Line {
                             traj: CartesianTrajectory::new(start_world, target, duration_s),
                             seed: self.setpoint,
                             prev_sample_at: now,
                             prev_blend: 0.0,
+                            steer_elbow,
                         }
                     }
                     // No continuous joint path tracks the line: swing through
