@@ -234,7 +234,7 @@ async fn handle_command(text: &str, app: &AppState) {
                 // Enabling streams both the arm and the gripper for this side, so
                 // seed each target first; refuse until measurements exist so the
                 // first emitted command holds position instead of a stale default.
-                let (Some(arm_measured), Some(gripper_measured)) =
+                let (Some(_), Some(gripper_measured)) =
                     (s.arm(side).last_feedback, s.gripper(side).last_feedback)
                 else {
                     s.set_status(format!(
@@ -243,11 +243,12 @@ async fn handle_command(text: &str, app: &AppState) {
                     ));
                     return;
                 };
-                // Zero-jump bumpless transfer: seed both targets from the measured
-                // pose, so enabling commands exactly where the arm already is. The
-                // retained target may sit a hair off under PD sag; adopting measured
-                // holds position instead of springing the motors back to the setpoint.
-                s.arm_mut(side).joints = arm_measured;
+                // Keep the retained arm target: it is the setpoint the arm already
+                // tracks under the same PD whether enabled or disabled, so commanding
+                // it on enable holds position with no jump, and repeated enable/disable
+                // never re-seeds the sagged measured (which ratcheted the arm down).
+                // joint_states establishes the target from the first measured pose at
+                // boot. The gripper does not sag, so seeding it from measured is safe.
                 s.gripper_mut(side).position = gripper_measured;
             }
             // A jog must not survive across a deadman edge in either direction: on

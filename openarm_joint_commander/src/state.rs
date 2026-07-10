@@ -60,6 +60,12 @@ impl Side {
 pub struct ArmTarget {
     pub joints: [f64; ARM_DOF],
     pub last_feedback: Option<[f64; ARM_DOF]>,
+    // Whether `joints` has been initialized from a real measured pose yet. Set once,
+    // from the first arm_states feedback, so the target starts where the arm is
+    // instead of at the home default; thereafter only streaming and discrete moves
+    // move it. Prevents re-seeding the gravity-sagged measured every disable, which
+    // ratcheted the arm down across enable/disable cycles.
+    pub established: bool,
     pub in_flight: bool,
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
@@ -80,6 +86,7 @@ impl ArmTarget {
         Self {
             joints: [0.0; ARM_DOF],
             last_feedback: None,
+            established: false,
             in_flight: false,
             preempt: None,
             pose_jog: None,

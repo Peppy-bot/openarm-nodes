@@ -300,7 +300,7 @@ function build_arm(side, label) {
     <div class="dials" id="${side}_arm_dials"></div>
     <div class="actions">
       <label id="${side}_dur_l" style="display:none; align-items:center; gap:5px; margin-right:auto; text-transform:none; letter-spacing:0; font-size:11px; color:var(--ink-50);">
-        move (s)<input type="number" id="${side}_dur" value="0" min="0" step="0.5" style="width:3.8em;">
+        move (s)<input type="number" id="${side}_dur" value="2" min="0" step="0.5" style="width:3.8em;">
       </label>
       <button id="${side}_home_btn" style="display:none" onclick="reset_arm('${side}')">Home Pose</button>
       <button id="${side}_ready_btn" style="display:none" onclick="ready_arm('${side}')">Ready Pose</button>
@@ -631,36 +631,12 @@ function set_ui_mode(mode) {
       if (enabled[side] && ws && ws.readyState === 1) {
         ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
       }
-      seed_controls_from_measured(side);
+      // Nothing composed yet: both spaces track the setpoint (where the arm is held)
+      // until the operator drags a control, which then freezes that space.
+      touched[side] = null;
     }
   }
   for (const side of ['left', 'right']) { refresh_primary(side); refresh_mode_buttons(side); }
-}
-
-// Snap one side's joint sliders, x/y/z sliders and dials to its measured pose, so a
-// compose in actions mode starts from where the arm actually is.
-function seed_controls_from_measured(side) {
-  const a = latestSnap && latestSnap[`${side}_arm`];
-  if (!a) return;
-  if (a.feedback) for (let i = 0; i < ARM_DOF; i++) {
-    $(`${side}_j${i}`).value = a.feedback[i];
-    $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
-  }
-  if (a.pose_feedback) {
-    for (const ax of POS_AXES) {
-      $(`${side}_p${ax.i}`).value = a.pose_feedback[ax.i];
-      $(`${side}_pt${ax.i}`).textContent = fmt(a.pose_feedback[ax.i]);
-    }
-    for (const ax of ROT_AXES) {
-      dialTarget[side][ax.i] = a.pose_feedback[ax.i];
-      render_dial(side, ax.i, dialTarget[side][ax.i], a.pose_feedback[ax.i]);
-    }
-  }
-  const g = latestSnap[`${side}_gripper`];
-  if (g && g.feedback != null) {
-    $(`${side}_g`).value = g.feedback;
-    $(`${side}_gt`).textContent = g.feedback.toFixed(4) + ' m';
-  }
 }
 
 // Set the arm card's primary button to its role for the current mode: the streaming
@@ -720,12 +696,17 @@ function apply_snapshot(snap) {
       // enabled it mirrors the streamed target, so a pose-field edit (solved to
       // joints server-side) shows on the sliders too - except the joint the operator
       // is actively dragging, which we must not fight.
-      if (uiMode === 'streaming' && !on && a.feedback) {
-        el.value = a.feedback[i];
-        $(`${side}_t${i}`).textContent = fmt(a.feedback[i]);
-      } else if (on && document.activeElement !== el) {
-        el.value = a.joints[i];
-        $(`${side}_t${i}`).textContent = fmt(a.joints[i]);
+      // Freeze only the space being composed in actions mode; the other space keeps
+      // tracking the setpoint, so a pose Execute's IK shows on the joint sliders (and
+      // a joint Execute's FK shows on the pose controls). Streaming-disabled shows
+      // measured so enabling never jumps; otherwise the sliders mirror the setpoint.
+      const composingJoints = uiMode === 'actions' && touched[side] === 'joints';
+      if (!composingJoints && document.activeElement !== el) {
+        const src = (uiMode === 'streaming' && !on) ? a.feedback : a.joints;
+        if (src) {
+          el.value = src[i];
+          $(`${side}_t${i}`).textContent = fmt(src[i]);
+        }
       }
       // Actual-position caret on the track.
       const sh = $(`${side}_sh${i}`);
@@ -745,8 +726,9 @@ function apply_snapshot(snap) {
       const i = ax.i;
       $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
       const el = $(`${side}_p${i}`);
-      if (uiMode === 'streaming' && document.activeElement !== el) {
-        const src = on ? a.pose : a.pose_feedback;
+      const composingPose = uiMode === 'actions' && touched[side] === 'pose';
+      if (!composingPose && document.activeElement !== el) {
+        const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
         if (src) { el.value = src[i]; $(`${side}_pt${i}`).textContent = fmt(src[i]); }
       }
       const ph = $(`${side}_ph${i}`);
@@ -761,8 +743,9 @@ function apply_snapshot(snap) {
     for (const ax of ROT_AXES) {
       const i = ax.i;
       const meas = a.pose_feedback ? a.pose_feedback[i] : null;
-      if (uiMode === 'streaming' && !(dialDrag.side === side && dialDrag.i === i)) {
-        const src = on ? a.pose : a.pose_feedback;
+      const composingPoseDial = uiMode === 'actions' && touched[side] === 'pose';
+      if (!composingPoseDial && !(dialDrag.side === side && dialDrag.i === i)) {
+        const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
         if (src) dialTarget[side][i] = src[i];
       }
       render_dial(side, i, dialTarget[side][i], meas);
