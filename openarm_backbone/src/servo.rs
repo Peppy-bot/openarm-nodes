@@ -37,12 +37,14 @@ const LEASH_M: f64 = 0.05;
 /// the streaming jog's convergence thresholds.
 const POS_CONVERGED_M: f64 = 5e-4;
 const ROT_CONVERGED_RAD: f64 = 2e-3;
-/// Stall detection: over each window, the reference must advance or the final
-/// error must shrink by the minimum amounts below, or the servo is going
-/// nowhere (an unreachable pose, or a wall the damping cannot carry it past).
+/// Stall detection: over each window, the reference must advance or the goal
+/// error (position or orientation) must shrink by the minimum amounts below, or
+/// the servo is going nowhere (an unreachable pose, or a wall the damping
+/// cannot carry it past).
 const STALL_WINDOW: Duration = Duration::from_secs(2);
 const MIN_REF_ADVANCE: f64 = 5e-3;
 const MIN_ERR_SHRINK_M: f64 = 1e-3;
+const MIN_ROT_SHRINK_RAD: f64 = 0.02;
 /// Hard ceiling on a servo move; a rollout still running past this is stalled
 /// in all but name.
 pub const MAX_SERVO_S: f64 = 30.0;
@@ -55,10 +57,11 @@ pub struct ServoState {
     end: Isometry3<f64>,
     /// Reference progress along the line, 0..=1.
     reference_s: f64,
-    /// Stall checkpoint: (reference_s, goal position error) at the window start,
-    /// and the time budget left in the window.
+    /// Stall checkpoint: reference progress and the goal position / orientation
+    /// errors at the window start, and the time budget left in the window.
     window_ref_s: f64,
     window_err_m: f64,
+    window_err_rad: f64,
     window_left: Duration,
 }
 
@@ -82,13 +85,13 @@ impl ServoState {
     }
 
     pub fn new(start: Isometry3<f64>, end: Isometry3<f64>) -> Self {
-        let err0 = (end.translation.vector - start.translation.vector).norm();
         Self {
             start,
             end,
             reference_s: 0.0,
             window_ref_s: 0.0,
-            window_err_m: err0,
+            window_err_m: (end.translation.vector - start.translation.vector).norm(),
+            window_err_rad: start.rotation.angle_to(&end.rotation),
             window_left: STALL_WINDOW,
         }
     }
@@ -167,17 +170,20 @@ impl ServoState {
         let stepped: JointVec = std::array::from_fn(|i| q[i] + dq[i]);
         let next = clamp_to_limits(&stepped, &model.limits());
 
-        // Stall bookkeeping: across each window the reference must move or the
-        // goal error must shrink; otherwise the law is grinding in place.
+        // Stall bookkeeping: across each window the reference must move or a
+        // goal error (position or orientation, since a move can end with pure
+        // rotation left) must shrink; otherwise the law is grinding in place.
         self.window_left = self.window_left.saturating_sub(dt);
         if self.window_left.is_zero() {
             let advanced = self.reference_s - self.window_ref_s >= MIN_REF_ADVANCE;
-            let shrunk = self.window_err_m - goal_pos_err >= MIN_ERR_SHRINK_M;
-            if !advanced && !shrunk {
+            let pos_shrunk = self.window_err_m - goal_pos_err >= MIN_ERR_SHRINK_M;
+            let rot_shrunk = self.window_err_rad - goal_rot_err >= MIN_ROT_SHRINK_RAD;
+            if !advanced && !pos_shrunk && !rot_shrunk {
                 return ServoStep::Stalled;
             }
             self.window_ref_s = self.reference_s;
             self.window_err_m = goal_pos_err;
+            self.window_err_rad = goal_rot_err;
             self.window_left = STALL_WINDOW;
         }
         ServoStep::Stepped(next)

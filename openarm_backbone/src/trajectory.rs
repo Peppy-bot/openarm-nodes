@@ -522,6 +522,23 @@ mod tests {
         assert!(!steer_elbow, "an easy move must not spend the elbow budget");
     }
 
+    // A move that ends as pure rotation (position converges early, orientation
+    // keeps slewing) must not trip the stall guard: rotational progress counts
+    // as progress. Exercises the law directly with a large in-place
+    // reorientation, where reference advance and position shrink both go quiet
+    // while the wrist is still turning.
+    #[test]
+    fn pure_reorientation_converges_in_the_servo_law() {
+        let mut model = v2_right_arm();
+        let start = {
+            let ee = model.at(&READY).ee_pose();
+            model.world_pose(&ee)
+        };
+        let mut end = start;
+        end.rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 1.2) * end.rotation;
+        run_servo_to_convergence(&mut model, &start, &end, READY);
+    }
+
     // The incident regression: after a servo move parks the arm at an unusual
     // arm angle, ordinary nudges from that posture must plan as quiet
     // held-elbow lines, not cascade into further wall crossings (the steered
