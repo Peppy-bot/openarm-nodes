@@ -1,24 +1,29 @@
-// Live arm joint state for the UI. Consumes the always-on `arm_states` stream
-// from any arm, demuxes by `arm_id`, and writes the latest measured positions
-// into UiState. This replaces reading move progress off the backbone's action
-// feedback: it runs continuously, so the panel shows live joint state whether or
-// not a move is in flight, and the move handler no longer needs the feedback.
+// Live arm joint state for the UI. Consumes the always-on `arm_states` stream from any
+// arm, demuxes by `arm_id`, and reports the latest measured positions to the owner. It
+// runs continuously, so the panel shows live joint state whether or not a move is in
+// flight; the owner decides how to fold each measurement into the target.
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::arm_states_arm_states;
 use peppylib::runtime::CancellationToken;
+use tokio::sync::mpsc;
 use tracing::{error, warn};
 
-use crate::state::{SharedState, Side};
+use crate::owner::Feedback;
+use crate::state::Side;
 
-/// Pause after a receive error before retrying, so a persistently broken
-/// subscription cannot spin a listener at full CPU or flood the log at the
-/// stream rate (shared with the gripper-states listener).
+/// Pause after a receive error before retrying, so a persistently broken subscription
+/// cannot spin a listener at full CPU or flood the log at the stream rate (shared with
+/// the gripper-states listener).
 pub(crate) const RECEIVE_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
+pub async fn run(
+    runner: Arc<NodeRunner>,
+    feedback: mpsc::Sender<Feedback>,
+    token: CancellationToken,
+) {
     let mut subscription = match arm_states_arm_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
@@ -44,16 +49,15 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             warn!(arm_id = msg.arm_id, "arm_states: unknown arm_id; ignoring");
             continue;
         };
-        let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-        s.arms[side].last_feedback = Some(msg.positions);
-        // Initialize the streamed target from the first measured pose so the panel
-        // starts at the arm's real position, then leave it: only streaming and
-        // discrete moves change it thereafter. Tracking measured continuously while
-        // disabled re-seeded the gravity-sagged pose every cycle, so each enable
-        // ratcheted the arm further down.
-        if !s.arms[side].established {
-            s.arms[side].joints = msg.positions;
-            s.arms[side].established = true;
+        if feedback
+            .send(Feedback::ArmMeasured {
+                side,
+                joints: msg.positions,
+            })
+            .await
+            .is_err()
+        {
+            return; // the owner is gone; nothing left to report to
         }
     }
 }

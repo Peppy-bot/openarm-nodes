@@ -1,8 +1,8 @@
-// Spawned per fire_gripper command (the gripper card's Execute in Actions mode).
-// Fires the hub's move_gripper (a discrete governed open/close) and writes the
-// result into the status line. Cancel-aware so a shutdown can't wedge an in-flight
-// goal. A second Execute is refused while one is in flight (see fire_gripper), so
-// this needs no per-goal preempt the way the longer arm moves do.
+// Spawned per fire_gripper command (the gripper card's Execute in Actions mode). Fires
+// the hub's move_gripper (a discrete governed open/close), then reports the outcome to
+// the owner. Cancel-aware so a shutdown can't wedge an in-flight goal. A second Execute
+// is refused while one is in flight (the owner gates it), so this needs no per-goal
+// preempt the way the longer arm moves do.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,9 +12,11 @@ use peppygen::QoSProfile;
 use peppygen::consumed_actions::backbone_move_gripper;
 use peppygen::consumed_actions::backbone_move_gripper::ResultOutcome;
 use peppylib::runtime::CancellationToken;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::state::{SharedState, Side};
+use crate::owner::Feedback;
+use crate::state::Side;
 
 // Goal-accept round-trip to a pinned producer; the gripper move itself is short.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -22,19 +24,19 @@ const RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn spawn(
     runner: Arc<NodeRunner>,
-    state: SharedState,
+    feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     side: Side,
     position: f64,
 ) {
     tokio::spawn(async move {
-        run(runner, state, token, side, position).await;
+        run(runner, feedback, token, side, position).await;
     });
 }
 
 async fn run(
     runner: Arc<NodeRunner>,
-    state: SharedState,
+    feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     side: Side,
     position: f64,
@@ -62,7 +64,7 @@ async fn run(
                 .error_message
                 .unwrap_or_else(|| "no reason given".into());
             finalize(
-                &state,
+                &feedback,
                 side,
                 false,
                 format!("backbone rejected the gripper goal: {reason}"),
@@ -71,17 +73,17 @@ async fn run(
             return;
         }
         Err(e) => {
-            finalize(&state, side, false, format!("fire_goal failed: {e}")).await;
+            finalize(&feedback, side, false, format!("fire_goal failed: {e}")).await;
             return;
         }
     };
 
     // Await the result, honoring shutdown. A rejected concurrent goal cannot happen
-    // here: fire_gripper refuses a second Execute while one is in flight, so unlike
-    // the arm moves there is no preempt branch and thus no loop.
+    // here: the owner refuses a second Execute while one is in flight, so unlike the arm
+    // moves there is no preempt branch and thus no loop.
     let outcome = tokio::select! {
         _ = token.cancelled() => {
-            finalize(&state, side, false, "shutting down; result abandoned").await;
+            finalize(&feedback, side, false, "shutting down; result abandoned").await;
             return;
         }
         result = downstream.get_result(RESULT_TIMEOUT) => result,
@@ -111,17 +113,24 @@ async fn run(
         },
         Err(e) => (false, format!("move_gripper ({label}) result error: {e}")),
     };
-    finalize(&state, side, success, summary).await;
+    finalize(&feedback, side, success, summary).await;
 }
 
-async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
+// Report the move outcome to the owner, which clears the in-flight slot and writes the
+// status line; a dropped channel means the owner is gone (shutdown), so ignore it.
+async fn finalize(
+    feedback: &mpsc::Sender<Feedback>,
+    side: Side,
+    success: bool,
+    summary: impl Into<String>,
+) {
     let summary = summary.into();
-    let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-    s.grippers[side].in_flight = false;
-    s.set_status(summary.clone());
     if success {
         info!(side = side.label(), %summary, "move_gripper done");
     } else {
         warn!(side = side.label(), %summary, "move_gripper done");
     }
+    let _ = feedback
+        .send(Feedback::GripperGoalDone { side, summary })
+        .await;
 }

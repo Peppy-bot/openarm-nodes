@@ -1,8 +1,7 @@
-// Spawned per fire_arm_pose command (the panel's Execute-pose in Actions mode).
-// Fires the hub's Cartesian move_arm (planned straight-line pose move), streams
-// feedback back into the shared UiState, and writes the result into the status
-// line. Each goal is its own task; cancel-aware so a shutdown can't wedge an
-// in-flight goal.
+// Spawned per fire_arm_pose command (the panel's Execute-pose in Actions mode). Fires
+// the hub's Cartesian move_arm (planned straight-line pose move), then reports the
+// outcome to the owner. Each goal is its own task; cancel-aware so a shutdown can't
+// wedge an in-flight goal, and preempt-aware so a new move can cancel it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,37 +11,41 @@ use peppygen::QoSProfile;
 use peppygen::consumed_actions::backbone_move_arm;
 use peppygen::consumed_actions::backbone_move_arm::ResultOutcome;
 use peppylib::runtime::CancellationToken;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::owner::{Feedback, PREEMPT_GRACE};
 use crate::pose::{REACHED_ANGLE_TOL_RAD, REACHED_POS_TOL_M, dist3, quat_angle};
-use crate::state::{SharedState, Side};
+use crate::state::Side;
 
-// Goal-accept round-trip to a pinned producer; answered directly, so this
-// only needs to cover the decider, not a discovery probe.
+// Goal-accept round-trip to a pinned producer; answered directly, so this only needs to
+// cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     runner: Arc<NodeRunner>,
-    state: SharedState,
+    feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
     side: Side,
     position: [f64; 3],
     orientation: [f64; 4],
     duration_s: f64,
+    grace: bool,
 ) {
     tokio::spawn(async move {
         run(
             runner,
-            state,
+            feedback,
             token,
             preempt,
             side,
             position,
             orientation,
             duration_s,
+            grace,
         )
         .await;
     });
@@ -51,14 +54,22 @@ pub fn spawn(
 #[allow(clippy::too_many_arguments)]
 async fn run(
     runner: Arc<NodeRunner>,
-    state: SharedState,
+    feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
     side: Side,
     position: [f64; 3],
     orientation: [f64; 4],
     duration_s: f64,
+    grace: bool,
 ) {
+    // A queued preempt fires only after the hub releases its single-flight gate.
+    if grace {
+        tokio::select! {
+            _ = token.cancelled() => return finalize(&feedback, side, false, "shutting down; move dropped").await,
+            _ = tokio::time::sleep(PREEMPT_GRACE) => {}
+        }
+    }
     let label = side.label();
     info!(side = label, ?position, ?orientation, "fire move_arm");
 
@@ -84,7 +95,7 @@ async fn run(
                 .error_message
                 .unwrap_or_else(|| "no reason given".into());
             finalize(
-                &state,
+                &feedback,
                 side,
                 false,
                 format!("backbone rejected the pose goal: {reason}"),
@@ -93,20 +104,20 @@ async fn run(
             return;
         }
         Err(e) => {
-            finalize(&state, side, false, format!("fire_goal failed: {e}")).await;
+            finalize(&feedback, side, false, format!("fire_goal failed: {e}")).await;
             return;
         }
     };
 
-    // Await the move result, honoring preempt (a new Execute cancels this goal)
-    // and shutdown. Live progress is shown from the arm_states stream.
+    // Await the move result, honoring preempt (a new Execute cancels this goal) and
+    // shutdown. Live progress is shown from the arm_states stream.
     let result_fut = downstream.get_result(RESULT_TIMEOUT);
     tokio::pin!(result_fut);
     let mut preempted = false;
     let outcome = loop {
         tokio::select! {
             _ = token.cancelled() => {
-                finalize(&state, side, false, "shutting down; result abandoned").await;
+                finalize(&feedback, side, false, "shutting down; result abandoned").await;
                 return;
             }
             _ = preempt.cancelled(), if !preempted => {
@@ -159,18 +170,22 @@ async fn run(
         },
         Err(e) => (false, format!("move_arm ({label}) result error: {e}")),
     };
-    finalize(&state, side, success, summary).await;
+    finalize(&feedback, side, success, summary).await;
 }
 
-async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
+// Report the move outcome to the owner, which clears the in-flight slot and writes the
+// status line; a dropped channel means the owner is gone (shutdown), so ignore it.
+async fn finalize(
+    feedback: &mpsc::Sender<Feedback>,
+    side: Side,
+    success: bool,
+    summary: impl Into<String>,
+) {
     let summary = summary.into();
-    let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-    s.arms[side].in_flight = false;
-    s.arms[side].preempt = None;
-    s.set_status(summary.clone());
     if success {
         info!(side = side.label(), %summary, "move_arm done");
     } else {
         warn!(side = side.label(), %summary, "move_arm done");
     }
+    let _ = feedback.send(Feedback::ArmGoalDone { side, summary }).await;
 }

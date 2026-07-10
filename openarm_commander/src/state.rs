@@ -1,4 +1,3 @@
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::pose::Jog;
@@ -49,9 +48,16 @@ impl Side {
 }
 
 /// A value stored per side, indexed by [`Side`]: `things[side]` reads or writes the
-/// right one, with no left/right accessor split.
-#[derive(Clone, Debug)]
+/// right one, with no left/right accessor split. `Copy` when `T` is, so the small
+/// per-tick frames pass by value.
+#[derive(Clone, Copy, Debug)]
 pub struct BySide<T>([T; 2]);
+
+impl<T> BySide<T> {
+    pub fn new(left: T, right: T) -> Self {
+        Self([left, right])
+    }
+}
 
 impl<T: Clone> BySide<T> {
     pub fn splat(value: T) -> Self {
@@ -216,20 +222,4 @@ impl UiState {
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = message.into();
     }
-}
-
-pub type SharedState = Arc<Mutex<UiState>>;
-
-pub fn new_shared(
-    collision_enabled: bool,
-    d_stop: f64,
-    d_safe: f64,
-    max_ee_velocity_m_s: f64,
-) -> SharedState {
-    Arc::new(Mutex::new(UiState::new(
-        collision_enabled,
-        d_stop,
-        d_safe,
-        max_ee_velocity_m_s,
-    )))
 }
