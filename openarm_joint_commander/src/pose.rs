@@ -36,6 +36,10 @@ pub struct ArmModels {
     right: Arc<Mutex<Arm>>,
     left_velocity_limits: [f64; ARM_DOF],
     right_velocity_limits: [f64; ARM_DOF],
+    // World-frame x/y/z reachable bounds per side, from the FK envelope (computed once
+    // at construction); the panel sizes its position sliders to these.
+    left_bounds: [[f64; 2]; 3],
+    right_bounds: [[f64; 2]; 3],
 }
 
 impl ArmModels {
@@ -45,11 +49,17 @@ impl ArmModels {
     /// come from the same URDF, so a jog step never demands more per tick than the
     /// hub's chase can follow.
     pub fn from_version(version: HardwareVersion) -> Self {
+        let mut left = build_arm(version, Side::Left);
+        let mut right = build_arm(version, Side::Right);
+        let left_bounds = workspace_aabb(&mut left);
+        let right_bounds = workspace_aabb(&mut right);
         Self {
-            left: Arc::new(Mutex::new(build_arm(version, Side::Left))),
-            right: Arc::new(Mutex::new(build_arm(version, Side::Right))),
             left_velocity_limits: velocity_limits(version.urdf(), Side::Left),
             right_velocity_limits: velocity_limits(version.urdf(), Side::Right),
+            left: Arc::new(Mutex::new(left)),
+            right: Arc::new(Mutex::new(right)),
+            left_bounds,
+            right_bounds,
         }
     }
 
@@ -173,6 +183,15 @@ impl ArmModels {
         match side {
             Side::Left => &self.left_velocity_limits,
             Side::Right => &self.right_velocity_limits,
+        }
+    }
+
+    /// World-frame x/y/z reachable bounds `[[min, max]; 3]` for `side`, so the panel
+    /// sizes its position sliders to the arm's actual reach (correct per generation).
+    pub fn pos_bounds(&self, side: Side) -> [[f64; 2]; 3] {
+        match side {
+            Side::Left => self.left_bounds,
+            Side::Right => self.right_bounds,
         }
     }
 }
@@ -363,6 +382,35 @@ fn decompose(pose: &Isometry3<f64>) -> Pose {
     [t.x, t.y, t.z, roll, pitch, yaw]
 }
 
+/// Grid-sample FK over the joint limits and return the world-frame EE bounding box
+/// `[[min, max]; 3]` (x, y, z), padded with a small margin. Runs once per side at
+/// construction to size the panel's position sliders to the actual reachable envelope,
+/// so the bounds are correct per generation rather than hardcoded.
+fn workspace_aabb(arm: &mut Arm) -> [[f64; 2]; 3] {
+    const N: usize = 4;
+    const MARGIN_M: f64 = 0.02;
+    let lims = arm.limits();
+    let ranges: [(f64, f64); ARM_DOF] = std::array::from_fn(|i| (lims[i].lo, lims[i].hi));
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for idx in 0..N.pow(ARM_DOF as u32) {
+        let mut rem = idx;
+        let q: [f64; ARM_DOF] = std::array::from_fn(|j| {
+            let step = rem % N;
+            rem /= N;
+            let t = step as f64 / (N - 1) as f64;
+            ranges[j].0 + t * (ranges[j].1 - ranges[j].0)
+        });
+        let base = arm.at(&q).ee_pose();
+        let p = arm.world_pose(&base).translation.vector;
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    std::array::from_fn(|k| [lo[k] - MARGIN_M, hi[k] + MARGIN_M])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +422,27 @@ mod tests {
     // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
     fn test_caps() -> JogCaps {
         JogCaps::per_tick(0.01, 0.5)
+    }
+
+    #[test]
+    fn workspace_bounds_are_sane_and_contain_home() {
+        let m = models();
+        for side in [Side::Left, Side::Right] {
+            let b = m.pos_bounds(side);
+            for [lo, hi] in b {
+                assert!(lo < hi, "bound [{lo}, {hi}] must be non-empty");
+            }
+            // A known-reachable pose (home: zeros, elbow off its floor) sits inside.
+            let home = m.ee_pose_world(side, &[0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0]);
+            for k in 0..3 {
+                assert!(
+                    b[k][0] <= home[k] && home[k] <= b[k][1],
+                    "home axis {k} = {} outside bounds {:?}",
+                    home[k],
+                    b[k]
+                );
+            }
+        }
     }
 
     fn geodesic(a: &Pose, b: &Pose) -> f64 {

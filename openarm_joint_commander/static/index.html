@@ -255,11 +255,13 @@ const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
 const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
 // World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
 // `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
-// arcball composes it on quaternions instead. Slider bounds are a generous window.
+// arcball composes it on quaternions instead. Slider bounds come from the snapshot's
+// per-side `pos_bounds` (the arm's reachable envelope, computed per generation), applied
+// each frame like the joint limits, so they are correct for v1 and v2 alike.
 const POS_AXES = [
-  {i: 0, label: 'x', min: -0.4, max: 0.9},
-  {i: 1, label: 'y', min: -0.9, max: 0.9},
-  {i: 2, label: 'z', min: -0.3, max: 1.0},
+  {i: 0, label: 'x'},
+  {i: 1, label: 'y'},
+  {i: 2, label: 'z'},
 ];
 // Target end-effector orientation each side's arcball composes, in the camera frame
 // (see VQ): quaternion [x, y, z, w]. Snapshots sync it from the setpoint when not
@@ -304,7 +306,8 @@ function build_arm(side, label) {
   }
   const pos = $(`${side}_arm_pos`);
   for (const ax of POS_AXES) {
-    pos.appendChild(slider_row(`${side}_p${ax.i}`, ax.label, ax.min, ax.max, 0.002,
+    // Placeholder bounds; apply_snapshot sets the real per-side reach from pos_bounds.
+    pos.appendChild(slider_row(`${side}_p${ax.i}`, ax.label, -1, 1.2, 0.002,
       `on_pose_input('${side}', 'position', ${ax.i})`, `${side}_ph${ax.i}`, `${side}_plo${ax.i}`, `${side}_phi${ax.i}`,
       `${side}_pt${ax.i}`, `${side}_pf${ax.i}`));
   }
@@ -772,16 +775,23 @@ function apply_snapshot(snap) {
     // disabled, each with the measured value marked. Skip a control being edited.
     for (const ax of POS_AXES) {
       const i = ax.i;
-      $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
+      // Per-side reach bounds from the snapshot drive the slider range, the min/max
+      // readout, and the caret, the same way joint limits drive the joint sliders.
+      const [pmin, pmax] = a.pos_bounds[i];
       const el = $(`${side}_p${i}`);
+      if (el.min != pmin) el.min = pmin;
+      if (el.max != pmax) el.max = pmax;
+      $(`${side}_plo${i}`).textContent = fmt(pmin);
+      $(`${side}_phi${i}`).textContent = fmt(pmax);
+      $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
       const composingPose = uiMode === 'actions' && touched[side] === 'pose';
       if (!composingPose && document.activeElement !== el) {
         const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
         if (src) { el.value = src[i]; $(`${side}_pt${i}`).textContent = fmt(src[i]); }
       }
       const ph = $(`${side}_ph${i}`);
-      if (a.pose_feedback) {
-        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - ax.min) / (ax.max - ax.min)));
+      if (a.pose_feedback && pmax > pmin) {
+        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - pmin) / (pmax - pmin)));
         ph.style.setProperty('--at', (pct * 100) + '%');
         ph.classList.remove('off');
       } else {
