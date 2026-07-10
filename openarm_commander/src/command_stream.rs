@@ -1,16 +1,17 @@
-// Always-on command publisher. For each enabled arm, streams its 7-joint target
-// on `arm_joint_commands`; for each enabled gripper, streams its opening (m) on
-// `gripper_commands`. Both are tagged with their id (arm_id / gripper_id) and go
-// to the hub, which governs each and re-streams the governed value the followers
-// track. A disabled side emits nothing, so the hub's stream timeout lapses and it
-// holds. Re-publishing every tick (even an unchanged target) keeps the hub's
-// stream watchdog alive between operator inputs; the hub clamps and rate-limits
-// what it receives, so this only has to deliver the latest setpoint.
+// Always-on command publisher. Reads the owner's per-tick `CommandFrame` and streams
+// each enabled side's arm setpoint on `arm_joint_commands` and gripper opening on
+// `gripper_commands`, plus the operator's governor controls on `governor_control`. Both
+// are tagged with their id (arm_id / gripper_id) and go to the hub, which governs each
+// and re-streams the governed value the followers track. A side with `None` in the
+// frame has its deadman off, so nothing is published and the hub's stream timeout
+// lapses and it holds. Re-publishing every tick (even an unchanged frame) keeps the
+// hub's stream watchdog alive between operator inputs.
 //
-// Each side+stream runs its own publish task on its own interval, cloning the
-// shared per-topic publisher. A single shared loop publishing Left then Right
-// would leave Right permanently second (zenoh publish resolves synchronously), so
-// independent tasks avoid that bias.
+// The owner is the sole writer of state and the sole jog integrator; these tasks only
+// forward the latest frame. Each side+stream runs its own publish task on its own
+// interval, cloning the shared per-topic publisher and the frame receiver. A single
+// shared loop publishing Left then Right would leave Right permanently second (zenoh
+// publish resolves synchronously), so independent tasks avoid that bias.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,16 +22,18 @@ use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
 use peppygen::emitted_topics::openarm_gripper_commands::v1::gripper_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
+use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tracing::{error, warn};
 
-use crate::state::{SharedState, Side};
+use crate::owner::CommandFrame;
+use crate::state::Side;
 
 pub async fn run(
     runner: Arc<NodeRunner>,
-    state: SharedState,
     command_rate_hz: u32,
     token: CancellationToken,
+    frame_rx: watch::Receiver<CommandFrame>,
 ) {
     // A failed publisher declaration leaves the node serving UI/health but unable to
     // command anything, so cancel the node to restart it rather than returning quietly.
@@ -41,8 +44,8 @@ pub async fn run(
             return token.cancel();
         }
     };
-    // One shared gripper publisher, cloned per side like the arm publisher; each
-    // side's stream tags its own gripper_id, so the hub tells them apart.
+    // One shared gripper publisher, cloned per side like the arm publisher; each side's
+    // stream tags its own gripper_id, so the hub tells them apart.
     let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
@@ -60,67 +63,52 @@ pub async fn run(
 
     let mut tasks = tokio::task::JoinSet::new();
 
-    // Re-publish the operator's governor controls every tick. Unlike the arm/gripper
-    // streams these have no deadman: the hub's governor must always know the
-    // operator's intent, and the lossy QoS means a one-shot publish could be
-    // dropped, so the latest state is re-sent continuously.
-    let governor_state = state.clone();
+    // Governor controls: no deadman, so this always publishes the latest frame.
+    let governor_rx = frame_rx.clone();
     tasks.spawn(stream_setpoints(
         governor_pub,
         command_rate_hz,
         token.clone(),
         "governor control".to_string(),
         move || {
-            let s = governor_state.lock().unwrap_or_else(|p| p.into_inner());
+            let g = governor_rx.borrow().governor;
             Some(
                 governor_control::build_message(
-                    s.collision_enabled,
-                    s.d_stop,
-                    s.d_safe,
-                    s.max_ee_velocity_m_s,
+                    g.collision_enabled,
+                    g.d_stop,
+                    g.d_safe,
+                    g.max_ee_velocity_m_s,
                 )
                 .map_err(|e| e.to_string()),
             )
         },
     ));
     for side in [Side::Left, Side::Right] {
-        // Arm: stream the 7-joint setpoint while enabled.
-        let arm_state = state.clone();
+        // Arm: stream the 7-joint setpoint while enabled (None in the frame = disabled).
+        let arm_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             arm_pub.clone(),
             command_rate_hz,
             token.clone(),
             format!("{} arm", side.label()),
             move || {
-                let target = {
-                    let s = arm_state.lock().unwrap_or_else(|p| p.into_inner());
-                    if !s.enabled(side) {
-                        return None;
-                    }
-                    s.arm(side).joints
-                };
+                let joints = arm_rx.borrow().arms[side]?;
                 Some(
-                    arm_joint_commands::build_message(side.arm_id(), target)
+                    arm_joint_commands::build_message(side.arm_id(), joints)
                         .map_err(|e| e.to_string()),
                 )
             },
         ));
-        // Gripper: stream the opening (m) while enabled, tagged with gripper_id
-        // for the hub to demux (mirror of the arm stream above).
-        let gripper_state = state.clone();
+        // Gripper: stream the opening (m) while enabled, tagged with gripper_id for the
+        // hub to demux (mirror of the arm stream above).
+        let gripper_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub.clone(),
             command_rate_hz,
             token.clone(),
             format!("{} gripper", side.label()),
             move || {
-                let position = {
-                    let s = gripper_state.lock().unwrap_or_else(|p| p.into_inner());
-                    if !s.enabled(side) {
-                        return None;
-                    }
-                    s.gripper(side).position
-                };
+                let position = gripper_rx.borrow().grippers[side]?;
                 Some(
                     gripper_commands::build_message(side.gripper_id(), position)
                         .map_err(|e| e.to_string()),
@@ -128,9 +116,9 @@ pub async fn run(
             },
         ));
     }
-    // join_next surfaces tasks in completion order, so a panicked stream is
-    // seen immediately. A dead channel would silently hold its side while the
-    // node reports healthy, which is worse than a restart: cancel the node.
+    // join_next surfaces tasks in completion order, so a panicked stream is seen
+    // immediately. A dead channel would silently hold its side while the node reports
+    // healthy, which is worse than a restart: cancel the node.
     while let Some(result) = tasks.join_next().await {
         if let Err(e) = result {
             error!("command stream task died: {e}; cancelling the node");
@@ -139,9 +127,9 @@ pub async fn run(
     }
 }
 
-// Publish the latest setpoint from `next_message` at command_rate_hz, skipping a
-// tick whenever it returns None (the side is disabled). Failures latch so a
-// stuck side warns once, not every tick.
+// Publish the latest setpoint from `next_message` at command_rate_hz, skipping a tick
+// whenever it returns None (the side is disabled). Failures latch so a stuck side warns
+// once, not every tick.
 async fn stream_setpoints(
     publisher: TopicPublisher,
     command_rate_hz: u32,
@@ -150,9 +138,9 @@ async fn stream_setpoints(
     mut next_message: impl FnMut() -> Option<Result<Payload, String>>,
 ) {
     let period = Duration::from_micros(1_000_000 / command_rate_hz as u64);
-    // interval (not sleep) so the publish cadence holds at command_rate_hz
-    // instead of drifting by the per-tick work time; Delay avoids a catch-up
-    // burst after a scheduling hiccup.
+    // interval (not sleep) so the publish cadence holds at command_rate_hz instead of
+    // drifting by the per-tick work time; Delay avoids a catch-up burst after a
+    // scheduling hiccup.
     let mut ticker = tokio::time::interval(period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut failing = false;

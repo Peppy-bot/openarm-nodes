@@ -1,0 +1,986 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>openarm01 joint commander</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700&family=Inter+Tight:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-soft: #edeff2;
+    --card: #e8eaed;
+    --ink: #1a1d22;
+    --ink-70: rgba(26, 29, 34, 0.72);
+    --ink-50: rgba(26, 29, 34, 0.5);
+    --ink-15: rgba(26, 29, 34, 0.13);
+    --hi: rgba(255, 255, 255, 0.95);
+    --lo: rgba(158, 166, 178, 0.5);
+    --dark: #0b0c0e;
+    --w: #f3f5f8;
+    --ok: #2e7d4f;
+    --warn: #a8741f;
+    --err: #9b3535;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 32px 36px;
+    background: linear-gradient(165deg, #fcfcfd 0%, #eceef1 42%, #dadde2 100%) fixed;
+    color: var(--ink);
+    font: 14px/1.45 'Inter Tight', -apple-system, system-ui, sans-serif;
+  }
+  h1 {
+    font-family: 'Big Shoulders Display', 'Inter Tight', sans-serif;
+    font-size: 26px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    margin: 0 0 20px; display: flex; align-items: baseline; gap: 14px;
+  }
+  .conn {
+    font: 600 11px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 5px 12px; border-radius: 999px; color: var(--w);
+    background: var(--ink-50);
+    box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25);
+  }
+  .conn.open { background: var(--ok); }
+  .conn.closed { background: var(--err); }
+
+  .row { display: flex; gap: 22px; margin-bottom: 22px; flex-wrap: wrap; }
+  .panel {
+    flex: 1; min-width: 380px;
+    background: var(--card);
+    border-radius: 18px; padding: 18px 20px 16px;
+    box-shadow: -6px -6px 12px var(--hi), 6px 6px 14px var(--lo);
+  }
+  .panel-head {
+    display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+  }
+  .panel-head span:first-child {
+    font-family: 'Big Shoulders Display', 'Inter Tight', sans-serif;
+    font-size: 17px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-70);
+  }
+  .badge {
+    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 5px 11px; border-radius: 999px; color: var(--ink-50);
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  }
+  .badge.flight { color: var(--w); background: var(--warn); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+  .badge.stream { color: var(--w); background: var(--ok); box-shadow: inset 1px 1px 3px rgba(0,0,0,0.25); }
+  button.enabled { color: var(--w); background: var(--err); box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0,0,0,0.35); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .joint {
+    display: grid; grid-template-columns: 30px 1fr 66px 66px; gap: 10px;
+    align-items: center; margin: 7px 0; font-variant-numeric: tabular-nums;
+  }
+  .joint .name { color: var(--ink-50); font-weight: 600; font-size: 12px; }
+  .joint .target { text-align: right; font-weight: 500; }
+  .joint .fb, .gripper .fb { text-align: right; color: var(--ink-50); }
+
+  /* Slider + actual-position shadow overlay. The caret marks the measured value
+     on the same track as the commanded thumb, so a commanded/actual gap reads at
+     a glance. Inset by the thumb radius so 0% and 100% line up with the thumb. */
+  .srow { position: relative; display: flex; align-items: center; }
+  .ghost {
+    position: absolute; left: 10px; right: 10px; top: 50%; height: 8px;
+    transform: translateY(-50%); pointer-events: none; z-index: 2;
+  }
+  .ghost::after {
+    content: ''; position: absolute; top: -4px; width: 3px; height: 16px;
+    border-radius: 2px; background: var(--warn);
+    box-shadow: 0 0 0 1px var(--hi);
+    left: var(--at, 0%); transform: translateX(-50%); transition: left 0.08s linear;
+  }
+  .ghost.off::after { display: none; }
+
+  .gripper {
+    display: grid; grid-template-columns: 1fr 84px 130px; gap: 10px;
+    align-items: center; margin: 10px 0 4px; font-variant-numeric: tabular-nums;
+  }
+
+  /* Section labels: "pose · joints" over the joint sliders, "pose · world" over the
+     world-frame controls. The x/y/z rows reuse the joint slider layout above. */
+  .pose-head {
+    margin: 16px 0 8px; font: 600 11px/1 'Inter Tight', sans-serif;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-50);
+  }
+
+  /* World-orientation arcball: drag the sphere to aim the hand (spin about the in-plane
+     axes) and drag near the rim to roll about the view axis. The bright triad is the
+     target orientation, the faint one is measured; z (blue) is the gripper approach. */
+  .arcball { display: flex; flex-direction: column; align-items: center; gap: 5px; margin: 14px 0 2px; }
+  .arcball svg { width: 128px; height: 128px; touch-action: none; cursor: grab; }
+  .arcball svg:active { cursor: grabbing; }
+  .ab-rim { fill: var(--bg-soft); stroke: var(--lo); stroke-width: 2.5; }
+  .ab-t { stroke-width: 3.5; stroke-linecap: round; }
+  .ab-m { stroke-width: 2.5; stroke-linecap: round; }
+  .ab-x { stroke: #c0392b; }
+  .ab-y { stroke: #2e7d4f; }
+  .ab-z { stroke: #2c5aa0; }
+  .ab-knob { fill: #d8dbe0; stroke: var(--hi); stroke-width: 1; }
+  .ab-hint {
+    font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--ink-50);
+  }
+
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 8px; border-radius: 999px; outline: none;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
+    background: radial-gradient(circle at 34% 28%, #ffffff 0%, #e4e7ec 45%, #c2c7cf 100%);
+    box-shadow: -2px -2px 5px var(--hi), 3px 3px 6px var(--lo), inset 0 0 0 1px var(--ink-15);
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 20px; height: 20px; border: none; border-radius: 50%; cursor: pointer;
+    background: radial-gradient(circle at 34% 28%, #ffffff 0%, #e4e7ec 45%, #c2c7cf 100%);
+    box-shadow: -2px -2px 5px var(--hi), 3px 3px 6px var(--lo), inset 0 0 0 1px var(--ink-15);
+  }
+  /* Read-only track (the elbow slider in actions): drop the draggable thumb, leaving
+     just the track and the measured caret as a current-position indicator. */
+  input[type=range].readonly-track::-webkit-slider-thumb { opacity: 0; width: 0; cursor: default; }
+  input[type=range].readonly-track::-moz-range-thumb { opacity: 0; width: 0; cursor: default; }
+
+  .actions {
+    display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; align-items: center;
+  }
+  /* Slider column: the track (with its actual-position caret) over a faint
+     min/max readout, so the joint's limits are always visible. */
+  /* .scol is the shared axis (full width of the cell); .subrange spans one slider's
+     reachable range within it, so tracks of different ranges compare at a glance. */
+  .scol { display: block; }
+  .subrange { display: flex; flex-direction: column; gap: 3px; }
+  .lim {
+    display: flex; justify-content: space-between;
+    font: 500 10px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
+    color: var(--ink-50);
+  }
+
+  button {
+    font: 600 12px/1 'Inter Tight', sans-serif; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--ink-70); cursor: pointer;
+    padding: 10px 16px; border: none; border-radius: 12px;
+    background: var(--card);
+    box-shadow: -3px -3px 7px var(--hi), 3px 3px 7px var(--lo);
+    transition: box-shadow 0.12s ease, transform 0.12s ease;
+  }
+  button:hover { color: var(--ink); }
+  button:active {
+    box-shadow: inset 2px 2px 5px var(--lo), inset -2px -2px 5px var(--hi);
+    transform: translateY(1px);
+  }
+  button.primary {
+    color: var(--w); background: var(--dark);
+    box-shadow: -3px -3px 7px var(--hi), 4px 4px 9px rgba(0, 0, 0, 0.35);
+  }
+  button.primary:active {
+    box-shadow: inset 2px 2px 6px rgba(0, 0, 0, 0.6);
+  }
+
+  /* Streaming | Actions segmented toggle. */
+  .modeseg {
+    display: inline-flex; padding: 4px; border-radius: 12px;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
+  }
+  .seg {
+    background: transparent; box-shadow: none; color: var(--ink-50);
+    padding: 8px 22px; border-radius: 9px;
+  }
+  .seg:hover { color: var(--ink-70); }
+  .seg:active { transform: none; box-shadow: none; }
+  .seg.on {
+    color: var(--ink); background: var(--card);
+    box-shadow: -2px -2px 5px var(--hi), 2px 2px 5px var(--lo);
+  }
+
+  .status {
+    padding: 13px 18px; border-radius: 14px;
+    background: var(--bg-soft);
+    box-shadow: inset 2px 2px 5px var(--lo), inset -2px -2px 5px var(--hi);
+    font: 12.5px/1.4 ui-monospace, 'SF Mono', Menlo, monospace;
+    color: var(--ink-70);
+  }
+</style>
+</head>
+<body>
+  <h1>openarm01 joint commander <span id="conn" class="conn closed">disconnected</span></h1>
+
+  <div class="row" style="justify-content:center; margin-bottom:20px;">
+    <div class="modeseg">
+      <button class="seg on" id="mode_streaming" onclick="set_ui_mode('streaming')">Streaming</button>
+      <button class="seg" id="mode_actions" onclick="set_ui_mode('actions')">Actions</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="panel" id="left_arm"></div>
+    <div class="panel" id="right_arm"></div>
+  </div>
+  <div class="row">
+    <div class="panel" id="left_gripper"></div>
+    <div class="panel" id="right_gripper"></div>
+  </div>
+  <div class="row" style="justify-content:center; gap:18px; align-items:center; flex-wrap:wrap;">
+    <label style="display:flex; align-items:center; gap:8px;">
+      <input type="checkbox" id="collision_chk" onchange="set_collision(this.checked)" checked>
+      Collision avoidance
+    </label>
+    <label style="display:flex; align-items:center; gap:6px;">
+      Stop d (m)
+      <input type="number" id="gov_d_stop" step="0.001" min="0.001" style="width:5.5em;" onchange="send_governor_params()">
+    </label>
+    <label style="display:flex; align-items:center; gap:6px;">
+      Safe d (m)
+      <input type="number" id="gov_d_safe" step="0.001" min="0.001" style="width:5.5em;" onchange="send_governor_params()">
+    </label>
+    <label style="display:flex; align-items:center; gap:6px;">
+      Max EE (m/s)
+      <input type="number" id="gov_max_ee" step="0.05" min="0.01" style="width:5.5em;" onchange="send_governor_params()">
+    </label>
+  </div>
+  <div class="row" style="justify-content:center;">
+    <div id="proximity" style="font-weight:600; padding:4px 10px; border-radius:4px;">closest pair: n/a</div>
+  </div>
+  <div class="status" id="status">connecting…</div>
+
+<script>
+const PI = Math.PI;
+const ARM_DOF = 7;
+const GRIPPER_MAX = 0.044;
+// Home is all zeros except the elbow (j4), held at a small positive angle so it
+// stays clear of the elbow singularity at 0 (which its lower limit excludes).
+const HOME_ELBOW_J4 = 0.1;
+// A natural workspace pose (elbows bent, forearms angled toward each other),
+// denoised from the operator's by-eye pose and made left/right symmetric. The mirror
+// flips the shoulder / upper-arm joints (j1,j2,j3); the elbow (j4) and wrist keep sign.
+const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
+const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
+// World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
+// `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
+// arcball composes it on quaternions instead. Slider bounds come from the snapshot's
+// per-side `pos_bounds` (the arm's reachable envelope, computed per generation), applied
+// each frame like the joint limits, so they are correct for v1 and v2 alike.
+const POS_AXES = [
+  {i: 0, label: 'x'},
+  {i: 1, label: 'y'},
+  {i: 2, label: 'z'},
+];
+// Target end-effector orientation each side's arcball composes, in the camera frame
+// (see VQ): quaternion [x, y, z, w]. Snapshots sync it from the setpoint when not
+// composing; the drag updates it directly.
+const quatTargetCam = { left: [0, 0, 0, 1], right: [0, 0, 0, 1] };
+let arcballDrag = { side: null, p0: null, start: null, pid: null };
+// Interaction mode: 'streaming' follows controls live (deadman-gated); 'actions'
+// composes a target and fires it as a discrete hub move on Execute.
+let uiMode = 'streaming';
+// Last control space the operator touched per side; picks what Execute fires.
+const touched = { left: 'joints', right: 'joints' };
+let ws = null;
+let latestSnap = null;
+// One streaming deadman per side, shared by that side's arm and gripper.
+const enabled = { left: false, right: false };
+
+function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
+// Angular readouts show degrees for legibility; the sliders, the wire, and the
+// kinematics stay in radians (so nothing on the control path changes units), and this
+// converts a radian value to a signed degree string at display time only.
+function fmtRadAsDeg(rad) { return (rad >= 0 ? '+' : '') + (rad * 180 / PI).toFixed(1) + '°'; }
+function $(id) { return document.getElementById(id); }
+
+// Place one slider's track on a shared axis [cMin, cMax]: its reachable [lo, hi] becomes
+// an offset sub-range, so tracks of different ranges are visually comparable.
+function place_subrange(id, lo, hi, cMin, cMax) {
+  const span = (cMax - cMin) || 1;
+  const sub = $(`${id}_sub`);
+  sub.style.marginLeft = ((lo - cMin) / span * 100).toFixed(2) + '%';
+  sub.style.width = ((hi - lo) / span * 100).toFixed(2) + '%';
+}
+
+function build_arm(side, label) {
+  const root = $(`${side}_arm`);
+  root.innerHTML = `
+    <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_arm_badge">idle</span></div>
+    <div class="pose-head">pose · joints</div>
+    <div id="${side}_arm_joints"></div>
+    <div class="pose-head">pose · world</div>
+    <div id="${side}_arm_pos"></div>
+    <div id="${side}_arm_psi"></div>
+    <div id="${side}_arm_orient"></div>
+    <div class="actions">
+      <label id="${side}_dur_l" style="display:none; align-items:center; gap:5px; margin-right:auto; text-transform:none; letter-spacing:0; font-size:11px; color:var(--ink-50);">
+        move (s)<input type="number" id="${side}_dur" value="2" min="0" step="0.5" style="width:3.8em;">
+      </label>
+      <button id="${side}_home_btn" style="display:none" onclick="reset_arm('${side}')">Home Pose</button>
+      <button id="${side}_ready_btn" style="display:none" onclick="ready_arm('${side}')">Ready Pose</button>
+      <button class="primary" id="${side}_arm_btn" onclick="primary_arm('${side}')">Enable</button>
+    </div>`;
+  const joints = $(`${side}_arm_joints`);
+  for (let i = 0; i < ARM_DOF; i++) {
+    joints.appendChild(slider_row(`${side}_j${i}`, `j${i+1}`, -PI, PI, 0.01,
+      `on_joint_input('${side}', ${i})`, `${side}_sh${i}`, `${side}_lo${i}`, `${side}_hi${i}`,
+      `${side}_t${i}`, `${side}_f${i}`));
+  }
+  const pos = $(`${side}_arm_pos`);
+  for (const ax of POS_AXES) {
+    // Placeholder bounds; apply_snapshot sets the real per-side reach from pos_bounds.
+    pos.appendChild(slider_row(`${side}_p${ax.i}`, ax.label, -1, 1.2, 0.002,
+      `on_pose_input('${side}', 'position', ${ax.i})`, `${side}_ph${ax.i}`, `${side}_plo${ax.i}`, `${side}_phi${ax.i}`,
+      `${side}_pt${ax.i}`, `${side}_pf${ax.i}`));
+  }
+  $(`${side}_arm_orient`).appendChild(arcball_widget(side));
+  // Elbow (arm-angle) slider: swivels the elbow through the null space, holding the
+  // hand pose. Streaming-only (the hub plans the elbow for actions-mode moves).
+  $(`${side}_arm_psi`).appendChild(slider_row(`${side}_psi`, 'ψ', -PI, PI, 0.01,
+    `on_arm_angle_input('${side}')`, `${side}_psih`, `${side}_psilo`, `${side}_psihi`,
+    `${side}_psit`, `${side}_psif`));
+  // The elbow swivel spans +-pi; label its fixed range in degrees (apply_snapshot
+  // refreshes the joint labels from live limits, but never touches these).
+  $(`${side}_psilo`).textContent = fmtRadAsDeg(-PI);
+  $(`${side}_psihi`).textContent = fmtRadAsDeg(PI);
+}
+
+// A joint-style slider row: name, track with a measured caret over a min/max readout,
+// then the commanded and measured numeric columns. Shared by the joints and by the
+// world-frame x/y/z so both read exactly the same.
+function slider_row(id, name, min, max, step, oninput, caretId, loId, hiId, tId, fId) {
+  const row = document.createElement('div');
+  row.className = 'joint';
+  row.innerHTML = `
+    <span class="name">${name}</span>
+    <div class="scol">
+      <div class="subrange" id="${id}_sub">
+        <div class="srow">
+          <input type="range" min="${min}" max="${max}" step="${step}" value="0" id="${id}" oninput="${oninput}" />
+          <div class="ghost off" id="${caretId}"></div>
+        </div>
+        <div class="lim"><span id="${loId}">${fmt(min)}</span><span id="${hiId}">${fmt(max)}</span></div>
+      </div>
+    </div>
+    <span class="target" id="${tId}">+0.000</span>
+    <span class="fb" id="${fId}">---</span>`;
+  return row;
+}
+
+// One roll/pitch/yaw dial: an SVG knob you drag around to set the angle. The viewBox
+// is centred at 0,0; the hand points at the commanded angle and the orange tick marks
+// the measured angle. Angles use the math convention (0 at 3 o'clock, CCW positive).
+// The orientation arcball: a sphere showing the target hand frame (bright triad) over
+// the measured frame (faint), which you drag to reorient. Measured lines are drawn
+// first so the target renders on top.
+function arcball_widget(side) {
+  const d = document.createElement('div');
+  d.className = 'arcball';
+  d.innerHTML = `
+    <svg viewBox="-50 -50 100 100" id="${side}_ab">
+      <circle class="ab-rim" cx="0" cy="0" r="40" />
+      <line class="ab-m ab-x" id="${side}_abmx" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-m ab-y" id="${side}_abmy" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-m ab-z" id="${side}_abmz" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-t ab-x" id="${side}_abtx" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-t ab-y" id="${side}_abty" x1="0" y1="0" x2="0" y2="0" />
+      <line class="ab-t ab-z" id="${side}_abtz" x1="0" y1="0" x2="0" y2="0" />
+      <circle class="ab-knob" cx="0" cy="0" r="4" />
+    </svg>
+    <span class="ab-hint">drag to aim · rim to roll</span>`;
+  const svg = d.querySelector('svg');
+  svg.addEventListener('pointerdown', e => arcball_down(side, e));
+  svg.addEventListener('pointermove', e => arcball_move(side, e));
+  svg.addEventListener('pointerup', arcball_up);
+  svg.addEventListener('pointercancel', arcball_up);
+  return d;
+}
+
+function build_gripper(side, label) {
+  // No discrete buttons: the gripper is driven entirely by the streamed slider
+  // (closed at 0, open at the max), and the side's single Enable lives on the arm
+  // card. The slider carries the same measured-position caret as the arm joints.
+  const root = $(`${side}_gripper`);
+  root.innerHTML = `
+    <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_g_badge">idle</span></div>
+    <div class="gripper">
+      <div class="srow">
+        <input type="range" min="0" max="${GRIPPER_MAX}" step="0.0005" value="0" id="${side}_g"
+               oninput="on_gripper_input('${side}')" />
+        <div class="ghost off" id="${side}_gh"></div>
+      </div>
+      <span class="target" id="${side}_gt">0.0000 m</span>
+      <span class="fb" id="${side}_gf">---</span>
+    </div>
+    <div class="actions">
+      <button class="primary" id="${side}_g_btn" style="display:none" onclick="execute_gripper('${side}')">Execute · gripper</button>
+    </div>`;
+}
+
+// Compose a joint target from the latest server floats, overriding only the
+// joint being dragged: untouched values never round-trip through the sliders'
+// step grid, so a one-joint drag cannot nudge the other six.
+function read_joints(side, overrideIdx) {
+  const snap = latestSnap && latestSnap[`${side}_arm`];
+  const joints = [];
+  for (let i = 0; i < ARM_DOF; i++) {
+    joints.push(i === overrideIdx || !snap
+      ? parseFloat($(`${side}_j${i}`).value)
+      : snap.joints[i]);
+  }
+  return joints;
+}
+
+// Slider moved: update the readout, and while enabled stream the new setpoint.
+function on_joint_input(side, i) {
+  $(`${side}_t${i}`).textContent = fmtRadAsDeg(parseFloat($(`${side}_j${i}`).value));
+  touched[side] = 'joints';
+  if (uiMode === 'streaming') {
+    if (enabled[side]) send_arm_target(side, i);
+  } else {
+    refresh_primary(side);
+  }
+}
+
+function send_arm_target(side, overrideIdx) {
+  if (!ws || ws.readyState !== 1) return;
+  throttled(`${side}_joints`, () =>
+    ws.send(JSON.stringify({cmd: 'set_arm_target', side, joints: read_joints(side, overrideIdx)})));
+}
+
+// Compose the desired pose from the latest server floats plus the control being
+// dragged: only the touched axis takes the DOM value, so the sliders' step grid
+// never feeds 1 mm parasitic jogs back on the other axes.
+function read_pose(side, overrideAxis) {
+  const snap = latestSnap && latestSnap[`${side}_arm`];
+  const position = POS_AXES.map(ax =>
+    ax.i === overrideAxis || !snap
+      ? parseFloat($(`${side}_p${ax.i}`).value)
+      : snap.pose[ax.i]);
+  const orientation = qnorm(qmul(qconj(VQ), quatTargetCam[side]));  // camera -> world
+  const arm_angle = parseFloat($(`${side}_psi`).value);
+  return {position, orientation, arm_angle};
+}
+
+// Stream the composed pose to the server's jog. `mode` = the component the touched
+// control drives (position / orientation / arm_angle); the rest is held.
+function send_arm_pose(side, mode, overrideAxis) {
+  if (!enabled[side] || !ws || ws.readyState !== 1) return;
+  const {position, orientation, arm_angle} = read_pose(side, overrideAxis);
+  if (![...position, ...orientation, arm_angle].every(Number.isFinite)) return;
+  throttled(`${side}_pose`, () =>
+    ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, orientation, arm_angle, mode})));
+}
+
+// Pose control moved (an x/y/z slider or the arcball): refresh the x/y/z target
+// readouts, then while streaming-enabled arm the server's jog. The touched control
+// leads; the rest is softly held.
+function on_pose_input(side, lead, overrideAxis) {
+  for (const ax of POS_AXES) $(`${side}_pt${ax.i}`).textContent = fmt(parseFloat($(`${side}_p${ax.i}`).value));
+  touched[side] = 'pose';
+  if (uiMode !== 'streaming') { refresh_primary(side); return; }
+  send_arm_pose(side, lead, overrideAxis);
+}
+
+// Elbow slider moved: swivel the elbow through the null space (streaming-only; the hub
+// plans the elbow for actions-mode moves, so the slider is read-only there).
+function on_arm_angle_input(side) {
+  $(`${side}_psit`).textContent = fmtRadAsDeg(parseFloat($(`${side}_psi`).value));
+  touched[side] = 'pose';
+  if (uiMode !== 'streaming') { refresh_primary(side); return; }
+  send_arm_pose(side, 'arm_angle', undefined);
+}
+
+// Trailing-edge throttle per channel: input events fire per pixel, but one jog
+// re-arm per interval is plenty and keeps the WS/command load flat.
+const THROTTLE_MS = 33;
+const throttles = {};
+function throttled(key, send) {
+  const t = throttles[key] || (throttles[key] = {last: 0, timer: null, fn: null});
+  t.fn = send;
+  const now = performance.now();
+  if (now - t.last >= THROTTLE_MS) {
+    t.last = now;
+    t.fn();
+  } else if (!t.timer) {
+    t.timer = setTimeout(() => {
+      t.timer = null;
+      t.last = performance.now();
+      t.fn();
+    }, THROTTLE_MS - (now - t.last));
+  }
+}
+
+// --- Quaternion helpers ([x, y, z, w]) and the arcball ---------------------------
+// World -> camera rotation: the operator faces the robot's front, so screen x = world
+// +Y, screen y (up) = world +Z, screen z (toward viewer) = world +X. As a quaternion
+// that is [0.5, 0.5, 0.5, -0.5]. The arcball works entirely in this camera frame (drags
+// are view-space rotations) and converts to/from world only at the wire.
+const VQ = [0.5, 0.5, 0.5, -0.5];
+
+function qmul(a, b) {
+  return [
+    a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+    a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+    a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+    a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2],
+  ];
+}
+function qnorm(q) {
+  const n = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  return [q[0]/n, q[1]/n, q[2]/n, q[3]/n];
+}
+function qconj(q) { return [-q[0], -q[1], -q[2], q[3]]; }
+// Rotate vector v by quaternion q.
+function qrot(q, v) {
+  const [x, y, z, w] = q;
+  const tx = 2*(y*v[2] - z*v[1]);
+  const ty = 2*(z*v[0] - x*v[2]);
+  const tz = 2*(x*v[1] - y*v[0]);
+  return [
+    v[0] + w*tx + (y*tz - z*ty),
+    v[1] + w*ty + (z*tx - x*tz),
+    v[2] + w*tz + (x*ty - y*tx),
+  ];
+}
+
+// Map a normalized screen point (cam frame, y up) onto the arcball sphere: inside the
+// unit circle it lifts to the near hemisphere; outside it clamps to the rim (z = 0), so
+// a rim drag becomes a pure roll about the view axis.
+function arcball_point(nx, ny) {
+  const r2 = nx*nx + ny*ny;
+  if (r2 <= 1) return [nx, ny, Math.sqrt(1 - r2)];
+  const s = 1 / Math.sqrt(r2);
+  return [nx*s, ny*s, 0];
+}
+// The rotation taking sphere point p0 to p1: [cross(p0,p1), dot(p0,p1)], normalized.
+function arcball_quat(p0, p1) {
+  return qnorm([
+    p0[1]*p1[2] - p0[2]*p1[1],
+    p0[2]*p1[0] - p0[0]*p1[2],
+    p0[0]*p1[1] - p0[1]*p1[0],
+    p0[0]*p1[0] + p0[1]*p1[1] + p0[2]*p1[2],
+  ]);
+}
+
+// Pointer -> normalized cam-frame coords (rim = radius 1). The rim (viewBox r=40 in a
+// 100-unit box) sits at 0.4 of the pixel width; SVG y is down, so negate for y-up.
+function arcball_xy(side, e) {
+  const r = $(`${side}_ab`).getBoundingClientRect();
+  const rim = 0.4 * r.width;
+  return [(e.clientX - (r.left + r.width/2)) / rim, -(e.clientY - (r.top + r.height/2)) / rim];
+}
+function arcball_down(side, e) {
+  $(`${side}_ab`).setPointerCapture(e.pointerId);
+  const [nx, ny] = arcball_xy(side, e);
+  arcballDrag = { side, p0: arcball_point(nx, ny), start: quatTargetCam[side].slice(), pid: e.pointerId };
+}
+function arcball_move(side, e) {
+  if (arcballDrag.side !== side || arcballDrag.pid !== e.pointerId) return;
+  const [nx, ny] = arcball_xy(side, e);
+  const delta = arcball_quat(arcballDrag.p0, arcball_point(nx, ny));
+  quatTargetCam[side] = qnorm(qmul(delta, arcballDrag.start));
+  render_arcball(side);
+  on_pose_input(side, 'orientation');
+}
+function arcball_up(e) {
+  if (arcballDrag.pid === e.pointerId) arcballDrag = { side: null, p0: null, start: null, pid: null };
+}
+
+// Draw the target frame (bright) and, beneath it, the measured frame (faint), each a
+// projected XYZ triad (z/blue is the gripper approach axis). Axes pointing away from
+// the viewer (cam z < 0) are dimmed, a depth cue that disambiguates toward vs away.
+function render_arcball(side) {
+  const R = 40;
+  const setAxis = (id, camQuat, axis, base) => {
+    const el = $(id);
+    if (!camQuat) { el.style.opacity = 0; return; }
+    const v = qrot(camQuat, axis);
+    el.setAttribute('x2', (R * v[0]).toFixed(2));
+    el.setAttribute('y2', (-R * v[1]).toFixed(2));
+    el.style.opacity = (v[2] >= 0 ? base : base * 0.4).toFixed(2);
+  };
+  const t = quatTargetCam[side];
+  setAxis(`${side}_abtx`, t, [1,0,0], 1);
+  setAxis(`${side}_abty`, t, [0,1,0], 1);
+  setAxis(`${side}_abtz`, t, [0,0,1], 1);
+  const a = latestSnap && latestSnap[`${side}_arm`];
+  const m = (a && a.orientation_feedback) ? qmul(VQ, a.orientation_feedback) : null;
+  setAxis(`${side}_abmx`, m, [1,0,0], 0.5);
+  setAxis(`${side}_abmy`, m, [0,1,0], 0.5);
+  setAxis(`${side}_abmz`, m, [0,0,1], 0.5);
+}
+
+function ready_arm(side) {
+  // Like Home, but to a natural workspace pose: disable so the stream stops, then
+  // drive to the symmetric Ready preset as a discrete, time-bounded move.
+  if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
+  const preset = side === 'left' ? READY_LEFT : READY_RIGHT;
+  for (let i = 0; i < ARM_DOF; i++) {
+    $(`${side}_j${i}`).value = preset[i];
+    $(`${side}_t${i}`).textContent = fmtRadAsDeg(preset[i]);
+  }
+  // A joint-space action: mark joints as the composed space so the pose controls
+  // (arcball, x/y/z) track the FK of the preset instead of staying frozen.
+  touched[side] = 'joints';
+  fire_arm(side, arm_duration(side));
+}
+
+// Enable: snap both the arm sliders and the gripper slider to the measured pose
+// first so streaming starts where the side already is, then flip the deadman.
+// Disable just flips it back. One deadman per side drives arm + gripper together.
+function toggle_enable(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const next = !enabled[side];
+  if (next && latestSnap) {
+    const armFb = latestSnap[`${side}_arm`].feedback;
+    if (armFb) for (let i = 0; i < ARM_DOF; i++) {
+      $(`${side}_j${i}`).value = armFb[i];
+      $(`${side}_t${i}`).textContent = fmtRadAsDeg(armFb[i]);
+    }
+    const gFb = latestSnap[`${side}_gripper`].feedback;
+    if (gFb != null) {
+      $(`${side}_g`).value = gFb;
+      $(`${side}_gt`).textContent = gFb.toFixed(4) + ' m';
+    }
+  }
+  ws.send(JSON.stringify({cmd: 'set_enabled', side, on: next}));
+}
+
+function reset_arm(side) {
+  // Home parks the arm: disable so the stream stops, then drive to the home pose
+  // (zeros, elbow held off the singularity) as a discrete, time-bounded move.
+  if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
+  for (let i = 0; i < ARM_DOF; i++) {
+    const v = i === 3 ? HOME_ELBOW_J4 : 0;
+    $(`${side}_j${i}`).value = v;
+    $(`${side}_t${i}`).textContent = fmtRadAsDeg(v);
+  }
+  touched[side] = 'joints';
+  fire_arm(side, arm_duration(side));
+}
+
+// Read all seven joint sliders directly. Used by the discrete fires (Home, Ready,
+// Execute), where every slider is a deliberate operator/preset value - unlike the
+// streaming read_joints, which composes from the snapshot and overrides only the one
+// joint being dragged.
+function slider_joints(side) {
+  const joints = [];
+  for (let i = 0; i < ARM_DOF; i++) joints.push(parseFloat($(`${side}_j${i}`).value));
+  return joints;
+}
+
+function fire_arm(side, duration_s) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s}));
+}
+
+// Slider moved: update the readout, and while enabled stream the new opening.
+function on_gripper_input(side) {
+  $(`${side}_gt`).textContent = parseFloat($(`${side}_g`).value).toFixed(4) + ' m';
+  if (enabled[side]) send_gripper_target(side);
+}
+
+function send_gripper_target(side) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({cmd: 'set_gripper_target', side, position: parseFloat($(`${side}_g`).value)}));
+}
+
+// The arm card's primary button: Enable/Disable in streaming, Execute in actions.
+function primary_arm(side) {
+  if (uiMode === 'streaming') toggle_enable(side);
+  else execute_arm(side);
+}
+
+// Fire the composed target for one side as a discrete governed hub move. The last
+// control space the operator touched picks which: the x/y/z sliders + dials fire a
+// straight-line Cartesian move_arm; the joint sliders fire move_arm_joints. Refused
+// server-side while a side streams, but actions mode holds both deadmen down.
+function execute_arm(side) {
+  if (!ws || ws.readyState !== 1) return;
+  if (touched[side] === 'pose') {
+    const position = POS_AXES.map(ax => parseFloat($(`${side}_p${ax.i}`).value));
+    const orientation = qnorm(qmul(qconj(VQ), quatTargetCam[side]));
+    if (![...position, ...orientation].every(Number.isFinite)) return;
+    ws.send(JSON.stringify({cmd: 'fire_arm_pose', side, position, orientation, duration_s: arm_duration(side)}));
+  } else {
+    ws.send(JSON.stringify({cmd: 'fire_arm', side, joints: slider_joints(side), duration_s: arm_duration(side)}));
+  }
+}
+
+// Fire the composed gripper opening as a discrete governed move_gripper (Actions
+// mode only; the streaming slider drives the gripper in Streaming mode).
+function execute_gripper(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const position = parseFloat($(`${side}_g`).value);
+  if (!Number.isFinite(position)) return;
+  ws.send(JSON.stringify({cmd: 'fire_gripper', side, position}));
+}
+
+// Switch interaction mode. Actions fires discrete moves, which the server refuses
+// while a side streams, so entering actions drops both deadmen and seeds the controls
+// from the measured pose (a fresh canvas to compose from). The mode also gates whether
+// control input streams live (streaming) or is held for Execute (actions).
+function set_ui_mode(mode) {
+  if (mode === uiMode) return;
+  uiMode = mode;
+  $('mode_streaming').classList.toggle('on', mode === 'streaming');
+  $('mode_actions').classList.toggle('on', mode === 'actions');
+  if (mode === 'actions') {
+    for (const side of ['left', 'right']) {
+      if (enabled[side] && ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
+      }
+      // Nothing composed yet: both spaces track the setpoint (where the arm is held)
+      // until the operator drags a control, which then freezes that space.
+      touched[side] = null;
+    }
+  }
+  for (const side of ['left', 'right']) { refresh_primary(side); refresh_mode_buttons(side); }
+}
+
+// Set the arm card's primary button to its role for the current mode: the streaming
+// deadman toggle (Enable/Disable) or the actions Execute (labelled with the space it
+// will fire).
+function refresh_primary(side) {
+  const btn = $(`${side}_arm_btn`);
+  if (uiMode === 'streaming') {
+    const on = enabled[side];
+    btn.textContent = on ? 'Disable' : 'Enable';
+    btn.classList.toggle('enabled', on);
+  } else {
+    btn.textContent = touched[side] === 'pose' ? 'Execute · pose' : 'Execute · joints';
+    btn.classList.remove('enabled');
+  }
+}
+
+// Home / Ready are discrete joint-space actions, so they show only in actions mode.
+function refresh_mode_buttons(side) {
+  const on = uiMode === 'actions';
+  $(`${side}_home_btn`).style.display = on ? '' : 'none';
+  $(`${side}_ready_btn`).style.display = on ? '' : 'none';
+  $(`${side}_dur_l`).style.display = on ? 'inline-flex' : 'none';
+  $(`${side}_g_btn`).style.display = on ? '' : 'none';
+}
+
+// Requested duration (s) for this arm's discrete moves; 0 = as fast as the EE-speed
+// cap allows. Read by Home, Ready, and Execute.
+function arm_duration(side) {
+  const v = parseFloat($(`${side}_dur`).value);
+  return Number.isFinite(v) && v >= 0 ? v : 0;
+}
+
+function apply_snapshot(snap) {
+  latestSnap = snap;
+  for (const side of ['left', 'right']) {
+    const on = snap[`${side}_enabled`];
+    enabled[side] = on;
+    const a = snap[`${side}_arm`];
+    const b = $(`${side}_arm_badge`);
+    b.textContent = on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
+    b.className = 'badge' + (on ? ' stream' : (a.in_flight ? ' flight' : ''));
+    refresh_primary(side);
+    // Shared joint axis: span all seven joint limits, so each joint's track shows its
+    // travel relative to the others.
+    const jMin = a.limits ? Math.min(...a.limits.map(l => l[0])) : -PI;
+    const jMax = a.limits ? Math.max(...a.limits.map(l => l[1])) : PI;
+    for (let i = 0; i < ARM_DOF; i++) {
+      $(`${side}_f${i}`).textContent = a.feedback ? fmtRadAsDeg(a.feedback[i]) : '---';
+      // Slider bounds + the visible min/max readout come from joint_limits.
+      const [lo, hi] = a.limits ? a.limits[i] : [-PI, PI];
+      const el = $(`${side}_j${i}`);
+      if (a.limits) {
+        if (el.min != lo) el.min = lo;
+        if (el.max != hi) el.max = hi;
+        $(`${side}_lo${i}`).textContent = fmtRadAsDeg(lo);
+        $(`${side}_hi${i}`).textContent = fmtRadAsDeg(hi);
+        place_subrange(`${side}_j${i}`, lo, hi, jMin, jMax);
+      }
+      // While disabled the slider mirrors the measured pose (you must enable to
+      // move), so the thumb shows where the arm is and enabling never jumps. While
+      // enabled it mirrors the streamed target, so a pose-field edit (solved to
+      // joints server-side) shows on the sliders too - except the joint the operator
+      // is actively dragging, which we must not fight.
+      // Freeze only the space being composed in actions mode; the other space keeps
+      // tracking the setpoint, so a pose Execute's IK shows on the joint sliders (and
+      // a joint Execute's FK shows on the pose controls). Streaming-disabled shows
+      // measured so enabling never jumps; otherwise the sliders mirror the setpoint.
+      const composingJoints = uiMode === 'actions' && touched[side] === 'joints';
+      if (!composingJoints && document.activeElement !== el) {
+        const src = (uiMode === 'streaming' && !on) ? a.feedback : a.joints;
+        if (src) {
+          el.value = src[i];
+          $(`${side}_t${i}`).textContent = fmtRadAsDeg(src[i]);
+        }
+      }
+      // Actual-position caret on the track.
+      const sh = $(`${side}_sh${i}`);
+      if (a.feedback && hi > lo) {
+        const pct = Math.max(0, Math.min(1, (a.feedback[i] - lo) / (hi - lo)));
+        sh.style.setProperty('--at', (pct * 100) + '%');
+        sh.classList.remove('off');
+      } else {
+        sh.classList.add('off');
+      }
+    }
+
+    // World position: the x/y/z sliders mirror the FK of the joint target while enabled
+    // (so a joint move updates them) or the measured pose while disabled, each with the
+    // measured value marked. Skip a control being edited.
+    const posMin = Math.min(...a.pos_bounds.map(b => b[0]));
+    const posMax = Math.max(...a.pos_bounds.map(b => b[1]));
+    for (const ax of POS_AXES) {
+      const i = ax.i;
+      // Per-side reach bounds from the snapshot drive the slider range, the min/max
+      // readout, and the caret, the same way joint limits drive the joint sliders.
+      const [pmin, pmax] = a.pos_bounds[i];
+      const el = $(`${side}_p${i}`);
+      if (el.min != pmin) el.min = pmin;
+      if (el.max != pmax) el.max = pmax;
+      $(`${side}_plo${i}`).textContent = fmt(pmin);
+      $(`${side}_phi${i}`).textContent = fmt(pmax);
+      place_subrange(`${side}_p${i}`, pmin, pmax, posMin, posMax);
+      $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
+      const composingPose = uiMode === 'actions' && touched[side] === 'pose';
+      if (!composingPose && document.activeElement !== el) {
+        const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
+        if (src) { el.value = src[i]; $(`${side}_pt${i}`).textContent = fmt(src[i]); }
+      }
+      const ph = $(`${side}_ph${i}`);
+      if (a.pose_feedback && pmax > pmin) {
+        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - pmin) / (pmax - pmin)));
+        ph.style.setProperty('--at', (pct * 100) + '%');
+        ph.classList.remove('off');
+      } else {
+        ph.classList.add('off');
+      }
+    }
+    // Orientation arcball: sync the target from the setpoint's orientation quaternion
+    // (or measured while streaming-disabled) unless composing orientation or mid-drag;
+    // render always, so the measured frame shows beneath the target.
+    const composingOrient = uiMode === 'actions' && touched[side] === 'pose';
+    if (!composingOrient && arcballDrag.side !== side) {
+      const src = (uiMode === 'streaming' && !on) ? a.orientation_feedback : a.orientation;
+      if (src) quatTargetCam[side] = qmul(VQ, src);
+    }
+    render_arcball(side);
+
+    // Elbow (arm angle): streaming-only. The slider shows the target psi (measured while
+    // streaming-disabled), the caret shows measured; disabled in actions, where the hub
+    // plans the elbow for straight-line moves.
+    const psiEl = $(`${side}_psi`);
+    // Live slider in streaming; in actions drop the thumb (readonly-track) so it reads
+    // as a current-position indicator (red tick only), not a dead slider.
+    psiEl.disabled = uiMode !== 'streaming';
+    psiEl.classList.toggle('readonly-track', uiMode !== 'streaming');
+    if (document.activeElement !== psiEl) {
+      const src = (uiMode === 'streaming' && !on) ? a.arm_angle_feedback : a.arm_angle;
+      if (src != null) { psiEl.value = src; $(`${side}_psit`).textContent = fmtRadAsDeg(src); }
+    }
+    $(`${side}_psif`).textContent = a.arm_angle_feedback != null ? fmtRadAsDeg(a.arm_angle_feedback) : '---';
+    const psih = $(`${side}_psih`);
+    if (a.arm_angle_feedback != null) {
+      const pct = Math.max(0, Math.min(1, (a.arm_angle_feedback + PI) / (2 * PI)));
+      psih.style.setProperty('--at', (pct * 100) + '%');
+      psih.classList.remove('off');
+    } else {
+      psih.classList.add('off');
+    }
+
+    const g = snap[`${side}_gripper`];
+    const gb = $(`${side}_g_badge`);
+    gb.textContent = on ? 'streaming' : (g.in_flight ? 'in flight' : 'idle');
+    gb.className = 'badge' + (on ? ' stream' : (g.in_flight ? ' flight' : ''));
+    const gs = $(`${side}_g`);
+    if (gs.min != g.min) gs.min = g.min;
+    if (gs.max != g.max) gs.max = g.max;
+    // Streaming: while disabled the slider mirrors the measured opening so enabling
+    // never jumps. Actions: the slider holds the composed value the Execute fires.
+    if (uiMode === 'streaming' && !on && g.feedback != null) {
+      gs.value = g.feedback;
+      $(`${side}_gt`).textContent = g.feedback.toFixed(4) + ' m';
+    }
+    $(`${side}_gf`).textContent = g.feedback != null
+      ? g.feedback.toFixed(4)
+      : '---';
+    // Measured-opening caret on the track, matching the arm joints.
+    const gsh = $(`${side}_gh`);
+    if (g.feedback != null && g.max > g.min) {
+      const pct = Math.max(0, Math.min(1, (g.feedback - g.min) / (g.max - g.min)));
+      gsh.style.setProperty('--at', (pct * 100) + '%');
+      gsh.classList.remove('off');
+    } else {
+      gsh.classList.add('off');
+    }
+  }
+  // Reflect the hub collision toggle, but never fight the operator mid-click.
+  const cc = $('collision_chk');
+  if (cc && document.activeElement !== cc) cc.checked = snap.collision_enabled;
+  // Seed the governor inputs from the snapshot unless the operator is editing one.
+  reflect_governor_input('gov_d_stop', snap.d_stop);
+  reflect_governor_input('gov_d_safe', snap.d_safe);
+  reflect_governor_input('gov_max_ee', snap.max_ee_velocity_m_s);
+  update_proximity(snap);
+  $('status').textContent = snap.status;
+}
+
+// Closest self-collision pair: distance in mm + the two links, colored black
+// (clear, d >= d_safe) -> orange (inside d_safe) -> red (inside d_stop), with
+// the governor's disposition (THROTTLED / STOPPED) appended while it restricts.
+function update_proximity(snap) {
+  const el = $('proximity');
+  const p = snap.proximity;
+  if (!p) { el.textContent = 'closest pair: n/a'; el.style.color = '#888'; el.style.background = 'transparent'; return; }
+  const mm = (p.distance * 1000).toFixed(1);
+  const short = s => s.replace(/^openarm_/, '');
+  let color = '#000', bg = 'transparent';
+  if (p.distance < snap.d_stop) { color = '#fff'; bg = '#c0392b'; }       // red: inside stop
+  else if (p.distance < snap.d_safe) { color = '#fff'; bg = '#e67e22'; }  // orange: inside safe
+  const disposition = p.stopped ? '   STOPPED' : p.throttled ? '   THROTTLED' : '';
+  el.textContent = `closest pair: ${mm} mm   ${short(p.link_a)} ↔ ${short(p.link_b)}${disposition}`;
+  el.style.color = color;
+  el.style.background = bg;
+}
+
+function reflect_governor_input(id, value) {
+  const el = $(id);
+  if (el && document.activeElement !== el && value != null) el.value = value;
+}
+
+// Stream the operator's self-collision-avoidance toggle to the hub.
+function set_collision(on) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_collision', enabled: !!on}));
+}
+
+// Stream the operator's governor band + EE speed cap to the hub. The hub re-checks
+// and ignores a degenerate band (d_stop must stay below d_safe).
+function send_governor_params() {
+  if (!ws || ws.readyState !== 1) return;
+  const d_stop = parseFloat($('gov_d_stop').value);
+  const d_safe = parseFloat($('gov_d_safe').value);
+  const max_ee_velocity_m_s = parseFloat($('gov_max_ee').value);
+  // A blur on a half-edited field parses to NaN, which JSON.stringify serializes as
+  // null; drop the update rather than send a null the hub would reject.
+  if (![d_stop, d_safe, max_ee_velocity_m_s].every(Number.isFinite)) return;
+  ws.send(JSON.stringify({cmd: 'set_governor_params', d_stop, d_safe, max_ee_velocity_m_s}));
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  const conn = $('conn');
+  ws.onopen = () => { conn.className = 'conn open'; conn.textContent = 'connected'; };
+  ws.onclose = () => {
+    conn.className = 'conn closed'; conn.textContent = 'disconnected';
+    setTimeout(connect, 1000);
+  };
+  ws.onmessage = (e) => { try { apply_snapshot(JSON.parse(e.data)); } catch {} };
+}
+
+build_arm('left', 'left arm');
+build_arm('right', 'right arm');
+build_gripper('left', 'left gripper');
+build_gripper('right', 'right gripper');
+connect();
+</script>
+</body>
+</html>

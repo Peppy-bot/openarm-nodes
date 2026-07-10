@@ -6,7 +6,7 @@ OpenArm v2 1:1 (link lengths scaled to 70%), so leader joint angles map to
 follower joint targets with no coordinate transform. The node reads the KER's
 M5Stack CoreS3 over USB vendor mode (or serial CDC), maps encoder channels
 through the calibration parameters to clamped joint radians and trigger
-openings, and streams them exactly like `openarm_joint_commander`: arms on
+openings, and streams them exactly like `openarm_commander`: arms on
 `arm_joint_commands` (the hub governs them), grippers on the pairing slots.
 
 The thumb button is the engage deadman: a press toggles streaming for the

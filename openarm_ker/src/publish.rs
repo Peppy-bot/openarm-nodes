@@ -1,4 +1,4 @@
-// Always-on command publisher, the same shape as the joint commander's: for
+// Always-on command publisher, the same shape as the commander's: for
 // each side, one task streams the arm setpoint at command_rate_hz on
 // `arm_joint_commands` and one streams the trigger opening on
 // `gripper_commands`, both tagged with their id and governed by the hub before

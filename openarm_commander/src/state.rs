@@ -1,5 +1,6 @@
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use crate::pose::Jog;
 
 pub const ARM_DOF: usize = openarm_description::ARM_DOF;
 // Range bounds come from the description's URDF (resolved by ui::init_limits);
@@ -46,14 +47,60 @@ impl Side {
     }
 }
 
+/// A value stored per side, indexed by [`Side`]: `things[side]` reads or writes the
+/// right one, with no left/right accessor split. `Copy` when `T` is, so the small
+/// per-tick frames pass by value.
+#[derive(Clone, Copy, Debug)]
+pub struct BySide<T>([T; 2]);
+
+impl<T> BySide<T> {
+    pub fn new(left: T, right: T) -> Self {
+        Self([left, right])
+    }
+}
+
+impl<T: Clone> BySide<T> {
+    pub fn splat(value: T) -> Self {
+        Self([value.clone(), value])
+    }
+}
+
+impl<T> std::ops::Index<Side> for BySide<T> {
+    type Output = T;
+    fn index(&self, side: Side) -> &T {
+        &self.0[side as usize]
+    }
+}
+
+impl<T> std::ops::IndexMut<Side> for BySide<T> {
+    fn index_mut(&mut self, side: Side) -> &mut T {
+        &mut self.0[side as usize]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ArmTarget {
     pub joints: [f64; ARM_DOF],
     pub last_feedback: Option<[f64; ARM_DOF]>,
+    // Whether `joints` has been initialized from a real measured pose yet. Set once,
+    // from the first arm_states feedback, so the target starts where the arm is
+    // instead of at the home default; thereafter only streaming and discrete moves
+    // move it. Prevents re-seeding the gravity-sagged measured every disable, which
+    // ratcheted the arm down across enable/disable cycles.
+    pub established: bool,
     pub in_flight: bool,
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
+    // What the operator is actively driving this side toward: a joint target (streamed
+    // straight, the hub governs the ramp) or a Cartesian jog (stepped toward a world
+    // pose one capped increment per tick, held at the reach boundary). None when the
+    // side is idle. Arming either space clears the other, and it clears on
+    // enable/disable, since the two spaces must not fight.
+    pub jog: Option<Jog>,
+    // Whether a Cartesian jog is currently held at the reach boundary. Drives one-shot
+    // status transitions (blocked <-> moving), so neither message latches or spams.
+    pub jog_blocked: bool,
 }
 
 impl ArmTarget {
@@ -61,8 +108,11 @@ impl ArmTarget {
         Self {
             joints: [0.0; ARM_DOF],
             last_feedback: None,
+            established: false,
             in_flight: false,
             preempt: None,
+            jog: None,
+            jog_blocked: false,
         }
     }
 }
@@ -72,6 +122,9 @@ pub struct GripperTarget {
     pub position: f64,
     // Measured gripper opening (m) from the gripper_states stream.
     pub last_feedback: Option<f64>,
+    // A discrete move_gripper (Actions mode) is in flight: refuses a second Execute
+    // and drives the gripper card's in-flight badge. Streaming mode never sets it.
+    pub in_flight: bool,
 }
 
 impl GripperTarget {
@@ -79,22 +132,20 @@ impl GripperTarget {
         Self {
             position: GRIPPER_CLOSED_M,
             last_feedback: None,
+            in_flight: false,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct UiState {
-    pub left_arm: ArmTarget,
-    pub right_arm: ArmTarget,
-    pub left_gripper: GripperTarget,
-    pub right_gripper: GripperTarget,
+    pub arms: BySide<ArmTarget>,
+    pub grippers: BySide<GripperTarget>,
     // Streaming deadman, one per side: while false the commander emits no
     // commands for that side's arm or gripper and both targets track the measured
     // pose, so enabling never steps the robot. The arm and gripper share the
     // deadman because the operator enables a whole side at once.
-    pub left_enabled: bool,
-    pub right_enabled: bool,
+    pub enabled: BySide<bool>,
     // Operator controls for the hub's self-collision governor, streamed to the
     // backbone on governor_control; the hub holds its own defaults until the first
     // message. All four launch defaults are node parameters, kept in step with the
@@ -155,12 +206,9 @@ impl UiState {
         max_ee_velocity_m_s: f64,
     ) -> Self {
         Self {
-            left_arm: ArmTarget::home(),
-            right_arm: ArmTarget::home(),
-            left_gripper: GripperTarget::closed(),
-            right_gripper: GripperTarget::closed(),
-            left_enabled: false,
-            right_enabled: false,
+            arms: BySide::splat(ArmTarget::home()),
+            grippers: BySide::splat(GripperTarget::closed()),
+            enabled: BySide::splat(false),
             collision_enabled,
             collision_enabled_default: collision_enabled,
             d_stop,
@@ -171,65 +219,7 @@ impl UiState {
         }
     }
 
-    pub fn enabled(&self, side: Side) -> bool {
-        match side {
-            Side::Left => self.left_enabled,
-            Side::Right => self.right_enabled,
-        }
-    }
-
-    pub fn set_enabled(&mut self, side: Side, on: bool) {
-        match side {
-            Side::Left => self.left_enabled = on,
-            Side::Right => self.right_enabled = on,
-        }
-    }
-
-    pub fn arm(&self, side: Side) -> &ArmTarget {
-        match side {
-            Side::Left => &self.left_arm,
-            Side::Right => &self.right_arm,
-        }
-    }
-
-    pub fn arm_mut(&mut self, side: Side) -> &mut ArmTarget {
-        match side {
-            Side::Left => &mut self.left_arm,
-            Side::Right => &mut self.right_arm,
-        }
-    }
-
-    pub fn gripper(&self, side: Side) -> &GripperTarget {
-        match side {
-            Side::Left => &self.left_gripper,
-            Side::Right => &self.right_gripper,
-        }
-    }
-
-    pub fn gripper_mut(&mut self, side: Side) -> &mut GripperTarget {
-        match side {
-            Side::Left => &mut self.left_gripper,
-            Side::Right => &mut self.right_gripper,
-        }
-    }
-
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = message.into();
     }
-}
-
-pub type SharedState = Arc<Mutex<UiState>>;
-
-pub fn new_shared(
-    collision_enabled: bool,
-    d_stop: f64,
-    d_safe: f64,
-    max_ee_velocity_m_s: f64,
-) -> SharedState {
-    Arc::new(Mutex::new(UiState::new(
-        collision_enabled,
-        d_stop,
-        d_safe,
-        max_ee_velocity_m_s,
-    )))
 }

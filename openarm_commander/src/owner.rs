@@ -1,0 +1,838 @@
+// The state owner: a single task that owns `UiState` outright, so nothing else ever
+// locks it. Everyone talks to it over channels instead of a shared mutex.
+//
+//   - the WS server sends operator input as `UiMsg` (a wire `Command` or a
+//     disconnect) on the command channel;
+//   - the state streams (arm/gripper/collision) and the discrete goal tasks send
+//     measured state and goal outcomes as `Feedback`;
+//   - the owner publishes the browser snapshot (pre-serialized) and the per-tick
+//     `CommandFrame` (the setpoints to stream) on two watch channels.
+//
+// The owner is also the single motion authority: once per tick it advances each
+// side's jog (the same pure step the panel drove before) and republishes the frame.
+// Because it is the only writer, the tick decision and every reducer are ordinary
+// synchronous functions on owned state, with no lock discipline to reason about.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use peppygen::NodeRunner;
+use peppylib::runtime::CancellationToken;
+use srs_model::nalgebra::{Quaternion, UnitQuaternion};
+use tokio::sync::{mpsc, watch};
+use tokio::time::{MissedTickBehavior, interval};
+use tokio_util::sync::CancellationToken as GoalToken;
+
+use crate::pose::{ArmModels, CartesianJog, Jog, JogCaps, JogMode, JogStep, Pose, dist3, jog_tick};
+use crate::state::{ARM_DOF, ArmTarget, BySide, Proximity, Side, UiState};
+use crate::ui::{
+    Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, sane_duration,
+    valid_governor_band,
+};
+use crate::{move_arm, move_arm_joints, move_gripper};
+
+/// The browser snapshot cadence (10 Hz); the command tick runs far faster, so the
+/// FK-heavy snapshot is built here rather than every tick.
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
+/// After a preempted goal reports done, the hub needs a beat to release its
+/// single-flight gate before it will accept the queued move; the queued goal task
+/// waits this long before firing.
+pub const PREEMPT_GRACE: Duration = Duration::from_millis(50);
+
+/// Operator input to the owner: a decoded wire command, or the WS closing (which drops
+/// the deadman and restores the governor default, same as a released panel).
+pub enum UiMsg {
+    Command(Command),
+    Disconnect,
+}
+
+/// State reported back to the owner from the always-on streams and the discrete goal
+/// tasks. The owner is the only writer, so these are the sole way measured state and
+/// goal outcomes reach `UiState`.
+pub enum Feedback {
+    ArmMeasured { side: Side, joints: [f64; ARM_DOF] },
+    GripperMeasured { side: Side, opening: f64 },
+    Proximity(Proximity),
+    ArmGoalDone { side: Side, summary: String },
+    GripperGoalDone { side: Side, summary: String },
+}
+
+/// The setpoints to stream this tick. `None` for a side means its deadman is off, so
+/// the publisher emits nothing and the hub's watchdog holds. Recomputed every command
+/// tick and read by the publisher tasks on their own cadence.
+#[derive(Clone, Copy, Debug)]
+pub struct CommandFrame {
+    pub arms: BySide<Option<[f64; ARM_DOF]>>,
+    pub grippers: BySide<Option<f64>>,
+    pub governor: GovernorFrame,
+}
+
+/// The operator's self-collision governor controls, streamed continuously (no deadman:
+/// the hub must always know the operator's intent).
+#[derive(Clone, Copy, Debug)]
+pub struct GovernorFrame {
+    pub collision_enabled: bool,
+    pub d_stop: f64,
+    pub d_safe: f64,
+    pub max_ee_velocity_m_s: f64,
+}
+
+impl CommandFrame {
+    pub(crate) fn from_state(s: &UiState) -> Self {
+        let arm = |side: Side| s.enabled[side].then_some(s.arms[side].joints);
+        let grip = |side: Side| s.enabled[side].then_some(s.grippers[side].position);
+        Self {
+            arms: BySide::new(arm(Side::Left), arm(Side::Right)),
+            grippers: BySide::new(grip(Side::Left), grip(Side::Right)),
+            governor: GovernorFrame {
+                collision_enabled: s.collision_enabled,
+                d_stop: s.d_stop,
+                d_safe: s.d_safe,
+                max_ee_velocity_m_s: s.max_ee_velocity_m_s,
+            },
+        }
+    }
+}
+
+/// A discrete arm move, resolved to what the goal task needs. A move that preempts an
+/// in-flight one is stashed as one of these until the old goal reports done.
+#[derive(Clone, Copy)]
+enum ArmGoal {
+    Joints {
+        joints: [f64; ARM_DOF],
+        duration_s: f64,
+    },
+    Pose {
+        position: [f64; 3],
+        orientation: [f64; 4],
+        target_joints: [f64; ARM_DOF],
+        duration_s: f64,
+    },
+}
+
+impl ArmGoal {
+    // The joint target to preview on the sliders while the move runs.
+    fn preview(&self) -> [f64; ARM_DOF] {
+        match self {
+            Self::Joints { joints, .. } => *joints,
+            Self::Pose { target_joints, .. } => *target_joints,
+        }
+    }
+
+    fn action(&self) -> &'static str {
+        match self {
+            Self::Joints { .. } => "move_arm_joints",
+            Self::Pose { .. } => "move_arm",
+        }
+    }
+}
+
+struct Owner {
+    state: UiState,
+    models: ArmModels,
+    runner: Arc<NodeRunner>,
+    token: CancellationToken,
+    // Cloned into each spawned goal task so it can report its outcome back.
+    feedback_tx: mpsc::Sender<Feedback>,
+    // A discrete arm move queued behind the in-flight one it preempted; fired when that
+    // one reports done (the hub is single-flight, so they must not overlap).
+    pending: BySide<Option<ArmGoal>>,
+}
+
+/// Run the owner until shutdown. Owns `state`; every other task holds only a channel
+/// end, so this is the one place `UiState` is read or written.
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    state: UiState,
+    models: ArmModels,
+    runner: Arc<NodeRunner>,
+    command_rate_hz: u32,
+    token: CancellationToken,
+    mut command_rx: mpsc::Receiver<UiMsg>,
+    mut feedback_rx: mpsc::Receiver<Feedback>,
+    feedback_tx: mpsc::Sender<Feedback>,
+    frame_tx: watch::Sender<CommandFrame>,
+    snapshot_tx: watch::Sender<String>,
+) {
+    let mut owner = Owner {
+        state,
+        models,
+        runner,
+        token: token.clone(),
+        feedback_tx,
+        pending: BySide::new(None, None),
+    };
+
+    // Publish the starting frame and snapshot before the first tick, so the publishers
+    // and any already-connected browser see real state at once rather than after a tick.
+    let _ = frame_tx.send(CommandFrame::from_state(&owner.state));
+    if let Ok(json) = build_snapshot_json(&owner.state, Instant::now(), &owner.models) {
+        let _ = snapshot_tx.send(json);
+    }
+
+    let tick_dt_s = 1.0 / command_rate_hz as f64;
+    let mut command_tick = interval(Duration::from_micros(1_000_000 / command_rate_hz as u64));
+    command_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut snapshot_tick = interval(SNAPSHOT_INTERVAL);
+    snapshot_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => return,
+            msg = command_rx.recv() => match msg {
+                Some(msg) => owner.reduce_ui(msg),
+                None => return, // the WS server is gone; nothing left to command
+            },
+            Some(fb) = feedback_rx.recv() => owner.reduce_feedback(fb),
+            _ = command_tick.tick() => {
+                owner.advance_jogs(tick_dt_s);
+                let _ = frame_tx.send(CommandFrame::from_state(&owner.state));
+            }
+            _ = snapshot_tick.tick() => {
+                match build_snapshot_json(&owner.state, Instant::now(), &owner.models) {
+                    Ok(json) => { let _ = snapshot_tx.send(json); }
+                    Err(e) => tracing::warn!(error = %e, "serialize snapshot"),
+                }
+            }
+        }
+    }
+}
+
+impl Owner {
+    // Step each enabled side's jog one tick and apply it. Only enabled sides advance
+    // (a disabled side streams nothing, so walking its target would just drift the panel
+    // off the measured pose). The step is pure (see `advance_jog`); caps re-derive from
+    // the live EE-speed cap so retuning the knob changes jog speed.
+    fn advance_jogs(&mut self, tick_dt_s: f64) {
+        let caps = JogCaps::per_tick(tick_dt_s, self.state.max_ee_velocity_m_s);
+        for side in [Side::Left, Side::Right] {
+            if !self.state.enabled[side] {
+                continue;
+            }
+            let advance = advance_jog(&self.state.arms[side], side, &self.models, caps);
+            apply_jog(&mut self.state, side, advance);
+        }
+    }
+
+    fn reduce_ui(&mut self, msg: UiMsg) {
+        match msg {
+            UiMsg::Command(cmd) => self.reduce_command(cmd),
+            UiMsg::Disconnect => self.on_disconnect(),
+        }
+    }
+
+    fn on_disconnect(&mut self) {
+        reset_on_disconnect(&mut self.state);
+    }
+
+    fn reduce_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::FireArm {
+                side,
+                mut joints,
+                duration_s,
+            } => {
+                let side: Side = side.into();
+                // A discrete move preempts the live stream, so refuse one while enabled.
+                if self.state.enabled[side] {
+                    self.status(side, "disable before a discrete move");
+                    return;
+                }
+                clamp_to_limits(&mut joints, side);
+                let target_ee = self.ee_position(side, &joints);
+                let duration_s = self.floored_duration(side, target_ee, duration_s);
+                self.fire_or_queue(side, ArmGoal::Joints { joints, duration_s });
+            }
+            Command::FireArmPose {
+                side,
+                position,
+                orientation,
+                duration_s,
+            } => {
+                let side: Side = side.into();
+                if self.state.enabled[side] {
+                    self.status(side, "disable before a discrete move");
+                    return;
+                }
+                if !position.iter().all(|v| v.is_finite()) {
+                    self.status(side, "invalid position, not firing");
+                    return;
+                }
+                let Some(rotation) = unit_quat_from_wire(orientation) else {
+                    self.status(side, "invalid orientation, not firing");
+                    return;
+                };
+                let seed = self.state.arms[side].joints;
+                // Preview the pose as joints (seeded from the current target) so both the
+                // sliders and the FK readout show where it is going, and reject an
+                // unreachable pose up front rather than firing a goal the hub refuses.
+                let Some(mut target_joints) = self.models.solve_ik(side, position, rotation, &seed)
+                else {
+                    self.status(side, "pose unreachable, not firing");
+                    return;
+                };
+                clamp_to_limits(&mut target_joints, side);
+                let duration_s = self.floored_duration(side, position, duration_s);
+                // Send the hub the normalized quaternion, not the raw wire values.
+                let orientation = [rotation.i, rotation.j, rotation.k, rotation.w];
+                self.fire_or_queue(
+                    side,
+                    ArmGoal::Pose {
+                        position,
+                        orientation,
+                        target_joints,
+                        duration_s,
+                    },
+                );
+            }
+            Command::SetEnabled { side, on } => {
+                let side: Side = side.into();
+                if on {
+                    // A discrete move owns the arm until its result lands; enabling now
+                    // would fight it and snap back when it completes.
+                    if self.state.arms[side].in_flight {
+                        self.status(side, "move in flight, not enabling");
+                        return;
+                    }
+                    // Refuse until measurements exist so the first emitted command holds
+                    // position instead of a stale default. The arm target keeps its
+                    // retained value (never re-seeded from the sagging measured pose);
+                    // the gripper does not sag, so seed it from measured.
+                    let (Some(_), Some(gripper_measured)) = (
+                        self.state.arms[side].last_feedback,
+                        self.state.grippers[side].last_feedback,
+                    ) else {
+                        self.status(side, "no measured pose yet, not enabling");
+                        return;
+                    };
+                    self.state.grippers[side].position = gripper_measured;
+                }
+                // A jog must not survive across a deadman edge in either direction.
+                self.state.arms[side].jog = None;
+                self.state.arms[side].jog_blocked = false;
+                self.state.enabled[side] = on;
+                // Side-level (arm + gripper share the deadman), so no "arm" prefix.
+                self.state.set_status(format!(
+                    "{}: {}",
+                    side.label(),
+                    if on {
+                        "ENABLED, streaming arm + gripper"
+                    } else {
+                        "disabled"
+                    }
+                ));
+            }
+            Command::SetArmTarget { side, mut joints } => {
+                let side: Side = side.into();
+                clamp_to_limits(&mut joints, side);
+                if self.state.enabled[side] {
+                    // Arm a joint jog: the tick reconciles it in one step, so the slider
+                    // never lags. It replaces any live Cartesian jog (the spaces must
+                    // not fight); its status latch resets with it.
+                    self.state.arms[side].jog = Some(Jog::Joints(joints));
+                    self.state.arms[side].jog_blocked = false;
+                }
+            }
+            Command::SetArmPose {
+                side,
+                position,
+                orientation,
+                arm_angle,
+                mode,
+            } => {
+                let side: Side = side.into();
+                if !position
+                    .iter()
+                    .chain(std::iter::once(&arm_angle))
+                    .all(|v| v.is_finite())
+                {
+                    return;
+                }
+                let Some(rotation) = unit_quat_from_wire(orientation) else {
+                    return;
+                };
+                // Store the desired pose as euler for the jog, which re-derives a
+                // quaternion each step (so the euler encoding never drives interpolation).
+                let (roll, pitch, yaw) = rotation.euler_angles();
+                let pose: Pose = [position[0], position[1], position[2], roll, pitch, yaw];
+                if self.state.enabled[side] {
+                    self.state.arms[side].jog = Some(Jog::Cartesian(CartesianJog {
+                        mode: mode.into(),
+                        desired: pose,
+                        arm_angle,
+                    }));
+                }
+            }
+            Command::SetGripperTarget { side, position } => {
+                let side: Side = side.into();
+                let [lo, hi] = gripper_limits();
+                let position = position.clamp(lo, hi);
+                if self.state.enabled[side] {
+                    self.state.grippers[side].position = position;
+                }
+            }
+            Command::FireGripper { side, position } => {
+                let side: Side = side.into();
+                if !position.is_finite() {
+                    return;
+                }
+                let [lo, hi] = gripper_limits();
+                let position = position.clamp(lo, hi);
+                // Disabled for a discrete move, and only one gripper goal in flight;
+                // refuse rather than preempt (the moves are short).
+                if self.state.enabled[side] {
+                    self.status_gripper(side, "disable before a discrete move");
+                    return;
+                }
+                if self.state.grippers[side].in_flight {
+                    self.status_gripper(side, "previous move still finishing");
+                    return;
+                }
+                self.state.grippers[side].in_flight = true;
+                self.state.grippers[side].position = position;
+                self.status_gripper(side, "firing move_gripper");
+                move_gripper::spawn(
+                    self.runner.clone(),
+                    self.feedback_tx.clone(),
+                    self.token.clone(),
+                    side,
+                    position,
+                );
+            }
+            Command::SetCollision { enabled } => {
+                self.state.collision_enabled = enabled;
+                self.state
+                    .set_status(format!("collision avoidance {}", on_off(enabled)));
+            }
+            Command::SetGovernorParams {
+                d_stop,
+                d_safe,
+                max_ee_velocity_m_s,
+            } => {
+                // The hub validates again before applying; reject a degenerate band here
+                // so the UI cannot stream one.
+                if !valid_governor_band(d_stop, d_safe, max_ee_velocity_m_s) {
+                    self.state.set_status(
+                        "governor params ignored: require 0 < d_stop < d_safe and speed > 0",
+                    );
+                    return;
+                }
+                self.state.d_stop = d_stop;
+                self.state.d_safe = d_safe;
+                self.state.max_ee_velocity_m_s = max_ee_velocity_m_s;
+                self.state.set_status(format!(
+                    "governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s"
+                ));
+            }
+        }
+    }
+
+    fn reduce_feedback(&mut self, fb: Feedback) {
+        match fb {
+            Feedback::ArmMeasured { side, joints } => {
+                self.state.arms[side].last_feedback = Some(joints);
+                // Initialize the streamed target from the first measured pose so the
+                // panel starts where the arm is, then leave it: tracking measured while
+                // disabled re-seeded the gravity-sagged pose and ratcheted the arm down.
+                if !self.state.arms[side].established {
+                    self.state.arms[side].joints = joints;
+                    self.state.arms[side].established = true;
+                }
+            }
+            Feedback::GripperMeasured { side, opening } => {
+                self.state.grippers[side].last_feedback = Some(opening);
+            }
+            Feedback::Proximity(proximity) => {
+                self.state.proximity = Some(proximity);
+            }
+            Feedback::ArmGoalDone { side, summary } => {
+                self.state.arms[side].in_flight = false;
+                self.state.arms[side].preempt = None;
+                self.state.set_status(summary);
+                // Fire any move queued behind the one that just finished; the hub needs
+                // a beat to release its single-flight gate first, so give it grace.
+                if let Some(goal) = self.pending[side].take() {
+                    self.fire_now(side, goal, true);
+                }
+            }
+            Feedback::GripperGoalDone { side, summary } => {
+                self.state.grippers[side].in_flight = false;
+                self.state.set_status(summary);
+            }
+        }
+    }
+
+    // Fire a discrete arm move, or queue it behind the in-flight one it preempts. The
+    // hub is single-flight, so an overlapping fire cancels the running goal and waits
+    // for its result (via `pending`) rather than racing a second goal in.
+    fn fire_or_queue(&mut self, side: Side, goal: ArmGoal) {
+        if self.state.arms[side].in_flight {
+            if let Some(tok) = &self.state.arms[side].preempt {
+                tok.cancel();
+            }
+            self.pending[side] = Some(goal);
+            self.status(side, "preempting, move queued");
+        } else {
+            self.fire_now(side, goal, false);
+        }
+    }
+
+    // Claim the side's move slot and spawn the goal task. `grace` makes the task wait
+    // for the hub to release its gate first (set when firing a queued preempt).
+    fn fire_now(&mut self, side: Side, goal: ArmGoal, grace: bool) {
+        // A preempt wait could have raced an Enable; never fire under a live deadman.
+        if self.state.enabled[side] {
+            self.status(side, "enabled during preempt, move dropped");
+            return;
+        }
+        let preempt = GoalToken::new();
+        self.state.arms[side].in_flight = true;
+        self.state.arms[side].preempt = Some(preempt.clone());
+        // Retain the target so the panel mirrors where the move is going.
+        self.state.arms[side].joints = goal.preview();
+        let action = goal.action();
+        let runner = self.runner.clone();
+        let feedback = self.feedback_tx.clone();
+        let token = self.token.clone();
+        match goal {
+            ArmGoal::Joints { joints, duration_s } => move_arm_joints::spawn(
+                runner, feedback, token, preempt, side, joints, duration_s, grace,
+            ),
+            ArmGoal::Pose {
+                position,
+                orientation,
+                duration_s,
+                ..
+            } => move_arm::spawn(
+                runner,
+                feedback,
+                token,
+                preempt,
+                side,
+                position,
+                orientation,
+                duration_s,
+                grace,
+            ),
+        }
+        self.status(side, &format!("firing {action}"));
+    }
+
+    // World-frame end-effector position (x, y, z) of a joint target.
+    fn ee_position(&self, side: Side, joints: &[f64; ARM_DOF]) -> [f64; 3] {
+        let p = self.models.ee_pose_world(side, joints);
+        [p[0], p[1], p[2]]
+    }
+
+    // Floor a requested arm-move duration so the straight-line EE speed stays under the
+    // governor cap (time >= distance / cap). With no measured pose yet, just sanitize.
+    fn floored_duration(&self, side: Side, target_ee: [f64; 3], requested_s: f64) -> f64 {
+        match self.state.arms[side].last_feedback {
+            Some(measured) => {
+                let dist = dist3(self.ee_position(side, &measured), target_ee);
+                ee_speed_floored(
+                    sane_duration(requested_s),
+                    dist,
+                    self.state.max_ee_velocity_m_s,
+                )
+            }
+            None => sane_duration(requested_s),
+        }
+    }
+
+    fn status(&mut self, side: Side, what: &str) {
+        self.state
+            .set_status(format!("{} arm: {what}", side.label()));
+    }
+
+    fn status_gripper(&mut self, side: Side, what: &str) {
+        self.state
+            .set_status(format!("{} gripper: {what}", side.label()));
+    }
+}
+
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "ON" } else { "OFF" }
+}
+
+/// A unit quaternion from the wire `[x, y, z, w]`, or `None` if it is non-finite or too
+/// near zero to normalize. A degenerate orientation would normalize to NaN and poison
+/// the IK solve, so both pose paths reject it here.
+fn unit_quat_from_wire(q: [f64; 4]) -> Option<UnitQuaternion<f64>> {
+    let quat = Quaternion::new(q[3], q[0], q[1], q[2]);
+    (quat.norm() > 1e-6).then(|| UnitQuaternion::from_quaternion(quat))
+}
+
+// Reset on operator disconnect: drop the streaming deadman for both sides (each stream's
+// timeout then releases to hold; the enabled gate also stops advancing their jogs) and
+// restore the governor enable to its launch default, so an operator who left avoidance
+// off cannot latch the hub ungoverned, while a launch-ungoverned deployment is not
+// force-armed either.
+fn reset_on_disconnect(s: &mut UiState) {
+    for side in [Side::Left, Side::Right] {
+        s.enabled[side] = false;
+    }
+    s.collision_enabled = s.collision_enabled_default;
+}
+
+// --------------------------- per-tick jog advance ---------------------------
+
+/// The outcome of advancing one side's jog a tick, ready for the caller to apply: the
+/// reconciled joint setpoint, the jog to retain (`None` once it retires or reaches its
+/// target), whether it is held at the reach boundary, and any moving <-> blocked
+/// transition to announce. Pure, so the tick decision is testable without a live
+/// [`UiState`] and the mutation is a straight assignment in [`apply_jog`].
+#[derive(Clone, Copy, Debug)]
+struct JogAdvance {
+    joints: [f64; ARM_DOF],
+    jog: Option<Jog>,
+    blocked: bool,
+    event: Option<JogEvent>,
+}
+
+/// A one-shot jog status transition. Emitted only on the edge, so a held boundary
+/// reports once, not at the command rate.
+#[derive(Clone, Copy, Debug)]
+enum JogEvent {
+    Moving { mode: JogMode },
+    Blocked { mode: JogMode, desired: Pose },
+}
+
+// Advance one side's active jog by one tick. A joint jog reconciles in a single step
+// (the streamed joints are the target; the hub governs the ramp); a Cartesian jog steps
+// the joint target a capped increment toward the desired pose, holds it at the reach
+// boundary, and retires once converged. Pure: `jog_tick` briefly takes the model lock
+// inside it, but no UiState is held here, so the caller applies the result.
+fn advance_jog(arm: &ArmTarget, side: Side, models: &ArmModels, caps: JogCaps) -> JogAdvance {
+    let hold = |jog, blocked| JogAdvance {
+        joints: arm.joints,
+        jog,
+        blocked,
+        event: None,
+    };
+    let cartesian = match arm.jog {
+        None => return hold(None, arm.jog_blocked),
+        // The hub governs the joint ramp, so reconcile in one step and retire.
+        Some(Jog::Joints(target)) => {
+            return JogAdvance {
+                joints: target,
+                jog: None,
+                blocked: false,
+                event: None,
+            };
+        }
+        Some(Jog::Cartesian(cartesian)) => cartesian,
+    };
+    match jog_tick(models, side, &arm.joints, &cartesian, caps) {
+        JogStep::Converged => hold(None, false),
+        JogStep::Stepped(joints) => JogAdvance {
+            joints,
+            jog: arm.jog,
+            blocked: false,
+            // Announce resumption only when leaving a held boundary.
+            event: arm.jog_blocked.then_some(JogEvent::Moving {
+                mode: cartesian.mode,
+            }),
+        },
+        JogStep::Blocked => JogAdvance {
+            joints: arm.joints,
+            jog: arm.jog,
+            blocked: true,
+            // Announce the boundary once, on entry.
+            event: (!arm.jog_blocked).then_some(JogEvent::Blocked {
+                mode: cartesian.mode,
+                desired: cartesian.desired,
+            }),
+        },
+    }
+}
+
+// Apply a computed jog advance to the side's target and emit its status transition, if
+// any. The only mutation half of the pure/apply split above.
+fn apply_jog(s: &mut UiState, side: Side, adv: JogAdvance) {
+    s.arms[side].joints = adv.joints;
+    s.arms[side].jog = adv.jog;
+    s.arms[side].jog_blocked = adv.blocked;
+    match adv.event {
+        Some(JogEvent::Moving { mode }) => {
+            s.set_status(format!("{}: pose jog moving", side.label()));
+            tracing::info!(side = side.label(), ?mode, "pose jog resumed");
+        }
+        Some(JogEvent::Blocked { mode, desired }) => {
+            s.set_status(format!("{}: pose at reach limit, holding", side.label()));
+            tracing::info!(
+                side = side.label(),
+                ?mode,
+                ?desired,
+                "pose jog at reach limit"
+            );
+        }
+        None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pose::CartesianJog;
+    use openarm_description::HardwareVersion;
+
+    fn models() -> ArmModels {
+        ArmModels::from_version(HardwareVersion::V2)
+    }
+
+    // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
+    fn caps() -> JogCaps {
+        JogCaps::per_tick(0.01, 0.5)
+    }
+
+    fn arm(joints: [f64; ARM_DOF], jog: Option<Jog>, jog_blocked: bool) -> ArmTarget {
+        let mut a = ArmTarget::home();
+        a.joints = joints;
+        a.jog = jog;
+        a.jog_blocked = jog_blocked;
+        a
+    }
+
+    fn position_jog(desired: Pose) -> Jog {
+        Jog::Cartesian(CartesianJog {
+            mode: JogMode::Position,
+            desired,
+            arm_angle: 0.0,
+        })
+    }
+
+    #[test]
+    fn joint_jog_reconciles_in_one_step_and_retires() {
+        let target = [0.1, -0.2, 0.3, 0.9, -0.1, 0.2, 0.05];
+        let a = arm([0.0; ARM_DOF], Some(Jog::Joints(target)), false);
+        let adv = advance_jog(&a, Side::Left, &models(), caps());
+        assert_eq!(
+            adv.joints, target,
+            "a joint jog snaps the setpoint to the target"
+        );
+        assert!(
+            adv.jog.is_none(),
+            "a joint jog retires after its single step"
+        );
+        assert!(!adv.blocked);
+        assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn idle_arm_holds_its_setpoint() {
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let adv = advance_jog(&arm(q, None, false), Side::Left, &models(), caps());
+        assert_eq!(adv.joints, q, "an idle side keeps its setpoint");
+        assert!(adv.jog.is_none());
+        assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn cartesian_jog_on_the_current_pose_converges() {
+        let m = models();
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let here = m.ee_pose_world(Side::Left, &q);
+        let adv = advance_jog(
+            &arm(q, Some(position_jog(here)), false),
+            Side::Left,
+            &m,
+            caps(),
+        );
+        assert!(
+            adv.jog.is_none(),
+            "reaching the desired pose retires the jog"
+        );
+        assert!(!adv.blocked);
+        assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn boundary_is_announced_on_entry_not_while_held() {
+        let m = models();
+        let start = [0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0];
+        let here = m.ee_pose_world(Side::Left, &start);
+        let far = position_jog([here[0] + 2.0, here[1], here[2], here[3], here[4], here[5]]);
+        // Drive the jog to the envelope, threading each advance back into the arm
+        // exactly as the stream does, until it first reports the boundary.
+        let mut a = arm(start, Some(far), false);
+        let entry = loop_to_boundary(&m, &mut a);
+        assert!(
+            matches!(entry.event, Some(JogEvent::Blocked { .. })),
+            "the boundary is announced when first entered"
+        );
+        assert!(
+            a.jog.is_some(),
+            "the jog stays armed so pulling back into reach resumes it"
+        );
+        // Held at the boundary (jog_blocked now set): the joints are pinned, so the next
+        // tick blocks identically but must stay quiet.
+        let held = advance_jog(&a, Side::Left, &m, caps());
+        assert!(held.blocked, "the pinned arm stays at the boundary");
+        assert!(held.event.is_none(), "a held boundary does not re-announce");
+    }
+
+    #[test]
+    fn resuming_from_a_held_boundary_announces_moving() {
+        let m = models();
+        let q = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let here = m.ee_pose_world(Side::Left, &q);
+        // A reachable nudge so the step advances, flagged as previously held.
+        let near = position_jog([here[0] + 0.02, here[1], here[2], here[3], here[4], here[5]]);
+        let adv = advance_jog(&arm(q, Some(near), true), Side::Left, &m, caps());
+        assert!(!adv.blocked);
+        assert!(
+            matches!(adv.event, Some(JogEvent::Moving { .. })),
+            "leaving the boundary announces movement"
+        );
+    }
+
+    // Advance until the jog first reports the boundary, applying each result to `a`
+    // like [`apply_jog`] does. Returns the entering advance; panics if it never blocks.
+    fn loop_to_boundary(m: &ArmModels, a: &mut ArmTarget) -> JogAdvance {
+        for _ in 0..5000 {
+            let adv = advance_jog(a, Side::Left, m, caps());
+            a.joints = adv.joints;
+            a.jog = adv.jog;
+            a.jog_blocked = adv.blocked;
+            if adv.blocked {
+                return adv;
+            }
+            assert!(
+                a.jog.is_some(),
+                "the jog retired before reaching the boundary"
+            );
+        }
+        panic!("jog never reached the boundary within 5000 ticks");
+    }
+
+    #[test]
+    fn disconnect_disarms_sides_and_restores_governor_default_on() {
+        // Launched with avoidance on; operator turned it off with both sides armed.
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25);
+        s.collision_enabled = false;
+        s.enabled[Side::Left] = true;
+        s.enabled[Side::Right] = true;
+        reset_on_disconnect(&mut s);
+        assert!(
+            !s.enabled[Side::Left] && !s.enabled[Side::Right],
+            "disconnect must drop the deadman for both sides"
+        );
+        assert!(
+            s.collision_enabled,
+            "disconnect must restore the launch governor default (on)"
+        );
+    }
+
+    #[test]
+    fn disconnect_restores_governor_default_off_when_launched_ungoverned() {
+        // Launched deliberately ungoverned; operator turned avoidance on.
+        let mut s = UiState::new(false, 0.005, 0.02, 0.25);
+        s.collision_enabled = true;
+        reset_on_disconnect(&mut s);
+        assert!(
+            !s.collision_enabled,
+            "disconnect must restore the launch default (off), not force on"
+        );
+    }
+}
