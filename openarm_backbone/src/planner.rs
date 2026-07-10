@@ -408,9 +408,12 @@ impl Planner {
                 prev_sample_at,
                 ..
             } => {
+                // Measured dt keeps the feedback law honest under tick jitter
+                // (each step is velocity-scaled by the same dt), clamped so a
+                // scheduling stall cannot turn one tick into a giant step.
                 let dt = now
                     .duration_since(*prev_sample_at)
-                    .max(self.cfg.cycle_period / 2);
+                    .clamp(self.cfg.cycle_period / 2, self.cfg.cycle_period * 4);
                 *prev_sample_at = now;
                 let step = servo.step(
                     &mut self.model,
