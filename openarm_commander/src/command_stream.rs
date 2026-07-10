@@ -1,11 +1,11 @@
 // Always-on command publisher. Reads the owner's per-tick `CommandFrame` and streams
 // each enabled side's arm setpoint on `arm_joint_commands` and gripper opening on
 // `gripper_commands`, plus the operator's governor controls on `governor_control`. Both
-// are tagged with their id (arm_id / gripper_id) and go to the hub, which governs each
+// are tagged with their id (arm_id / gripper_id) and go to the backbone, which governs each
 // and re-streams the governed value the followers track. A side with `None` in the
-// frame has its deadman off, so nothing is published and the hub's stream timeout
+// frame has its deadman off, so nothing is published and the backbone's stream timeout
 // lapses and it holds. Re-publishing every tick (even an unchanged frame) keeps the
-// hub's stream watchdog alive between operator inputs.
+// backbone's stream watchdog alive between operator inputs.
 //
 // The owner is the sole writer of state and the sole jog integrator; these tasks only
 // forward the latest frame. Each side+stream runs its own publish task on its own
@@ -45,7 +45,7 @@ pub async fn run(
         }
     };
     // One shared gripper publisher, cloned per side like the arm publisher; each side's
-    // stream tags its own gripper_id, so the hub tells them apart.
+    // stream tags its own gripper_id, so the backbone tells them apart.
     let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
@@ -100,7 +100,7 @@ pub async fn run(
             },
         ));
         // Gripper: stream the opening (m) while enabled, tagged with gripper_id for the
-        // hub to demux (mirror of the arm stream above).
+        // backbone to demux (mirror of the arm stream above).
         let gripper_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub.clone(),

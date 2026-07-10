@@ -1,4 +1,4 @@
-//! A value held once per arm. The hub works on the two arms together almost
+//! A value held once per arm. The backbone works on the two arms together almost
 //! everywhere (governing, streaming, the per-tick math), so a named `left`/`right`
 //! pair reads far better than `[_; 2]` indexed by 0/1 or a bare tuple.
 

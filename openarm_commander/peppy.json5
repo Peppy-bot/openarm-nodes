@@ -1,6 +1,6 @@
 // openarm_commander: operator entry point. Serves a browser-based
 // control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that streams
-// operator arm and gripper setpoints to the hub (which governs and re-streams
+// operator arm and gripper setpoints to the backbone (which governs and re-streams
 // them), jogs the arm in joint or Cartesian (world-frame IK) space, and fires
 // move_arm_joints / move_arm / move_gripper goals at openarm_backbone.
 {
@@ -10,7 +10,7 @@
     tag: "v1",
     depends_on: {
       nodes: [
-        // The hub; the commander fires its move_arm_joints action (the "Send"
+        // The backbone; the commander fires its move_arm_joints action (the "Send"
         // button). Bound to the backbone instance in the launcher.
         {
           name: "openarm_backbone",
@@ -29,7 +29,7 @@
           link_id: "arm_states",
           from_any: true
         },
-        // Live nearest-pair self-collision distance + links from the hub, for the
+        // Live nearest-pair self-collision distance + links from the backbone, for the
         // proximity readout. Wildcard + optional like the state streams.
         {
           name: "openarm_collision_status",
@@ -39,7 +39,7 @@
         },
         // Measured gripper opening of both grippers, for the live aperture
         // readout. Wildcard (`from_any`) + told apart by gripper_id, like
-        // arm_states; the grippers stream this to the hub and the panel alike.
+        // arm_states; the grippers stream this to the backbone and the panel alike.
         {
           name: "openarm_gripper_states",
           tag: "v1",
@@ -50,10 +50,10 @@
     }
   },
   interfaces: {
-    // Streams operator setpoints to the hub: arm targets on arm_joint_commands and
+    // Streams operator setpoints to the backbone: arm targets on arm_joint_commands and
     // gripper openings on gripper_commands, both told apart by id. Producing these
     // is what lets the panel drive an enabled arm/gripper continuously instead of
-    // one move at a time; the hub governs each and re-streams the governed value,
+    // one move at a time; the backbone governs each and re-streams the governed value,
     // so a follower clamps, rate-limits, and times out on its side.
     conforms_to: [
       {
@@ -64,16 +64,16 @@
         name: "openarm_gripper_commands",
         tag: "v1"
       },
-      // Runtime on/off for the hub's self-collision governor, driven by the UI
+      // Runtime on/off for the backbone's self-collision governor, driven by the UI
       // checkbox and re-published periodically (lossy QoS) so a dropped toggle
-      // cannot strand the hub.
+      // cannot strand the backbone.
       {
         name: "openarm_governor_control",
         tag: "v1"
       }
     ],
     actions: {
-      // Goals fired by the operator land on the hub, which runs the move itself
+      // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.
       consumes: [
         {
@@ -81,7 +81,7 @@
           name: "move_arm_joints"
         },
         // Cartesian point-to-point: Execute-pose in the panel's Actions mode fires
-        // the hub's planned straight-line move rather than jogging there.
+        // the backbone's planned straight-line move rather than jogging there.
         {
           link_id: "backbone",
           name: "move_arm"
@@ -125,7 +125,7 @@
       // Robot generation ("v1" or "v2"): picks the panel joint + gripper ranges
       // (URDF limits + jaw width), so the launcher must be explicit.
       hardware_version: "string",
-      // Operator's launch end-effector speed cap (m/s), streamed live to the hub on
+      // Operator's launch end-effector speed cap (m/s), streamed live to the backbone on
       // governor_control and retunable from the UI. Require > 0. The sim launchers
       // set a permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",

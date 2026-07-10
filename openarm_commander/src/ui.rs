@@ -28,8 +28,8 @@ use crate::pose::{ArmModels, JogMode, Pose};
 use crate::state::{ARM_DOF, ArmTarget, Disposition, GripperTarget, Proximity, Side, UiState};
 
 const DEFAULT_PORT: u16 = 8765;
-// The hub publishes the proximity readout at ~20 Hz; treat it as stale after this
-// long with no update (a dead hub) so the panel falls back to n/a instead of
+// The backbone publishes the proximity readout at ~20 Hz; treat it as stale after this
+// long with no update (a dead backbone) so the panel falls back to n/a instead of
 // latching the last distance.
 const PROXIMITY_STALE_AFTER: Duration = Duration::from_millis(500);
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -65,7 +65,7 @@ static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
 
 /// Resolve the panel's clamp/display ranges from the generation's description:
 /// arm joints via its `joint_limits` (URDF limits with the elbow held off its
-/// singularity floor, matching the hub's clamp) and the gripper from the jaw
+/// singularity floor, matching the backbone's clamp) and the gripper from the jaw
 /// width. Must run before the UI serves.
 pub fn init_limits(version: HardwareVersion) {
     assert!(
@@ -182,7 +182,7 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
 }
 
 // A governor band the UI may stream: all finite and positive, with d_stop below
-// d_safe. The hub validates again before applying.
+// d_safe. The backbone validates again before applying.
 pub(crate) fn valid_governor_band(d_stop: f64, d_safe: f64, max_ee_velocity_m_s: f64) -> bool {
     [d_stop, d_safe, max_ee_velocity_m_s]
         .iter()
@@ -208,7 +208,7 @@ pub(crate) fn sane_duration(duration_s: f64) -> f64 {
 }
 
 // A discrete move's duration: the operator's request, floored so the straight-line
-// EE speed never exceeds the governor cap (time >= distance / cap). The hub floors
+// EE speed never exceeds the governor cap (time >= distance / cap). The backbone floors
 // again at its joint-velocity limit, so this only ever slows a move, never speeds it.
 pub(crate) fn ee_speed_floored(user_s: f64, ee_distance_m: f64, max_ee_velocity_m_s: f64) -> f64 {
     (ee_distance_m / max_ee_velocity_m_s).max(user_s)
@@ -235,12 +235,12 @@ struct Snapshot {
     // Streaming deadman per side, shared by that side's arm and gripper.
     left_enabled: bool,
     right_enabled: bool,
-    // Operator's self-collision governor controls (streamed to the hub).
+    // Operator's self-collision governor controls (streamed to the backbone).
     collision_enabled: bool,
     d_stop: f64,
     d_safe: f64,
     max_ee_velocity_m_s: f64,
-    // Live nearest-pair proximity from the hub (null until the first report).
+    // Live nearest-pair proximity from the backbone (null until the first report).
     proximity: Option<ProximityView>,
     status: String,
 }
@@ -317,7 +317,7 @@ impl Snapshot {
     }
 }
 
-/// The proximity readout if it is still fresh, else `None` (the hub stopped
+/// The proximity readout if it is still fresh, else `None` (the backbone stopped
 /// reporting), so the UI falls back to n/a instead of latching a stale distance.
 fn live_proximity(s: &UiState, now: Instant) -> Option<&Proximity> {
     s.proximity
@@ -386,7 +386,7 @@ pub(crate) enum Command {
         arm_angle: f64,
         mode: JogModeWire,
     },
-    // Fire the hub's planned Cartesian move_arm to a composed world-frame pose
+    // Fire the backbone's planned Cartesian move_arm to a composed world-frame pose
     // (Actions-mode Execute): a governed straight-line move, not a jog. Refused
     // while the side streams, like fire_arm.
     FireArmPose {
@@ -401,18 +401,18 @@ pub(crate) enum Command {
         side: SideWire,
         position: f64,
     },
-    // Fire the hub's discrete move_gripper (Actions-mode gripper Execute): a governed
+    // Fire the backbone's discrete move_gripper (Actions-mode gripper Execute): a governed
     // open/close to `position` (m), not the streamed opening. Refused while the side
     // streams or a prior gripper move is in flight.
     FireGripper {
         side: SideWire,
         position: f64,
     },
-    // Set the hub's self-collision-avoidance toggle (streamed continuously).
+    // Set the backbone's self-collision-avoidance toggle (streamed continuously).
     SetCollision {
         enabled: bool,
     },
-    // Retune the hub's governor band and stream speed cap (streamed continuously).
+    // Retune the backbone's governor band and stream speed cap (streamed continuously).
     SetGovernorParams {
         d_stop: f64,
         d_safe: f64,

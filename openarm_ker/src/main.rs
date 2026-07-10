@@ -3,7 +3,7 @@
 //! reader thread speaks the M5Stack's framed protocol (USB vendor mode or
 //! serial CDC), maps encoder channels to calibrated joint radians and trigger
 //! openings, and the publish tasks stream them like the commander does:
-//! arms on `arm_joint_commands` (the hub owns governing and safety), grippers
+//! arms on `arm_joint_commands` (the backbone owns governing and safety), grippers
 //! on their pairing slots. The thumb button is the engage deadman; while
 //! disengaged, stale, or disconnected the node emits nothing and every
 //! consumer's stream timeout holds the robot.

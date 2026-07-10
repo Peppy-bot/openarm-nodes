@@ -1,4 +1,4 @@
-//! Shared primitives for the bimanual hub: arm DOF, the joint vector, and the
+//! Shared primitives for the bimanual backbone: arm DOF, the joint vector, and the
 //! arm side identifier.
 
 /// Degrees of freedom of one arm.
@@ -9,7 +9,7 @@ pub type JointVec = [f64; ARM_DOF];
 
 /// Which arm a message addresses. The wire encodes it as `arm_id` (0 = left,
 /// 1 = right); [`Side::from_arm_id`] parses that at the boundary so the rest of
-/// the hub carries a side it cannot get wrong, never a raw `u8`.
+/// the backbone carries a side it cannot get wrong, never a raw `u8`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Left,

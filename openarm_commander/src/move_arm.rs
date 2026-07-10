@@ -1,5 +1,5 @@
 // Spawned per fire_arm_pose command (the panel's Execute-pose in Actions mode). Fires
-// the hub's Cartesian move_arm (planned straight-line pose move), then reports the
+// the backbone's Cartesian move_arm (planned straight-line pose move), then reports the
 // outcome to the owner. Each goal is its own task; cancel-aware so a shutdown can't
 // wedge an in-flight goal, and preempt-aware so a new move can cancel it.
 
@@ -63,7 +63,7 @@ async fn run(
     duration_s: f64,
     grace: bool,
 ) {
-    // A queued preempt fires only after the hub releases its single-flight gate.
+    // A queued preempt fires only after the backbone releases its single-flight gate.
     if grace {
         tokio::select! {
             _ = token.cancelled() => return finalize(&feedback, side, false, "shutting down; move dropped").await,

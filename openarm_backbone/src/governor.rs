@@ -170,7 +170,7 @@ pub struct Governor {
 impl Governor {
     /// Build the bimanual model (with the tight torso proxy) and validate the band.
     /// Fails loudly on a bad URDF / mesh dir / base link or an invalid band, so a
-    /// misconfigured hub aborts at bringup instead of running ungoverned.
+    /// misconfigured backbone aborts at bringup instead of running ungoverned.
     #[allow(clippy::too_many_arguments)] // distinct model inputs + band + speed bound + toggle
     pub fn build(
         urdf: &str,

@@ -1,4 +1,4 @@
-//! Gripper move-action admission: the `move_gripper` handler the hub exposes.
+//! Gripper move-action admission: the `move_gripper` handler the backbone exposes.
 //! Mirrors the arm move admission exactly: validate the goal (gripper_id,
 //! finiteness, jaw travel), claim the side's single-flight slot, and hand the
 //! accepted goal to the coordinator over its gripper goal channel. The

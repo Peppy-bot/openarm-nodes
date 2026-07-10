@@ -41,10 +41,10 @@ fn main() -> Result<()> {
             .unwrap_or_else(|e| panic!("hardware_version: {e}"));
         ui::init_limits(version);
         // Arm models for the panel's Cartesian pose fields (pose <-> joints), built
-        // from the same generation the ranges came from so FK/IK match the hub's chain.
+        // from the same generation the ranges came from so FK/IK match the backbone's chain.
         let models = pose::ArmModels::from_version(version);
         // The operator streams the governor controls live; their launch defaults are
-        // node parameters, kept in step with the hub's, so the real arm starts
+        // node parameters, kept in step with the backbone's, so the real arm starts
         // conservative (tight band, slow cap) and the sim launchers start fast.
         assert!(
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
 
         // The always-on publisher: streams each enabled side's governed setpoint from
         // the owner's command frame at command_rate_hz. A disabled side has None in the
-        // frame, so nothing is published and the hub's watchdog holds it.
+        // frame, so nothing is published and the backbone's watchdog holds it.
         tokio::spawn(command_stream::run(
             node_runner.clone(),
             params.command_rate_hz,

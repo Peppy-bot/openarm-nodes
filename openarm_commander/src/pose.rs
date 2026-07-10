@@ -2,9 +2,9 @@
 //! joint vector stays the single source of truth: the UI reads a pose off forward
 //! kinematics and writes joints back through damped-least-squares steps, so a pose
 //! is only ever an input/display lens, never stored state. Exact point-to-point
-//! pose moves are the hub's move_arm action, not this module.
+//! pose moves are the backbone's move_arm action, not this module.
 //!
-//! Poses are in the world frame (matching the hub's move_arm action) and
+//! Poses are in the world frame (matching the backbone's move_arm action) and
 //! orientation is exposed as intrinsic-XYZ roll/pitch/yaw via nalgebra's
 //! `euler_angles` round-trip for display; every orientation computation runs on
 //! quaternions, so no control path ever interpolates euler components.
@@ -21,7 +21,7 @@ use crate::state::{ARM_DOF, Side};
 /// radians): the form the panel edits and displays.
 pub type Pose = [f64; 6];
 
-/// A discrete move counts as "arrived" within this position / angle slack. The hub
+/// A discrete move counts as "arrived" within this position / angle slack. The backbone
 /// reports success once its setpoints finish streaming, which a governor stop satisfies
 /// without the arm following, so the move handlers re-check the measured final pose
 /// against these. One angle slack serves both joint error and orientation error.
@@ -49,10 +49,10 @@ pub struct ArmModels {
 
 impl ArmModels {
     /// Build both arm models from the generation's embedded description, mirroring
-    /// the hub's `arm_model` (same URDF, same elbow singularity floor) so the panel
-    /// solves against the identical chain the hub governs. Joint velocity limits
+    /// the backbone's `arm_model` (same URDF, same elbow singularity floor) so the panel
+    /// solves against the identical chain the backbone governs. Joint velocity limits
     /// come from the same URDF, so a jog step never demands more per tick than the
-    /// hub's chase can follow.
+    /// backbone's chase can follow.
     pub fn from_version(version: HardwareVersion) -> Self {
         let mut left = build_arm(version, Side::Left);
         let mut right = build_arm(version, Side::Right);
@@ -88,7 +88,7 @@ impl ArmModels {
     /// metres, orientation as a unit quaternion), seeded from `seed` so the branch
     /// nearest the current configuration is chosen. `None` when the pose is
     /// unreachable or admits no in-limit solution. Used to preview an Actions-mode
-    /// pose move as joints; the hub re-solves and plans the move itself.
+    /// pose move as joints; the backbone re-solves and plans the move itself.
     pub fn solve_ik(
         &self,
         side: Side,
@@ -186,7 +186,7 @@ impl ArmModels {
         let mut dq = damped_pseudo_inverse(&jacobian, DLS_LAMBDA) * twist;
         // Velocity-consistent clamping (not accept/reject): scale the whole step
         // down so every joint stays inside its velocity budget for this tick,
-        // preserving the step direction. The hub chases under the same limits, so
+        // preserving the step direction. The backbone chases under the same limits, so
         // a clamped step is always followable within one tick.
         let budget = self.velocity_limits(side);
         let scale = (0..ARM_DOF)
@@ -259,7 +259,7 @@ enum RateTask {
 }
 
 /// Angular jog rate (rad/s). The linear rate is the operator's live EE speed cap
-/// (one knob governs both the jog and the hub's enforcement); rotation has no
+/// (one knob governs both the jog and the backbone's enforcement); rotation has no
 /// operator knob, so it jogs at this fixed, comfortable rate.
 const JOG_ROT_RATE_RAD_S: f64 = 1.5;
 /// Arm-angle (elbow swivel) jog rate (rad/s); fixed like the rotation rate, since the
@@ -311,7 +311,7 @@ pub enum JogMode {
 /// arming either clears the other, since the spaces must not fight.
 #[derive(Clone, Copy, Debug)]
 pub enum Jog {
-    /// Joint sliders: stream these joints straight to the hub, which governs the
+    /// Joint sliders: stream these joints straight to the backbone, which governs the
     /// ramp under its joint-velocity cap. Reconciles in one step, so the panel's
     /// slider never lags the operator's drag (no node-side interpolation).
     Joints([f64; ARM_DOF]),
@@ -435,7 +435,7 @@ fn orientation_step(current: &Pose, desired: &Pose, cap_rad: f64) -> Option<Vect
 
 /// Build one arm model from the generation's embedded description, with the elbow
 /// singularity floor applied (mirrors `openarm_backbone`'s `arm_model`). A bad base
-/// link aborts bringup, matching how the hub fails.
+/// link aborts bringup, matching how the backbone fails.
 fn build_arm(version: HardwareVersion, side: Side) -> Arm {
     let urdf = version.urdf();
     let base = base_link(urdf, side);
@@ -463,7 +463,7 @@ fn base_link(urdf: &str, side: Side) -> String {
 }
 
 /// Per-joint velocity limits (rad/s) for `side`, j1..j7, from the bundled URDF:
-/// the same numbers the hub's chase enforces, so commander steps and hub follow
+/// the same numbers the backbone's chase enforces, so commander steps and backbone follow
 /// capability agree by construction.
 fn velocity_limits(urdf: &str, side: Side) -> [f64; ARM_DOF] {
     let robot = urdf_rs::read_from_string(urdf).expect("bundled URDF must parse");

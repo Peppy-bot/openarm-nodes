@@ -1,4 +1,4 @@
-// openarm_backbone: the bimanual coordination hub node. Consumes the operator
+// openarm_backbone: the bimanual coordination node. Consumes the operator
 // arm_joint_commands and gripper_commands streams; exposes the joint /
 // Cartesian / gripper move actions and executes them itself; conforms to
 // collision_status; and drives each arm and each gripper over its own pairing
@@ -16,7 +16,7 @@
           tag: "v1",
           link_id: "robot_init"
         },
-        // Operator joint setpoint stream, `from_any`: the hub binds to whatever
+        // Operator joint setpoint stream, `from_any`: the backbone binds to whatever
         // commander is running and tells sides apart by arm_id.
         {
           name: "openarm_arm_joint_commands",
@@ -25,7 +25,7 @@
           from_any: true
         },
         // Operator gripper opening stream, `from_any`: the same commander streams
-        // the desired opening per side (gripper_id); the hub governs it (the finger
+        // the desired opening per side (gripper_id); the backbone governs it (the finger
         // opening barrier) and drives each gripper over its pairing slot below,
         // exactly as it does for the arm joint stream.
         {
@@ -34,7 +34,7 @@
           link_id: "commander_gripper",
           from_any: true
         },
-        // Runtime on/off for the governor. Wildcard + optional: the hub holds its
+        // Runtime on/off for the governor. Wildcard + optional: the backbone holds its
         // launch-time default until the first message.
         {
           name: "openarm_governor_control",
@@ -44,7 +44,7 @@
         }
       ],
       pairings: [
-        // The exclusive command loop with each arm: the hub plays the commander
+        // The exclusive command loop with each arm: the backbone plays the commander
         // role, streams the governed joint setpoint down each slot's
         // arm_setpoints, and reads that arm's measured state back on the slot's
         // arm_states (the governor's d_now and the trajectory anchor); the slot
@@ -65,12 +65,12 @@
           link_id: "right_arm_link",
           optional: true
         },
-        // The exclusive command loop with each gripper: the hub plays the
+        // The exclusive command loop with each gripper: the backbone plays the
         // commander role, streams the governed opening down each slot's
         // gripper_commands, and reads that gripper's measured aperture back on
         // the slot's gripper_states; the slot scopes both directions, so no
         // gripper_id demux and no other producer can pose as the fingers.
-        // Optional: the hub boots with either gripper unpaired (that side's
+        // Optional: the backbone boots with either gripper unpaired (that side's
         // governed openings go nowhere and no aperture arrives, so streaming
         // stays gated) and each pair is established at this instance's start
         // (launcher `pairings:`).
@@ -100,7 +100,7 @@
       }
     ],
     actions: {
-      // The hub's move actions, addressed by side id. The hub runs each move
+      // The backbone's move actions, addressed by side id. The backbone runs each move
       // itself (trajectory + governor + governed stream); progress is observed
       // on the state streams. Discrete goals that return a result, distinct
       // from the arm_joint_commands / gripper_commands streams.
@@ -275,7 +275,7 @@
       // Governor state at launch, before the first governor_control message.
       collision_governor_enabled: "bool",
       // Per-joint peak velocity (rad/s) sizing the quintic trajectories and the
-      // stream chase. OpenArm V1.0 URDF joint velocity limits; the hub is the sole
+      // stream chase. OpenArm V1.0 URDF joint velocity limits; the backbone is the sole
       // owner of motion sizing.
       max_joint_velocity_rad_s_1: { $type: "f64", $default: 16.754666 },
       max_joint_velocity_rad_s_2: { $type: "f64", $default: 16.754666 },
@@ -289,13 +289,13 @@
       // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
-      // How long (s) the hub keeps following an operator stream after its last
+      // How long (s) the backbone keeps following an operator stream after its last
       // message before releasing the lock and holding.
       stream_timeout_s: "f64",
-      // Completion tolerance (m) for hub-executed move_gripper goals: the goal
+      // Completion tolerance (m) for backbone-executed move_gripper goals: the goal
       // completes when the measured opening is within this of the target.
       gripper_position_tolerance: { $type: "f64", $default: 0.001 },
-      // Deadline (s) for hub-executed move_gripper goals; a goal the governed
+      // Deadline (s) for backbone-executed move_gripper goals; a goal the governed
       // opening cannot reach (a collision clamp) fails here.
       gripper_motion_timeout_s: { $type: "f64", $default: 10.0 },
     }

@@ -3,7 +3,7 @@
 // KER's encoder frames from its M5Stack CoreS3 over USB vendor mode (or
 // serial CDC), maps the channels to per-side joint radians and the triggers
 // to gripper pad-gap meters, and streams both to the stack exactly like
-// openarm_commander: arm setpoints on arm_joint_commands (the hub
+// openarm_commander: arm setpoints on arm_joint_commands (the backbone
 // governs them into per-arm setpoints), gripper openings on the pairing
 // slots. The KER's thumb button is the engage deadman: while disengaged the
 // node emits nothing and every consumer's stream timeout holds the robot.
@@ -17,8 +17,8 @@
     tag: "v1",
   },
   interfaces: {
-    // Streams both arms' leader setpoints and both trigger openings to the hub,
-    // told apart by id; the hub governs everything and drives the followers over
+    // Streams both arms' leader setpoints and both trigger openings to the backbone,
+    // told apart by id; the backbone governs everything and drives the followers over
     // its own pairings. governor_control stays owned by the openarm_commander
     // panel: this node produces motion, not governor tuning.
     conforms_to: [

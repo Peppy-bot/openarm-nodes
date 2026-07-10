@@ -93,7 +93,7 @@ pub struct ArmTarget {
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
     // What the operator is actively driving this side toward: a joint target (streamed
-    // straight, the hub governs the ramp) or a Cartesian jog (stepped toward a world
+    // straight, the backbone governs the ramp) or a Cartesian jog (stepped toward a world
     // pose one capped increment per tick, held at the reach boundary). None when the
     // side is idle. Arming either space clears the other, and it clears on
     // enable/disable, since the two spaces must not fight.
@@ -146,28 +146,28 @@ pub struct UiState {
     // pose, so enabling never steps the robot. The arm and gripper share the
     // deadman because the operator enables a whole side at once.
     pub enabled: BySide<bool>,
-    // Operator controls for the hub's self-collision governor, streamed to the
-    // backbone on governor_control; the hub holds its own defaults until the first
+    // Operator controls for the backbone's self-collision governor, streamed to the
+    // backbone on governor_control; the backbone holds its own defaults until the first
     // message. All four launch defaults are node parameters, kept in step with the
-    // hub's, so a deployment tunes startup from one place; the operator then drives
+    // backbone's, so a deployment tunes startup from one place; the operator then drives
     // them live from the UI.
     pub collision_enabled: bool,
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
     // The launch governor-enable state, restored on operator disconnect so an
-    // operator who turned avoidance off cannot leave the hub latched ungoverned,
+    // operator who turned avoidance off cannot leave the backbone latched ungoverned,
     // while a deployment that launched ungoverned is not force-armed either.
     pub collision_enabled_default: bool,
-    // Latest nearest-pair self-collision proximity from the hub (it carries its own
+    // Latest nearest-pair self-collision proximity from the backbone (it carries its own
     // receipt time). `None` until the first message; treated as stale (and rendered
     // n/a) once that receipt time ages past the readout staleness window, so a dead
-    // hub does not leave the last distance latched on the panel.
+    // backbone does not leave the last distance latched on the panel.
     pub proximity: Option<Proximity>,
     pub status: String,
 }
 
-/// The hub's reported nearest checked pair: signed surface distance (m, positive
+/// The backbone's reported nearest checked pair: signed surface distance (m, positive
 /// is clearance), the two link names, the governor's disposition of the commanded
 /// motion, and the local time it was received (for the readout's staleness check).
 #[derive(Clone, Debug)]

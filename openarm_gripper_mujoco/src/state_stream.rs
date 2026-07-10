@@ -1,13 +1,13 @@
 // Consume the sim's measured gripper opening (gripper_states) for this
-// gripper and relay it to the paired hub on the pairing's
-// `gripper_states` topic (a legal no-op while unpaired), so the hub
+// gripper and relay it to the paired backbone on the pairing's
+// `gripper_states` topic (a legal no-op while unpaired), so the backbone
 // sees this gripper's aperture without any gripper_id demux.
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::state_gripper_states;
-use peppygen::pairings::hub;
+use peppygen::pairings::backbone;
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 
@@ -21,7 +21,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
             return;
         }
     };
-    let peer_pub = match hub::gripper_states::declare_publisher(&runner).await {
+    let peer_pub = match backbone::gripper_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "declare paired gripper_states publisher");
@@ -44,8 +44,8 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
         if msg.gripper_id != gripper_id.as_u8() || !msg.position.is_finite() {
             continue;
         }
-        // Relay to the paired hub; silently dropped while unpaired.
-        match hub::gripper_states::build_message(msg.position) {
+        // Relay to the paired backbone; silently dropped while unpaired.
+        match backbone::gripper_states::build_message(msg.position) {
             Ok(payload) => {
                 if let Err(e) = peer_pub.publish(payload).await {
                     error!(error = %e, "paired gripper_states publish");

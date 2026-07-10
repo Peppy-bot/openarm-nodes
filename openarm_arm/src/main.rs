@@ -1,10 +1,10 @@
 //! One arm of the openarm robot (real hardware); instantiate twice, one per
-//! side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
+//! side, with a distinct `arm_id`. A follower of the bimanual backbone: it owns the
 //! hardware control loop (gravity/Coriolis/friction feedforward from the
-//! in-process srs_model, plus MIT control) and tracks the hub's governed
+//! in-process srs_model, plus MIT control) and tracks the backbone's governed
 //! setpoint over the arm_link pairing, reporting measured state back on the
 //! same pairing and on the always-on broadcast `arm_states` stream. The
-//! hub (openarm_backbone) owns all trajectory generation, stream following, and
+//! backbone (openarm_backbone) owns all trajectory generation, stream following, and
 //! self-collision governing, so this node carries no motion logic of its own; on
 //! shutdown it disables the motors and lets the arm go limp.
 
@@ -219,7 +219,7 @@ fn main() -> Result<()> {
 
         // Stream plumbing: the listener keeps the latest governed setpoint for the
         // control loop, and the publisher emits the measured joint state at its
-        // own rate (the hub consumes it).
+        // own rate (the backbone consumes it).
         let (governed_tx, governed_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
         let listener = tokio::spawn(stream::run_governed_setpoint_listener(
