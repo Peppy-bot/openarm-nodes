@@ -25,7 +25,10 @@ use tracing::{error, info};
 
 use crate::chase::{chase_step, clamp_to_limits};
 use crate::streams::JointCommand;
-use crate::trajectory::{CartesianTrajectory, JointTrajectory, plan_cartesian_duration};
+use crate::trajectory::{
+    ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory,
+    plan_cartesian,
+};
 use crate::{ARM_DOF, JointVec, Side};
 
 /// Slack the runtime per-tick Cartesian velocity check allows over the planned
@@ -85,12 +88,38 @@ struct JointMove {
 }
 
 struct CartesianMove {
-    traj: CartesianTrajectory,
+    path: MovePath,
     ctx: move_arm::GoalContext,
-    seed: JointVec,
+    // Last commanded joint target: held on cancel/failure so the arm never snaps.
     prev_q_des: JointVec,
-    prev_sample_at: Instant,
     _busy: BusyGuard,
+}
+
+/// How an admitted move_arm goal executes, per its [`CartesianPlan`]: track the
+/// straight line (solving IK each tick), or run the planned joint-space
+/// reconfiguration when no continuous joint path tracks the line.
+enum MovePath {
+    Line {
+        traj: CartesianTrajectory,
+        seed: JointVec,
+        prev_sample_at: Instant,
+        // Blend parameter at the previous solve: each tick's elbow step budget is
+        // the blend progressed since, so the executed elbow travel matches the
+        // plan's.
+        prev_blend: f64,
+    },
+    Reconfigure {
+        traj: JointTrajectory,
+    },
+}
+
+impl MovePath {
+    fn motion_start(&self) -> Instant {
+        match self {
+            Self::Line { traj, .. } => traj.motion_start,
+            Self::Reconfigure { traj } => traj.motion_start,
+        }
+    }
 }
 
 /// One mode's advance result: the joint target this tick, the next mode (the
@@ -261,16 +290,17 @@ impl Planner {
         }
     }
 
-    /// One Cartesian tick: sample the pose, solve IK (seeded), and complete on
-    /// cancel, IK failure, a velocity-guard trip, or normal completion. Any
-    /// terminal drops `m` (and with it the busy guard), releasing the slot.
+    /// One Cartesian tick: advance the move's path (line-tracking IK, or the
+    /// planned joint-space reconfiguration) and complete on cancel, IK failure, a
+    /// velocity-guard trip, or normal completion. Any terminal drops `m` (and with
+    /// it the busy guard), releasing the slot.
     async fn advance_cartesian(
         &mut self,
         mut m: CartesianMove,
         measured_q: JointVec,
         now: Instant,
     ) -> Advance {
-        let elapsed = now.duration_since(m.traj.motion_start).as_secs_f64();
+        let elapsed = now.duration_since(m.path.motion_start()).as_secs_f64();
         if m.ctx.is_cancelled() {
             self.finish_cartesian(&m.ctx, measured_q, false, "goal cancelled", elapsed, true)
                 .await;
@@ -280,72 +310,88 @@ impl Planner {
                 is_follow: false,
             };
         }
-        let base_target = self.model.base_pose(&m.traj.sample(now));
-        let Some(sol) = self
-            .model
-            .solve_ik(&base_target, ArmAnglePolicy::FromSeed, &m.seed)
-        else {
-            self.finish_cartesian(
-                &m.ctx,
-                measured_q,
-                false,
-                "IK failed mid-trajectory (unreachable / singular)",
-                elapsed,
-                false,
-            )
-            .await;
-            return Advance {
-                target: m.prev_q_des,
-                next_mode: Mode::Follow,
-                is_follow: false,
-            };
+        let (q_des, complete) = match &mut m.path {
+            MovePath::Line {
+                traj,
+                seed,
+                prev_sample_at,
+                prev_blend,
+            } => {
+                let blend = traj.blend(now);
+                let base_target = self.model.base_pose(&traj.sample(now));
+                // Elbow steering under the same per-blend budget the plan was
+                // sized with, so the executed arm-angle path tracks the planned one.
+                let policy = ArmAnglePolicy::MaxManipulability {
+                    max_step_rad: ARM_ANGLE_STEP_PER_BLEND_RAD * (blend - *prev_blend),
+                };
+                let Some(sol) = self.model.solve_ik(&base_target, policy, seed) else {
+                    self.finish_cartesian(
+                        &m.ctx,
+                        measured_q,
+                        false,
+                        "IK failed mid-trajectory (unreachable / singular)",
+                        elapsed,
+                        false,
+                    )
+                    .await;
+                    return Advance {
+                        target: m.prev_q_des,
+                        next_mode: Mode::Follow,
+                        is_follow: false,
+                    };
+                };
+                let dt = now
+                    .duration_since(*prev_sample_at)
+                    .as_secs_f64()
+                    .max(self.cfg.cycle_period.as_secs_f64() * 0.5);
+                if exceeds_velocity_limits(
+                    &sol.q,
+                    &m.prev_q_des,
+                    &self.cfg.max_joint_velocity_rad_s,
+                    dt,
+                ) {
+                    self.finish_cartesian(
+                        &m.ctx,
+                        measured_q,
+                        false,
+                        "joint velocity limit exceeded near singularity",
+                        elapsed,
+                        false,
+                    )
+                    .await;
+                    return Advance {
+                        target: m.prev_q_des,
+                        next_mode: Mode::Follow,
+                        is_follow: false,
+                    };
+                }
+                *seed = sol.q;
+                *prev_sample_at = now;
+                *prev_blend = blend;
+                (sol.q, traj.is_complete(now))
+            }
+            // The planned reconfiguration: a quintic in joint space, sized to the
+            // velocity limits analytically, so no per-tick IK or velocity guard.
+            MovePath::Reconfigure { traj } => (traj.sample(now), traj.is_complete(now)),
         };
-        let dt = now
-            .duration_since(m.prev_sample_at)
-            .as_secs_f64()
-            .max(self.cfg.cycle_period.as_secs_f64() * 0.5);
-        if exceeds_velocity_limits(
-            &sol.q,
-            &m.prev_q_des,
-            &self.cfg.max_joint_velocity_rad_s,
-            dt,
-        ) {
-            self.finish_cartesian(
-                &m.ctx,
-                measured_q,
-                false,
-                "joint velocity limit exceeded near singularity",
-                elapsed,
-                false,
-            )
-            .await;
-            return Advance {
-                target: m.prev_q_des,
-                next_mode: Mode::Follow,
-                is_follow: false,
+        m.prev_q_des = q_des;
+        if complete {
+            let message = match &m.path {
+                MovePath::Line { .. } => "cartesian move complete",
+                MovePath::Reconfigure { .. } => {
+                    "cartesian move complete (joint-space reconfiguration)"
+                }
             };
-        }
-        m.prev_q_des = sol.q;
-        m.prev_sample_at = now;
-        m.seed = sol.q;
-        if m.traj.is_complete(now) {
-            self.finish_cartesian(
-                &m.ctx,
-                measured_q,
-                true,
-                "cartesian move complete",
-                elapsed,
-                false,
-            )
-            .await;
+            self.finish_cartesian(&m.ctx, measured_q, true, message, elapsed, false)
+                .await;
             Advance {
-                target: sol.q,
+                target: q_des,
                 next_mode: Mode::Follow,
                 is_follow: false,
             }
         } else {
             Advance {
-                target: sol.q,
+                target: q_des,
                 next_mode: Mode::CartesianMove(m),
                 is_follow: false,
             }
@@ -386,7 +432,7 @@ impl Planner {
             } => {
                 let ee_base = self.model.at(&self.setpoint).ee_pose();
                 let start_world = self.model.world_pose(&ee_base);
-                let plan = plan_cartesian_duration(
+                let plan = plan_cartesian(
                     &self.model,
                     &start_world,
                     &target,
@@ -394,12 +440,12 @@ impl Planner {
                     &self.cfg.max_joint_velocity_rad_s,
                     duration_s,
                 );
-                let Some(duration) = plan else {
+                let Some(plan) = plan else {
                     let (pos, quat) = world_pose_arrays(&start_world);
                     if let Err(e) = ctx
                         .complete(
                             false,
-                            "target path unreachable / no in-limit IK solution".into(),
+                            "goal pose unreachable / no in-limit IK solution".into(),
                             pos,
                             quat,
                             0.0,
@@ -411,16 +457,41 @@ impl Planner {
                     // `busy` drops here: the slot is released even on this early exit.
                     return Mode::Follow;
                 };
-                info!(
-                    "{}: move_arm start, duration={duration:.3}s",
-                    self.side.label()
-                );
+                let path = match plan {
+                    CartesianPlan::Line { duration_s } => {
+                        info!(
+                            "{}: move_arm start, duration={duration_s:.3}s",
+                            self.side.label()
+                        );
+                        MovePath::Line {
+                            traj: CartesianTrajectory::new(start_world, target, duration_s),
+                            seed: self.setpoint,
+                            prev_sample_at: now,
+                            prev_blend: 0.0,
+                        }
+                    }
+                    // No continuous joint path tracks the line: swing through
+                    // joint space to the goal solution instead (the EE leaves the
+                    // line, the quintic sizing bounds every joint's speed).
+                    CartesianPlan::Reconfigure { goal_q } => {
+                        let traj = JointTrajectory::new(
+                            self.setpoint,
+                            goal_q,
+                            self.cfg.max_joint_velocity_rad_s,
+                            duration_s,
+                        );
+                        info!(
+                            "{}: move_arm start (joint-space reconfiguration), duration={:.3}s",
+                            self.side.label(),
+                            traj.duration_secs()
+                        );
+                        MovePath::Reconfigure { traj }
+                    }
+                };
                 Mode::CartesianMove(CartesianMove {
-                    traj: CartesianTrajectory::new(start_world, target, duration),
+                    path,
                     ctx,
-                    seed: self.setpoint,
                     prev_q_des: self.setpoint,
-                    prev_sample_at: now,
                     _busy: busy,
                 })
             }
