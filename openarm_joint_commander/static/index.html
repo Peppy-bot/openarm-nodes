@@ -386,6 +386,9 @@ function build_gripper(side, label) {
       </div>
       <span class="target" id="${side}_gt">0.0000 m</span>
       <span class="fb" id="${side}_gf">---</span>
+    </div>
+    <div class="actions">
+      <button class="primary" id="${side}_g_btn" style="display:none" onclick="execute_gripper('${side}')">Execute · gripper</button>
     </div>`;
 }
 
@@ -605,6 +608,15 @@ function execute_arm(side) {
   }
 }
 
+// Fire the composed gripper opening as a discrete governed move_gripper (Actions
+// mode only; the streaming slider drives the gripper in Streaming mode).
+function execute_gripper(side) {
+  if (!ws || ws.readyState !== 1) return;
+  const position = parseFloat($(`${side}_g`).value);
+  if (!Number.isFinite(position)) return;
+  ws.send(JSON.stringify({cmd: 'fire_gripper', side, position}));
+}
+
 // Switch interaction mode. Actions fires discrete moves, which the server refuses
 // while a side streams, so entering actions drops both deadmen and seeds the controls
 // from the measured pose (a fresh canvas to compose from). The mode also gates whether
@@ -644,6 +656,11 @@ function seed_controls_from_measured(side) {
       render_dial(side, ax.i, dialTarget[side][ax.i], a.pose_feedback[ax.i]);
     }
   }
+  const g = latestSnap[`${side}_gripper`];
+  if (g && g.feedback != null) {
+    $(`${side}_g`).value = g.feedback;
+    $(`${side}_gt`).textContent = g.feedback.toFixed(4) + ' m';
+  }
 }
 
 // Set the arm card's primary button to its role for the current mode: the streaming
@@ -667,6 +684,7 @@ function refresh_mode_buttons(side) {
   $(`${side}_home_btn`).style.display = on ? '' : 'none';
   $(`${side}_ready_btn`).style.display = on ? '' : 'none';
   $(`${side}_dur_l`).style.display = on ? 'inline-flex' : 'none';
+  $(`${side}_g_btn`).style.display = on ? '' : 'none';
 }
 
 // Requested duration (s) for this arm's discrete moves; 0 = as fast as the EE-speed
@@ -752,13 +770,14 @@ function apply_snapshot(snap) {
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);
-    gb.textContent = on ? 'streaming' : 'idle';
-    gb.className = 'badge' + (on ? ' stream' : '');
+    gb.textContent = on ? 'streaming' : (g.in_flight ? 'in flight' : 'idle');
+    gb.className = 'badge' + (on ? ' stream' : (g.in_flight ? ' flight' : ''));
     const gs = $(`${side}_g`);
     if (gs.min != g.min) gs.min = g.min;
     if (gs.max != g.max) gs.max = g.max;
-    // While disabled the slider mirrors the measured opening so enabling never jumps.
-    if (!on && g.feedback != null) {
+    // Streaming: while disabled the slider mirrors the measured opening so enabling
+    // never jumps. Actions: the slider holds the composed value the Execute fires.
+    if (uiMode === 'streaming' && !on && g.feedback != null) {
       gs.value = g.feedback;
       $(`${side}_gt`).textContent = g.feedback.toFixed(4) + ' m';
     }

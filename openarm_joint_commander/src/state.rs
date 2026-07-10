@@ -93,6 +93,9 @@ pub struct GripperTarget {
     pub position: f64,
     // Measured gripper opening (m) from the gripper_states stream.
     pub last_feedback: Option<f64>,
+    // A discrete move_gripper (Actions mode) is in flight: refuses a second Execute
+    // and drives the gripper card's in-flight badge. Streaming mode never sets it.
+    pub in_flight: bool,
 }
 
 impl GripperTarget {
@@ -100,6 +103,7 @@ impl GripperTarget {
         Self {
             position: GRIPPER_CLOSED_M,
             last_feedback: None,
+            in_flight: false,
         }
     }
 }

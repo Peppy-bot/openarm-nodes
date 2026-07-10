@@ -5,6 +5,7 @@ mod gripper_states;
 mod joint_states;
 mod move_arm;
 mod move_arm_joints;
+mod move_gripper;
 mod pose;
 mod state;
 mod ui;

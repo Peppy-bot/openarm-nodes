@@ -25,7 +25,7 @@ use crate::pose::{ArmModels, JogMode, Pose};
 use crate::state::{
     ARM_DOF, ArmTarget, Disposition, GripperTarget, PoseJog, Proximity, SharedState, Side, UiState,
 };
-use crate::{move_arm, move_arm_joints};
+use crate::{move_arm, move_arm_joints, move_gripper};
 
 const DEFAULT_PORT: u16 = 8765;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
@@ -370,6 +370,43 @@ async fn handle_command(text: &str, app: &AppState) {
                 s.gripper_mut(side).position = position;
             }
         }
+        Command::FireGripper { side, position } => {
+            let side: Side = side.into();
+            if !position.is_finite() {
+                return;
+            }
+            let [lo, hi] = joint_limits().gripper;
+            let position = position.clamp(lo, hi);
+            {
+                let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
+                // The side must be disabled for a discrete move, and only one gripper
+                // goal may be in flight; refuse rather than preempt (moves are short).
+                if s.enabled(side) {
+                    s.set_status(format!(
+                        "{} gripper: disable before a discrete move",
+                        side.label()
+                    ));
+                    return;
+                }
+                if s.gripper(side).in_flight {
+                    s.set_status(format!(
+                        "{} gripper: previous move still finishing",
+                        side.label()
+                    ));
+                    return;
+                }
+                s.gripper_mut(side).in_flight = true;
+                s.gripper_mut(side).position = position;
+                s.set_status(format!("{} gripper: firing move_gripper", side.label()));
+            }
+            move_gripper::spawn(
+                app.runner.clone(),
+                app.state.clone(),
+                app.token.clone(),
+                side,
+                position,
+            );
+        }
         Command::SetCollision { enabled } => {
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             s.collision_enabled = enabled;
@@ -613,6 +650,8 @@ struct GripperView {
     feedback: Option<f64>,
     min: f64,
     max: f64,
+    // A discrete move_gripper is in flight (drives the gripper card's badge).
+    in_flight: bool,
 }
 
 impl Snapshot {
@@ -666,6 +705,7 @@ fn gripper_view(g: &GripperTarget) -> GripperView {
         feedback: g.last_feedback,
         min,
         max,
+        in_flight: g.in_flight,
     }
 }
 
@@ -715,6 +755,13 @@ enum Command {
     },
     // Update an enabled gripper's streamed opening. Ignored while disabled.
     SetGripperTarget {
+        side: SideWire,
+        position: f64,
+    },
+    // Fire the hub's discrete move_gripper (Actions-mode gripper Execute): a governed
+    // open/close to `position` (m), not the streamed opening. Refused while the side
+    // streams or a prior gripper move is in flight.
+    FireGripper {
         side: SideWire,
         position: f64,
     },

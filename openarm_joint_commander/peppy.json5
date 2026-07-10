@@ -85,6 +85,12 @@
         {
           link_id: "backbone",
           name: "move_arm"
+        },
+        // Gripper open/close as a discrete governed action (Actions mode), rather
+        // than the streamed opening used in Streaming mode.
+        {
+          link_id: "backbone",
+          name: "move_gripper"
         }
       ]
     },
