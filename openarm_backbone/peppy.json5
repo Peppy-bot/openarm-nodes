@@ -286,7 +286,7 @@
       max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
       // End-effector linear-speed cap (m/s) for the stream chase, used only until
       // the first governor_control message; after that the operator's streamed cap
-      // (openarm_joint_commander) governs. Require > 0. The sim launchers set a
+      // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
       // How long (s) the hub keeps following an operator stream after its last

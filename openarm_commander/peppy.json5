@@ -1,4 +1,4 @@
-// openarm_joint_commander: operator entry point. Serves a browser-based
+// openarm_commander: operator entry point. Serves a browser-based
 // control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that streams
 // operator arm and gripper setpoints to the hub (which governs and re-streams
 // them) and fires move_arm_joints goals at openarm_backbone. MVP scope is
@@ -6,7 +6,7 @@
 {
   peppy_schema: "node/v1",
   manifest: {
-    name: "openarm_joint_commander",
+    name: "openarm_commander",
     tag: "v1",
     depends_on: {
       nodes: [
