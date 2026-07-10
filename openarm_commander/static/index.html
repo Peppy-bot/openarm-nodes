@@ -286,6 +286,10 @@ let latestSnap = null;
 const enabled = { left: false, right: false };
 
 function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
+// Angular readouts show degrees for legibility; the sliders, the wire, and the
+// kinematics stay in radians (so nothing on the control path changes units), and this
+// converts a radian value to a signed degree string at display time only.
+function fmtRadAsDeg(rad) { return (rad >= 0 ? '+' : '') + (rad * 180 / PI).toFixed(1) + '°'; }
 function $(id) { return document.getElementById(id); }
 
 // Place one slider's track on a shared axis [cMin, cMax]: its reachable [lo, hi] becomes
@@ -334,6 +338,10 @@ function build_arm(side, label) {
   $(`${side}_arm_psi`).appendChild(slider_row(`${side}_psi`, 'ψ', -PI, PI, 0.01,
     `on_arm_angle_input('${side}')`, `${side}_psih`, `${side}_psilo`, `${side}_psihi`,
     `${side}_psit`, `${side}_psif`));
+  // The elbow swivel spans +-pi; label its fixed range in degrees (apply_snapshot
+  // refreshes the joint labels from live limits, but never touches these).
+  $(`${side}_psilo`).textContent = fmtRadAsDeg(-PI);
+  $(`${side}_psihi`).textContent = fmtRadAsDeg(PI);
 }
 
 // A joint-style slider row: name, track with a measured caret over a min/max readout,
@@ -424,7 +432,7 @@ function read_joints(side, overrideIdx) {
 
 // Slider moved: update the readout, and while enabled stream the new setpoint.
 function on_joint_input(side, i) {
-  $(`${side}_t${i}`).textContent = fmt(parseFloat($(`${side}_j${i}`).value));
+  $(`${side}_t${i}`).textContent = fmtRadAsDeg(parseFloat($(`${side}_j${i}`).value));
   touched[side] = 'joints';
   if (uiMode === 'streaming') {
     if (enabled[side]) send_arm_target(side, i);
@@ -476,7 +484,7 @@ function on_pose_input(side, lead, overrideAxis) {
 // Elbow slider moved: swivel the elbow through the null space (streaming-only; the hub
 // plans the elbow for actions-mode moves, so the slider is read-only there).
 function on_arm_angle_input(side) {
-  $(`${side}_psit`).textContent = fmt(parseFloat($(`${side}_psi`).value));
+  $(`${side}_psit`).textContent = fmtRadAsDeg(parseFloat($(`${side}_psi`).value));
   touched[side] = 'pose';
   if (uiMode !== 'streaming') { refresh_primary(side); return; }
   send_arm_pose(side, 'arm_angle', undefined);
@@ -609,7 +617,7 @@ function ready_arm(side) {
   const preset = side === 'left' ? READY_LEFT : READY_RIGHT;
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = preset[i];
-    $(`${side}_t${i}`).textContent = fmt(preset[i]);
+    $(`${side}_t${i}`).textContent = fmtRadAsDeg(preset[i]);
   }
   // A joint-space action: mark joints as the composed space so the pose controls
   // (arcball, x/y/z) track the FK of the preset instead of staying frozen.
@@ -627,7 +635,7 @@ function toggle_enable(side) {
     const armFb = latestSnap[`${side}_arm`].feedback;
     if (armFb) for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_j${i}`).value = armFb[i];
-      $(`${side}_t${i}`).textContent = fmt(armFb[i]);
+      $(`${side}_t${i}`).textContent = fmtRadAsDeg(armFb[i]);
     }
     const gFb = latestSnap[`${side}_gripper`].feedback;
     if (gFb != null) {
@@ -645,7 +653,7 @@ function reset_arm(side) {
   for (let i = 0; i < ARM_DOF; i++) {
     const v = i === 3 ? HOME_ELBOW_J4 : 0;
     $(`${side}_j${i}`).value = v;
-    $(`${side}_t${i}`).textContent = fmt(v);
+    $(`${side}_t${i}`).textContent = fmtRadAsDeg(v);
   }
   touched[side] = 'joints';
   fire_arm(side, arm_duration(side));
@@ -776,15 +784,15 @@ function apply_snapshot(snap) {
     const jMin = a.limits ? Math.min(...a.limits.map(l => l[0])) : -PI;
     const jMax = a.limits ? Math.max(...a.limits.map(l => l[1])) : PI;
     for (let i = 0; i < ARM_DOF; i++) {
-      $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
+      $(`${side}_f${i}`).textContent = a.feedback ? fmtRadAsDeg(a.feedback[i]) : '---';
       // Slider bounds + the visible min/max readout come from joint_limits.
       const [lo, hi] = a.limits ? a.limits[i] : [-PI, PI];
       const el = $(`${side}_j${i}`);
       if (a.limits) {
         if (el.min != lo) el.min = lo;
         if (el.max != hi) el.max = hi;
-        $(`${side}_lo${i}`).textContent = fmt(lo);
-        $(`${side}_hi${i}`).textContent = fmt(hi);
+        $(`${side}_lo${i}`).textContent = fmtRadAsDeg(lo);
+        $(`${side}_hi${i}`).textContent = fmtRadAsDeg(hi);
         place_subrange(`${side}_j${i}`, lo, hi, jMin, jMax);
       }
       // While disabled the slider mirrors the measured pose (you must enable to
@@ -801,7 +809,7 @@ function apply_snapshot(snap) {
         const src = (uiMode === 'streaming' && !on) ? a.feedback : a.joints;
         if (src) {
           el.value = src[i];
-          $(`${side}_t${i}`).textContent = fmt(src[i]);
+          $(`${side}_t${i}`).textContent = fmtRadAsDeg(src[i]);
         }
       }
       // Actual-position caret on the track.
@@ -866,9 +874,9 @@ function apply_snapshot(snap) {
     psiEl.classList.toggle('readonly-track', uiMode !== 'streaming');
     if (document.activeElement !== psiEl) {
       const src = (uiMode === 'streaming' && !on) ? a.arm_angle_feedback : a.arm_angle;
-      if (src != null) { psiEl.value = src; $(`${side}_psit`).textContent = fmt(src); }
+      if (src != null) { psiEl.value = src; $(`${side}_psit`).textContent = fmtRadAsDeg(src); }
     }
-    $(`${side}_psif`).textContent = a.arm_angle_feedback != null ? fmt(a.arm_angle_feedback) : '---';
+    $(`${side}_psif`).textContent = a.arm_angle_feedback != null ? fmtRadAsDeg(a.arm_angle_feedback) : '---';
     const psih = $(`${side}_psih`);
     if (a.arm_angle_feedback != null) {
       const pct = Math.max(0, Math.min(1, (a.arm_angle_feedback + PI) / (2 * PI)));
