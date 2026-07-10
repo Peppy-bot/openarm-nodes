@@ -11,7 +11,7 @@
     name: "openarm_robot_initializer_mujoco",
     tag: "v1",
     depends_on: {
-      interfaces: [
+      contracts: [
         // Per-arm / per-gripper sim passthrough setpoints, consumed from any
         // instance (`from_any`): one sim process drives both sides and tells
         // them apart by arm_id / gripper_id in the message.

@@ -10,7 +10,7 @@
     name: "openarm_backbone",
     tag: "v1",
     depends_on: {
-      interfaces: [
+      contracts: [
         {
           name: "openarm_robot_initializer",
           tag: "v1",

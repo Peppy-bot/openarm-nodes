@@ -25,7 +25,7 @@
           optional: true,
         },
       ],
-      interfaces: [
+      contracts: [
         // Measured joint state from the sim engine, relayed to the paired hub.
         // from_any: the sim is the producer; entries told apart by arm_id.
         {

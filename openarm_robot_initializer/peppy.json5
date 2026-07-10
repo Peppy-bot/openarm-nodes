@@ -12,7 +12,7 @@
     depends_on: {
       // Per-side link_ids mirror backbone: the launcher pins each to the concrete
       // arm/gripper instance whose readiness this node aggregates.
-      interfaces: [
+      contracts: [
         {
           name: "openarm_hardware_ready",
           tag: "v1",

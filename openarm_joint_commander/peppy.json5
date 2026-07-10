@@ -18,7 +18,7 @@
           link_id: "backbone"
         }
       ],
-      interfaces: [
+      contracts: [
         // Measured joint state of both arms, for live UI progress. Wildcard
         // (`from_any`) so the panel binds to whatever arms are running and tells
         // them apart by `arm_id`; optional, so the commander still boots with no

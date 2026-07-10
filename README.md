@@ -11,7 +11,7 @@
 | [`openarm_backbone`](./openarm_backbone) | routes goals to the correct side |
 | [`openarm_joint_commander`](./openarm_joint_commander) | browser control panel |
 
-Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same interface. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter (`"v1"` or `"v2"`). The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
+Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same contract. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter (`"v1"` or `"v2"`). The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
 
 This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickest way to see everything working.
 
@@ -22,7 +22,7 @@ This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickes
 - Docker, running
 - For Isaac only: an NVIDIA GPU with the [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) configured
 
-Clone this repo together with [interfaces_hub](https://github.com/Peppy-bot/interfaces_hub) (the interface contracts) and [launchers_hub](https://github.com/Peppy-bot/launchers_hub) (the stack launchers) so the paths below line up:
+Clone this repo together with [interfaces_hub](https://github.com/Peppy-bot/interfaces_hub) (the conformance contracts) and [launchers_hub](https://github.com/Peppy-bot/launchers_hub) (the stack launchers) so the paths below line up:
 
 ```text
 ws/
@@ -33,7 +33,7 @@ ws/
 
 ## 2. Start the daemon and register the repos
 
-The daemon builds, runs, and connects every node. Registering the repos is what lets it resolve nodes and interfaces by name. The launcher depends on this, so don't skip it on a fresh machine.
+The daemon builds, runs, and connects every node. Registering the repos is what lets it resolve nodes and contracts by name. The launcher depends on this, so don't skip it on a fresh machine.
 
 ```sh
 peppy service serve &
@@ -43,7 +43,7 @@ peppy repo add /path/to/ws/openarm_nodes
 peppy repo refresh
 ```
 
-`peppy repo refresh` walks the registered repos and ends with a summary like `Repository refresh complete. N node(s), M interface(s) found.` You can double-check what got registered with `peppy repo list`.
+`peppy repo refresh` walks the registered repos and ends with a summary like `Repository refresh complete. N node(s), M contract(s) found.` You can double-check what got registered with `peppy repo list`.
 
 ## 3. Build the nodes
 

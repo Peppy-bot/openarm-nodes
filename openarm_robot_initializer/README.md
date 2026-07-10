@@ -2,7 +2,7 @@
 
 This node owns the world the OpenArm lives in. It loads the simulation (or does nothing, on the real robot) and exposes an `is_ready` service that the rest of the stack polls, so nothing tries to command an arm until this node says the world is actually up.
 
-Three siblings conform to the same `openarm_robot_initializer:v1` interface, and the launcher picks one:
+Three siblings conform to the same `openarm_robot_initializer:v1` contract, and the launcher picks one:
 
 | Node | Use case |
 |---|---|
