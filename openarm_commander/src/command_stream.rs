@@ -165,6 +165,7 @@ fn advance_jog(s: &mut UiState, side: Side, models: &ArmModels, caps: JogCaps) {
         side,
         &s.arm(side).joints,
         &jog.desired,
+        jog.arm_angle,
         jog.mode,
         caps,
     ) {

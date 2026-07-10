@@ -140,6 +140,10 @@
     background: radial-gradient(circle at 34% 28%, #ffffff 0%, #e4e7ec 45%, #c2c7cf 100%);
     box-shadow: -2px -2px 5px var(--hi), 3px 3px 6px var(--lo), inset 0 0 0 1px var(--ink-15);
   }
+  /* Read-only track (the elbow slider in actions): drop the draggable thumb, leaving
+     just the track and the measured caret as a current-position indicator. */
+  input[type=range].readonly-track::-webkit-slider-thumb { opacity: 0; width: 0; cursor: default; }
+  input[type=range].readonly-track::-moz-range-thumb { opacity: 0; width: 0; cursor: default; }
 
   .actions {
     display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; align-items: center;
@@ -289,6 +293,7 @@ function build_arm(side, label) {
     <div id="${side}_arm_joints"></div>
     <div class="pose-head">pose · world</div>
     <div id="${side}_arm_pos"></div>
+    <div id="${side}_arm_psi"></div>
     <div id="${side}_arm_orient"></div>
     <div class="actions">
       <label id="${side}_dur_l" style="display:none; align-items:center; gap:5px; margin-right:auto; text-transform:none; letter-spacing:0; font-size:11px; color:var(--ink-50);">
@@ -312,6 +317,11 @@ function build_arm(side, label) {
       `${side}_pt${ax.i}`, `${side}_pf${ax.i}`));
   }
   $(`${side}_arm_orient`).appendChild(arcball_widget(side));
+  // Elbow (arm-angle) slider: swivels the elbow through the null space, holding the
+  // hand pose. Streaming-only (the hub plans the elbow for actions-mode moves).
+  $(`${side}_arm_psi`).appendChild(slider_row(`${side}_psi`, 'ψ', -PI, PI, 0.01,
+    `on_arm_angle_input('${side}')`, `${side}_psih`, `${side}_psilo`, `${side}_psihi`,
+    `${side}_psit`, `${side}_psif`));
 }
 
 // A joint-style slider row: name, track with a measured caret over a min/max readout,
@@ -425,21 +435,37 @@ function read_pose(side, overrideAxis) {
       ? parseFloat($(`${side}_p${ax.i}`).value)
       : snap.pose[ax.i]);
   const orientation = qnorm(qmul(qconj(VQ), quatTargetCam[side]));  // camera -> world
-  return {position, orientation};
+  const arm_angle = parseFloat($(`${side}_psi`).value);
+  return {position, orientation, arm_angle};
+}
+
+// Stream the composed pose to the server's jog. `mode` = the component the touched
+// control drives (position / orientation / arm_angle); the rest is held.
+function send_arm_pose(side, mode, overrideAxis) {
+  if (!enabled[side] || !ws || ws.readyState !== 1) return;
+  const {position, orientation, arm_angle} = read_pose(side, overrideAxis);
+  if (![...position, ...orientation, arm_angle].every(Number.isFinite)) return;
+  throttled(`${side}_pose`, () =>
+    ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, orientation, arm_angle, mode})));
 }
 
 // Pose control moved (an x/y/z slider or the arcball): refresh the x/y/z target
-// readouts, then while streaming-enabled arm the server's jog. The touched
-// control leads (position or orientation); the untouched half is softly held.
+// readouts, then while streaming-enabled arm the server's jog. The touched control
+// leads; the rest is softly held.
 function on_pose_input(side, lead, overrideAxis) {
   for (const ax of POS_AXES) $(`${side}_pt${ax.i}`).textContent = fmt(parseFloat($(`${side}_p${ax.i}`).value));
   touched[side] = 'pose';
   if (uiMode !== 'streaming') { refresh_primary(side); return; }
-  if (!enabled[side] || !ws || ws.readyState !== 1) return;
-  const {position, orientation} = read_pose(side, overrideAxis);
-  if (![...position, ...orientation].every(Number.isFinite)) return;
-  throttled(`${side}_pose`, () =>
-    ws.send(JSON.stringify({cmd: 'set_arm_pose', side, position, orientation, mode: lead})));
+  send_arm_pose(side, lead, overrideAxis);
+}
+
+// Elbow slider moved: swivel the elbow through the null space (streaming-only; the hub
+// plans the elbow for actions-mode moves, so the slider is read-only there).
+function on_arm_angle_input(side) {
+  $(`${side}_psit`).textContent = fmt(parseFloat($(`${side}_psi`).value));
+  touched[side] = 'pose';
+  if (uiMode !== 'streaming') { refresh_primary(side); return; }
+  send_arm_pose(side, 'arm_angle', undefined);
 }
 
 // Trailing-edge throttle per channel: input events fire per pixel, but one jog
@@ -807,6 +833,28 @@ function apply_snapshot(snap) {
       if (src) quatTargetCam[side] = qmul(VQ, src);
     }
     render_arcball(side);
+
+    // Elbow (arm angle): streaming-only. The slider shows the target psi (measured while
+    // streaming-disabled), the caret shows measured; disabled in actions, where the hub
+    // plans the elbow for straight-line moves.
+    const psiEl = $(`${side}_psi`);
+    // Live slider in streaming; in actions drop the thumb (readonly-track) so it reads
+    // as a current-position indicator (red tick only), not a dead slider.
+    psiEl.disabled = uiMode !== 'streaming';
+    psiEl.classList.toggle('readonly-track', uiMode !== 'streaming');
+    if (document.activeElement !== psiEl) {
+      const src = (uiMode === 'streaming' && !on) ? a.arm_angle_feedback : a.arm_angle;
+      if (src != null) { psiEl.value = src; $(`${side}_psit`).textContent = fmt(src); }
+    }
+    $(`${side}_psif`).textContent = a.arm_angle_feedback != null ? fmt(a.arm_angle_feedback) : '---';
+    const psih = $(`${side}_psih`);
+    if (a.arm_angle_feedback != null) {
+      const pct = Math.max(0, Math.min(1, (a.arm_angle_feedback + PI) / (2 * PI)));
+      psih.style.setProperty('--at', (pct * 100) + '%');
+      psih.classList.remove('off');
+    } else {
+      psih.classList.add('off');
+    }
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);

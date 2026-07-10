@@ -91,15 +91,65 @@ impl ArmModels {
         rotation: UnitQuaternion<f64>,
         seed: &[f64; ARM_DOF],
     ) -> Option<[f64; ARM_DOF]> {
+        self.solve_ik_with(side, position, rotation, ArmAnglePolicy::FromSeed, seed)
+    }
+
+    /// IK holding the arm angle at `psi` (elbow swivel pinned): the null-space jog
+    /// re-solves the current end-effector pose at a stepped psi. `None` when no
+    /// in-limit solution exists at that psi.
+    fn solve_ik_fixed(
+        &self,
+        side: Side,
+        position: [f64; 3],
+        rotation: UnitQuaternion<f64>,
+        psi: f64,
+        seed: &[f64; ARM_DOF],
+    ) -> Option<[f64; ARM_DOF]> {
+        self.solve_ik_with(side, position, rotation, ArmAnglePolicy::Fixed(psi), seed)
+    }
+
+    fn solve_ik_with(
+        &self,
+        side: Side,
+        position: [f64; 3],
+        rotation: UnitQuaternion<f64>,
+        arm_angle: ArmAnglePolicy,
+        seed: &[f64; ARM_DOF],
+    ) -> Option<[f64; ARM_DOF]> {
         let model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
         let world = Isometry3::from_parts(
             Translation3::new(position[0], position[1], position[2]),
             rotation,
         );
         let base_target = model.base_pose(&world);
-        model
-            .solve_ik(&base_target, ArmAnglePolicy::FromSeed, seed)
-            .map(|s| s.q)
+        model.solve_ik(&base_target, arm_angle, seed).map(|s| s.q)
+    }
+
+    /// Current arm angle psi (elbow swivel, rad) of `joints` for `side`; `None` only at
+    /// the straight-arm singularity, which the elbow floor keeps the arm off.
+    pub fn arm_angle(&self, side: Side, joints: &[f64; ARM_DOF]) -> Option<f64> {
+        let model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+        model.arm_angle(joints)
+    }
+
+    /// Scale the joint delta `to - from` so no joint exceeds its velocity budget over
+    /// `dt_s`, preserving direction (the same clamp the resolved-rate step applies).
+    fn velocity_clamp(
+        &self,
+        side: Side,
+        from: &[f64; ARM_DOF],
+        to: &[f64; ARM_DOF],
+        dt_s: f64,
+    ) -> [f64; ARM_DOF] {
+        let budget = self.velocity_limits(side);
+        let scale = (0..ARM_DOF)
+            .map(|i| {
+                let dq = (to[i] - from[i]).abs();
+                let cap = budget[i] * dt_s;
+                if dq > cap { cap / dq } else { 1.0 }
+            })
+            .fold(1.0_f64, f64::min);
+        std::array::from_fn(|i| from[i] + (to[i] - from[i]) * scale)
     }
 
     /// One damped-least-squares joint step realizing a world-frame task increment
@@ -207,6 +257,9 @@ enum RateTask {
 /// (one knob governs both the jog and the hub's enforcement); rotation has no
 /// operator knob, so it jogs at this fixed, comfortable rate.
 const JOG_ROT_RATE_RAD_S: f64 = 1.5;
+/// Arm-angle (elbow swivel) jog rate (rad/s); fixed like the rotation rate, since the
+/// null-space motion has no operator speed knob.
+const ARM_ANGLE_RATE_RAD_S: f64 = 1.2;
 /// Damping for the resolved-rate steps: heavy enough to stay bounded through
 /// singular postures, light enough not to visibly lag a jog step.
 const DLS_LAMBDA: f64 = 0.05;
@@ -218,6 +271,7 @@ const DLS_LAMBDA: f64 = 0.05;
 pub struct JogCaps {
     pub pos_step_m: f64,
     pub rot_step_rad: f64,
+    pub arm_angle_step_rad: f64,
     pub dt_s: f64,
 }
 
@@ -229,18 +283,21 @@ impl JogCaps {
         Self {
             pos_step_m: (max_ee_velocity_m_s * dt_s).clamp(1e-5, 0.05),
             rot_step_rad: (JOG_ROT_RATE_RAD_S * dt_s).clamp(1e-4, 0.2),
+            arm_angle_step_rad: (ARM_ANGLE_RATE_RAD_S * dt_s).clamp(1e-4, 0.2),
             dt_s,
         }
     }
 }
 
-/// Which pose components a jog tracks: `Position` tracks x/y/z and softly holds
-/// orientation; `Orientation` tracks r/p/y and softly holds position. Whatever
-/// control the operator touches leads; the rest follows.
+/// Which component a jog drives: `Position` tracks x/y/z (holding orientation),
+/// `Orientation` tracks the hand frame (holding position), `ArmAngle` swivels the
+/// elbow through the null space (holding the whole end-effector pose). Whatever
+/// control the operator touches leads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JogMode {
     Position,
     Orientation,
+    ArmAngle,
 }
 
 /// One jog tick's outcome.
@@ -258,6 +315,7 @@ pub enum JogStep {
 /// millimetre and ~0.1 degrees: invisible on the panel, far above FK round-trip noise.
 const POS_CONVERGED_M: f64 = 5e-4;
 const ROT_CONVERGED_RAD: f64 = 2e-3;
+const ARM_ANGLE_CONVERGED_RAD: f64 = 2e-3;
 /// A resolved-rate step that achieves less than this fraction of its demanded
 /// motion is pinned by joint limits: the envelope boundary in free space.
 const MIN_STEP_PROGRESS: f64 = 0.2;
@@ -271,6 +329,7 @@ pub fn jog_tick(
     side: Side,
     joints: &[f64; ARM_DOF],
     desired: &Pose,
+    arm_angle: f64,
     mode: JogMode,
     caps: JogCaps,
 ) -> JogStep {
@@ -287,6 +346,25 @@ pub fn jog_tick(
                 return JogStep::Converged;
             };
             models.resolved_rate_step(side, joints, RateTask::Angular(dw), caps.dt_s)
+        }
+        JogMode::ArmAngle => {
+            let Some(psi_cur) = models.arm_angle(side, joints) else {
+                return JogStep::Blocked;
+            };
+            let err = arm_angle - psi_cur;
+            if err.abs() < ARM_ANGLE_CONVERGED_RAD {
+                return JogStep::Converged;
+            }
+            let psi_step = psi_cur + err.clamp(-caps.arm_angle_step_rad, caps.arm_angle_step_rad);
+            // Hold the current end-effector pose, re-solve at the stepped arm angle: a
+            // pure null-space move (the elbow swivels, the hand stays put).
+            let position = [current[0], current[1], current[2]];
+            let q4 = models.ee_quat_world(side, joints);
+            let rotation =
+                UnitQuaternion::from_quaternion(Quaternion::new(q4[3], q4[0], q4[1], q4[2]));
+            models
+                .solve_ik_fixed(side, position, rotation, psi_step, joints)
+                .map(|q_new| models.velocity_clamp(side, joints, &q_new, caps.dt_s))
         }
     };
     match step {
@@ -505,11 +583,12 @@ mod tests {
         let caps = JogCaps {
             pos_step_m: 0.05,
             rot_step_rad: 0.2,
+            arm_angle_step_rad: 0.2,
             dt_s: 0.01,
         };
         let desired = [p0[0] + 1.0, p0[1], p0[2], p0[3], p0[4], p0[5]];
         if let JogStep::Stepped(q) =
-            jog_tick(&m, Side::Left, &q0, &desired, JogMode::Position, caps)
+            jog_tick(&m, Side::Left, &q0, &desired, 0.0, JogMode::Position, caps)
         {
             let budget = m.velocity_limits(Side::Left);
             for i in 0..ARM_DOF {
@@ -535,7 +614,15 @@ mod tests {
         let desired = [p0[0] + 0.3, p0[1], p0[2], p0[3], p0[4], p0[5]];
         let mut q = start;
         for _ in 0..3000 {
-            match jog_tick(&m, Side::Left, &q, &desired, JogMode::Position, test_caps()) {
+            match jog_tick(
+                &m,
+                Side::Left,
+                &q,
+                &desired,
+                0.0,
+                JogMode::Position,
+                test_caps(),
+            ) {
                 JogStep::Stepped(next) => q = next,
                 JogStep::Blocked | JogStep::Converged => break,
             }
@@ -566,6 +653,7 @@ mod tests {
                 Side::Left,
                 &q,
                 &desired,
+                0.0,
                 JogMode::Orientation,
                 test_caps(),
             ) {
@@ -590,10 +678,55 @@ mod tests {
         let p = m.ee_pose_world(Side::Left, &q);
         for mode in [JogMode::Position, JogMode::Orientation] {
             assert!(matches!(
-                jog_tick(&m, Side::Left, &q, &p, mode, test_caps()),
+                jog_tick(&m, Side::Left, &q, &p, 0.0, mode, test_caps()),
                 JogStep::Converged
             ));
         }
+    }
+
+    #[test]
+    fn arm_angle_jog_swivels_the_elbow_holding_the_ee_pose() {
+        // Driving the arm angle moves psi toward the target while the end-effector
+        // pose stays put: a pure null-space move (elbow swivels, hand holds).
+        let m = models();
+        let q0 = [0.3, 0.1, 0.2, 0.8, 0.3, 0.2, 0.15];
+        let p0 = m.ee_pose_world(Side::Left, &q0);
+        let psi0 = m
+            .arm_angle(Side::Left, &q0)
+            .expect("arm angle is defined off the straight-arm floor");
+        let target_psi = psi0 + 0.3;
+        let mut q = q0;
+        for _ in 0..500 {
+            match jog_tick(
+                &m,
+                Side::Left,
+                &q,
+                &p0,
+                target_psi,
+                JogMode::ArmAngle,
+                test_caps(),
+            ) {
+                JogStep::Stepped(next) => q = next,
+                JogStep::Converged | JogStep::Blocked => break,
+            }
+        }
+        let psi = m.arm_angle(Side::Left, &q).unwrap();
+        let p = m.ee_pose_world(Side::Left, &q);
+        assert!(
+            (psi - target_psi).abs() < 0.05,
+            "psi should reach the target, got {psi:.3} vs {target_psi:.3}"
+        );
+        let pos_drift =
+            ((p[0] - p0[0]).powi(2) + (p[1] - p0[1]).powi(2) + (p[2] - p0[2]).powi(2)).sqrt();
+        assert!(
+            pos_drift < 0.01,
+            "EE position must hold under an arm-angle jog, drifted {pos_drift:.4}"
+        );
+        assert!(
+            geodesic(&p, &p0) < 0.05,
+            "EE orientation must hold, drifted {:.4} rad",
+            geodesic(&p, &p0)
+        );
     }
 
     #[test]
@@ -606,7 +739,15 @@ mod tests {
         let desired = [p0[0] + 2.0, p0[1], p0[2], p0[3], p0[4], p0[5]];
         let budget = m.velocity_limits(Side::Left);
         for _ in 0..5000 {
-            match jog_tick(&m, Side::Left, &q, &desired, JogMode::Position, test_caps()) {
+            match jog_tick(
+                &m,
+                Side::Left,
+                &q,
+                &desired,
+                0.0,
+                JogMode::Position,
+                test_caps(),
+            ) {
                 JogStep::Stepped(next) => {
                     for i in 0..ARM_DOF {
                         assert!((next[i] - q[i]).abs() / 0.01 <= budget[i] * 1.0001);

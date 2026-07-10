@@ -8,12 +8,14 @@ pub const ARM_DOF: usize = openarm_description::ARM_DOF;
 // this is only the startup default for the gripper target.
 pub const GRIPPER_CLOSED_M: f64 = 0.0;
 
-/// An armed Cartesian jog: the desired world-frame pose and which of its
-/// components the jog tracks (the rest drift minimally).
+/// An armed Cartesian jog: which component the jog drives (`mode`), the desired
+/// world-frame pose (`Position`/`Orientation` modes), and the desired arm angle
+/// (`ArmAngle` mode); the unused target is ignored for the active mode.
 #[derive(Clone, Copy, Debug)]
 pub struct PoseJog {
     pub mode: JogMode,
     pub desired: Pose,
+    pub arm_angle: f64,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

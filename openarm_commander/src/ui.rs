@@ -284,19 +284,22 @@ async fn handle_command(text: &str, app: &AppState) {
             side,
             position,
             orientation,
+            arm_angle,
             mode,
         } => {
             let side: Side = side.into();
             if !position
                 .iter()
                 .chain(orientation.iter())
+                .chain(std::iter::once(&arm_angle))
                 .all(|v| v.is_finite())
             {
                 return;
             }
             // The wire carries orientation as a quaternion; store the desired pose as
             // euler for the jog, which re-derives a quaternion each step (so the euler
-            // encoding never drives interpolation).
+            // encoding never drives interpolation). arm_angle is the null-space (elbow)
+            // target, used only in ArmAngle mode.
             let (roll, pitch, yaw) = quat_to_euler(orientation);
             let pose: Pose = [position[0], position[1], position[2], roll, pitch, yaw];
             // Arm the Cartesian jog: the command stream walks the joint target toward
@@ -308,6 +311,7 @@ async fn handle_command(text: &str, app: &AppState) {
                 s.arm_mut(side).pose_jog = Some(PoseJog {
                     mode: mode.into(),
                     desired: pose,
+                    arm_angle,
                 });
             }
         }
@@ -661,6 +665,10 @@ struct ArmView {
     // so orientation never round-trips through euler on the wire.
     orientation: [f64; 4],
     orientation_feedback: Option<[f64; 4]>,
+    // Arm angle psi (elbow swivel, rad) of the target and the measured pose; `null` at
+    // the straight-arm singularity (kept off by the elbow floor). Drives the elbow slider.
+    arm_angle: Option<f64>,
+    arm_angle_feedback: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -718,6 +726,8 @@ fn arm_view(a: &ArmTarget, side: Side, models: &ArmModels) -> ArmView {
         pose_feedback: a.last_feedback.map(|fb| models.ee_pose_world(side, &fb)),
         orientation: models.ee_quat_world(side, &a.joints),
         orientation_feedback: a.last_feedback.map(|fb| models.ee_quat_world(side, &fb)),
+        arm_angle: models.arm_angle(side, &a.joints),
+        arm_angle_feedback: a.last_feedback.and_then(|fb| models.arm_angle(side, &fb)),
     }
 }
 
@@ -755,15 +765,15 @@ enum Command {
         side: SideWire,
         joints: [f64; ARM_DOF],
     },
-    // Arm a Cartesian jog toward a world-frame end-effector pose: position (metres)
-    // + orientation as a quaternion [x, y, z, w], plus which half the jog tracks (the
-    // touched control leads; the rest is softly held). The command stream walks the
-    // joint target toward it and holds at the reach boundary. Ignored while disabled,
-    // like set_arm_target.
+    // Arm a jog: position (metres) + orientation quaternion [x, y, z, w] + arm angle
+    // (elbow swivel, rad), plus which one the jog drives (`mode` = the touched control;
+    // the rest is held). The command stream walks the joint target toward it and holds
+    // at the boundary. Ignored while disabled, like set_arm_target.
     SetArmPose {
         side: SideWire,
         position: [f64; 3],
         orientation: [f64; 4],
+        arm_angle: f64,
         mode: JogModeWire,
     },
     // Fire the hub's planned Cartesian move_arm to a composed world-frame pose
@@ -816,13 +826,15 @@ impl From<SideWire> for Side {
     }
 }
 
-// Which pose components a jog tracks, as sent by the panel: "position" from the
-// x/y/z sliders or "orientation" from the dials (the touched control leads).
+// Which component a jog drives, as sent by the panel: "position" from the x/y/z
+// sliders, "orientation" from the arcball, or "arm_angle" from the elbow slider.
 #[derive(Deserialize, Copy, Clone)]
 #[serde(rename_all = "lowercase")]
 enum JogModeWire {
     Position,
     Orientation,
+    #[serde(rename = "arm_angle")]
+    ArmAngle,
 }
 
 impl From<JogModeWire> for JogMode {
@@ -830,6 +842,7 @@ impl From<JogModeWire> for JogMode {
         match m {
             JogModeWire::Position => JogMode::Position,
             JogModeWire::Orientation => JogMode::Orientation,
+            JogModeWire::ArmAngle => JogMode::ArmAngle,
         }
     }
 }
