@@ -101,14 +101,14 @@ pub async fn run(
             move || {
                 let target = {
                     let mut s = arm_state.lock().unwrap_or_else(|p| p.into_inner());
-                    if !s.enabled(side) {
+                    if !s.enabled[side] {
                         return None;
                     }
                     // Caps re-derive each tick from the operator's live EE speed cap,
                     // so retuning the knob mid-jog changes the jog speed with it.
                     let caps = JogCaps::per_tick(tick_dt_s, s.max_ee_velocity_m_s);
                     advance_jog(&mut s, side, &arm_models, caps);
-                    s.arm(side).joints
+                    s.arms[side].joints
                 };
                 Some(
                     arm_joint_commands::build_message(side.arm_id(), target)
@@ -127,10 +127,10 @@ pub async fn run(
             move || {
                 let position = {
                     let s = gripper_state.lock().unwrap_or_else(|p| p.into_inner());
-                    if !s.enabled(side) {
+                    if !s.enabled[side] {
                         return None;
                     }
-                    s.gripper(side).position
+                    s.grippers[side].position
                 };
                 Some(
                     gripper_commands::build_message(side.gripper_id(), position)
@@ -157,33 +157,33 @@ pub async fn run(
 // Called under the UiState lock; jog_tick briefly takes the model lock inside it,
 // the same state -> model order as the UI snapshot, so the two cannot deadlock.
 fn advance_jog(s: &mut UiState, side: Side, models: &ArmModels, caps: JogCaps) {
-    let Some(jog) = s.arm(side).pose_jog else {
+    let Some(jog) = s.arms[side].pose_jog else {
         return;
     };
     match jog_tick(
         models,
         side,
-        &s.arm(side).joints,
+        &s.arms[side].joints,
         &jog.desired,
         jog.arm_angle,
         jog.mode,
         caps,
     ) {
         JogStep::Converged => {
-            s.arm_mut(side).pose_jog = None;
-            s.arm_mut(side).pose_blocked = false;
+            s.arms[side].pose_jog = None;
+            s.arms[side].pose_blocked = false;
         }
         JogStep::Stepped(q) => {
-            s.arm_mut(side).joints = q;
-            if s.arm(side).pose_blocked {
-                s.arm_mut(side).pose_blocked = false;
+            s.arms[side].joints = q;
+            if s.arms[side].pose_blocked {
+                s.arms[side].pose_blocked = false;
                 s.set_status(format!("{}: pose jog moving", side.label()));
                 info!(side = side.label(), mode = ?jog.mode, "pose jog resumed");
             }
         }
         JogStep::Blocked => {
-            if !s.arm(side).pose_blocked {
-                s.arm_mut(side).pose_blocked = true;
+            if !s.arms[side].pose_blocked {
+                s.arms[side].pose_blocked = true;
                 s.set_status(format!("{}: pose at reach limit, holding", side.label()));
                 info!(side = side.label(), mode = ?jog.mode, desired = ?jog.desired, "pose jog at reach limit");
             }

@@ -58,6 +58,30 @@ impl Side {
     }
 }
 
+/// A value stored per side, indexed by [`Side`]: `things[side]` reads or writes the
+/// right one, with no left/right accessor split.
+#[derive(Clone, Debug)]
+pub struct BySide<T>([T; 2]);
+
+impl<T: Clone> BySide<T> {
+    pub fn splat(value: T) -> Self {
+        Self([value.clone(), value])
+    }
+}
+
+impl<T> std::ops::Index<Side> for BySide<T> {
+    type Output = T;
+    fn index(&self, side: Side) -> &T {
+        &self.0[side as usize]
+    }
+}
+
+impl<T> std::ops::IndexMut<Side> for BySide<T> {
+    fn index_mut(&mut self, side: Side) -> &mut T {
+        &mut self.0[side as usize]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ArmTarget {
     pub joints: [f64; ARM_DOF],
@@ -119,16 +143,13 @@ impl GripperTarget {
 
 #[derive(Clone, Debug)]
 pub struct UiState {
-    pub left_arm: ArmTarget,
-    pub right_arm: ArmTarget,
-    pub left_gripper: GripperTarget,
-    pub right_gripper: GripperTarget,
+    pub arms: BySide<ArmTarget>,
+    pub grippers: BySide<GripperTarget>,
     // Streaming deadman, one per side: while false the commander emits no
     // commands for that side's arm or gripper and both targets track the measured
     // pose, so enabling never steps the robot. The arm and gripper share the
     // deadman because the operator enables a whole side at once.
-    pub left_enabled: bool,
-    pub right_enabled: bool,
+    pub enabled: BySide<bool>,
     // Operator controls for the hub's self-collision governor, streamed to the
     // backbone on governor_control; the hub holds its own defaults until the first
     // message. All four launch defaults are node parameters, kept in step with the
@@ -189,12 +210,9 @@ impl UiState {
         max_ee_velocity_m_s: f64,
     ) -> Self {
         Self {
-            left_arm: ArmTarget::home(),
-            right_arm: ArmTarget::home(),
-            left_gripper: GripperTarget::closed(),
-            right_gripper: GripperTarget::closed(),
-            left_enabled: false,
-            right_enabled: false,
+            arms: BySide::splat(ArmTarget::home()),
+            grippers: BySide::splat(GripperTarget::closed()),
+            enabled: BySide::splat(false),
             collision_enabled,
             collision_enabled_default: collision_enabled,
             d_stop,
@@ -202,48 +220,6 @@ impl UiState {
             max_ee_velocity_m_s,
             proximity: None,
             status: "ready".to_string(),
-        }
-    }
-
-    pub fn enabled(&self, side: Side) -> bool {
-        match side {
-            Side::Left => self.left_enabled,
-            Side::Right => self.right_enabled,
-        }
-    }
-
-    pub fn set_enabled(&mut self, side: Side, on: bool) {
-        match side {
-            Side::Left => self.left_enabled = on,
-            Side::Right => self.right_enabled = on,
-        }
-    }
-
-    pub fn arm(&self, side: Side) -> &ArmTarget {
-        match side {
-            Side::Left => &self.left_arm,
-            Side::Right => &self.right_arm,
-        }
-    }
-
-    pub fn arm_mut(&mut self, side: Side) -> &mut ArmTarget {
-        match side {
-            Side::Left => &mut self.left_arm,
-            Side::Right => &mut self.right_arm,
-        }
-    }
-
-    pub fn gripper(&self, side: Side) -> &GripperTarget {
-        match side {
-            Side::Left => &self.left_gripper,
-            Side::Right => &self.right_gripper,
-        }
-    }
-
-    pub fn gripper_mut(&mut self, side: Side) -> &mut GripperTarget {
-        match side {
-            Side::Left => &mut self.left_gripper,
-            Side::Right => &mut self.right_gripper,
         }
     }
 

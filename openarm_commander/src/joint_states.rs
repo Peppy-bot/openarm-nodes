@@ -45,15 +45,15 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             continue;
         };
         let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-        s.arm_mut(side).last_feedback = Some(msg.positions);
+        s.arms[side].last_feedback = Some(msg.positions);
         // Initialize the streamed target from the first measured pose so the panel
         // starts at the arm's real position, then leave it: only streaming and
         // discrete moves change it thereafter. Tracking measured continuously while
         // disabled re-seeded the gravity-sagged pose every cycle, so each enable
         // ratcheted the arm further down.
-        if !s.arm(side).established {
-            s.arm_mut(side).joints = msg.positions;
-            s.arm_mut(side).established = true;
+        if !s.arms[side].established {
+            s.arms[side].joints = msg.positions;
+            s.arms[side].established = true;
         }
     }
 }

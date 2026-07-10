@@ -171,8 +171,8 @@ async fn run(
 async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
     let summary = summary.into();
     let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-    s.arm_mut(side).in_flight = false;
-    s.arm_mut(side).preempt = None;
+    s.arms[side].in_flight = false;
+    s.arms[side].preempt = None;
     s.set_status(summary.clone());
     if success {
         info!(side = side.label(), %summary, "move_arm_joints done");

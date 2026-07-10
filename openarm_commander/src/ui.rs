@@ -170,7 +170,7 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
 /// its launch default.
 fn on_operator_disconnect(s: &mut UiState) {
     for side in [Side::Left, Side::Right] {
-        s.set_enabled(side, false);
+        s.enabled[side] = false;
     }
     s.collision_enabled = s.collision_enabled_default;
 }
@@ -194,7 +194,7 @@ async fn handle_command(text: &str, app: &AppState) {
             // rather than relying on the UI to hide the button.
             {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                if s.enabled(side) {
+                if s.enabled[side] {
                     s.set_status(format!(
                         "{} arm: disable before a discrete move",
                         side.label()
@@ -205,7 +205,7 @@ async fn handle_command(text: &str, app: &AppState) {
             clamp_to_limits(&mut joints, side);
             let (measured, max_ee) = {
                 let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                (s.arm(side).last_feedback, s.max_ee_velocity_m_s)
+                (s.arms[side].last_feedback, s.max_ee_velocity_m_s)
             };
             // Floor the requested duration so the end-effector never crosses the
             // workspace faster than the governor cap; the hub floors again at its
@@ -227,7 +227,7 @@ async fn handle_command(text: &str, app: &AppState) {
             if on {
                 // A discrete move owns the arm until its result lands; enabling now
                 // would fight it and the hub would snap back when it completes.
-                if s.arm(side).in_flight {
+                if s.arms[side].in_flight {
                     s.set_status(format!("{}: move in flight, not enabling", side.label()));
                     return;
                 }
@@ -235,7 +235,7 @@ async fn handle_command(text: &str, app: &AppState) {
                 // seed each target first; refuse until measurements exist so the
                 // first emitted command holds position instead of a stale default.
                 let (Some(_), Some(gripper_measured)) =
-                    (s.arm(side).last_feedback, s.gripper(side).last_feedback)
+                    (s.arms[side].last_feedback, s.grippers[side].last_feedback)
                 else {
                     s.set_status(format!(
                         "{}: no measured pose yet, not enabling",
@@ -249,14 +249,14 @@ async fn handle_command(text: &str, app: &AppState) {
                 // never re-seeds the sagged measured (which ratcheted the arm down).
                 // joint_states establishes the target from the first measured pose at
                 // boot. The gripper does not sag, so seeding it from measured is safe.
-                s.gripper_mut(side).position = gripper_measured;
+                s.grippers[side].position = gripper_measured;
             }
             // A jog must not survive across a deadman edge in either direction: on
             // enable it would replay a stale desired pose, on disable it would resume
             // unexpectedly at the next enable. Its status latch resets with it.
-            s.arm_mut(side).pose_jog = None;
-            s.arm_mut(side).pose_blocked = false;
-            s.set_enabled(side, on);
+            s.arms[side].pose_jog = None;
+            s.arms[side].pose_blocked = false;
+            s.enabled[side] = on;
             s.set_status(format!(
                 "{}: {}",
                 side.label(),
@@ -271,13 +271,13 @@ async fn handle_command(text: &str, app: &AppState) {
             let side: Side = side.into();
             clamp_to_limits(&mut joints, side);
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.enabled(side) {
-                s.arm_mut(side).joints = joints;
+            if s.enabled[side] {
+                s.arms[side].joints = joints;
                 // Joint-space input takes over: a live Cartesian jog would otherwise
                 // walk the target right back off the operator's slider. Reset its
                 // status latch with it.
-                s.arm_mut(side).pose_jog = None;
-                s.arm_mut(side).pose_blocked = false;
+                s.arms[side].pose_jog = None;
+                s.arms[side].pose_blocked = false;
             }
         }
         Command::SetArmPose {
@@ -307,8 +307,8 @@ async fn handle_command(text: &str, app: &AppState) {
             // slider drag can never command a teleport or a branch flip. Enabled-gated
             // like set_arm_target.
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.enabled(side) {
-                s.arm_mut(side).pose_jog = Some(PoseJog {
+            if s.enabled[side] {
+                s.arms[side].pose_jog = Some(PoseJog {
                     mode: mode.into(),
                     desired: pose,
                     arm_angle,
@@ -324,7 +324,7 @@ async fn handle_command(text: &str, app: &AppState) {
             let side: Side = side.into();
             let (seed, measured, max_ee) = {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-                if s.enabled(side) {
+                if s.enabled[side] {
                     s.set_status(format!(
                         "{} arm: disable before a discrete move",
                         side.label()
@@ -332,8 +332,8 @@ async fn handle_command(text: &str, app: &AppState) {
                     return;
                 }
                 (
-                    s.arm(side).joints,
-                    s.arm(side).last_feedback,
+                    s.arms[side].joints,
+                    s.arms[side].last_feedback,
                     s.max_ee_velocity_m_s,
                 )
             };
@@ -381,8 +381,8 @@ async fn handle_command(text: &str, app: &AppState) {
             let [lo, hi] = joint_limits().gripper;
             let position = position.clamp(lo, hi);
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.enabled(side) {
-                s.gripper_mut(side).position = position;
+            if s.enabled[side] {
+                s.grippers[side].position = position;
             }
         }
         Command::FireGripper { side, position } => {
@@ -396,22 +396,22 @@ async fn handle_command(text: &str, app: &AppState) {
                 let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
                 // The side must be disabled for a discrete move, and only one gripper
                 // goal may be in flight; refuse rather than preempt (moves are short).
-                if s.enabled(side) {
+                if s.enabled[side] {
                     s.set_status(format!(
                         "{} gripper: disable before a discrete move",
                         side.label()
                     ));
                     return;
                 }
-                if s.gripper(side).in_flight {
+                if s.grippers[side].in_flight {
                     s.set_status(format!(
                         "{} gripper: previous move still finishing",
                         side.label()
                     ));
                     return;
                 }
-                s.gripper_mut(side).in_flight = true;
-                s.gripper_mut(side).position = position;
+                s.grippers[side].in_flight = true;
+                s.grippers[side].position = position;
                 s.set_status(format!("{} gripper: firing move_gripper", side.label()));
             }
             move_gripper::spawn(
@@ -560,8 +560,8 @@ fn fire_discrete(
         // exits promptly, so in_flight clears within the cancel round-trip.
         let preempt = {
             let s = app.state.lock().unwrap_or_else(|p| p.into_inner());
-            if s.arm(side).in_flight {
-                s.arm(side).preempt.clone()
+            if s.arms[side].in_flight {
+                s.arms[side].preempt.clone()
             } else {
                 None
             }
@@ -570,12 +570,8 @@ fn fire_discrete(
             tok.cancel();
             for _ in 0..50 {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                let clear = !app
-                    .state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .arm(side)
-                    .in_flight;
+                let clear =
+                    !app.state.lock().unwrap_or_else(|p| p.into_inner()).arms[side].in_flight;
                 if clear {
                     break;
                 }
@@ -589,25 +585,25 @@ fn fire_discrete(
             // Re-check everything the awaits above could have invalidated: an
             // Enable interleaved during the preempt wait means the side is
             // streaming again and a discrete move must not fire under it.
-            if s.enabled(side) {
+            if s.enabled[side] {
                 s.set_status(format!(
                     "{} arm: enabled during preempt, move dropped",
                     side.label()
                 ));
                 return;
             }
-            if s.arm(side).in_flight {
+            if s.arms[side].in_flight {
                 s.set_status(format!(
                     "{} arm: previous goal still finishing",
                     side.label()
                 ));
                 return;
             }
-            s.arm_mut(side).in_flight = true;
+            s.arms[side].in_flight = true;
             if let Some(joints) = target_joints {
-                s.arm_mut(side).joints = joints;
+                s.arms[side].joints = joints;
             }
-            s.arm_mut(side).preempt = Some(goal_preempt.clone());
+            s.arms[side].preempt = Some(goal_preempt.clone());
             s.set_status(format!("{} arm: firing {action}", side.label()));
         }
         launch(&app, goal_preempt);
@@ -685,12 +681,12 @@ struct GripperView {
 impl Snapshot {
     fn build(s: &UiState, now: Instant, models: &ArmModels) -> Self {
         Self {
-            left_arm: arm_view(&s.left_arm, Side::Left, models),
-            right_arm: arm_view(&s.right_arm, Side::Right, models),
-            left_gripper: gripper_view(&s.left_gripper),
-            right_gripper: gripper_view(&s.right_gripper),
-            left_enabled: s.left_enabled,
-            right_enabled: s.right_enabled,
+            left_arm: arm_view(&s.arms[Side::Left], Side::Left, models),
+            right_arm: arm_view(&s.arms[Side::Right], Side::Right, models),
+            left_gripper: gripper_view(&s.grippers[Side::Left]),
+            right_gripper: gripper_view(&s.grippers[Side::Right]),
+            left_enabled: s.enabled[Side::Left],
+            right_enabled: s.enabled[Side::Right],
             collision_enabled: s.collision_enabled,
             d_stop: s.d_stop,
             d_safe: s.d_safe,
@@ -897,11 +893,11 @@ mod tests {
         // Launched with avoidance on; operator turned it off with both sides armed.
         let mut s = UiState::new(true, 0.005, 0.02, 0.25);
         s.collision_enabled = false;
-        s.set_enabled(Side::Left, true);
-        s.set_enabled(Side::Right, true);
+        s.enabled[Side::Left] = true;
+        s.enabled[Side::Right] = true;
         on_operator_disconnect(&mut s);
         assert!(
-            !s.left_enabled && !s.right_enabled,
+            !s.enabled[Side::Left] && !s.enabled[Side::Right],
             "disconnect must drop the deadman for both sides"
         );
         assert!(

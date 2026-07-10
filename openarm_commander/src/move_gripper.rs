@@ -117,7 +117,7 @@ async fn run(
 async fn finalize(state: &SharedState, side: Side, success: bool, summary: impl Into<String>) {
     let summary = summary.into();
     let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-    s.gripper_mut(side).in_flight = false;
+    s.grippers[side].in_flight = false;
     s.set_status(summary.clone());
     if success {
         info!(side = side.label(), %summary, "move_gripper done");

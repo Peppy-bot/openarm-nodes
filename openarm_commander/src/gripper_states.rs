@@ -44,6 +44,6 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             continue;
         };
         let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-        s.gripper_mut(side).last_feedback = Some(msg.position);
+        s.grippers[side].last_feedback = Some(msg.position);
     }
 }
