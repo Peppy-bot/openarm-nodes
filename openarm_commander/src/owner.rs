@@ -34,7 +34,7 @@ use crate::{move_arm, move_arm_joints, move_gripper};
 /// The browser snapshot cadence (10 Hz); the command tick runs far faster, so the
 /// FK-heavy snapshot is built here rather than every tick.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
-/// After a preempted goal reports done, the hub needs a beat to release its
+/// After a preempted goal reports done, the backbone needs a beat to release its
 /// single-flight gate before it will accept the queued move; the queued goal task
 /// waits this long before firing.
 pub const PREEMPT_GRACE: Duration = Duration::from_millis(50);
@@ -58,7 +58,7 @@ pub enum Feedback {
 }
 
 /// The setpoints to stream this tick. `None` for a side means its deadman is off, so
-/// the publisher emits nothing and the hub's watchdog holds. Recomputed every command
+/// the publisher emits nothing and the backbone's watchdog holds. Recomputed every command
 /// tick and read by the publisher tasks on their own cadence.
 #[derive(Clone, Copy, Debug)]
 pub struct CommandFrame {
@@ -68,7 +68,7 @@ pub struct CommandFrame {
 }
 
 /// The operator's self-collision governor controls, streamed continuously (no deadman:
-/// the hub must always know the operator's intent).
+/// the backbone must always know the operator's intent).
 #[derive(Clone, Copy, Debug)]
 pub struct GovernorFrame {
     pub collision_enabled: bool,
@@ -135,7 +135,7 @@ struct Owner {
     // Cloned into each spawned goal task so it can report its outcome back.
     feedback_tx: mpsc::Sender<Feedback>,
     // A discrete arm move queued behind the in-flight one it preempted; fired when that
-    // one reports done (the hub is single-flight, so they must not overlap).
+    // one reports done (the backbone is single-flight, so they must not overlap).
     pending: BySide<Option<ArmGoal>>,
 }
 
@@ -265,7 +265,7 @@ impl Owner {
                 let seed = self.state.arms[side].joints;
                 // Preview the pose as joints (seeded from the current target) so both the
                 // sliders and the FK readout show where it is going, and reject an
-                // unreachable pose up front rather than firing a goal the hub refuses.
+                // unreachable pose up front rather than firing a goal the backbone refuses.
                 let Some(mut target_joints) = self.models.solve_ik(side, position, rotation, &seed)
                 else {
                     self.status(side, "pose unreachable, not firing");
@@ -273,7 +273,7 @@ impl Owner {
                 };
                 clamp_to_limits(&mut target_joints, side);
                 let duration_s = self.floored_duration(side, position, duration_s);
-                // Send the hub the normalized quaternion, not the raw wire values.
+                // Send the backbone the normalized quaternion, not the raw wire values.
                 let orientation = [rotation.i, rotation.j, rotation.k, rotation.w];
                 self.fire_or_queue(
                     side,
@@ -409,7 +409,7 @@ impl Owner {
                 d_safe,
                 max_ee_velocity_m_s,
             } => {
-                // The hub validates again before applying; reject a degenerate band here
+                // The backbone validates again before applying; reject a degenerate band here
                 // so the UI cannot stream one.
                 if !valid_governor_band(d_stop, d_safe, max_ee_velocity_m_s) {
                     self.state.set_status(
@@ -449,7 +449,7 @@ impl Owner {
                 self.state.arms[side].in_flight = false;
                 self.state.arms[side].preempt = None;
                 self.state.set_status(summary);
-                // Fire any move queued behind the one that just finished; the hub needs
+                // Fire any move queued behind the one that just finished; the backbone needs
                 // a beat to release its single-flight gate first, so give it grace.
                 if let Some(goal) = self.pending[side].take() {
                     self.fire_now(side, goal, true);
@@ -463,7 +463,7 @@ impl Owner {
     }
 
     // Fire a discrete arm move, or queue it behind the in-flight one it preempts. The
-    // hub is single-flight, so an overlapping fire cancels the running goal and waits
+    // backbone is single-flight, so an overlapping fire cancels the running goal and waits
     // for its result (via `pending`) rather than racing a second goal in.
     fn fire_or_queue(&mut self, side: Side, goal: ArmGoal) {
         if self.state.arms[side].in_flight {
@@ -478,7 +478,7 @@ impl Owner {
     }
 
     // Claim the side's move slot and spawn the goal task. `grace` makes the task wait
-    // for the hub to release its gate first (set when firing a queued preempt).
+    // for the backbone to release its gate first (set when firing a queued preempt).
     fn fire_now(&mut self, side: Side, goal: ArmGoal, grace: bool) {
         // A preempt wait could have raced an Enable; never fire under a live deadman.
         if self.state.enabled[side] {
@@ -566,7 +566,7 @@ fn unit_quat_from_wire(q: [f64; 4]) -> Option<UnitQuaternion<f64>> {
 // Reset on operator disconnect: drop the streaming deadman for both sides (each stream's
 // timeout then releases to hold; the enabled gate also stops advancing their jogs) and
 // restore the governor enable to its launch default, so an operator who left avoidance
-// off cannot latch the hub ungoverned, while a launch-ungoverned deployment is not
+// off cannot latch the backbone ungoverned, while a launch-ungoverned deployment is not
 // force-armed either.
 fn reset_on_disconnect(s: &mut UiState) {
     for side in [Side::Left, Side::Right] {
@@ -599,7 +599,7 @@ enum JogEvent {
 }
 
 // Advance one side's active jog by one tick. A joint jog reconciles in a single step
-// (the streamed joints are the target; the hub governs the ramp); a Cartesian jog steps
+// (the streamed joints are the target; the backbone governs the ramp); a Cartesian jog steps
 // the joint target a capped increment toward the desired pose, holds it at the reach
 // boundary, and retires once converged. Pure: `jog_tick` briefly takes the model lock
 // inside it, but no UiState is held here, so the caller applies the result.
@@ -612,7 +612,7 @@ fn advance_jog(arm: &ArmTarget, side: Side, models: &ArmModels, caps: JogCaps) -
     };
     let cartesian = match arm.jog {
         None => return hold(None, arm.jog_blocked),
-        // The hub governs the joint ramp, so reconcile in one step and retire.
+        // The backbone governs the joint ramp, so reconcile in one step and retire.
         Some(Jog::Joints(target)) => {
             return JogAdvance {
                 joints: target,

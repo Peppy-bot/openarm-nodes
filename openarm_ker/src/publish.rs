@@ -1,11 +1,11 @@
 // Always-on command publisher, the same shape as the commander's: for
 // each side, one task streams the arm setpoint at command_rate_hz on
 // `arm_joint_commands` and one streams the trigger opening on
-// `gripper_commands`, both tagged with their id and governed by the hub before
+// `gripper_commands`, both tagged with their id and governed by the backbone before
 // anything reaches a follower. A tick publishes nothing when the newest sample
-// is missing, stale, or disengaged, so the hub's stream timeouts lapse and the
+// is missing, stale, or disengaged, so the backbone's stream timeouts lapse and the
 // robot holds: skipping is the deadman. Re-publishing an unchanged sample every
-// tick keeps the hub's stream watchdogs alive between device frames.
+// tick keeps the backbone's stream watchdogs alive between device frames.
 //
 // Each side+stream runs its own publish task on its own interval, cloning the
 // shared per-topic publisher. A single shared loop publishing Left then Right
@@ -61,7 +61,7 @@ pub async fn run(
         }
     };
     // One shared gripper publisher, cloned per side like the arm publisher;
-    // each side's stream tags its own gripper_id, so the hub tells them apart.
+    // each side's stream tags its own gripper_id, so the backbone tells them apart.
     let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
@@ -88,7 +88,7 @@ pub async fn run(
             },
         ));
         // Gripper: stream the trigger opening (m) while streamable, tagged with
-        // the side's id for the hub to demux (mirror of the arm stream above).
+        // the side's id for the backbone to demux (mirror of the arm stream above).
         let sample_rx = rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub.clone(),

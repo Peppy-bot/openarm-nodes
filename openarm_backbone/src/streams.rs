@@ -1,4 +1,4 @@
-//! Inbound stream plumbing for the hub: the operator arm and gripper command
+//! Inbound stream plumbing for the backbone: the operator arm and gripper command
 //! streams, both paired arms' measured joint state, both paired grippers'
 //! measured aperture, and the runtime governor controls. Each listener holds
 //! one subscription and keeps the latest well-formed message in a watch channel
@@ -58,7 +58,7 @@ pub struct GripperCommand {
 }
 
 /// The latest measured joint position for one arm, fed by the arm_link
-/// pairing's `arm_states` back-channel. The hub anchors trajectories and
+/// pairing's `arm_states` back-channel. The backbone anchors trajectories and
 /// governor queries on position; the governed velocity feedforward is the
 /// commanded step, not a measurement, so the stream's velocities are validated
 /// but not retained.
@@ -259,7 +259,7 @@ pub async fn run_joint_state_listener(
 /// Receive both paired grippers' measured aperture forever (the gripper_link
 /// back-channel), keeping the latest opening fraction per side. The slot IS the
 /// side (a pairing delivers only its one peer's messages), so there is no id
-/// demux, and the hub's collision model reads finger positions only from its
+/// demux, and the backbone's collision model reads finger positions only from its
 /// exclusive command-loop peers: a stray broadcast producer cannot spoof the
 /// modeled fingers. A non-finite width is dropped so the model never places the
 /// fingers on a bad reading; the parsed fraction is clamped into the jaw travel.
@@ -317,7 +317,7 @@ pub async fn run_gripper_state_listener(
     }
 }
 
-/// The hub's runtime governor controls from the operator: the on/off toggle plus
+/// The backbone's runtime governor controls from the operator: the on/off toggle plus
 /// the live-tunable band and stream speed cap. Raw values; the governor and
 /// planners validate them as they apply (an invalid band or speed is ignored,
 /// keeping the last good one), so the toggle still takes effect regardless.
@@ -331,7 +331,7 @@ pub struct GovernorConfig {
 
 /// Receive the `governor_control` stream forever, mirroring the latest governor
 /// config into `config`. The producer re-publishes periodically, so the lossy QoS
-/// cannot strand the hub in a stale state.
+/// cannot strand the backbone in a stale state.
 pub async fn run_governor_config_listener(
     runner: Arc<NodeRunner>,
     config: watch::Sender<GovernorConfig>,

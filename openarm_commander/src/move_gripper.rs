@@ -1,5 +1,5 @@
 // Spawned per fire_gripper command (the gripper card's Execute in Actions mode). Fires
-// the hub's move_gripper (a discrete governed open/close), then reports the outcome to
+// the backbone's move_gripper (a discrete governed open/close), then reports the outcome to
 // the owner. Cancel-aware so a shutdown can't wedge an in-flight goal. A second Execute
 // is refused while one is in flight (the owner gates it), so this needs no per-goal
 // preempt the way the longer arm moves do.

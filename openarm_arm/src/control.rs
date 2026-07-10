@@ -1,13 +1,13 @@
 //! The real arm's control: a single task that owns the motors and runs an MIT
-//! control loop following the hub's governed setpoint. The bimanual coordination
-//! hub (openarm_backbone) owns all trajectory generation, stream following, and
+//! control loop following the backbone's governed setpoint. The bimanual coordination
+//! backbone (openarm_backbone) owns all trajectory generation, stream following, and
 //! collision governing, and streams the resolved (q_des, dq_des) per arm; this
-//! loop adds only the realtime feedforward (gravity/Coriolis/friction the hub
+//! loop adds only the realtime feedforward (gravity/Coriolis/friction the backbone
 //! cannot compute remotely) and a final clamp to the joint limits, then commands
 //! the motors. There is no mode state machine and no streaming logic here.
 //!
 //! On shutdown the loop disables the motors and lets the arm go limp. It does not
-//! park to a pose: a collision-aware return-to-home is the hub's job (it sees both
+//! park to a pose: a collision-aware return-to-home is the backbone's job (it sees both
 //! arms), and a local straight-line joint path would be collision-blind and could
 //! command the two arms into each other.
 
@@ -116,8 +116,8 @@ async fn run_control(
             }));
 
         // Follow the latest governed setpoint; hold the measured pose (zero
-        // desired velocity) until the hub's stream is live, so the arm never
-        // lunges before the hub is up.
+        // desired velocity) until the backbone's stream is live, so the arm never
+        // lunges before the backbone is up.
         let (q_des, dq_des) = match *wiring.governed.borrow() {
             Some(GovernedSetpoint { q_des, dq_des }) => {
                 clamp_setpoint_to_limits(&q_des, &dq_des, &cfg.limits)
@@ -136,7 +136,7 @@ async fn run_control(
     }
 
     // Cancelled: disable the motors and let the arm go limp. A graceful, collision-
-    // aware park is the hub's responsibility (it sees both arms); the arm on its own
+    // aware park is the backbone's responsibility (it sees both arms); the arm on its own
     // must not drive to a fixed pose, because a collision-blind straight joint path
     // could command the two arms into each other. main.rs awaits `shutdown_tx` so
     // the lock is released only after the motors are off.

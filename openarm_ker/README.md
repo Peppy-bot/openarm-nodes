@@ -7,7 +7,7 @@ follower joint targets with no coordinate transform. The node reads the KER's
 M5Stack CoreS3 over USB vendor mode (or serial CDC), maps encoder channels
 through the calibration parameters to clamped joint radians and trigger
 openings, and streams them exactly like `openarm_commander`: arms on
-`arm_joint_commands` (the hub governs them), grippers on the pairing slots.
+`arm_joint_commands` (the backbone governs them), grippers on the pairing slots.
 
 The thumb button is the engage deadman: a press toggles streaming for the
 whole device, and a disengaged, stale, or disconnected leader publishes
@@ -51,4 +51,4 @@ To pin them:
 
 First engaged run: keep the backbone's `max_ee_velocity_m_s` conservative;
 engaging with the leader far from the follower pose is governed into a
-rate-limited catch-up by the hub, not a jump.
+rate-limited catch-up by the backbone, not a jump.

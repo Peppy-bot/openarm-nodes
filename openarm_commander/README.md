@@ -23,7 +23,7 @@ peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5
 You can also run it alone against an existing backbone instance:
 
 ```sh
-peppy node run openarm_commander:v1 --bind backbone@backbone_inst
+peppy node run openarm_commander:v1 --bind backbone@backbone
 ```
 
 Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to the generation's full jaw width (0.044 m on v1, 0.0697 m on v2), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.

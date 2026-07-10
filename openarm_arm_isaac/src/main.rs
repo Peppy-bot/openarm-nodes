@@ -1,14 +1,14 @@
-//! Isaac sim follower: republish the paired hub's governed setpoints onto the
+//! Isaac sim follower: republish the paired backbone's governed setpoints onto the
 //! sim's arm_sim_passthrough topic, and relay the engine's measured state back
-//! to the hub on the pairing. All motion, trajectory, and collision logic lives
+//! to the backbone on the pairing. All motion, trajectory, and collision logic lives
 //! in openarm_backbone; this node only relabels the governed stream for the
-//! engine and the engine's state for the hub. A held subscription receives
+//! engine and the engine's state for the backbone. A held subscription receives
 //! every setpoint in order with no re-subscribe gap; a separate task publishes
 //! the latest, so neither arm is starved (the same shape the real arm uses).
 
 use peppygen::consumed_topics::state_arm_states;
 use peppygen::emitted_topics::openarm_arm_sim_passthrough::v1::arm_sim_passthrough;
-use peppygen::pairings::hub;
+use peppygen::pairings::backbone;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 /// Latest desired (positions, velocities) for this arm.
 type Setpoint = ([f64; 7], [f64; 7]);
 
-/// Wire arm_id values (matching the hub).
+/// Wire arm_id values (matching the backbone).
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
@@ -40,11 +40,11 @@ fn main() -> Result<()> {
         let token = node_runner.cancellation_token().clone();
 
         // Receive task: one held pairing subscription, looped. The slot delivers
-        // only the paired hub's setpoints, so there is no arm_id filter; holding
+        // only the paired backbone's setpoints, so there is no arm_id filter; holding
         // the subscription means no re-subscribe gap between messages.
         let rx_runner = node_runner.clone();
         let receive = tokio::spawn(async move {
-            let mut sub = match hub::arm_setpoints::subscribe(&rx_runner).await {
+            let mut sub = match backbone::arm_setpoints::subscribe(&rx_runner).await {
                 Ok(s) => s,
                 Err(e) => return error!("arm_setpoints subscribe: {e}"),
             };
@@ -110,15 +110,15 @@ fn main() -> Result<()> {
         });
 
         // State relay task: this arm's engine measurements (the broadcast
-        // arm_states the sim emits, demuxed by arm_id) flow to the paired hub on
+        // arm_states the sim emits, demuxed by arm_id) flow to the paired backbone on
         // the pairing's arm_states, the command loop's state input. Non-finite
-        // samples are dropped so the hub never anchors on a bad measurement.
+        // samples are dropped so the backbone never anchors on a bad measurement.
         let relay = tokio::spawn(async move {
             let mut sub = match state_arm_states::subscribe(&node_runner).await {
                 Ok(s) => s,
                 Err(e) => return error!("arm_states subscribe: {e}"),
             };
-            let peer_pub = match hub::arm_states::declare_publisher(&node_runner).await {
+            let peer_pub = match backbone::arm_states::declare_publisher(&node_runner).await {
                 Ok(p) => p,
                 Err(e) => return error!("declare paired arm_states publisher: {e}"),
             };
@@ -141,8 +141,9 @@ fn main() -> Result<()> {
                     continue;
                 }
                 let result = async {
-                    let payload = hub::arm_states::build_message(msg.positions, msg.velocities)
-                        .map_err(|e| e.to_string())?;
+                    let payload =
+                        backbone::arm_states::build_message(msg.positions, msg.velocities)
+                            .map_err(|e| e.to_string())?;
                     peer_pub.publish(payload).await.map_err(|e| e.to_string())
                 }
                 .await;

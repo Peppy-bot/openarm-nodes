@@ -1,4 +1,4 @@
-// Live self-collision proximity for the UI. Consumes the hub's `collision_status`
+// Live self-collision proximity for the UI. Consumes the backbone's `collision_status`
 // stream and reports the nearest-pair distance and link names to the owner, so the
 // panel can show how close the arms are and color it against the governor band.
 

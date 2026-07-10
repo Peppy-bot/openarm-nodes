@@ -1,5 +1,5 @@
 // Spawned per fire_arm command (the panel's Home/Ready parks, as discrete governed
-// moves). Fires move_arm_joints at the hub, then reports the outcome to the owner. Each
+// moves). Fires move_arm_joints at the backbone, then reports the outcome to the owner. Each
 // goal is its own task; cancel-aware so a shutdown can't wedge an in-flight goal, and
 // preempt-aware so a new move can cancel it.
 
@@ -60,7 +60,7 @@ async fn run(
     duration_s: f64,
     grace: bool,
 ) {
-    // A queued preempt fires only after the hub releases its single-flight gate.
+    // A queued preempt fires only after the backbone releases its single-flight gate.
     if grace {
         tokio::select! {
             _ = token.cancelled() => return finalize(&feedback, side, false, "shutting down; move dropped").await,

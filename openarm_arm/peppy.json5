@@ -1,9 +1,9 @@
 // One arm of the openarm robot (real hardware); instantiate twice, one per
-// side, with a distinct `arm_id`. A follower of the bimanual hub: it owns the
+// side, with a distinct `arm_id`. A follower of the bimanual backbone: it owns the
 // hardware control loop (gravity/Coriolis/friction feedforward from the
-// in-process srs_model, plus MIT control) and tracks the hub's governed
+// in-process srs_model, plus MIT control) and tracks the backbone's governed
 // setpoint, reporting measured state on the always-on `arm_states` stream. The
-// hub (openarm_backbone) owns all trajectory generation, stream following, and
+// backbone (openarm_backbone) owns all trajectory generation, stream following, and
 // self-collision governing, so the arm carries no motion logic of its own.
 {
   peppy_schema: "node/v1",
@@ -12,15 +12,15 @@
     tag: "v1",
     depends_on: {
       pairings: [
-        // The exclusive command loop with the hub: governed setpoints stream in
+        // The exclusive command loop with the backbone: governed setpoints stream in
         // and the measured state streams back, both scoped to the pair (no
-        // arm_id demux). Optional: the arm boots and holds with no hub paired,
-        // and the pair is established at the hub's start (launcher `pairings:`).
+        // arm_id demux). Optional: the arm boots and holds with no backbone paired,
+        // and the pair is established at the backbone's start (launcher `pairings:`).
         {
           name: "openarm_arm_link",
           tag: "v1",
           role: "arm",
-          link_id: "hub",
+          link_id: "backbone",
           optional: true,
         },
       ],
@@ -44,7 +44,7 @@
       // "openarm_left_base_link" (v2 renamed the per-arm base link).
       base_link: "string",
       // Hardware-loop rate (Hz). Required: pick deliberately per deployment. The
-      // stack currently unifies on 100 Hz (hub stream rate and arm loop rate match);
+      // stack currently unifies on 100 Hz (backbone stream rate and arm loop rate match);
       // confirm `overruns=0` at the target rate during bring-up.
       control_rate_hz: "u32",
       // Per-cycle CAN read deadline (μs). Must fit the cycle budget (10 ms at 100 Hz).
@@ -66,13 +66,13 @@
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
       // Rate (Hz) of the always-on measured-state stream (`arm_states`), which the
-      // hub consumes. Required: consumers' needs vary too much for a default.
+      // backbone consumes. Required: consumers' needs vary too much for a default.
       state_rate_hz: "u32",
     }
   },
   interfaces: {
     conforms_to: [
-      // Measured state for the hub (governor + trajectory anchor) and any monitor.
+      // Measured state for the backbone (governor + trajectory anchor) and any monitor.
       {
         name: "openarm_arm_states",
         tag: "v1"

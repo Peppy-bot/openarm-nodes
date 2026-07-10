@@ -38,7 +38,7 @@ fn main() -> Result<()> {
             .expect("peppygen::clock::init");
 
         // Relay the sim's measured opening (gripper_states) to the paired
-        // hub. Supervised: if the consumer ever exits, whether a clean
+        // backbone. Supervised: if the consumer ever exits, whether a clean
         // close on shutdown or an unexpected error, the state relay is dead, so
         // cancel the node to restart it rather than leaving it healthy but inert.
         {
