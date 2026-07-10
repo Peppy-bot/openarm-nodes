@@ -113,11 +113,13 @@ fn main() -> Result<()> {
             node_runner,
             params.command_rate_hz,
             token.clone(),
-            command_rx,
-            feedback_rx,
-            feedback_tx,
-            frame_tx,
-            snapshot_tx,
+            owner::Channels {
+                command_rx,
+                feedback_rx,
+                feedback_tx,
+                frame_tx,
+                snapshot_tx,
+            },
         ));
 
         // ui::run is the long-lived HTTP + WebSocket server. It must be spawned rather
