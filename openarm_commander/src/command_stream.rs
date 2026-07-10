@@ -24,7 +24,7 @@ use peppylib::{Payload, TopicPublisher};
 use tokio::time::MissedTickBehavior;
 use tracing::{error, info, warn};
 
-use crate::pose::{ArmModels, JogCaps, JogStep, jog_tick};
+use crate::pose::{ArmModels, Jog, JogCaps, JogStep, jog_tick};
 use crate::state::{SharedState, Side, UiState};
 
 pub async fn run(
@@ -89,7 +89,7 @@ pub async fn run(
     // command_rate_hz changes the step size, never the jog speed.
     let tick_dt_s = 1.0 / command_rate_hz as f64;
     for side in [Side::Left, Side::Right] {
-        // Arm: advance any active Cartesian jog one capped step, then stream the
+        // Arm: advance any active jog (joint or Cartesian) one step, then stream the
         // 7-joint setpoint while enabled.
         let arm_state = state.clone();
         let arm_models = models.clone();
@@ -150,42 +150,42 @@ pub async fn run(
     }
 }
 
-// Advance one side's Cartesian jog by one tick, if one is armed: step the joint
-// target a capped increment toward the desired pose, hold it at the reach boundary,
-// and retire the jog once it has converged. Status lines fire only on the
-// moving <-> blocked transitions, so a held boundary reports once, not at 100 Hz.
-// Called under the UiState lock; jog_tick briefly takes the model lock inside it,
-// the same state -> model order as the UI snapshot, so the two cannot deadlock.
+// Advance one side's active jog by one tick, if one is armed. A joint jog reconciles
+// in a single step (the streamed joints are the target; the hub governs the ramp); a
+// Cartesian jog steps the joint target a capped increment toward the desired pose,
+// holds it at the reach boundary, and retires once converged. Status lines fire only
+// on the moving <-> blocked transitions, so a held boundary reports once, not at
+// 100 Hz. Called under the UiState lock; jog_tick briefly takes the model lock inside
+// it, the same state -> model order as the UI snapshot, so the two cannot deadlock.
 fn advance_jog(s: &mut UiState, side: Side, models: &ArmModels, caps: JogCaps) {
-    let Some(jog) = s.arms[side].pose_jog else {
-        return;
+    let cartesian = match s.arms[side].jog {
+        None => return,
+        Some(Jog::Joints(target)) => {
+            s.arms[side].joints = target;
+            s.arms[side].jog = None;
+            s.arms[side].jog_blocked = false;
+            return;
+        }
+        Some(Jog::Cartesian(cartesian)) => cartesian,
     };
-    match jog_tick(
-        models,
-        side,
-        &s.arms[side].joints,
-        &jog.desired,
-        jog.arm_angle,
-        jog.mode,
-        caps,
-    ) {
+    match jog_tick(models, side, &s.arms[side].joints, &cartesian, caps) {
         JogStep::Converged => {
-            s.arms[side].pose_jog = None;
-            s.arms[side].pose_blocked = false;
+            s.arms[side].jog = None;
+            s.arms[side].jog_blocked = false;
         }
         JogStep::Stepped(q) => {
             s.arms[side].joints = q;
-            if s.arms[side].pose_blocked {
-                s.arms[side].pose_blocked = false;
+            if s.arms[side].jog_blocked {
+                s.arms[side].jog_blocked = false;
                 s.set_status(format!("{}: pose jog moving", side.label()));
-                info!(side = side.label(), mode = ?jog.mode, "pose jog resumed");
+                info!(side = side.label(), mode = ?cartesian.mode, "pose jog resumed");
             }
         }
         JogStep::Blocked => {
-            if !s.arms[side].pose_blocked {
-                s.arms[side].pose_blocked = true;
+            if !s.arms[side].jog_blocked {
+                s.arms[side].jog_blocked = true;
                 s.set_status(format!("{}: pose at reach limit, holding", side.label()));
-                info!(side = side.label(), mode = ?jog.mode, desired = ?jog.desired, "pose jog at reach limit");
+                info!(side = side.label(), mode = ?cartesian.mode, desired = ?cartesian.desired, "pose jog at reach limit");
             }
         }
     }

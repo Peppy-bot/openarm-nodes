@@ -1,22 +1,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::pose::{JogMode, Pose};
+use crate::pose::Jog;
 
 pub const ARM_DOF: usize = openarm_description::ARM_DOF;
 // Range bounds come from the description's URDF (resolved by ui::init_limits);
 // this is only the startup default for the gripper target.
 pub const GRIPPER_CLOSED_M: f64 = 0.0;
-
-/// An armed Cartesian jog: which component the jog drives (`mode`), the desired
-/// world-frame pose (`Position`/`Orientation` modes), and the desired arm angle
-/// (`ArmAngle` mode); the unused target is ignored for the active mode.
-#[derive(Clone, Copy, Debug)]
-pub struct PoseJog {
-    pub mode: JogMode,
-    pub desired: Pose,
-    pub arm_angle: f64,
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -96,15 +86,15 @@ pub struct ArmTarget {
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
-    // The active Cartesian jog: desired world-frame pose plus which components it
-    // tracks (the Lock-RPY toggle). The command stream steps the joint target toward
-    // it a capped increment per tick and holds at the reach boundary; None when the
-    // operator is not jogging in Cartesian space. Cleared on enable/disable and by
-    // joint-space input (the two spaces must not fight).
-    pub pose_jog: Option<PoseJog>,
-    // Whether the jog is currently held at the reach boundary. Drives one-shot
+    // What the operator is actively driving this side toward: a joint target (streamed
+    // straight, the hub governs the ramp) or a Cartesian jog (stepped toward a world
+    // pose one capped increment per tick, held at the reach boundary). None when the
+    // side is idle. Arming either space clears the other, and it clears on
+    // enable/disable, since the two spaces must not fight.
+    pub jog: Option<Jog>,
+    // Whether a Cartesian jog is currently held at the reach boundary. Drives one-shot
     // status transitions (blocked <-> moving), so neither message latches or spams.
-    pub pose_blocked: bool,
+    pub jog_blocked: bool,
 }
 
 impl ArmTarget {
@@ -115,8 +105,8 @@ impl ArmTarget {
             established: false,
             in_flight: false,
             preempt: None,
-            pose_jog: None,
-            pose_blocked: false,
+            jog: None,
+            jog_blocked: false,
         }
     }
 }

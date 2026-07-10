@@ -21,9 +21,9 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::error::Result;
-use crate::pose::{ArmModels, JogMode, Pose, dist3};
+use crate::pose::{ArmModels, CartesianJog, Jog, JogMode, Pose, dist3};
 use crate::state::{
-    ARM_DOF, ArmTarget, Disposition, GripperTarget, PoseJog, Proximity, SharedState, Side, UiState,
+    ARM_DOF, ArmTarget, Disposition, GripperTarget, Proximity, SharedState, Side, UiState,
 };
 use crate::{move_arm, move_arm_joints, move_gripper};
 
@@ -254,8 +254,8 @@ async fn handle_command(text: &str, app: &AppState) {
             // A jog must not survive across a deadman edge in either direction: on
             // enable it would replay a stale desired pose, on disable it would resume
             // unexpectedly at the next enable. Its status latch resets with it.
-            s.arms[side].pose_jog = None;
-            s.arms[side].pose_blocked = false;
+            s.arms[side].jog = None;
+            s.arms[side].jog_blocked = false;
             s.enabled[side] = on;
             s.set_status(format!(
                 "{}: {}",
@@ -272,12 +272,12 @@ async fn handle_command(text: &str, app: &AppState) {
             clamp_to_limits(&mut joints, side);
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             if s.enabled[side] {
-                s.arms[side].joints = joints;
-                // Joint-space input takes over: a live Cartesian jog would otherwise
-                // walk the target right back off the operator's slider. Reset its
-                // status latch with it.
-                s.arms[side].pose_jog = None;
-                s.arms[side].pose_blocked = false;
+                // Arm a joint jog: the stream reconciles it to the setpoint on the next
+                // tick (in one step, so the slider never lags the drag). This replaces
+                // any live Cartesian jog, which would otherwise walk the target right
+                // back off the operator's slider; its status latch resets with it.
+                s.arms[side].jog = Some(Jog::Joints(joints));
+                s.arms[side].jog_blocked = false;
             }
         }
         Command::SetArmPose {
@@ -308,11 +308,11 @@ async fn handle_command(text: &str, app: &AppState) {
             // like set_arm_target.
             let mut s = app.state.lock().unwrap_or_else(|p| p.into_inner());
             if s.enabled[side] {
-                s.arms[side].pose_jog = Some(PoseJog {
+                s.arms[side].jog = Some(Jog::Cartesian(CartesianJog {
                     mode: mode.into(),
                     desired: pose,
                     arm_angle,
-                });
+                }));
             }
         }
         Command::FireArmPose {

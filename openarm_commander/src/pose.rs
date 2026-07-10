@@ -296,15 +296,41 @@ impl JogCaps {
     }
 }
 
-/// Which component a jog drives: `Position` tracks x/y/z (holding orientation),
-/// `Orientation` tracks the hand frame (holding position), `ArmAngle` swivels the
-/// elbow through the null space (holding the whole end-effector pose). Whatever
-/// control the operator touches leads.
+/// Which component a Cartesian jog drives: `Position` tracks x/y/z (holding
+/// orientation), `Orientation` tracks the hand frame (holding position), `ArmAngle`
+/// swivels the elbow through the null space (holding the whole end-effector pose).
+/// Whatever control the operator touches leads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JogMode {
     Position,
     Orientation,
     ArmAngle,
+}
+
+/// The operator's active drive for one arm, reconciled toward once per stream tick.
+/// Joint sliders and world-frame controls both arm one of these, so the two spaces
+/// share a single "what is this side being driven toward" slot and one advance path;
+/// arming either clears the other, since the spaces must not fight.
+#[derive(Clone, Copy, Debug)]
+pub enum Jog {
+    /// Joint sliders: stream these joints straight to the hub, which governs the
+    /// ramp under its joint-velocity cap. Reconciles in one step, so the panel's
+    /// slider never lags the operator's drag (no node-side interpolation).
+    Joints([f64; ARM_DOF]),
+    /// World-frame controls: step the joints one resolved-rate increment per tick
+    /// toward the target, since the command wire carries only joints and a pose jump
+    /// would teleport or branch-flip the arm.
+    Cartesian(CartesianJog),
+}
+
+/// An armed Cartesian jog: which component leads (`mode`), the desired world-frame
+/// pose (used by `Position`/`Orientation`), and the desired arm angle (used by
+/// `ArmAngle`); the field the active mode does not use is ignored.
+#[derive(Clone, Copy, Debug)]
+pub struct CartesianJog {
+    pub mode: JogMode,
+    pub desired: Pose,
+    pub arm_angle: f64,
 }
 
 /// One jog tick's outcome.
@@ -327,29 +353,27 @@ const ARM_ANGLE_CONVERGED_RAD: f64 = 2e-3;
 /// motion is pinned by joint limits: the envelope boundary in free space.
 const MIN_STEP_PROGRESS: f64 = 0.2;
 
-/// Advance one jog tick for `side`: step the pose of `joints` one capped Cartesian
-/// increment toward `desired` under `mode`. Steps are velocity-clamped in joint
-/// space, so the target walks toward the desired values and stops exactly where
+/// Advance one Cartesian jog tick for `side`: step the pose of `joints` one capped
+/// increment toward `jog.desired` under `jog.mode`. Steps are velocity-clamped in
+/// joint space, so the target walks toward the desired values and stops exactly where
 /// reach or limits end.
 pub fn jog_tick(
     models: &ArmModels,
     side: Side,
     joints: &[f64; ARM_DOF],
-    desired: &Pose,
-    arm_angle: f64,
-    mode: JogMode,
+    jog: &CartesianJog,
     caps: JogCaps,
 ) -> JogStep {
     let current = models.ee_pose_world(side, joints);
-    let step = match mode {
+    let step = match jog.mode {
         JogMode::Position => {
-            let Some(dx) = position_step(&current, desired, caps.pos_step_m) else {
+            let Some(dx) = position_step(&current, &jog.desired, caps.pos_step_m) else {
                 return JogStep::Converged;
             };
             models.resolved_rate_step(side, joints, RateTask::Linear(dx), caps.dt_s)
         }
         JogMode::Orientation => {
-            let Some(dw) = orientation_step(&current, desired, caps.rot_step_rad) else {
+            let Some(dw) = orientation_step(&current, &jog.desired, caps.rot_step_rad) else {
                 return JogStep::Converged;
             };
             models.resolved_rate_step(side, joints, RateTask::Angular(dw), caps.dt_s)
@@ -358,7 +382,7 @@ pub fn jog_tick(
             let Some(psi_cur) = models.arm_angle(side, joints) else {
                 return JogStep::Blocked;
             };
-            let err = arm_angle - psi_cur;
+            let err = jog.arm_angle - psi_cur;
             if err.abs() < ARM_ANGLE_CONVERGED_RAD {
                 return JogStep::Converged;
             }
@@ -522,6 +546,14 @@ mod tests {
         JogCaps::per_tick(0.01, 0.5)
     }
 
+    fn cart(mode: JogMode, desired: Pose, arm_angle: f64) -> CartesianJog {
+        CartesianJog {
+            mode,
+            desired,
+            arm_angle,
+        }
+    }
+
     #[test]
     fn workspace_bounds_are_sane_and_contain_home() {
         let m = models();
@@ -594,9 +626,13 @@ mod tests {
             dt_s: 0.01,
         };
         let desired = [p0[0] + 1.0, p0[1], p0[2], p0[3], p0[4], p0[5]];
-        if let JogStep::Stepped(q) =
-            jog_tick(&m, Side::Left, &q0, &desired, 0.0, JogMode::Position, caps)
-        {
+        if let JogStep::Stepped(q) = jog_tick(
+            &m,
+            Side::Left,
+            &q0,
+            &cart(JogMode::Position, desired, 0.0),
+            caps,
+        ) {
             let budget = m.velocity_limits(Side::Left);
             for i in 0..ARM_DOF {
                 let v = (q[i] - q0[i]).abs() / caps.dt_s;
@@ -625,9 +661,7 @@ mod tests {
                 &m,
                 Side::Left,
                 &q,
-                &desired,
-                0.0,
-                JogMode::Position,
+                &cart(JogMode::Position, desired, 0.0),
                 test_caps(),
             ) {
                 JogStep::Stepped(next) => q = next,
@@ -659,9 +693,7 @@ mod tests {
                 &m,
                 Side::Left,
                 &q,
-                &desired,
-                0.0,
-                JogMode::Orientation,
+                &cart(JogMode::Orientation, desired, 0.0),
                 test_caps(),
             ) {
                 JogStep::Stepped(next) => q = next,
@@ -685,7 +717,7 @@ mod tests {
         let p = m.ee_pose_world(Side::Left, &q);
         for mode in [JogMode::Position, JogMode::Orientation] {
             assert!(matches!(
-                jog_tick(&m, Side::Left, &q, &p, 0.0, mode, test_caps()),
+                jog_tick(&m, Side::Left, &q, &cart(mode, p, 0.0), test_caps()),
                 JogStep::Converged
             ));
         }
@@ -708,9 +740,7 @@ mod tests {
                 &m,
                 Side::Left,
                 &q,
-                &p0,
-                target_psi,
-                JogMode::ArmAngle,
+                &cart(JogMode::ArmAngle, p0, target_psi),
                 test_caps(),
             ) {
                 JogStep::Stepped(next) => q = next,
@@ -750,9 +780,7 @@ mod tests {
                 &m,
                 Side::Left,
                 &q,
-                &desired,
-                0.0,
-                JogMode::Position,
+                &cart(JogMode::Position, desired, 0.0),
                 test_caps(),
             ) {
                 JogStep::Stepped(next) => {
