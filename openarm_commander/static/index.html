@@ -150,7 +150,10 @@
   }
   /* Slider column: the track (with its actual-position caret) over a faint
      min/max readout, so the joint's limits are always visible. */
-  .scol { display: flex; flex-direction: column; gap: 3px; }
+  /* .scol is the shared axis (full width of the cell); .subrange spans one slider's
+     reachable range within it, so tracks of different ranges compare at a glance. */
+  .scol { display: block; }
+  .subrange { display: flex; flex-direction: column; gap: 3px; }
   .lim {
     display: flex; justify-content: space-between;
     font: 500 10px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
@@ -285,6 +288,15 @@ const enabled = { left: false, right: false };
 function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
 function $(id) { return document.getElementById(id); }
 
+// Place one slider's track on a shared axis [cMin, cMax]: its reachable [lo, hi] becomes
+// an offset sub-range, so tracks of different ranges are visually comparable.
+function place_subrange(id, lo, hi, cMin, cMax) {
+  const span = (cMax - cMin) || 1;
+  const sub = $(`${id}_sub`);
+  sub.style.marginLeft = ((lo - cMin) / span * 100).toFixed(2) + '%';
+  sub.style.width = ((hi - lo) / span * 100).toFixed(2) + '%';
+}
+
 function build_arm(side, label) {
   const root = $(`${side}_arm`);
   root.innerHTML = `
@@ -333,11 +345,13 @@ function slider_row(id, name, min, max, step, oninput, caretId, loId, hiId, tId,
   row.innerHTML = `
     <span class="name">${name}</span>
     <div class="scol">
-      <div class="srow">
-        <input type="range" min="${min}" max="${max}" step="${step}" value="0" id="${id}" oninput="${oninput}" />
-        <div class="ghost off" id="${caretId}"></div>
+      <div class="subrange" id="${id}_sub">
+        <div class="srow">
+          <input type="range" min="${min}" max="${max}" step="${step}" value="0" id="${id}" oninput="${oninput}" />
+          <div class="ghost off" id="${caretId}"></div>
+        </div>
+        <div class="lim"><span id="${loId}">${fmt(min)}</span><span id="${hiId}">${fmt(max)}</span></div>
       </div>
-      <div class="lim"><span id="${loId}">${fmt(min)}</span><span id="${hiId}">${fmt(max)}</span></div>
     </div>
     <span class="target" id="${tId}">+0.000</span>
     <span class="fb" id="${fId}">---</span>`;
@@ -757,6 +771,10 @@ function apply_snapshot(snap) {
     b.textContent = on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
     b.className = 'badge' + (on ? ' stream' : (a.in_flight ? ' flight' : ''));
     refresh_primary(side);
+    // Shared joint axis: span all seven joint limits, so each joint's track shows its
+    // travel relative to the others.
+    const jMin = a.limits ? Math.min(...a.limits.map(l => l[0])) : -PI;
+    const jMax = a.limits ? Math.max(...a.limits.map(l => l[1])) : PI;
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_f${i}`).textContent = a.feedback ? fmt(a.feedback[i]) : '---';
       // Slider bounds + the visible min/max readout come from joint_limits.
@@ -767,6 +785,7 @@ function apply_snapshot(snap) {
         if (el.max != hi) el.max = hi;
         $(`${side}_lo${i}`).textContent = fmt(lo);
         $(`${side}_hi${i}`).textContent = fmt(hi);
+        place_subrange(`${side}_j${i}`, lo, hi, jMin, jMax);
       }
       // While disabled the slider mirrors the measured pose (you must enable to
       // move), so the thumb shows where the arm is and enabling never jumps. While
@@ -796,9 +815,11 @@ function apply_snapshot(snap) {
       }
     }
 
-    // World pose: x/y/z sliders and roll/pitch/yaw dials mirror the FK of the joint
-    // target while enabled (so a joint move updates them) or the measured pose while
-    // disabled, each with the measured value marked. Skip a control being edited.
+    // World position: the x/y/z sliders mirror the FK of the joint target while enabled
+    // (so a joint move updates them) or the measured pose while disabled, each with the
+    // measured value marked. Skip a control being edited.
+    const posMin = Math.min(...a.pos_bounds.map(b => b[0]));
+    const posMax = Math.max(...a.pos_bounds.map(b => b[1]));
     for (const ax of POS_AXES) {
       const i = ax.i;
       // Per-side reach bounds from the snapshot drive the slider range, the min/max
@@ -809,6 +830,7 @@ function apply_snapshot(snap) {
       if (el.max != pmax) el.max = pmax;
       $(`${side}_plo${i}`).textContent = fmt(pmin);
       $(`${side}_phi${i}`).textContent = fmt(pmax);
+      place_subrange(`${side}_p${i}`, pmin, pmax, posMin, posMax);
       $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
       const composingPose = uiMode === 'actions' && touched[side] === 'pose';
       if (!composingPose && document.activeElement !== el) {
