@@ -255,6 +255,7 @@ impl Owner {
                     return;
                 }
                 if !position.iter().all(|v| v.is_finite()) {
+                    self.status(side, "invalid position, not firing");
                     return;
                 }
                 let Some(rotation) = unit_quat_from_wire(orientation) else {

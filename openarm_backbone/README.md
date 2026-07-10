@@ -1,6 +1,6 @@
 # openarm_backbone
 
-Routes operator commands to the right place. The commander fires `move_arm_joints` and `move_gripper` goals at this node; backbone reads the goal's `arm_id` or `gripper_id` (0 = left, 1 = right), forwards it to the matching arm or gripper instance, and streams the feedback and result back to the caller.
+Routes operator commands to the right place. The commander fires `move_arm`, `move_arm_joints`, and `move_gripper` goals at this node; backbone reads the goal's `arm_id` or `gripper_id` (0 = left, 1 = right), forwards it to the matching arm or gripper instance, and streams the feedback and result back to the caller.
 
 It is engine-agnostic. The launcher binds one robot_initializer, two arms, and two grippers into its five slots, and those can be real, Isaac, or MuJoCo implementations. At startup it waits on the robot_initializer's `is_ready` before accepting any goals, so nothing moves until the world is actually loaded.
 
@@ -29,11 +29,12 @@ peppy node info openarm_backbone:v1
 ## Actions
 
 ```
-move_arm_joints   goal: { arm_id, feedback_frequency, joint_positions[7] }
-move_gripper      goal: { gripper_id, feedback_frequency, position }
+move_arm          goal: { arm_id, position[3], orientation[4], duration_s }
+move_arm_joints   goal: { arm_id, joint_positions[7], duration_s }
+move_gripper      goal: { gripper_id, position }
 ```
 
-`position` is the gripper's total aperture in meters (0.0 closed, 0.044 fully open).
+The gripper's `position` is its total aperture in meters (0.0 closed, 0.044 fully open); `move_arm`'s `position` (m) and `orientation` (quaternion `[x, y, z, w]`) are the world-frame end-effector target, and `duration_s` (0 = fastest safe) is the requested move time.
 
 ## Troubleshooting
 
