@@ -84,17 +84,20 @@ impl CartesianTrajectory {
         }
     }
 
-    /// EE pose at time `now`: position on the quintic blend between start and end,
-    /// orientation slerped at the same blend parameter. Holds at `end` once complete.
-    pub fn sample(&self, now: Instant) -> Isometry3<f64> {
-        interpolate_pose(&self.start, &self.end, self.blend(now))
+    /// EE pose at blend parameter `s` on this trajectory's geometric path:
+    /// position on the blend between start and end, orientation slerped at the
+    /// same parameter. The runtime IK walk samples blends from
+    /// [`subdivided_blends`] with this, so its resolution never falls below the
+    /// plan's.
+    pub fn sample_at_blend(&self, s: f64) -> Isometry3<f64> {
+        interpolate_pose(&self.start, &self.end, s.clamp(0.0, 1.0))
     }
 
     /// Blend parameter `s in [0, 1]` at time `now` (the quintic of elapsed / total,
     /// 1 for a zero-duration trajectory): how far along its geometric path the
-    /// trajectory is, the same `s` [`sample`](Self::sample) interpolates at. The
-    /// runtime scales its per-tick elbow budget by the blend progressed between
-    /// solves, mirroring the planner's per-sample cap.
+    /// trajectory is, fed to [`sample_at_blend`](Self::sample_at_blend). A steered
+    /// line's per-tick elbow budget scales by the blend progressed between solves,
+    /// mirroring the planner's per-sample cap.
     pub fn blend(&self, now: Instant) -> f64 {
         let t_total = self.duration.as_secs_f64();
         if t_total == 0.0 {
@@ -115,6 +118,25 @@ impl CartesianTrajectory {
 /// per-joint speed. Closed-form IK makes this sub-millisecond.
 const CARTESIAN_PLAN_SAMPLES: usize = 100;
 
+/// The plan's validation grid spacing in blend parameter: what one plan sample
+/// spans. The runtime must never advance its IK walk coarser than this (see
+/// [`subdivided_blends`]), or a short move's quintic could step past geometry the
+/// plan validated cell by cell.
+pub const CARTESIAN_PLAN_DS: f64 = 1.0 / CARTESIAN_PLAN_SAMPLES as f64;
+
+/// The blend samples one runtime tick must IK-solve, walking from `prev`
+/// (exclusive) to `next` (inclusive) in equal steps no wider than
+/// [`CARTESIAN_PLAN_DS`]. A tick that progressed no more than one plan cell gets
+/// the single sample `next` (including a zero-progress hold tick); a
+/// short-duration move whose quintic outpaces the plan grid gets intermediate
+/// samples, so the executed IK walk (and its per-step elbow budget) always runs
+/// at least as fine as the walk that validated the line.
+pub fn subdivided_blends(prev: f64, next: f64) -> impl Iterator<Item = f64> {
+    let span = (next - prev).max(0.0);
+    let steps = ((span / CARTESIAN_PLAN_DS).ceil() as usize).max(1);
+    (1..=steps).map(move |k| prev + span * (k as f64 / steps as f64))
+}
+
 /// Arm-angle travel budget for a Cartesian move, in radians per unit blend
 /// parameter: at each IK solve the elbow may step at most this far (scaled by the
 /// blend progressed since the previous solve) toward higher manipulability, so a
@@ -126,38 +148,91 @@ pub const ARM_ANGLE_STEP_PER_BLEND_RAD: f64 = 2.0;
 
 /// Largest joint step (rad) one plan sample of the line may demand and still be
 /// tracked as a straight line. Above it the exact IK solution has jumped to
-/// another branch (a genuine discontinuity: sampling finer does not shrink it) or
-/// is steep enough that line-tracking would inflate the whole move far past its
-/// request; either way the goal executes as a joint-space reconfiguration.
+/// another branch (a genuine discontinuity: sampling finer does not shrink it),
+/// which no continuous tracking can execute.
 const MAX_LINE_STEP_RAD: f64 = 0.35;
+
+/// Longest a line plan may run beyond the caller's requested duration before it
+/// reads as stuck rather than deliberate. A near-singular graze that slows a line
+/// to a few seconds is honest motion and beats a reconfiguration swing; one that
+/// balloons past this is effectively unexecutable as a line, so the planner falls
+/// through to its next tier.
+const MAX_UNREQUESTED_LINE_S: f64 = 10.0;
 
 /// How an accepted move_arm goal executes, decided by [`plan_cartesian`].
 pub enum CartesianPlan {
-    /// The straight line is continuously trackable: track it over this duration.
-    Line { duration_s: f64 },
-    /// The line is not continuously trackable (it demands a branch jump, is
-    /// untrackably steep, or leaves reach mid-path): run a joint-space quintic to
+    /// The straight line is continuously trackable: track it over this duration,
+    /// resolving the elbow the same way the plan did (`steer_elbow` on means the
+    /// per-blend manipulability budget was needed to keep the line alive; off
+    /// means the elbow holds its seed angle, the quiet default).
+    Line { duration_s: f64, steer_elbow: bool },
+    /// No line exists: every continuous tracking demands a branch jump, is
+    /// untrackably slow, or leaves reach mid-path. Run a joint-space quintic to
     /// this goal solution instead, reaching the same pose off the line.
     Reconfigure { goal_q: JointVec },
 }
 
-/// Plan a Cartesian move: walk the geometric path start->end, solving IK at each
-/// sample (seeded for continuity, elbow stepped toward higher manipulability under
-/// the shared [`ARM_ANGLE_STEP_PER_BLEND_RAD`] budget). A cleanly trackable line
-/// plans as [`CartesianPlan::Line`] with the duration that keeps every joint
-/// within its velocity limit, floored at the caller's request; a line that cannot
-/// be tracked continuously (a per-sample step past [`MAX_LINE_STEP_RAD`], or a
-/// mid-path pose with no in-limit solution) degrades to
-/// [`CartesianPlan::Reconfigure`] at the goal pose's own solution. `None` only
-/// when the goal pose itself is unreachable.
+/// One policy's walk along the line: the velocity-sizing peak if the line is
+/// continuously trackable under that policy.
+struct LineWalk {
+    /// Peak of `|dq_i/ds| / v_max_i` over the path: the binding joint/segment.
+    peak_ratio: f64,
+}
+
+/// Walk the geometric path start->end at plan resolution, IK-solving each sample
+/// seeded from the previous. `None` when the line is not continuously trackable
+/// under `policy`: a per-sample joint step past [`MAX_LINE_STEP_RAD`] (a branch
+/// jump) or a mid-path pose with no in-limit solution.
+fn walk_line(
+    model: &Arm,
+    start: &Isometry3<f64>,
+    end: &Isometry3<f64>,
+    mut seed: JointVec,
+    max_joint_velocity_rad_s: &JointVec,
+    policy: ArmAnglePolicy,
+) -> Option<LineWalk> {
+    let mut prev_q: Option<JointVec> = None;
+    let mut peak_ratio = 0.0_f64;
+    for k in 0..=CARTESIAN_PLAN_SAMPLES {
+        let pose = interpolate_pose(start, end, k as f64 * CARTESIAN_PLAN_DS);
+        let sol = model.solve_ik(&model.base_pose(&pose), policy, &seed)?;
+        if let Some(prev) = prev_q {
+            for i in 0..ARM_DOF {
+                let step = (sol.q[i] - prev[i]).abs();
+                if step > MAX_LINE_STEP_RAD {
+                    return None;
+                }
+                peak_ratio = peak_ratio.max(step / CARTESIAN_PLAN_DS / max_joint_velocity_rad_s[i]);
+            }
+        }
+        prev_q = Some(sol.q);
+        seed = sol.q;
+    }
+    Some(LineWalk { peak_ratio })
+}
+
+/// Plan a Cartesian move, preferring the quietest execution that works:
 ///
-/// Bounding `dq/ds` (joint sensitivity to the blend parameter) numerically along
-/// the path turns "respect every joint velocity limit" into a minimum duration via
+/// 1. **Held elbow** ([`ArmAnglePolicy::FromSeed`]): the elbow stays at its seed
+///    angle, so an ordinary move never swings joints it does not need. Taken
+///    whenever the line tracks at a sane duration.
+/// 2. **Steered elbow** ([`ArmAnglePolicy::MaxManipulability`] under the shared
+///    [`ARM_ANGLE_STEP_PER_BLEND_RAD`] budget): spends elbow motion only when
+///    holding it would break the line (a singular graze inflating the duration,
+///    or a limit wall the swivel can dodge).
+/// 3. **Reconfiguration**: no line exists at all (every continuous tracking
+///    demands a branch jump or leaves reach); swing through joint space to the
+///    goal pose's own solution. The only tier that visibly reorganizes the arm,
+///    reserved for goals that cannot be reached any other way.
+///
+/// A tier is accepted when its line tracks continuously and its
+/// velocity-limited duration stays within the request (or
+/// [`MAX_UNREQUESTED_LINE_S`] past it). `None` only when the goal pose itself
+/// is unreachable. Bounding `dq/ds` numerically along the walk turns "respect
+/// every joint velocity limit" into a minimum duration via
 /// [`velocity_limited_duration`], the same sizing the joint trajectory does
-/// analytically. The steered elbow keeps the path off singular postures where
-/// `dq/ds` blows up; where the geometry still forces one, the move is slowed
-/// rather than driven fast through it. Poses are in the world frame; IK runs in
-/// the arm base frame, so each sample is converted with [`Arm::base_pose`].
+/// analytically. Poses are in the world frame; IK runs in the arm base frame,
+/// so each sample is converted with [`Arm::base_pose`].
 pub fn plan_cartesian(
     model: &Arm,
     start: &Isometry3<f64>,
@@ -166,42 +241,31 @@ pub fn plan_cartesian(
     max_joint_velocity_rad_s: &JointVec,
     requested_duration_secs: f64,
 ) -> Option<CartesianPlan> {
-    let ds = 1.0 / CARTESIAN_PLAN_SAMPLES as f64;
-    let policy = ArmAnglePolicy::MaxManipulability {
-        max_step_rad: ARM_ANGLE_STEP_PER_BLEND_RAD * ds,
-    };
-    let mut seed = seed;
-    let mut prev_q: Option<JointVec> = None;
-    // Peak of |dq_i/ds| / v_max_i over the path: the binding joint/segment.
-    let mut peak_ratio = 0.0_f64;
-    let mut line_trackable = true;
-    for k in 0..=CARTESIAN_PLAN_SAMPLES {
-        let pose = interpolate_pose(start, end, k as f64 * ds);
-        let base_target = model.base_pose(&pose);
-        let Some(sol) = model.solve_ik(&base_target, policy, &seed) else {
-            line_trackable = false; // mid-path pose out of reach: the line is off
-            break;
+    let duration_cap = requested_duration_secs.max(MAX_UNREQUESTED_LINE_S);
+    let tiers = [
+        (ArmAnglePolicy::FromSeed, false),
+        (
+            ArmAnglePolicy::MaxManipulability {
+                max_step_rad: ARM_ANGLE_STEP_PER_BLEND_RAD * CARTESIAN_PLAN_DS,
+            },
+            true,
+        ),
+    ];
+    for (policy, steer_elbow) in tiers {
+        let Some(walk) = walk_line(model, start, end, seed, max_joint_velocity_rad_s, policy)
+        else {
+            continue;
         };
-        if let Some(prev) = prev_q {
-            for i in 0..ARM_DOF {
-                let step = (sol.q[i] - prev[i]).abs();
-                if step > MAX_LINE_STEP_RAD {
-                    line_trackable = false;
-                }
-                peak_ratio = peak_ratio.max(step / ds / max_joint_velocity_rad_s[i]);
-            }
+        let duration_s = velocity_limited_duration(walk.peak_ratio, requested_duration_secs);
+        if duration_s <= duration_cap {
+            return Some(CartesianPlan::Line {
+                duration_s,
+                steer_elbow,
+            });
         }
-        prev_q = Some(sol.q);
-        seed = sol.q;
     }
-    if line_trackable {
-        return Some(CartesianPlan::Line {
-            duration_s: velocity_limited_duration(peak_ratio, requested_duration_secs),
-        });
-    }
-    // The line is untrackable but the goal may still be reachable: solve it
-    // directly (seeded from how far the walk got, for branch continuity) and
-    // reconfigure through joint space.
+    // No line tracks: reconfigure to the goal pose's nearest-branch solution,
+    // or reject a goal that is unreachable outright.
     let goal_q = model
         .solve_ik(&model.base_pose(end), ArmAnglePolicy::FromSeed, &seed)?
         .q;
@@ -359,13 +423,97 @@ mod tests {
         end.translation.vector.z += 0.05;
         let plan = plan_cartesian(&model, &start, &end, ready, &V_MAX_V2, 2.0)
             .expect("small lift from ready is reachable");
-        let CartesianPlan::Line { duration_s } = plan else {
+        let CartesianPlan::Line {
+            duration_s,
+            steer_elbow,
+        } = plan
+        else {
             panic!("a trackable line must plan as a line");
         };
         assert!(
             (duration_s - 2.0).abs() < EPS,
             "easy move must stay at the request, got {duration_s:.3}s"
         );
+        assert!(!steer_elbow, "an easy move must not spend the elbow budget");
+    }
+
+    // The incident regression: after a reconfiguration parks the arm at an
+    // unusual arm angle, ordinary nudges from that posture must plan as quiet
+    // held-elbow lines, not cascade into further reconfigurations (the steered
+    // walk's greedy optimizer can manufacture branch jumps on lines the held
+    // walk tracks cleanly, so the quiet tier must be tried first).
+    #[test]
+    fn small_nudge_from_a_reconfigured_posture_stays_a_quiet_line() {
+        let mut model = v2_right_arm();
+        let quat = [
+            -0.06651768984258864,
+            -0.5085494684876904,
+            0.32535618836337443,
+            0.7944156253074012,
+        ];
+        let start = world_pose(
+            [0.0715597403410507, -0.179708420505458, 0.448631054180598],
+            quat,
+        );
+        let end = world_pose(
+            [-0.178440259658949, -0.179708420505458, 0.448631054180598],
+            quat,
+        );
+        let ready = [0.1537, 0.39547, -0.4808, 0.95, -0.0008, 0.0046, -0.0008];
+        let seed = model
+            .solve_ik(
+                &model.base_pose(&start),
+                srs_model::ArmAnglePolicy::FromSeed,
+                &ready,
+            )
+            .expect("start pose reachable from ready")
+            .q;
+        let Some(CartesianPlan::Reconfigure { goal_q }) =
+            plan_cartesian(&model, &start, &end, seed, &V_MAX_V2, 2.0)
+        else {
+            panic!("cross-body pull reconfigures");
+        };
+        // From the reconfigured posture, nudge 3 cm in +x: an ordinary move.
+        let parked_ee = model.at(&goal_q).ee_pose();
+        let nudge_start = model.world_pose(&parked_ee);
+        let mut nudge_end = nudge_start;
+        nudge_end.translation.vector.x += 0.03;
+        let plan = plan_cartesian(&model, &nudge_start, &nudge_end, goal_q, &V_MAX_V2, 2.0)
+            .expect("nudge from the parked posture is reachable");
+        let CartesianPlan::Line {
+            duration_s,
+            steer_elbow,
+        } = plan
+        else {
+            panic!("an ordinary nudge must stay a line, not reconfigure");
+        };
+        assert!(!steer_elbow, "an ordinary nudge must hold the elbow");
+        assert!(
+            (duration_s - 2.0).abs() < EPS,
+            "nudge stays at the request, got {duration_s:.3}s"
+        );
+    }
+
+    #[test]
+    fn subdivided_blends_match_plan_resolution() {
+        // Within one plan cell (or zero progress): the single sample `next`.
+        let one: Vec<f64> = subdivided_blends(0.42, 0.425).collect();
+        assert_eq!(one, vec![0.425]);
+        let hold: Vec<f64> = subdivided_blends(0.42, 0.42).collect();
+        assert_eq!(hold, vec![0.42]);
+        // A tick outpacing the grid subdivides evenly: last lands exactly on
+        // `next`, and no step exceeds the plan spacing.
+        let many: Vec<f64> = subdivided_blends(0.1, 0.1 + 3.7 * CARTESIAN_PLAN_DS).collect();
+        assert_eq!(many.len(), 4);
+        assert!(approx_eq(
+            *many.last().unwrap(),
+            0.1 + 3.7 * CARTESIAN_PLAN_DS
+        ));
+        let mut prev = 0.1;
+        for s in many {
+            assert!(s - prev <= CARTESIAN_PLAN_DS + EPS);
+            prev = s;
+        }
     }
 
     fn approx_eq(a: f64, b: f64) -> bool {
@@ -487,7 +635,7 @@ mod tests {
         let mut goal = start;
         goal.translation.vector.z += 0.05; // a small reachable move
 
-        let Some(CartesianPlan::Line { duration_s }) =
+        let Some(CartesianPlan::Line { duration_s, .. }) =
             plan_cartesian(&arm, &start, &goal, seed, &V_MAX, 0.0)
         else {
             panic!("an in-workspace move should plan a line");
@@ -499,6 +647,7 @@ mod tests {
         // The request floors the velocity-limited duration.
         let Some(CartesianPlan::Line {
             duration_s: floored,
+            ..
         }) = plan_cartesian(&arm, &start, &goal, seed, &V_MAX, 5.0)
         else {
             panic!("reachable");
@@ -552,7 +701,7 @@ mod tests {
         let start = pose(0.1, 0.2, 0.3, 0.2);
         let end = pose(0.5, -0.1, 0.4, 1.0);
         let traj = CartesianTrajectory::new(start, end, 2.0);
-        let got = traj.sample(traj.motion_start);
+        let got = traj.sample_at_blend(traj.blend(traj.motion_start));
         assert!((got.translation.vector - start.translation.vector).norm() < EPS);
         assert!(got.rotation.angle_to(&start.rotation) < EPS);
     }
@@ -562,7 +711,7 @@ mod tests {
         let start = pose(0.1, 0.2, 0.3, 0.2);
         let end = pose(0.5, -0.1, 0.4, 1.0);
         let traj = CartesianTrajectory::new(start, end, 2.0);
-        let got = traj.sample(traj.motion_start + traj.duration);
+        let got = traj.sample_at_blend(traj.blend(traj.motion_start + traj.duration));
         assert!((got.translation.vector - end.translation.vector).norm() < EPS);
         assert!(got.rotation.angle_to(&end.rotation) < EPS);
     }
@@ -574,7 +723,7 @@ mod tests {
         let end = pose(1.0, 2.0, -1.0, 1.0);
         let traj = CartesianTrajectory::new(start, end, 2.0);
         let half = Duration::from_secs_f64(traj.duration.as_secs_f64() / 2.0);
-        let got = traj.sample(traj.motion_start + half);
+        let got = traj.sample_at_blend(traj.blend(traj.motion_start + half));
         let mid = start.translation.vector.lerp(&end.translation.vector, 0.5);
         assert!((got.translation.vector - mid).norm() < EPS);
         // Halfway in orientation: equal angle to both endpoints.
@@ -588,7 +737,9 @@ mod tests {
         let start = pose(0.0, 0.0, 0.0, 0.0);
         let end = pose(0.3, 0.3, 0.3, 0.5);
         let traj = CartesianTrajectory::new(start, end, 1.0);
-        let got = traj.sample(traj.motion_start + traj.duration + Duration::from_secs(3));
+        let got = traj.sample_at_blend(
+            traj.blend(traj.motion_start + traj.duration + Duration::from_secs(3)),
+        );
         assert!((got.translation.vector - end.translation.vector).norm() < EPS);
         assert!(got.rotation.angle_to(&end.rotation) < EPS);
     }
@@ -598,7 +749,7 @@ mod tests {
         let start = pose(0.0, 0.0, 0.0, 0.0);
         let end = pose(0.3, 0.3, 0.3, 0.5);
         let traj = CartesianTrajectory::new(start, end, 0.0);
-        let got = traj.sample(traj.motion_start);
+        let got = traj.sample_at_blend(traj.blend(traj.motion_start));
         assert!((got.translation.vector - end.translation.vector).norm() < EPS);
         assert!(got.rotation.angle_to(&end.rotation) < EPS);
     }
