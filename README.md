@@ -59,7 +59,7 @@ peppy node add /path/to/ws/openarm_nodes/openarm_backbone -sb --idle-timeout 180
 peppy node add /path/to/ws/openarm_nodes/openarm_commander -sb --idle-timeout 1800
 ```
 
-For Isaac, swap the three sim-specific nodes. Backbone and joint_commander are engine-agnostic and don't need rebuilding:
+For Isaac, swap the three sim-specific nodes. Backbone and commander are engine-agnostic and don't need rebuilding:
 
 ```sh
 peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer_isaac -sb --idle-timeout 18000

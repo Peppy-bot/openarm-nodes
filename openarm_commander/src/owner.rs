@@ -26,8 +26,8 @@ use tokio_util::sync::CancellationToken as GoalToken;
 use crate::pose::{ArmModels, CartesianJog, Jog, JogCaps, JogMode, JogStep, Pose, dist3, jog_tick};
 use crate::state::{ARM_DOF, ArmTarget, BySide, Proximity, Side, UiState};
 use crate::ui::{
-    Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, quat_to_euler,
-    sane_duration, valid_governor_band,
+    Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, sane_duration,
+    valid_governor_band,
 };
 use crate::{move_arm, move_arm_joints, move_gripper};
 
@@ -254,14 +254,13 @@ impl Owner {
                     self.status(side, "disable before a discrete move");
                     return;
                 }
-                if !position
-                    .iter()
-                    .chain(orientation.iter())
-                    .all(|v| v.is_finite())
-                {
+                if !position.iter().all(|v| v.is_finite()) {
                     return;
                 }
-                let rotation = quat_from_wire(orientation);
+                let Some(rotation) = unit_quat_from_wire(orientation) else {
+                    self.status(side, "invalid orientation, not firing");
+                    return;
+                };
                 let seed = self.state.arms[side].joints;
                 // Preview the pose as joints (seeded from the current target) so both the
                 // sliders and the FK readout show where it is going, and reject an
@@ -273,6 +272,8 @@ impl Owner {
                 };
                 clamp_to_limits(&mut target_joints, side);
                 let duration_s = self.floored_duration(side, position, duration_s);
+                // Send the hub the normalized quaternion, not the raw wire values.
+                let orientation = [rotation.i, rotation.j, rotation.k, rotation.w];
                 self.fire_or_queue(
                     side,
                     ArmGoal::Pose {
@@ -341,16 +342,17 @@ impl Owner {
                 let side: Side = side.into();
                 if !position
                     .iter()
-                    .chain(orientation.iter())
                     .chain(std::iter::once(&arm_angle))
                     .all(|v| v.is_finite())
                 {
                     return;
                 }
-                // The wire carries orientation as a quaternion; store the desired pose as
-                // euler for the jog, which re-derives a quaternion each step (so the euler
-                // encoding never drives interpolation).
-                let (roll, pitch, yaw) = quat_to_euler(orientation);
+                let Some(rotation) = unit_quat_from_wire(orientation) else {
+                    return;
+                };
+                // Store the desired pose as euler for the jog, which re-derives a
+                // quaternion each step (so the euler encoding never drives interpolation).
+                let (roll, pitch, yaw) = rotation.euler_angles();
                 let pose: Pose = [position[0], position[1], position[2], roll, pitch, yaw];
                 if self.state.enabled[side] {
                     self.state.arms[side].jog = Some(Jog::Cartesian(CartesianJog {
@@ -552,8 +554,12 @@ fn on_off(enabled: bool) -> &'static str {
     if enabled { "ON" } else { "OFF" }
 }
 
-fn quat_from_wire(q: [f64; 4]) -> UnitQuaternion<f64> {
-    UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]))
+/// A unit quaternion from the wire `[x, y, z, w]`, or `None` if it is non-finite or too
+/// near zero to normalize. A degenerate orientation would normalize to NaN and poison
+/// the IK solve, so both pose paths reject it here.
+fn unit_quat_from_wire(q: [f64; 4]) -> Option<UnitQuaternion<f64>> {
+    let quat = Quaternion::new(q[3], q[0], q[1], q[2]);
+    (quat.norm() > 1e-6).then(|| UnitQuaternion::from_quaternion(quat))
 }
 
 // Reset on operator disconnect: drop the streaming deadman for both sides (each stream's

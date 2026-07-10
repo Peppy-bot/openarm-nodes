@@ -1,6 +1,6 @@
 # openarm_backbone
 
-Routes operator commands to the right place. The joint commander fires `move_arm_joints` and `move_gripper` goals at this node; backbone reads the goal's `arm_id` or `gripper_id` (0 = left, 1 = right), forwards it to the matching arm or gripper instance, and streams the feedback and result back to the caller.
+Routes operator commands to the right place. The commander fires `move_arm_joints` and `move_gripper` goals at this node; backbone reads the goal's `arm_id` or `gripper_id` (0 = left, 1 = right), forwards it to the matching arm or gripper instance, and streams the feedback and result back to the caller.
 
 It is engine-agnostic. The launcher binds one robot_initializer, two arms, and two grippers into its five slots, and those can be real, Isaac, or MuJoCo implementations. At startup it waits on the robot_initializer's `is_ready` before accepting any goals, so nothing moves until the world is actually loaded.
 

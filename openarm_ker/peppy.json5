@@ -19,7 +19,7 @@
   interfaces: {
     // Streams both arms' leader setpoints and both trigger openings to the hub,
     // told apart by id; the hub governs everything and drives the followers over
-    // its own pairings. governor_control stays owned by the joint_commander
+    // its own pairings. governor_control stays owned by the openarm_commander
     // panel: this node produces motion, not governor tuning.
     conforms_to: [
       {

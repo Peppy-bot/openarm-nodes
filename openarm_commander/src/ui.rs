@@ -18,7 +18,6 @@ use axum::routing::get;
 use openarm_description::HardwareVersion;
 use peppylib::runtime::CancellationToken;
 use serde::{Deserialize, Serialize};
-use srs_model::nalgebra::{Quaternion, UnitQuaternion};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -122,7 +121,7 @@ pub async fn run(
         .with_state(app_state);
 
     let listener = TcpListener::bind(addr).await?;
-    info!("joint commander UI at http://localhost:{port}");
+    info!("commander UI at http://localhost:{port}");
 
     let shutdown_token = token.clone();
     axum::serve(listener, app)
@@ -213,12 +212,6 @@ pub(crate) fn sane_duration(duration_s: f64) -> f64 {
 // again at its joint-velocity limit, so this only ever slows a move, never speeds it.
 pub(crate) fn ee_speed_floored(user_s: f64, ee_distance_m: f64, max_ee_velocity_m_s: f64) -> f64 {
     (ee_distance_m / max_ee_velocity_m_s).max(user_s)
-}
-
-// Intrinsic-XYZ roll/pitch/yaw of a `[x, y, z, w]` quaternion, via nalgebra so the
-// convention matches the panel's FK readout and the jog's `from_euler_angles`.
-pub(crate) fn quat_to_euler(q: [f64; 4]) -> (f64, f64, f64) {
-    UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2])).euler_angles()
 }
 
 /// Serialize the browser snapshot from the owner's state; called on the owner's

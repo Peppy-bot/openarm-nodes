@@ -32,11 +32,9 @@ pub const REACHED_ANGLE_TOL_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0; // 5 
 /// side's URDF joint velocity limits for step clamping.
 ///
 /// Each lock is held only for a single synchronous FK or Jacobian call and never
-/// across an `.await`. The only nesting is snapshot building, which holds the
-/// [`UiState`] lock and then briefly takes a model lock; no path takes the locks
-/// in the reverse order, so they cannot deadlock.
-///
-/// [`UiState`]: crate::state::UiState
+/// across an `.await`. The owner task is the sole caller, so the locks are
+/// uncontended; the mutex only provides the interior mutability an `Arm` needs
+/// (`at` takes `&mut self`) behind `ArmModels`'s shared `&self` methods.
 #[derive(Clone)]
 pub struct ArmModels {
     left: Arc<Mutex<Arm>>,
