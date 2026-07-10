@@ -15,6 +15,7 @@ mod chase;
 mod coordinator;
 mod governor;
 mod planner;
+mod servo;
 mod startup;
 mod streams;
 mod torso;

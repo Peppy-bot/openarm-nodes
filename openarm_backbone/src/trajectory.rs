@@ -55,11 +55,6 @@ impl JointTrajectory {
     pub fn is_complete(&self, now: Instant) -> bool {
         now.duration_since(self.motion_start) >= self.duration
     }
-
-    /// The velocity-sized total duration (s), for admission logging.
-    pub fn duration_secs(&self) -> f64 {
-        self.duration.as_secs_f64()
-    }
 }
 
 /// Quintic minimum-jerk trajectory between two end-effector poses (world frame).
@@ -159,6 +154,15 @@ const MAX_LINE_STEP_RAD: f64 = 0.35;
 /// through to its next tier.
 const MAX_UNREQUESTED_LINE_S: f64 = 10.0;
 
+/// The motion limits a Cartesian plan sizes and validates against: the same
+/// values the runtime enforces, so acceptance and execution agree, plus the
+/// control period the servo rollout steps at.
+pub struct PlanLimits<'a> {
+    pub max_joint_velocity_rad_s: &'a JointVec,
+    pub max_ee_velocity_m_s: f64,
+    pub control_period: Duration,
+}
+
 /// How an accepted move_arm goal executes, decided by [`plan_cartesian`].
 pub enum CartesianPlan {
     /// The straight line is continuously trackable: track it over this duration,
@@ -167,9 +171,11 @@ pub enum CartesianPlan {
     /// means the elbow holds its seed angle, the quiet default).
     Line { duration_s: f64, steer_elbow: bool },
     /// No line exists: every continuous tracking demands a branch jump, is
-    /// untrackably slow, or leaves reach mid-path. Run a joint-space quintic to
-    /// this goal solution instead, reaching the same pose off the line.
-    Reconfigure { goal_q: JointVec },
+    /// untrackably slow, or leaves reach mid-path. Reach the pose with the
+    /// guarded servo law instead (the streaming jog's damped resolved-rate
+    /// follow, which crosses the singular surface a discrete branch choice
+    /// cannot), validated by an offline rollout that took about this long.
+    Servo { duration_s: f64 },
 }
 
 /// One policy's walk along the line: the velocity-sizing peak if the line is
@@ -220,25 +226,27 @@ fn walk_line(
 ///    [`ARM_ANGLE_STEP_PER_BLEND_RAD`] budget): spends elbow motion only when
 ///    holding it would break the line (a singular graze inflating the duration,
 ///    or a limit wall the swivel can dodge).
-/// 3. **Reconfiguration**: no line exists at all (every continuous tracking
-///    demands a branch jump or leaves reach); swing through joint space to the
-///    goal pose's own solution. The only tier that visibly reorganizes the arm,
-///    reserved for goals that cannot be reached any other way.
+/// 3. **Guarded servo** ([`crate::servo`]): no line exists at all (every
+///    continuous tracking demands a branch jump or leaves reach). Follow a
+///    leashed reference down the line with the damped resolved-rate law the
+///    operator's streaming jog runs, deviating only where the geometry forces
+///    it. The tier is accepted only if an offline rollout of the identical law
+///    reaches the pose, so a servo move never starts blind.
 ///
-/// A tier is accepted when its line tracks continuously and its
+/// A line tier is accepted when it tracks continuously and its
 /// velocity-limited duration stays within the request (or
-/// [`MAX_UNREQUESTED_LINE_S`] past it). `None` only when the goal pose itself
-/// is unreachable. Bounding `dq/ds` numerically along the walk turns "respect
-/// every joint velocity limit" into a minimum duration via
+/// [`MAX_UNREQUESTED_LINE_S`] past it). `None` when even the servo cannot reach
+/// the pose. Bounding `dq/ds` numerically along the walk turns "respect every
+/// joint velocity limit" into a minimum duration via
 /// [`velocity_limited_duration`], the same sizing the joint trajectory does
 /// analytically. Poses are in the world frame; IK runs in the arm base frame,
 /// so each sample is converted with [`Arm::base_pose`].
 pub fn plan_cartesian(
-    model: &Arm,
+    model: &mut Arm,
     start: &Isometry3<f64>,
     end: &Isometry3<f64>,
     seed: JointVec,
-    max_joint_velocity_rad_s: &JointVec,
+    limits: &PlanLimits,
     requested_duration_secs: f64,
 ) -> Option<CartesianPlan> {
     let duration_cap = requested_duration_secs.max(MAX_UNREQUESTED_LINE_S);
@@ -252,8 +260,14 @@ pub fn plan_cartesian(
         ),
     ];
     for (policy, steer_elbow) in tiers {
-        let Some(walk) = walk_line(model, start, end, seed, max_joint_velocity_rad_s, policy)
-        else {
+        let Some(walk) = walk_line(
+            model,
+            start,
+            end,
+            seed,
+            limits.max_joint_velocity_rad_s,
+            policy,
+        ) else {
             continue;
         };
         let duration_s = velocity_limited_duration(walk.peak_ratio, requested_duration_secs);
@@ -264,12 +278,9 @@ pub fn plan_cartesian(
             });
         }
     }
-    // No line tracks: reconfigure to the goal pose's nearest-branch solution,
-    // or reject a goal that is unreachable outright.
-    let goal_q = model
-        .solve_ik(&model.base_pose(end), ArmAnglePolicy::FromSeed, &seed)?
-        .q;
-    Some(CartesianPlan::Reconfigure { goal_q })
+    // No line tracks: prove the servo law reaches the pose before accepting it.
+    crate::servo::rollout(model, start, end, seed, limits)
+        .map(|duration_s| CartesianPlan::Servo { duration_s })
 }
 
 // --- Shared blend / sizing helpers -----------------------------------------
@@ -310,7 +321,11 @@ fn velocity_limited_duration(peak_velocity_ratio: f64, requested_secs: f64) -> f
 /// (quaternion |dot| ≈ 1 after its shortest-arc sign flip, a rotation gap of
 /// microradians), so falling back to the goal orientation is exact there, not a
 /// jump.
-fn interpolate_pose(start: &Isometry3<f64>, end: &Isometry3<f64>, s: f64) -> Isometry3<f64> {
+pub(crate) fn interpolate_pose(
+    start: &Isometry3<f64>,
+    end: &Isometry3<f64>,
+    s: f64,
+) -> Isometry3<f64> {
     let position = start.translation.vector.lerp(&end.translation.vector, s);
     let rotation = start
         .rotation
@@ -350,78 +365,148 @@ mod tests {
         )
     }
 
+    const TEST_EE_CAP_M_S: f64 = 0.5;
+    const TEST_DT: Duration = Duration::from_millis(10);
+
+    fn v2_limits() -> PlanLimits<'static> {
+        PlanLimits {
+            max_joint_velocity_rad_s: &V_MAX_V2,
+            max_ee_velocity_m_s: TEST_EE_CAP_M_S,
+            control_period: TEST_DT,
+        }
+    }
+
+    fn v1_limits() -> PlanLimits<'static> {
+        PlanLimits {
+            max_joint_velocity_rad_s: &V_MAX,
+            max_ee_velocity_m_s: TEST_EE_CAP_M_S,
+            control_period: TEST_DT,
+        }
+    }
+
+    const READY: JointVec = [0.1537, 0.39547, -0.4808, 0.95, -0.0008, 0.0046, -0.0008];
+
+    // The logged orientation of the field repro's poses.
+    const REPRO_QUAT: [f64; 4] = [
+        -0.06651768984258864,
+        -0.5085494684876904,
+        0.32535618836337443,
+        0.7944156253074012,
+    ];
+
+    /// Run the servo law to convergence, asserting every step stays inside the
+    /// per-joint velocity budget, and return the converged configuration.
+    fn run_servo_to_convergence(
+        model: &mut Arm,
+        start: &Isometry3<f64>,
+        end: &Isometry3<f64>,
+        seed: JointVec,
+    ) -> JointVec {
+        let mut state = crate::servo::ServoState::new(*start, *end);
+        let mut q = seed;
+        let steps = (crate::servo::MAX_SERVO_S / TEST_DT.as_secs_f64()).ceil() as usize;
+        for _ in 0..steps {
+            match state.step(model, &q, &V_MAX_V2, TEST_EE_CAP_M_S, TEST_DT) {
+                crate::servo::ServoStep::Stepped(next) => {
+                    for i in 0..ARM_DOF {
+                        let v = (next[i] - q[i]).abs() / TEST_DT.as_secs_f64();
+                        assert!(
+                            v <= V_MAX_V2[i] * 1.0001,
+                            "joint {i} at {v:.2} rad/s exceeds its budget"
+                        );
+                    }
+                    q = next;
+                }
+                crate::servo::ServoStep::Converged(q) => {
+                    let ee = model.at(&q).ee_pose();
+                    let got = model.world_pose(&ee);
+                    assert!(
+                        (got.translation.vector - end.translation.vector).norm() < 2e-3,
+                        "servo must land on the target position"
+                    );
+                    assert!(
+                        got.rotation.angle_to(&end.rotation) < 1e-2,
+                        "servo must land on the target orientation"
+                    );
+                    return q;
+                }
+                crate::servo::ServoStep::Stalled => panic!("servo stalled short of the goal"),
+            }
+        }
+        panic!("servo did not converge within the ceiling");
+    }
+
     // The field repro: pulling the right arm straight back across the base
     // (world x +0.07 -> -0.18 at constant orientation). No continuous joint path
     // tracks that line at any arm angle (the exact IK solution jumps branches
-    // mid-path), so line-tracking either inflated the move to tens of seconds or
-    // tripped the runtime velocity guard. The plan must classify it as a
-    // joint-space reconfiguration whose goal solution lands on the target pose.
+    // mid-path), so the plan must fall through to the guarded servo, whose
+    // damped law crosses the wall the way the streaming jog does.
     #[test]
-    fn cross_body_pull_reconfigures_through_joint_space() {
+    fn cross_body_pull_runs_the_guarded_servo() {
         let mut model = v2_right_arm();
-        let quat = [
-            -0.06651768984258864,
-            -0.5085494684876904,
-            0.32535618836337443,
-            0.7944156253074012,
-        ];
         let start = world_pose(
             [0.0715597403410507, -0.179708420505458, 0.448631054180598],
-            quat,
+            REPRO_QUAT,
         );
         let end = world_pose(
             [-0.178440259658949, -0.179708420505458, 0.448631054180598],
-            quat,
+            REPRO_QUAT,
         );
-        // Seed at the start pose, solved from the panel's Ready parking posture.
-        let ready = [0.1537, 0.39547, -0.4808, 0.95, -0.0008, 0.0046, -0.0008];
         let seed = model
             .solve_ik(
                 &model.base_pose(&start),
                 srs_model::ArmAnglePolicy::FromSeed,
-                &ready,
+                &READY,
             )
             .expect("start pose reachable from ready")
             .q;
-        let plan = plan_cartesian(&model, &start, &end, seed, &V_MAX_V2, 2.0)
-            .expect("goal pose is reachable");
-        let CartesianPlan::Reconfigure { goal_q } = plan else {
-            panic!("an untrackable line must degrade to a reconfiguration");
+        let plan = plan_cartesian(&mut model, &start, &end, seed, &v2_limits(), 2.0)
+            .expect("servo reaches the pose");
+        let CartesianPlan::Servo { duration_s } = plan else {
+            panic!("an untrackable line must fall through to the servo");
         };
-        let goal_ee = model.at(&goal_q).ee_pose();
-        let got = model.world_pose(&goal_ee);
         assert!(
-            (got.translation.vector - end.translation.vector).norm() < 1e-6,
-            "reconfiguration goal must land on the target position"
+            duration_s < crate::servo::MAX_SERVO_S,
+            "servo rollout should finish inside the ceiling, took {duration_s:.1}s"
         );
-        assert!(
-            got.rotation.angle_to(&end.rotation) < 1e-6,
-            "reconfiguration goal must land on the target orientation"
-        );
-        // The joint move it becomes is sized analytically and stays sane.
-        let traj = JointTrajectory::new(seed, goal_q, V_MAX_V2, 2.0);
-        assert!(
-            traj.duration.as_secs_f64() < 5.0,
-            "reconfiguration should take seconds, got {:.1}s",
-            traj.duration.as_secs_f64()
-        );
+        run_servo_to_convergence(&mut model, &start, &end, seed);
+    }
+
+    // The user-reported gap made a regression test: pulling x back to -0.2 from
+    // Ready works in streaming, so the same intent fired as an action must reach
+    // the pose too (via the servo when no line tracks), never a blind swing and
+    // never a rejection.
+    #[test]
+    fn pull_from_ready_to_x_minus_02_reaches_via_servo() {
+        let mut model = v2_right_arm();
+        let start = {
+            let ee = model.at(&READY).ee_pose();
+            model.world_pose(&ee)
+        };
+        let mut end = start;
+        end.translation.vector.x = -0.2;
+        let plan = plan_cartesian(&mut model, &start, &end, READY, &v2_limits(), 2.0)
+            .expect("the pull must be reachable, as streaming proves live");
+        if let CartesianPlan::Servo { duration_s } = plan {
+            assert!(duration_s < crate::servo::MAX_SERVO_S);
+            run_servo_to_convergence(&mut model, &start, &end, READY);
+        }
+        // A Line verdict is equally acceptable: the pose is reached on the line.
     }
 
     // An easy short move must still plan as a line at exactly the requested
     // duration: the elbow steering must not inflate well-conditioned paths, and
-    // trackable lines must never degrade to reconfigurations.
+    // trackable lines must never degrade to the servo.
     #[test]
     fn easy_move_plans_the_line_at_the_requested_duration() {
-        let model = v2_right_arm();
-        let ready = [0.1537, 0.39547, -0.4808, 0.95, -0.0008, 0.0046, -0.0008];
+        let mut model = v2_right_arm();
         let start = {
-            let mut m = v2_right_arm();
-            let p = m.at(&ready).ee_pose();
-            model.world_pose(&p)
+            let ee = model.at(&READY).ee_pose();
+            model.world_pose(&ee)
         };
         let mut end = start;
         end.translation.vector.z += 0.05;
-        let plan = plan_cartesian(&model, &start, &end, ready, &V_MAX_V2, 2.0)
+        let plan = plan_cartesian(&mut model, &start, &end, READY, &v2_limits(), 2.0)
             .expect("small lift from ready is reachable");
         let CartesianPlan::Line {
             duration_s,
@@ -437,55 +522,53 @@ mod tests {
         assert!(!steer_elbow, "an easy move must not spend the elbow budget");
     }
 
-    // The incident regression: after a reconfiguration parks the arm at an
-    // unusual arm angle, ordinary nudges from that posture must plan as quiet
-    // held-elbow lines, not cascade into further reconfigurations (the steered
+    // The incident regression: after a servo move parks the arm at an unusual
+    // arm angle, ordinary nudges from that posture must plan as quiet
+    // held-elbow lines, not cascade into further wall crossings (the steered
     // walk's greedy optimizer can manufacture branch jumps on lines the held
     // walk tracks cleanly, so the quiet tier must be tried first).
     #[test]
-    fn small_nudge_from_a_reconfigured_posture_stays_a_quiet_line() {
+    fn small_nudge_after_a_servo_move_stays_a_quiet_line() {
         let mut model = v2_right_arm();
-        let quat = [
-            -0.06651768984258864,
-            -0.5085494684876904,
-            0.32535618836337443,
-            0.7944156253074012,
-        ];
         let start = world_pose(
             [0.0715597403410507, -0.179708420505458, 0.448631054180598],
-            quat,
+            REPRO_QUAT,
         );
         let end = world_pose(
             [-0.178440259658949, -0.179708420505458, 0.448631054180598],
-            quat,
+            REPRO_QUAT,
         );
-        let ready = [0.1537, 0.39547, -0.4808, 0.95, -0.0008, 0.0046, -0.0008];
         let seed = model
             .solve_ik(
                 &model.base_pose(&start),
                 srs_model::ArmAnglePolicy::FromSeed,
-                &ready,
+                &READY,
             )
             .expect("start pose reachable from ready")
             .q;
-        let Some(CartesianPlan::Reconfigure { goal_q }) =
-            plan_cartesian(&model, &start, &end, seed, &V_MAX_V2, 2.0)
-        else {
-            panic!("cross-body pull reconfigures");
+        let parked = run_servo_to_convergence(&mut model, &start, &end, seed);
+        // From the parked posture, nudge 3 cm in +x: an ordinary move.
+        let nudge_start = {
+            let ee = model.at(&parked).ee_pose();
+            model.world_pose(&ee)
         };
-        // From the reconfigured posture, nudge 3 cm in +x: an ordinary move.
-        let parked_ee = model.at(&goal_q).ee_pose();
-        let nudge_start = model.world_pose(&parked_ee);
         let mut nudge_end = nudge_start;
         nudge_end.translation.vector.x += 0.03;
-        let plan = plan_cartesian(&model, &nudge_start, &nudge_end, goal_q, &V_MAX_V2, 2.0)
-            .expect("nudge from the parked posture is reachable");
+        let plan = plan_cartesian(
+            &mut model,
+            &nudge_start,
+            &nudge_end,
+            parked,
+            &v2_limits(),
+            2.0,
+        )
+        .expect("nudge from the parked posture is reachable");
         let CartesianPlan::Line {
             duration_s,
             steer_elbow,
         } = plan
         else {
-            panic!("an ordinary nudge must stay a line, not reconfigure");
+            panic!("an ordinary nudge must stay a line, not servo");
         };
         assert!(!steer_elbow, "an ordinary nudge must hold the elbow");
         assert!(
@@ -638,7 +721,7 @@ mod tests {
         goal.translation.vector.z += 0.05; // a small reachable move
 
         let Some(CartesianPlan::Line { duration_s, .. }) =
-            plan_cartesian(&arm, &start, &goal, seed, &V_MAX, 0.0)
+            plan_cartesian(&mut arm, &start, &goal, seed, &v1_limits(), 0.0)
         else {
             panic!("an in-workspace move should plan a line");
         };
@@ -650,7 +733,7 @@ mod tests {
         let Some(CartesianPlan::Line {
             duration_s: floored,
             ..
-        }) = plan_cartesian(&arm, &start, &goal, seed, &V_MAX, 5.0)
+        }) = plan_cartesian(&mut arm, &start, &goal, seed, &v1_limits(), 5.0)
         else {
             panic!("reachable");
         };
@@ -668,7 +751,7 @@ mod tests {
         let start = arm.world_pose(&ee);
         let mut unreachable = start;
         unreachable.translation.vector.x += 10.0; // 10 m away: no IK solution
-        assert!(plan_cartesian(&arm, &start, &unreachable, seed, &V_MAX, 0.0).is_none());
+        assert!(plan_cartesian(&mut arm, &start, &unreachable, seed, &v1_limits(), 0.0).is_none());
     }
 
     // --- CartesianTrajectory ---------------------------------------------
