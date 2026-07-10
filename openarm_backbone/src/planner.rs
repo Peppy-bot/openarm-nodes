@@ -24,9 +24,10 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::chase::{chase_step, clamp_to_limits};
+use crate::servo::{MAX_SERVO_S, ServoState, ServoStep};
 use crate::streams::JointCommand;
 use crate::trajectory::{
-    ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory,
+    ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory, PlanLimits,
     plan_cartesian, subdivided_blends,
 };
 use crate::{ARM_DOF, JointVec, Side};
@@ -96,8 +97,8 @@ struct CartesianMove {
 }
 
 /// How an admitted move_arm goal executes, per its [`CartesianPlan`]: track the
-/// straight line (solving IK each tick), or run the planned joint-space
-/// reconfiguration when no continuous joint path tracks the line.
+/// straight line (solving IK each tick), or run the guarded servo when no
+/// continuous joint path tracks the line.
 enum MovePath {
     Line {
         traj: CartesianTrajectory,
@@ -111,8 +112,10 @@ enum MovePath {
         // budget) or held at the seed angle (the quiet default).
         steer_elbow: bool,
     },
-    Reconfigure {
-        traj: JointTrajectory,
+    Servo {
+        servo: ServoState,
+        started: Instant,
+        prev_sample_at: Instant,
     },
 }
 
@@ -120,7 +123,7 @@ impl MovePath {
     fn motion_start(&self) -> Instant {
         match self {
             Self::Line { traj, .. } => traj.motion_start,
-            Self::Reconfigure { traj } => traj.motion_start,
+            Self::Servo { started, .. } => *started,
         }
     }
 }
@@ -387,17 +390,51 @@ impl Planner {
                 *prev_blend = blend;
                 (q_next, traj.is_complete(now))
             }
-            // The planned reconfiguration: a quintic in joint space, sized to the
-            // velocity limits analytically, so no per-tick IK or velocity guard.
-            MovePath::Reconfigure { traj } => (traj.sample(now), traj.is_complete(now)),
+            // The guarded servo: one damped resolved-rate step toward the leashed
+            // line reference per tick, the law the plan's rollout validated. Its
+            // steps are velocity-clamped by construction; the stall guard and the
+            // hard ceiling terminate a move the live geometry stops cooperating
+            // with (the plan proved the nominal path, not every disturbance).
+            MovePath::Servo {
+                servo,
+                prev_sample_at,
+                ..
+            } => {
+                let dt = now
+                    .duration_since(*prev_sample_at)
+                    .max(self.cfg.cycle_period / 2);
+                *prev_sample_at = now;
+                let step = servo.step(
+                    &mut self.model,
+                    &m.prev_q_des,
+                    &self.cfg.max_joint_velocity_rad_s,
+                    self.cfg.max_ee_velocity_m_s,
+                    dt,
+                );
+                let timed_out = elapsed > MAX_SERVO_S;
+                match step {
+                    ServoStep::Stepped(q) if !timed_out => (q, false),
+                    ServoStep::Converged(q) => (q, true),
+                    ServoStep::Stepped(_) | ServoStep::Stalled => {
+                        let short_m = servo.position_err_m(&mut self.model, &m.prev_q_des);
+                        let message =
+                            format!("servo stopped {:.0} mm short of the goal", short_m * 1000.0);
+                        self.finish_cartesian(&m.ctx, measured_q, false, &message, elapsed, false)
+                            .await;
+                        return Advance {
+                            target: m.prev_q_des,
+                            next_mode: Mode::Follow,
+                            is_follow: false,
+                        };
+                    }
+                }
+            }
         };
         m.prev_q_des = q_des;
         if complete {
             let message = match &m.path {
                 MovePath::Line { .. } => "cartesian move complete",
-                MovePath::Reconfigure { .. } => {
-                    "cartesian move complete (joint-space reconfiguration)"
-                }
+                MovePath::Servo { .. } => "cartesian move complete (servo-guided)",
             };
             self.finish_cartesian(&m.ctx, measured_q, true, message, elapsed, false)
                 .await;
@@ -450,11 +487,15 @@ impl Planner {
                 let ee_base = self.model.at(&self.setpoint).ee_pose();
                 let start_world = self.model.world_pose(&ee_base);
                 let plan = plan_cartesian(
-                    &self.model,
+                    &mut self.model,
                     &start_world,
                     &target,
                     self.setpoint,
-                    &self.cfg.max_joint_velocity_rad_s,
+                    &PlanLimits {
+                        max_joint_velocity_rad_s: &self.cfg.max_joint_velocity_rad_s,
+                        max_ee_velocity_m_s: self.cfg.max_ee_velocity_m_s,
+                        control_period: self.cfg.cycle_period,
+                    },
                     duration_s,
                 );
                 let Some(plan) = plan else {
@@ -462,7 +503,8 @@ impl Planner {
                     if let Err(e) = ctx
                         .complete(
                             false,
-                            "goal pose unreachable / no in-limit IK solution".into(),
+                            "goal pose unreachable (no line tracks and the servo rollout stalls)"
+                                .into(),
                             pos,
                             quat,
                             0.0,
@@ -492,22 +534,19 @@ impl Planner {
                             steer_elbow,
                         }
                     }
-                    // No continuous joint path tracks the line: swing through
-                    // joint space to the goal solution instead (the EE leaves the
-                    // line, the quintic sizing bounds every joint's speed).
-                    CartesianPlan::Reconfigure { goal_q } => {
-                        let traj = JointTrajectory::new(
-                            self.setpoint,
-                            goal_q,
-                            self.cfg.max_joint_velocity_rad_s,
-                            duration_s,
-                        );
+                    // No continuous joint path tracks the line: run the guarded
+                    // servo the rollout just validated, the same damped law the
+                    // operator's streaming jog crosses these walls with.
+                    CartesianPlan::Servo { duration_s } => {
                         info!(
-                            "{}: move_arm start (joint-space reconfiguration), duration={:.3}s",
-                            self.side.label(),
-                            traj.duration_secs()
+                            "{}: move_arm start (servo-guided), rollout={duration_s:.3}s",
+                            self.side.label()
                         );
-                        MovePath::Reconfigure { traj }
+                        MovePath::Servo {
+                            servo: ServoState::new(start_world, target),
+                            started: now,
+                            prev_sample_at: now,
+                        }
                     }
                 };
                 Mode::CartesianMove(CartesianMove {
