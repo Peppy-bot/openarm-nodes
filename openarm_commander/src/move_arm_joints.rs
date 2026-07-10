@@ -20,6 +20,10 @@ use crate::state::{ARM_DOF, SharedState, Side};
 // only needs to cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
+// Max per-joint final error accepted as "reached": the hub reports success when its
+// setpoints finish, which a collision stop satisfies without the arm following. Loose
+// enough for PD sag, tight enough to catch a governed stop many degrees short.
+const REACHED_JOINT_TOL_RAD: f64 = 0.12;
 
 pub fn spawn(
     runner: Arc<NodeRunner>,
@@ -119,15 +123,35 @@ async fn run(
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
             ResultOutcome::Completed(data) => {
-                let msg = if data.success {
-                    format!(
-                        "move_arm_joints ({}): success in {:.2}s",
-                        label, data.action_time
+                if !data.success {
+                    (
+                        false,
+                        format!("move_arm_joints ({label}) failed: {}", data.message),
                     )
                 } else {
-                    format!("move_arm_joints ({}) failed: {}", label, data.message)
-                };
-                (data.success, msg)
+                    // Confirm the arm actually reached the commanded joints, not just
+                    // that the trajectory finished (a governor stop finishes it too).
+                    let max_err = (0..ARM_DOF)
+                        .map(|i| (data.final_joint_positions[i] - joint_positions[i]).abs())
+                        .fold(0.0_f64, f64::max);
+                    if max_err <= REACHED_JOINT_TOL_RAD {
+                        (
+                            true,
+                            format!(
+                                "move_arm_joints ({label}): success in {:.2}s",
+                                data.action_time
+                            ),
+                        )
+                    } else {
+                        (
+                            false,
+                            format!(
+                                "move_arm_joints ({label}) ended {:.1} deg off target (blocked?)",
+                                max_err.to_degrees()
+                            ),
+                        )
+                    }
+                }
             }
             ResultOutcome::Cancelled(data) => (
                 false,

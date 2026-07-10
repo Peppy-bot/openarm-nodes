@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use openarm_description::HardwareVersion;
-use srs_model::nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3, Vector6};
+use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3, Vector6};
 use srs_model::{Arm, ArmAnglePolicy, damped_pseudo_inverse};
 
 use crate::state::{ARM_DOF, Side};
@@ -380,6 +380,19 @@ fn decompose(pose: &Isometry3<f64>) -> Pose {
     let t = pose.translation.vector;
     let (roll, pitch, yaw) = pose.rotation.euler_angles();
     [t.x, t.y, t.z, roll, pitch, yaw]
+}
+
+/// Euclidean distance (m) between two world-frame points.
+pub fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Rotation angle (rad) between two orientations given as `[x, y, z, w]` quaternions;
+/// robust to the double cover (q and -q are the same rotation, angle 0).
+pub fn quat_angle(a: [f64; 4], b: [f64; 4]) -> f64 {
+    let qa = UnitQuaternion::from_quaternion(Quaternion::new(a[3], a[0], a[1], a[2]));
+    let qb = UnitQuaternion::from_quaternion(Quaternion::new(b[3], b[0], b[1], b[2]));
+    qa.angle_to(&qb)
 }
 
 /// Grid-sample FK over the joint limits and return the world-frame EE bounding box

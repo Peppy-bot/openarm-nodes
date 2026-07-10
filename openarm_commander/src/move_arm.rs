@@ -14,12 +14,19 @@ use peppygen::consumed_actions::backbone_move_arm::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
+use crate::pose::{dist3, quat_angle};
 use crate::state::{SharedState, Side};
 
 // Goal-accept round-trip to a pinned producer; answered directly, so this
 // only needs to cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
+// A completed trajectory is only a real success if the arm actually arrived: the hub
+// reports success when its setpoints finish streaming, which a collision stop can
+// satisfy without the arm following. These bound the accepted final-pose error, loose
+// enough for PD sag/settle but tight enough to catch a governed stop cm/degrees short.
+const REACHED_POS_TOL_M: f64 = 0.03;
+const REACHED_ROT_TOL_RAD: f64 = 0.15;
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
@@ -120,12 +127,32 @@ async fn run(
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
             ResultOutcome::Completed(data) => {
-                let msg = if data.success {
-                    format!("move_arm ({}): success in {:.2}s", label, data.action_time)
+                if !data.success {
+                    (
+                        false,
+                        format!("move_arm ({label}) failed: {}", data.message),
+                    )
                 } else {
-                    format!("move_arm ({}) failed: {}", label, data.message)
-                };
-                (data.success, msg)
+                    // Confirm the arm actually reached the commanded pose, not just that
+                    // the trajectory finished (a governor stop finishes it too).
+                    let pos_err = dist3(data.final_position, position);
+                    let rot_err = quat_angle(data.final_orientation, orientation);
+                    if pos_err <= REACHED_POS_TOL_M && rot_err <= REACHED_ROT_TOL_RAD {
+                        (
+                            true,
+                            format!("move_arm ({label}): success in {:.2}s", data.action_time),
+                        )
+                    } else {
+                        (
+                            false,
+                            format!(
+                                "move_arm ({label}) ended {:.0} mm / {:.1} deg off target (blocked?)",
+                                pos_err * 1000.0,
+                                rot_err.to_degrees()
+                            ),
+                        )
+                    }
+                }
             }
             ResultOutcome::Cancelled(data) => (
                 false,

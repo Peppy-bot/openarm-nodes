@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::error::Result;
-use crate::pose::{ArmModels, JogMode, Pose};
+use crate::pose::{ArmModels, JogMode, Pose, dist3};
 use crate::state::{
     ARM_DOF, ArmTarget, Disposition, GripperTarget, PoseJog, Proximity, SharedState, Side, UiState,
 };
@@ -480,11 +480,6 @@ fn sane_duration(duration_s: f64) -> f64 {
 // again at its joint-velocity limit, so this only ever slows a move, never speeds it.
 fn ee_speed_floored(user_s: f64, ee_distance_m: f64, max_ee_velocity_m_s: f64) -> f64 {
     (ee_distance_m / max_ee_velocity_m_s).max(user_s)
-}
-
-// Euclidean distance between two world-frame points (m).
-fn dist3(a: [f64; 3], b: [f64; 3]) -> f64 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
 // Intrinsic-XYZ roll/pitch/yaw of a `[x, y, z, w]` quaternion, via nalgebra so the
