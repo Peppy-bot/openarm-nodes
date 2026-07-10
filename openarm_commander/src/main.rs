@@ -80,8 +80,10 @@ fn main() -> Result<()> {
             token.clone(),
         ));
 
-        // Stream operator joint setpoints to the enabled arms (deadman in UiState),
-        // advancing any armed Cartesian jog one capped step per tick.
+        // The command loop: at command_rate_hz, publish each enabled side's joint and
+        // gripper setpoint to the hub, first advancing any armed Cartesian jog one
+        // velocity-clamped step toward its pose. Disabled sides (deadman off) publish
+        // nothing, so the hub's stream watchdog holds their last governed setpoint.
         tokio::spawn(command_stream::run(
             node_runner.clone(),
             shared.clone(),

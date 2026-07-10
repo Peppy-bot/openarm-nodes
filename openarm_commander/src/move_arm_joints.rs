@@ -14,16 +14,13 @@ use peppygen::consumed_actions::backbone_move_arm_joints::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
+use crate::pose::REACHED_ANGLE_TOL_RAD;
 use crate::state::{ARM_DOF, SharedState, Side};
 
 // Goal-accept round-trip to a pinned producer; answered directly, so this
 // only needs to cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
-// Max per-joint final error accepted as "reached": the hub reports success when its
-// setpoints finish, which a collision stop satisfies without the arm following. Loose
-// enough for PD sag, tight enough to catch a governed stop many degrees short.
-const REACHED_JOINT_TOL_RAD: f64 = 0.12;
 
 pub fn spawn(
     runner: Arc<NodeRunner>,
@@ -134,7 +131,7 @@ async fn run(
                     let max_err = (0..ARM_DOF)
                         .map(|i| (data.final_joint_positions[i] - joint_positions[i]).abs())
                         .fold(0.0_f64, f64::max);
-                    if max_err <= REACHED_JOINT_TOL_RAD {
+                    if max_err <= REACHED_ANGLE_TOL_RAD {
                         (
                             true,
                             format!(

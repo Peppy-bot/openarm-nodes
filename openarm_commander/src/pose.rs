@@ -21,6 +21,13 @@ use crate::state::{ARM_DOF, Side};
 /// radians): the form the panel edits and displays.
 pub type Pose = [f64; 6];
 
+/// A discrete move counts as "arrived" within this position / angle slack. The hub
+/// reports success once its setpoints finish streaming, which a governor stop satisfies
+/// without the arm following, so the move handlers re-check the measured final pose
+/// against these. One angle slack serves both joint error and orientation error.
+pub const REACHED_POS_TOL_M: f64 = 0.02;
+pub const REACHED_ANGLE_TOL_RAD: f64 = 5.0 * std::f64::consts::PI / 180.0; // 5 degrees
+
 /// The two per-side arm models (FK/Jacobian/limits) behind mutexes, plus each
 /// side's URDF joint velocity limits for step clamping.
 ///
