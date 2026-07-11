@@ -556,8 +556,8 @@ fn gripper_target(
 
 /// The locked gripper-command producer and the target fraction it drives: the
 /// opening analog of the planner's follow lock, sharing its semantics (the
-/// stream is `from_any`, so without the lock two producers would interleave and
-/// a foreign stream could hold the deadman open).
+/// slot may be bound to several producers, so without the lock two producers
+/// would interleave and a foreign stream could hold the deadman open).
 struct GripperFollow {
     producer: ProducerRef,
     target_frac: f64,

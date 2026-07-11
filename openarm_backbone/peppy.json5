@@ -16,31 +16,28 @@
           tag: "v1",
           link_id: "robot_init"
         },
-        // Operator joint setpoint stream, `from_any`: the hub binds to whatever
-        // commander is running and tells sides apart by arm_id.
+        // Operator joint setpoint stream: the launcher binds the slot to the
+        // operator instance(s) and the hub tells sides apart by arm_id.
         {
           name: "openarm_arm_joint_commands",
           tag: "v1",
-          link_id: "commander",
-          from_any: true
+          link_id: "commander"
         },
-        // Operator gripper opening stream, `from_any`: the same commander streams
-        // the desired opening per side (gripper_id); the hub governs it (the finger
-        // opening barrier) and drives each gripper over its pairing slot below,
-        // exactly as it does for the arm joint stream.
+        // Operator gripper opening stream, bound like the joint stream: the same
+        // commander streams the desired opening per side (gripper_id); the hub
+        // governs it (the finger opening barrier) and drives each gripper over
+        // its pairing slot below, exactly as it does for the arm joint stream.
         {
           name: "openarm_gripper_commands",
           tag: "v1",
-          link_id: "commander_gripper",
-          from_any: true
+          link_id: "commander_gripper"
         },
-        // Runtime on/off for the governor. Wildcard + optional: the hub holds its
-        // launch-time default until the first message.
+        // Runtime on/off for the governor, bound to the operator panel. The hub
+        // holds its launch-time default until the first message.
         {
           name: "openarm_governor_control",
           tag: "v1",
-          link_id: "collision_ctrl",
-          from_any: true
+          link_id: "collision_ctrl"
         }
       ],
       pairings: [

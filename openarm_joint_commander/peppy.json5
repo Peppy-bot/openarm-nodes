@@ -19,32 +19,29 @@
         }
       ],
       contracts: [
-        // Measured joint state of both arms, for live UI progress. Wildcard
-        // (`from_any`) so the panel binds to whatever arms are running and tells
-        // them apart by `arm_id`; optional, so the commander still boots with no
-        // arm up. This replaces reading move progress off the action feedback.
+        // Measured joint state of both arms, for live UI progress. The launcher
+        // binds the slot to the state producer(s) and the panel tells arms apart
+        // by `arm_id`; a bound producer that isn't streaming yet just means no
+        // readout. This replaces reading move progress off the action feedback.
         {
           name: "openarm_arm_states",
           tag: "v1",
-          link_id: "arm_states",
-          from_any: true
+          link_id: "arm_states"
         },
         // Live nearest-pair self-collision distance + links from the hub, for the
-        // proximity readout. Wildcard + optional like the state streams.
+        // proximity readout. Bound to the hub instance in the launcher.
         {
           name: "openarm_collision_status",
           tag: "v1",
-          link_id: "proximity",
-          from_any: true
+          link_id: "proximity"
         },
         // Measured gripper opening of both grippers, for the live aperture
-        // readout. Wildcard (`from_any`) + told apart by gripper_id, like
-        // arm_states; the grippers stream this to the hub and the panel alike.
+        // readout. Bound like arm_states and told apart by gripper_id; the
+        // grippers stream this to the hub and the panel alike.
         {
           name: "openarm_gripper_states",
           tag: "v1",
-          link_id: "gripper_states",
-          from_any: true
+          link_id: "gripper_states"
         }
       ]
     }

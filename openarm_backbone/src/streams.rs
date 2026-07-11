@@ -44,8 +44,9 @@ pub struct JointCommand {
 /// The latest operator opening command for one gripper (m), fed by the
 /// `gripper_commands` stream. Carries the same follow fields as
 /// [`JointCommand`]: `seq` distinguishes a fresh command from one already acted
-/// on, `producer` is the source the coordinator's follow locks to (the stream is
-/// `from_any`, so without the lock two producers would interleave), and
+/// on, `producer` is the source the coordinator's follow locks to (the slot may
+/// be bound to several producers, so without the lock two producers would
+/// interleave), and
 /// `recv_at` is the arrival time the deadman uses to tell a live stream from a
 /// released one. The width stays in meters (the wire unit); the coordinator
 /// parses it into the governed opening fraction.

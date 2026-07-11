@@ -14,15 +14,7 @@ Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in
 
 ## Run
 
-One instance drives one side. `arm_id` picks the side (0 = left, 1 = right), `-i` names the instance, and `--bind` points the node at the sim instance it should attach to:
-
-```sh
-peppy node run openarm_robot_initializer_mujoco:v1 -i sim
-peppy node run openarm_arm_mujoco:v1 arm_id=0 -i left_arm_inst --bind sim@sim
-peppy node run openarm_arm_mujoco:v1 arm_id=1 -i right_arm_inst --bind sim@sim
-```
-
-For the full stack, with the browser UI driving both arms and grippers, use the launcher instead; the [top-level README](../README.md) has the complete sequence:
+One instance drives one side; `arm_id` picks the side (0 = left, 1 = right). Every declared slot must be bound when an instance starts, and this node and the sim consume from each other (the arm reads `arm_states` from the sim, the sim reads the arm's `arm_sim_passthrough`), so the pair can only start through a launcher, which plans and binds all instances together. The [top-level README](../README.md) has the complete sequence:
 
 ```sh
 peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5

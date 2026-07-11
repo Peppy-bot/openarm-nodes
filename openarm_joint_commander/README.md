@@ -20,10 +20,16 @@ It needs a running backbone, so the usual way is through a launcher; the [top-le
 peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5
 ```
 
-You can also run it alone against an existing backbone instance:
+You can also run it alone against an already-running stack. Every declared slot must be bound at start: the `backbone` and `proximity` slots to the hub instance, and the state slots to whatever produces them in your stack (the sim instance here, the arm/gripper drivers on real hardware). The required parameters have no defaults, so they are supplied too:
 
 ```sh
-peppy node run openarm_joint_commander:v1 --bind backbone@backbone_inst
+peppy node run openarm_joint_commander:v1 \
+    command_rate_hz=100 hardware_version=v2 max_ee_velocity_m_s=0.5 \
+    collision_governor_enabled=true d_stop=0.005 d_safe=0.02 \
+    --bind backbone@backbone_inst \
+    --bind proximity@backbone_inst \
+    --bind arm_states@sim \
+    --bind gripper_states@sim
 ```
 
 Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to the generation's full jaw width (0.044 m on v1, 0.0697 m on v2), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.

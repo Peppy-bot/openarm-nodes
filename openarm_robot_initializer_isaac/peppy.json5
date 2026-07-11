@@ -12,20 +12,18 @@
     tag: "v1",
     depends_on: {
       contracts: [
-        // Per-arm / per-gripper sim passthrough setpoints, consumed from any
-        // instance (`from_any`): one sim process drives both sides and tells
-        // them apart by arm_id / gripper_id in the message.
+        // Per-arm / per-gripper sim passthrough setpoints. The launcher binds
+        // each slot to both sides' bridge instances: one sim process drives
+        // both sides and tells them apart by arm_id / gripper_id in the message.
         {
           name: "openarm_arm_sim_passthrough",
           tag: "v1",
           link_id: "arm_cmd",
-          from_any: true,
         },
         {
           name: "openarm_gripper_sim_passthrough",
           tag: "v1",
           link_id: "gripper_cmd",
-          from_any: true,
         },
       ],
     },

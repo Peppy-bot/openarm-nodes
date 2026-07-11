@@ -27,12 +27,11 @@
       ],
       contracts: [
         // Measured joint state from the sim engine, relayed to the paired hub.
-        // from_any: the sim is the producer; entries told apart by arm_id.
+        // Bound to the sim instance at launch; entries told apart by arm_id.
         {
           name: "openarm_arm_states",
           tag: "v1",
           link_id: "state",
-          from_any: true,
         },
       ],
     },

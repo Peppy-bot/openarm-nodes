@@ -14,15 +14,7 @@ Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in
 
 ## Run
 
-One instance drives one side. `gripper_id` picks the side (0 = left, 1 = right), `-i` names the instance, and `--bind` points the node at the sim instance it should attach to:
-
-```sh
-peppy node run openarm_robot_initializer_isaac:v1 -i sim
-peppy node run openarm_gripper_isaac:v1 gripper_id=0 hardware_version=v1 control_rate_hz=100 stream_timeout_s=0.5 -i left_grip_inst --bind sim@sim
-peppy node run openarm_gripper_isaac:v1 gripper_id=1 hardware_version=v1 control_rate_hz=100 stream_timeout_s=0.5 -i right_grip_inst --bind sim@sim
-```
-
-For the full stack, with the browser UI driving both arms and grippers, use the launcher instead; the [top-level README](../README.md) has the complete sequence:
+One instance drives one side; `gripper_id` picks the side (0 = left, 1 = right). Every declared slot must be bound when an instance starts, and this node and the sim consume from each other (the gripper reads `gripper_states` from the sim, the sim reads the gripper's `gripper_sim_passthrough`), so the pair can only start through a launcher, which plans and binds all instances together. The [top-level README](../README.md) has the complete sequence:
 
 ```sh
 peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_isaac.json5
