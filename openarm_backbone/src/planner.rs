@@ -142,8 +142,8 @@ impl Planner {
     /// Seed the held setpoint from the arm's first measured pose, clamped into the
     /// joint limits. A power-up pose parked past a soft limit (e.g. the elbow below
     /// its one-sided lower bound, hard against the boundary singularity) would
-    /// otherwise anchor the hub off-limit while the arm clamps every command back to
-    /// the limit, leaving the hub's held setpoint disagreeing with the arm's actual
+    /// otherwise anchor the backbone off-limit while the arm clamps every command back to
+    /// the limit, leaving the backbone's held setpoint disagreeing with the arm's actual
     /// pose. Clamping the seed keeps the two consistent from the first tick.
     pub fn seed_from_measured(&mut self, measured: JointVec) {
         self.setpoint = clamp_to_limits(&measured, &self.cfg.limits);

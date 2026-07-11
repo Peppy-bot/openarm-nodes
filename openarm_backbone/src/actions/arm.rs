@@ -1,5 +1,5 @@
 //! Arm move-action admission: the `move_arm_joints` and `move_arm` handlers the
-//! hub exposes to the commander. Each validates the goal (arm_id, finiteness,
+//! backbone exposes to the commander. Each validates the goal (arm_id, finiteness,
 //! duration, and joint limits for joint moves) and claims the target arm's
 //! single-flight slot, then hands the accepted goal to that arm's planner over
 //! its goal channel. The planner runs the motion - governed against the other

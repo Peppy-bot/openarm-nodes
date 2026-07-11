@@ -1,9 +1,9 @@
-// Isaac sim follower for one openarm arm. A thin bridge: it follows the hub's
+// Isaac sim follower for one openarm arm. A thin bridge: it follows the backbone's
 // governed setpoints over the arm_link pairing (collision-governed,
-// rate-limited, the hub owns all trajectory generation) and republishes the
+// rate-limited, the backbone owns all trajectory generation) and republishes the
 // resolved (q_des, dq_des) on the sim-internal arm_sim_passthrough topic for
 // the engine to actuate, relaying the engine's measured state back to the
-// paired hub. No trajectory, follow, or collision logic of its own - that all
+// paired backbone. No trajectory, follow, or collision logic of its own - that all
 // lives in openarm_backbone, so the sim and the real arm follow the same
 // governed stream. Two instances, one per side.
 {
@@ -13,20 +13,20 @@
     tag: "v1",
     depends_on: {
       pairings: [
-        // The exclusive command loop with the hub: governed setpoints stream in
+        // The exclusive command loop with the backbone: governed setpoints stream in
         // and the engine's measured state is relayed back, both scoped to the
         // pair (no arm_id demux). Optional: the follower boots and idles with no
-        // hub paired; the pair is established at the hub's start.
+        // backbone paired; the pair is established at the backbone's start.
         {
           name: "openarm_arm_link",
           tag: "v1",
           role: "arm",
-          link_id: "hub",
+          link_id: "backbone",
           optional: true,
         },
       ],
       contracts: [
-        // Measured joint state from the sim engine, relayed to the paired hub.
+        // Measured joint state from the sim engine, relayed to the paired backbone.
         // Bound to the sim instance at launch; entries told apart by arm_id.
         {
           name: "openarm_arm_states",

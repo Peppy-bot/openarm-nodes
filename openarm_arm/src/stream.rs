@@ -1,7 +1,7 @@
 //! Stream plumbing for the real-arm follower: a listener that keeps the latest
-//! governed setpoint from the paired hub (the `hub` slot of openarm_arm_link)
+//! governed setpoint from the paired backbone (the `backbone` slot of openarm_arm_link)
 //! in a watch channel for the control loop, and a publisher that emits the
-//! measured joint state at a fixed rate, both to the paired hub on the
+//! measured joint state at a fixed rate, both to the paired backbone on the
 //! pairing's `arm_states` (the exclusive command loop the governor anchors on)
 //! and to observers on the broadcast stream (tagged with `arm_id`). All run for
 //! the life of the node.
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_arm_states::v1::arm_states;
-use peppygen::pairings::hub;
+use peppygen::pairings::backbone;
 use tokio::sync::watch;
 use tracing::{error, warn};
 
@@ -20,7 +20,7 @@ use control_core::Pacer;
 use crate::JointVec;
 
 /// The latest governed setpoint for this arm: the position/velocity the MIT loop
-/// tracks. Produced by the hub, already collision-governed and rate-limited.
+/// tracks. Produced by the backbone, already collision-governed and rate-limited.
 #[derive(Clone, Copy)]
 pub struct GovernedSetpoint {
     pub q_des: JointVec,
@@ -42,16 +42,16 @@ pub struct StreamWiring {
     pub measured: watch::Sender<Option<MeasuredState>>,
 }
 
-/// Receive the paired hub's `arm_setpoints` forever, folding each message into
+/// Receive the paired backbone's `arm_setpoints` forever, folding each message into
 /// `latest` via [`apply_setpoint`]. The slot delivers only the paired peer's
 /// messages, so there is no arm_id filter; subscribing while unpaired is legal
-/// (the slot stays silent until a hub pairs). One held subscription, looped: no
+/// (the slot stays silent until a backbone pairs). One held subscription, looped: no
 /// re-subscribe gap, so a setpoint is never dropped between receives.
 pub async fn run_governed_setpoint_listener(
     runner: Arc<NodeRunner>,
     latest: watch::Sender<Option<GovernedSetpoint>>,
 ) {
-    let mut sub = match hub::arm_setpoints::subscribe(&runner).await {
+    let mut sub = match backbone::arm_setpoints::subscribe(&runner).await {
         Ok(s) => s,
         Err(e) => return error!("arm_setpoints subscribe: {e}"),
     };
@@ -91,7 +91,7 @@ fn apply_setpoint(
     }));
 }
 
-/// Emit the measured joint state at a fixed rate, forever: to the paired hub on
+/// Emit the measured joint state at a fixed rate, forever: to the paired backbone on
 /// the pairing's `arm_states` (the command loop's state input) and to observers
 /// on the broadcast stream (tagged with `arm_id`). The two publishes serve
 /// unrelated consumers, so each reports failures independently. The watch starts
@@ -109,7 +109,7 @@ pub async fn run_state_publisher(
         Ok(p) => p,
         Err(e) => return error!("declare arm_states publisher: {e}"),
     };
-    let peer_pub = match hub::arm_states::declare_publisher(&runner).await {
+    let peer_pub = match backbone::arm_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare paired arm_states publisher: {e}"),
     };
@@ -141,7 +141,7 @@ pub async fn run_state_publisher(
             Err(_) => {}
         }
         let peer_result = async {
-            let joints = hub::arm_states::build_message(m.positions, m.velocities)
+            let joints = backbone::arm_states::build_message(m.positions, m.velocities)
                 .map_err(|e| e.to_string())?;
             peer_pub.publish(joints).await.map_err(|e| e.to_string())?;
             Ok::<(), String>(())

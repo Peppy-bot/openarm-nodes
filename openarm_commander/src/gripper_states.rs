@@ -1,20 +1,25 @@
-// Live gripper opening for the UI. Consumes the always-on `gripper_states`
-// stream from any gripper, demuxes by `gripper_id`, and writes the latest
-// measured opening into UiState. Mirrors joint_states.rs for the arm: it runs
-// continuously, so the panel shows live aperture whether or not a move is in
-// flight.
+// Live gripper opening for the UI. Consumes the always-on `gripper_states` stream from
+// any gripper, demuxes by `gripper_id`, and reports the latest measured opening to the
+// owner. Mirrors joint_states.rs for the arm: it runs continuously, so the panel shows
+// live aperture whether or not a move is in flight.
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::gripper_states_gripper_states;
 use peppylib::runtime::CancellationToken;
+use tokio::sync::mpsc;
 use tracing::{error, warn};
 
 use crate::joint_states::RECEIVE_ERROR_BACKOFF;
-use crate::state::{SharedState, Side};
+use crate::owner::Feedback;
+use crate::state::Side;
 
-pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: CancellationToken) {
+pub async fn run(
+    runner: Arc<NodeRunner>,
+    feedback: mpsc::Sender<Feedback>,
+    token: CancellationToken,
+) {
     let mut subscription = match gripper_states_gripper_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
@@ -43,7 +48,15 @@ pub async fn run(runner: Arc<NodeRunner>, state: SharedState, token: Cancellatio
             );
             continue;
         };
-        let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
-        s.gripper_mut(side).last_feedback = Some(msg.position);
+        if feedback
+            .send(Feedback::GripperMeasured {
+                side,
+                opening: msg.position,
+            })
+            .await
+            .is_err()
+        {
+            return; // the owner is gone; nothing left to report to
+        }
     }
 }

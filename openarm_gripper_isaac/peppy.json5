@@ -1,6 +1,6 @@
 // Isaac sim implementation of openarm_gripper. Follows streamed
 // gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
-// the sim to actuate; relays the sim's gripper_states to the paired hub.
+// the sim to actuate; relays the sim's gripper_states to the paired backbone.
 // Typed peppygen topics throughout, no raw peppylib.
 {
   peppy_schema: "node/v1",
@@ -9,7 +9,7 @@
     tag: "v1",
     depends_on: {
       pairings: [
-        // The exclusive control conversation with ONE hub instance:
+        // The exclusive control conversation with ONE backbone instance:
         // streamed opening setpoints in, this gripper's sim aperture relayed
         // back, both scoped to the pair (no gripper_id demux). Optional and
         // mirrors the real gripper, so both follow the same contract.
@@ -17,12 +17,12 @@
           name: "openarm_gripper_link",
           tag: "v1",
           role: "gripper",
-          link_id: "hub",
+          link_id: "backbone",
           optional: true,
         },
       ],
       contracts: [
-        // Measured opening from the sim, relayed to the paired hub.
+        // Measured opening from the sim, relayed to the paired backbone.
         // Bound to the sim instance at launch.
         {
           name: "openarm_gripper_states",

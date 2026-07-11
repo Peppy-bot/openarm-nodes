@@ -9,7 +9,7 @@
 | [`openarm_gripper`](./openarm_gripper) | drives one gripper side (v1.0 prismatic) |
 | [`openarm_gripper_v2`](./openarm_gripper_v2) | drives one gripper side (v2.0 pinch) |
 | [`openarm_backbone`](./openarm_backbone) | routes goals to the correct side |
-| [`openarm_joint_commander`](./openarm_joint_commander) | browser control panel |
+| [`openarm_commander`](./openarm_commander) | browser control panel |
 
 Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same contract. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter (`"v1"` or `"v2"`). The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
 
@@ -56,10 +56,10 @@ peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer_mujoco -sb --
 peppy node add /path/to/ws/openarm_nodes/openarm_arm_mujoco -sb --idle-timeout 1800
 peppy node add /path/to/ws/openarm_nodes/openarm_gripper_mujoco -sb --idle-timeout 1800
 peppy node add /path/to/ws/openarm_nodes/openarm_backbone -sb --idle-timeout 1800
-peppy node add /path/to/ws/openarm_nodes/openarm_joint_commander -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_commander -sb --idle-timeout 1800
 ```
 
-For Isaac, swap the three sim-specific nodes. Backbone and joint_commander are engine-agnostic and don't need rebuilding:
+For Isaac, swap the three sim-specific nodes. Backbone and commander are engine-agnostic and don't need rebuilding:
 
 ```sh
 peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer_isaac -sb --idle-timeout 18000

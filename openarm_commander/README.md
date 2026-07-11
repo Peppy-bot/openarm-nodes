@@ -1,4 +1,4 @@
-# openarm_joint_commander
+# openarm_commander
 
 The browser control panel for the OpenArm (either hardware generation). It serves a page on port 8765 with a slider per joint and per gripper; pressing **Send** fires the matching `move_arm_joints` or `move_gripper` goal at `openarm_backbone`, and feedback streams back into the page while the arm moves.
 
@@ -7,7 +7,7 @@ Slider ranges come from the generation's description (`hardware_version` paramet
 ## Build
 
 ```sh
-peppy node add /path/to/ws/openarm_nodes/openarm_joint_commander -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm_nodes/openarm_commander -sb --idle-timeout 1800
 ```
 
 Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in `peppy stack list` once built.
@@ -20,10 +20,10 @@ It needs a running backbone, so the usual way is through a launcher; the [top-le
 peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5
 ```
 
-You can also run it alone against an already-running stack. Every declared slot must be bound at start: the `backbone` and `proximity` slots to the hub instance, and the state slots to whatever produces them in your stack (the sim instance here, the arm/gripper drivers on real hardware). The required parameters have no defaults, so they are supplied too:
+You can also run it alone against an already-running stack. Every declared slot must be bound at start: the `backbone` and `proximity` slots to the backbone instance, and the state slots to whatever produces them in your stack (the sim instance here, the arm/gripper drivers on real hardware). The required parameters have no defaults, so they are supplied too:
 
 ```sh
-peppy node run openarm_joint_commander:v1 \
+peppy node run openarm_commander:v1 \
     command_rate_hz=100 hardware_version=v2 max_ee_velocity_m_s=0.5 \
     collision_governor_enabled=true d_stop=0.005 d_safe=0.02 \
     --bind backbone@backbone_inst \

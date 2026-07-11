@@ -3,7 +3,7 @@
 //! against the self-collision model in one call (arms and openings are one
 //! governed configuration), and publishes the governed per-arm setpoints and
 //! per-gripper openings. One loop owns the governor (the single collision
-//! model), both planners, and the hub-executed gripper moves, so everything is
+//! model), both planners, and the backbone-executed gripper moves, so everything is
 //! always governed together against a consistent configuration, and the
 //! governed result is fed back so the next tick chases from where each DOF was
 //! actually allowed to go.
@@ -30,7 +30,7 @@ use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointComman
 use crate::{ArmPair, JointVec, Side};
 
 /// How long [`seed`] waits for an arm's first measured state before warning that
-/// the hub is still blocked, so a silent arm is visible in the log instead of an
+/// the backbone is still blocked, so a silent arm is visible in the log instead of an
 /// indefinite quiet stall.
 const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 
@@ -52,7 +52,7 @@ pub struct ArmChannels {
 /// The coordinator's run parameters: the control-cycle period, how long a
 /// command stream stays fresh before its input counts as released (an operator
 /// who stops streaming freezes at the last governed setpoint), and the
-/// hub-executed gripper moves' completion tolerance and timeout.
+/// backbone-executed gripper moves' completion tolerance and timeout.
 pub struct RunConfig {
     pub cycle_period: Duration,
     pub stream_timeout: Duration,
@@ -68,7 +68,7 @@ pub struct GripperGoal {
     pub ctx: move_gripper::GoalContext,
 }
 
-/// A hub-executed gripper move in flight: the opening chases `target_frac`
+/// A backbone-executed gripper move in flight: the opening chases `target_frac`
 /// through the governor until the measured jaws converge, the goal is cancelled,
 /// or the deadline lapses (a governed clamp short of the target ends here). The
 /// busy guard releases the side's single-flight slot on any exit.
@@ -100,7 +100,7 @@ pub async fn run(
         gripper_move_timeout,
     } = config;
     // One publisher per pairing slot (arms and grippers alike). Publishing while
-    // a slot is unpaired is a legal no-op, so the hub streams governed setpoints
+    // a slot is unpaired is a legal no-op, so the backbone streams governed setpoints
     // regardless and a follower simply starts tracking once its pair is
     // established.
     let left_arm_pub = match left_arm_link::arm_setpoints::declare_publisher(&runner).await {
@@ -152,7 +152,7 @@ pub async fn run(
     {
         return Ok(());
     }
-    info!("bimanual hub: both arms reporting; governed streaming begins");
+    info!("bimanual backbone: both arms reporting; governed streaming begins");
 
     // A gripper's latest measured opening fraction. `seed` gated on each side's
     // first reading and the watch never reverts to `None`, so the read is
@@ -174,7 +174,7 @@ pub async fn run(
         opening(&channels.left.gripper),
         opening(&channels.right.gripper),
     );
-    // In-flight hub-executed gripper moves, one single-flight slot per side, and
+    // In-flight backbone-executed gripper moves, one single-flight slot per side, and
     // each side's producer-locked follow on the operator's opening stream.
     let mut gripper_moves: ArmPair<Option<GripperMove>> = ArmPair::new(None, None);
     let mut gripper_follows: ArmPair<Option<GripperFollow>> = ArmPair::new(None, None);
@@ -204,7 +204,7 @@ pub async fn run(
             opening(&channels.right.gripper),
         );
 
-        // Service the hub-executed gripper moves: admit a queued goal into a free
+        // Service the backbone-executed gripper moves: admit a queued goal into a free
         // side and complete an in-flight move on measured convergence,
         // cancellation, or its deadline.
         service_gripper_move(
@@ -405,8 +405,8 @@ struct Shutdown;
 
 /// Wait for the arm's first measured state and first gripper opening, then seed
 /// the planner's held setpoint from the measured pose (clamped into the joint
-/// limits, so a power-up pose past a soft limit does not anchor the hub
-/// off-limit). Gating on both means the hub never publishes a setpoint before a
+/// limits, so a power-up pose past a soft limit does not anchor the backbone
+/// off-limit). Gating on both means the backbone never publishes a setpoint before a
 /// real arm measurement exists, and never governs on the fully-open finger
 /// default while the real jaws might be closed (open placement vacates the
 /// between-jaws space a closed finger occupies).
@@ -447,7 +447,7 @@ async fn wait_for_first<T>(
                 return Err(Shutdown);
             }
             Err(_) => warn!(
-                "{} {what} not reported yet; hub waiting to stream",
+                "{} {what} not reported yet; backbone waiting to stream",
                 side.label()
             ),
         }
@@ -531,7 +531,7 @@ async fn service_gripper_move(
     }
 }
 
-/// The side's target opening fraction for this tick: an in-flight hub-executed
+/// The side's target opening fraction for this tick: an in-flight backbone-executed
 /// move owns it; otherwise the operator's streamed command drives it through the
 /// producer-locked follow; otherwise `None` (idle).
 fn gripper_target(
