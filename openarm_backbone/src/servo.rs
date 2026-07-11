@@ -16,12 +16,11 @@
 
 use std::time::Duration;
 
-use srs_model::nalgebra::{Isometry3, Rotation3, Vector3, Vector6};
-use srs_model::{Arm, damped_pseudo_inverse};
+use srs_model::Arm;
+use srs_model::nalgebra::{Isometry3, Rotation3, Vector3};
 
-use crate::chase::clamp_to_limits;
+use crate::JointVec;
 use crate::trajectory::{PlanLimits, interpolate_pose};
-use crate::{ARM_DOF, JointVec};
 
 /// Damping for the resolved-rate steps: the value the operator's streaming jog
 /// has proven live, heavy enough to stay bounded through singular postures,
@@ -134,8 +133,8 @@ impl ServoState {
         let reference = interpolate_pose(&self.start, &self.end, self.reference_s);
 
         // One damped resolved-rate step toward the reference: position error
-        // capped at the speed budget, orientation at the slew budget, both
-        // rotated into the arm base frame where the Jacobian lives.
+        // capped at the speed budget, orientation at the slew budget, realized
+        // by the shared [`Arm::rate_step`] (velocity-scaled, limit-clamped).
         let dp_world = reference.translation.vector - ee.translation.vector;
         let dp_world = if dp_world.norm() > POS_CONVERGED_M {
             dp_world * (max_ee_velocity_m_s * dt_s / dp_world.norm()).min(1.0)
@@ -148,27 +147,14 @@ impl ServoState {
             .axis_angle()
             .map(|(axis, angle)| axis.into_inner() * angle.min(ROT_RATE_RAD_S * dt_s))
             .unwrap_or_else(Vector3::zeros);
-        let to_base = model.base_from_world().rotation;
-        let dp = to_base * dp_world;
-        let dw = to_base * dw_world;
-        let twist = Vector6::new(dp.x, dp.y, dp.z, dw.x, dw.y, dw.z);
-        let jacobian = model.at(q).jacobian();
-        let mut dq = damped_pseudo_inverse(&jacobian, DLS_LAMBDA) * twist;
-        // Velocity-consistent scaling: shrink the whole step so every joint stays
-        // inside its budget for this tick, preserving direction.
-        let scale = (0..ARM_DOF)
-            .map(|i| {
-                let cap = max_joint_velocity_rad_s[i] * dt_s;
-                if dq[i].abs() > cap {
-                    cap / dq[i].abs()
-                } else {
-                    1.0
-                }
-            })
-            .fold(1.0_f64, f64::min);
-        dq *= scale;
-        let stepped: JointVec = std::array::from_fn(|i| q[i] + dq[i]);
-        let next = clamp_to_limits(&stepped, &model.limits());
+        let next = model.rate_step(
+            q,
+            dp_world,
+            dw_world,
+            max_joint_velocity_rad_s,
+            dt_s,
+            DLS_LAMBDA,
+        );
 
         // Stall bookkeeping: across each window the reference must move or a
         // goal error (position or orientation, since a move can end with pure
