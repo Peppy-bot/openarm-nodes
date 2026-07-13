@@ -340,6 +340,17 @@ function clamp_slider(el) {
   el.value = min + steps * step;
 }
 
+// Place a slider's measured caret at v on its [axisMin, axisMax] track (the same
+// thumb-center scale set_reachable uses for the gradient stops and labels), or
+// hide it when nothing is measured or the axis is degenerate.
+function place_caret(id, v, axisMin, axisMax) {
+  const ghost = $(`${id}_ghost`);
+  if (v == null || !(axisMax > axisMin)) { ghost.classList.add('off'); return; }
+  const pct = Math.max(0, Math.min(1, (v - axisMin) / (axisMax - axisMin)));
+  ghost.style.setProperty('--at', (pct * 100) + '%');
+  ghost.classList.remove('off');
+}
+
 function build_arm(side, label) {
   const root = $(`${side}_arm`);
   root.innerHTML = `
@@ -442,7 +453,7 @@ function build_gripper(side, label) {
       <div class="srow">
         <input type="range" min="0" max="${GRIPPER_MAX}" step="0.0005" value="0" id="${side}_g"
                oninput="on_gripper_input('${side}')" />
-        <div class="ghost off" id="${side}_gh"></div>
+        <div class="ghost off" id="${side}_g_ghost"></div>
       </div>
       <span class="target" id="${side}_gt">0.0000 m</span>
       <span class="fb" id="${side}_gf">---</span>
@@ -852,15 +863,7 @@ function apply_snapshot(snap) {
           $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(src[i]);
         }
       }
-      // Actual-position caret on the track.
-      const sh = $(`${side}_j${i}_ghost`);
-      if (a.feedback) {
-        const pct = Math.max(0, Math.min(1, (a.feedback[i] + JOINT_AXIS) / (2 * JOINT_AXIS)));
-        sh.style.setProperty('--at', (pct * 100) + '%');
-        sh.classList.remove('off');
-      } else {
-        sh.classList.add('off');
-      }
+      place_caret(`${side}_j${i}`, a.feedback ? a.feedback[i] : null, -JOINT_AXIS, JOINT_AXIS);
     }
 
     // World position: the x/y/z sliders mirror the FK of the joint target while enabled
@@ -881,14 +884,7 @@ function apply_snapshot(snap) {
         const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
         if (src) { el.value = src[i]; $(`${side}_p${i}_t`).textContent = fmt(src[i]); }
       }
-      const ph = $(`${side}_p${i}_ghost`);
-      if (a.pose_feedback && posMax > posMin) {
-        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - posMin) / (posMax - posMin)));
-        ph.style.setProperty('--at', (pct * 100) + '%');
-        ph.classList.remove('off');
-      } else {
-        ph.classList.add('off');
-      }
+      place_caret(`${side}_p${i}`, a.pose_feedback ? a.pose_feedback[i] : null, posMin, posMax);
     }
     // Orientation arcball: sync the target from the setpoint's orientation quaternion
     // (or measured while streaming-disabled) unless composing orientation or mid-drag;
@@ -913,14 +909,7 @@ function apply_snapshot(snap) {
       if (src != null) { psiEl.value = src; $(`${side}_psi_t`).textContent = fmtRadAsDeg(src); }
     }
     $(`${side}_psi_f`).textContent = a.arm_angle_feedback != null ? fmtRadAsDeg(a.arm_angle_feedback) : '---';
-    const psih = $(`${side}_psi_ghost`);
-    if (a.arm_angle_feedback != null) {
-      const pct = Math.max(0, Math.min(1, (a.arm_angle_feedback + JOINT_AXIS) / (2 * JOINT_AXIS)));
-      psih.style.setProperty('--at', (pct * 100) + '%');
-      psih.classList.remove('off');
-    } else {
-      psih.classList.add('off');
-    }
+    place_caret(`${side}_psi`, a.arm_angle_feedback, -JOINT_AXIS, JOINT_AXIS);
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);
@@ -939,14 +928,7 @@ function apply_snapshot(snap) {
       ? g.feedback.toFixed(4)
       : '---';
     // Measured-opening caret on the track, matching the arm joints.
-    const gsh = $(`${side}_gh`);
-    if (g.feedback != null && g.max > g.min) {
-      const pct = Math.max(0, Math.min(1, (g.feedback - g.min) / (g.max - g.min)));
-      gsh.style.setProperty('--at', (pct * 100) + '%');
-      gsh.classList.remove('off');
-    } else {
-      gsh.classList.add('off');
-    }
+    place_caret(`${side}_g`, g.feedback, g.min, g.max);
   }
   // Reflect the backbone collision toggle, but never fight the operator mid-click.
   const cc = $('collision_chk');
