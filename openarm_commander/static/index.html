@@ -16,6 +16,7 @@
     --ink-15: rgba(26, 29, 34, 0.13);
     --hi: rgba(255, 255, 255, 0.95);
     --lo: rgba(158, 166, 178, 0.5);
+    --dead: #b4bac4;
     --dark: #0b0c0e;
     --w: #f3f5f8;
     --ok: #2e7d4f;
@@ -123,10 +124,17 @@
     text-transform: uppercase; color: var(--ink-50);
   }
 
+  /* Every track is full width on a shared axis; the ends outside the slider's
+     reachable [lo, hi] are painted dead-gray. set_reachable drives the stops,
+     placed on the thumb-center scale (10px inset, like the .ghost caret). */
   input[type=range] {
     -webkit-appearance: none; appearance: none;
     width: 100%; height: 8px; border-radius: 999px; outline: none;
-    background: var(--bg-soft);
+    --lo-x: 0%; --hi-x: 100%;
+    background: linear-gradient(to right,
+      var(--dead) 0 var(--lo-x),
+      var(--bg-soft) var(--lo-x) var(--hi-x),
+      var(--dead) var(--hi-x) 100%);
     box-shadow: inset 2px 2px 4px var(--lo), inset -2px -2px 4px var(--hi);
   }
   input[type=range]::-webkit-slider-thumb {
@@ -148,17 +156,15 @@
   .actions {
     display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; align-items: center;
   }
-  /* Slider column: the track (with its actual-position caret) over a faint
-     min/max readout, so the joint's limits are always visible. */
-  /* .scol is the shared axis (full width of the cell); .subrange spans one slider's
-     reachable range within it, so tracks of different ranges compare at a glance. */
-  .scol { display: block; }
-  .subrange { display: flex; flex-direction: column; gap: 3px; }
+  /* Slider column: the full-width track (with its actual-position caret) over the
+     limit readouts, each pinned under the gray boundary it marks. */
+  .scol { display: flex; flex-direction: column; gap: 3px; }
   .lim {
-    display: flex; justify-content: space-between;
+    position: relative; height: 10px;
     font: 500 10px/1 'Inter Tight', sans-serif; font-variant-numeric: tabular-nums;
     color: var(--ink-50);
   }
+  .lim span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 
   button {
     font: 600 12px/1 'Inter Tight', sans-serif; letter-spacing: 0.05em; text-transform: uppercase;
@@ -252,6 +258,10 @@
 const PI = Math.PI;
 const ARM_DOF = 7;
 const GRIPPER_MAX = 0.044;
+// Shared full-width axis for every angular track (joints and the elbow swivel):
+// +-200deg exactly spans the widest joint on both hardware generations, so all
+// rows align and the grayed ends mark each joint's own limits.
+const JOINT_AXIS = 200 * PI / 180;
 // Home is all zeros except the elbow (j4), held at a small positive angle so it
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
@@ -262,9 +272,9 @@ const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
 const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
 // World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
 // `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
-// arcball composes it on quaternions instead. Slider bounds come from the snapshot's
-// per-side `pos_bounds` (the arm's reachable envelope, computed per generation), applied
-// each frame like the joint limits, so they are correct for v1 and v2 alike.
+// arcball composes it on quaternions instead. Each slider's reachable band comes from
+// the snapshot's per-side `pos_bounds` (the arm's reachable envelope, computed per
+// generation), applied each frame like the joint limits, so v1 and v2 both work.
 const POS_AXES = [
   {i: 0, label: 'x'},
   {i: 1, label: 'y'},
@@ -292,13 +302,42 @@ function fmt(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
 function fmtRadAsDeg(rad) { return (rad >= 0 ? '+' : '') + (rad * 180 / PI).toFixed(1) + '°'; }
 function $(id) { return document.getElementById(id); }
 
-// Place one slider's track on a shared axis [cMin, cMax]: its reachable [lo, hi] becomes
-// an offset sub-range, so tracks of different ranges are visually comparable.
-function place_subrange(id, lo, hi, cMin, cMax) {
-  const span = (cMax - cMin) || 1;
-  const sub = $(`${id}_sub`);
-  sub.style.marginLeft = ((lo - cMin) / span * 100).toFixed(2) + '%';
-  sub.style.width = ((hi - lo) / span * 100).toFixed(2) + '%';
+// Mark one slider's reachable [lo, hi] on its full-width [axisMin, axisMax] track:
+// gray the ends outside the range (the --lo-x/--hi-x gradient stops), pin the limit
+// labels under the boundaries, and record the range for clamp_slider. Positions use
+// the thumb-center scale (10px thumb-radius inset), matching the .ghost caret.
+function set_reachable(id, lo, hi, axisMin, axisMax, fmtFn) {
+  const el = $(id);
+  el.dataset.lo = lo;
+  el.dataset.hi = hi;
+  const span = (axisMax - axisMin) || 1;
+  const at = v => `calc(10px + (100% - 20px) * ${((v - axisMin) / span).toFixed(4)})`;
+  el.style.setProperty('--lo-x', at(lo));
+  el.style.setProperty('--hi-x', at(hi));
+  for (const [labelId, v] of [[`${id}_lo`, lo], [`${id}_hi`, hi]]) {
+    const label = $(labelId);
+    label.style.left = at(v);
+    label.textContent = fmtFn(v);
+  }
+}
+
+// Keep the commanded thumb out of the grayed ends: snap the value back into the
+// slider's reachable [lo, hi] before anything reads or streams it. Assigning the
+// exact limit is not enough: browsers round assignments to the nearest step-grid
+// point (anchored at min), which can overshoot the limit by up to half a step, so
+// clamp to the outermost grid point inside the range instead.
+function clamp_slider(el) {
+  const lo = parseFloat(el.dataset.lo);
+  const hi = parseFloat(el.dataset.hi);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+  const v = parseFloat(el.value);
+  if (v >= lo && v <= hi) return;
+  const min = parseFloat(el.min);
+  const step = parseFloat(el.step);
+  const steps = v > hi
+    ? Math.floor((hi - min) / step + 1e-6)
+    : Math.ceil((lo - min) / step - 1e-6);
+  el.value = min + steps * step;
 }
 
 function build_arm(side, label) {
@@ -321,48 +360,45 @@ function build_arm(side, label) {
     </div>`;
   const joints = $(`${side}_arm_joints`);
   for (let i = 0; i < ARM_DOF; i++) {
-    joints.appendChild(slider_row(`${side}_j${i}`, `j${i+1}`, -PI, PI, 0.01,
-      `on_joint_input('${side}', ${i})`, `${side}_sh${i}`, `${side}_lo${i}`, `${side}_hi${i}`,
-      `${side}_t${i}`, `${side}_f${i}`));
+    joints.appendChild(slider_row(`${side}_j${i}`, `j${i+1}`, -JOINT_AXIS, JOINT_AXIS, 0.01,
+      `on_joint_input('${side}', ${i})`));
   }
   const pos = $(`${side}_arm_pos`);
   for (const ax of POS_AXES) {
-    // Placeholder bounds; apply_snapshot sets the real per-side reach from pos_bounds.
+    // Placeholder axis; apply_snapshot sets the cross-side world axis and each
+    // axis's reachable band from pos_bounds.
     pos.appendChild(slider_row(`${side}_p${ax.i}`, ax.label, -1, 1.2, 0.002,
-      `on_pose_input('${side}', 'position', ${ax.i})`, `${side}_ph${ax.i}`, `${side}_plo${ax.i}`, `${side}_phi${ax.i}`,
-      `${side}_pt${ax.i}`, `${side}_pf${ax.i}`));
+      `on_pose_input('${side}', 'position', ${ax.i})`));
   }
   $(`${side}_arm_orient`).appendChild(arcball_widget(side));
   // Elbow (arm-angle) slider: swivels the elbow through the null space, holding the
   // hand pose. Streaming-only (the backbone plans the elbow for actions-mode moves).
-  $(`${side}_arm_psi`).appendChild(slider_row(`${side}_psi`, 'ψ', -PI, PI, 0.01,
-    `on_arm_angle_input('${side}')`, `${side}_psih`, `${side}_psilo`, `${side}_psihi`,
-    `${side}_psit`, `${side}_psif`));
-  // The elbow swivel spans +-pi; label its fixed range in degrees (apply_snapshot
-  // refreshes the joint labels from live limits, but never touches these).
-  $(`${side}_psilo`).textContent = fmtRadAsDeg(-PI);
-  $(`${side}_psihi`).textContent = fmtRadAsDeg(PI);
+  $(`${side}_arm_psi`).appendChild(slider_row(`${side}_psi`, 'ψ', -JOINT_AXIS, JOINT_AXIS, 0.01,
+    `on_arm_angle_input('${side}')`));
+  // The elbow swivel's reach is fixed at +-pi; apply_snapshot refreshes the joints
+  // and x/y/z from live limits, but never touches this one.
+  set_reachable(`${side}_psi`, -PI, PI, -JOINT_AXIS, JOINT_AXIS, fmtRadAsDeg);
 }
 
-// A joint-style slider row: name, track with a measured caret over a min/max readout,
-// then the commanded and measured numeric columns. Shared by the joints and by the
-// world-frame x/y/z so both read exactly the same.
-function slider_row(id, name, min, max, step, oninput, caretId, loId, hiId, tId, fId) {
+// A joint-style slider row: name, full-width track with a measured caret over the
+// limit readouts, then the commanded and measured numeric columns. Shared by the
+// joints, the elbow swivel, and the world-frame x/y/z so all read exactly the same.
+// Sub-elements derive their ids from the slider's: `_ghost` (measured caret),
+// `_lo`/`_hi` (limit labels, filled by set_reachable), `_t` (target), `_f` (measured).
+function slider_row(id, name, min, max, step, oninput) {
   const row = document.createElement('div');
   row.className = 'joint';
   row.innerHTML = `
     <span class="name">${name}</span>
     <div class="scol">
-      <div class="subrange" id="${id}_sub">
-        <div class="srow">
-          <input type="range" min="${min}" max="${max}" step="${step}" value="0" id="${id}" oninput="${oninput}" />
-          <div class="ghost off" id="${caretId}"></div>
-        </div>
-        <div class="lim"><span id="${loId}">${fmt(min)}</span><span id="${hiId}">${fmt(max)}</span></div>
+      <div class="srow">
+        <input type="range" min="${min}" max="${max}" step="${step}" value="0" id="${id}" oninput="${oninput}" />
+        <div class="ghost off" id="${id}_ghost"></div>
       </div>
+      <div class="lim"><span id="${id}_lo"></span><span id="${id}_hi"></span></div>
     </div>
-    <span class="target" id="${tId}">+0.000</span>
-    <span class="fb" id="${fId}">---</span>`;
+    <span class="target" id="${id}_t">+0.000</span>
+    <span class="fb" id="${id}_f">---</span>`;
   return row;
 }
 
@@ -430,9 +466,12 @@ function read_joints(side, overrideIdx) {
   return joints;
 }
 
-// Slider moved: update the readout, and while enabled stream the new setpoint.
+// Slider moved: clamp out of the grayed ends, update the readout, and while
+// enabled stream the new setpoint.
 function on_joint_input(side, i) {
-  $(`${side}_t${i}`).textContent = fmtRadAsDeg(parseFloat($(`${side}_j${i}`).value));
+  const el = $(`${side}_j${i}`);
+  clamp_slider(el);
+  $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(parseFloat(el.value));
   touched[side] = 'joints';
   if (uiMode === 'streaming') {
     if (enabled[side]) send_arm_target(side, i);
@@ -475,7 +514,8 @@ function send_arm_pose(side, mode, overrideAxis) {
 // readouts, then while streaming-enabled arm the server's jog. The touched control
 // leads; the rest is softly held.
 function on_pose_input(side, lead, overrideAxis) {
-  for (const ax of POS_AXES) $(`${side}_pt${ax.i}`).textContent = fmt(parseFloat($(`${side}_p${ax.i}`).value));
+  if (lead === 'position') clamp_slider($(`${side}_p${overrideAxis}`));
+  for (const ax of POS_AXES) $(`${side}_p${ax.i}_t`).textContent = fmt(parseFloat($(`${side}_p${ax.i}`).value));
   touched[side] = 'pose';
   if (uiMode !== 'streaming') { refresh_primary(side); return; }
   send_arm_pose(side, lead, overrideAxis);
@@ -484,7 +524,9 @@ function on_pose_input(side, lead, overrideAxis) {
 // Elbow slider moved: swivel the elbow through the null space (streaming-only; the backbone
 // plans the elbow for actions-mode moves, so the slider is read-only there).
 function on_arm_angle_input(side) {
-  $(`${side}_psit`).textContent = fmtRadAsDeg(parseFloat($(`${side}_psi`).value));
+  const el = $(`${side}_psi`);
+  clamp_slider(el);
+  $(`${side}_psi_t`).textContent = fmtRadAsDeg(parseFloat(el.value));
   touched[side] = 'pose';
   if (uiMode !== 'streaming') { refresh_primary(side); return; }
   send_arm_pose(side, 'arm_angle', undefined);
@@ -617,7 +659,7 @@ function ready_arm(side) {
   const preset = side === 'left' ? READY_LEFT : READY_RIGHT;
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = preset[i];
-    $(`${side}_t${i}`).textContent = fmtRadAsDeg(preset[i]);
+    $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(preset[i]);
   }
   // A joint-space action: mark joints as the composed space so the pose controls
   // (arcball, x/y/z) track the FK of the preset instead of staying frozen.
@@ -635,7 +677,7 @@ function toggle_enable(side) {
     const armFb = latestSnap[`${side}_arm`].feedback;
     if (armFb) for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_j${i}`).value = armFb[i];
-      $(`${side}_t${i}`).textContent = fmtRadAsDeg(armFb[i]);
+      $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(armFb[i]);
     }
     const gFb = latestSnap[`${side}_gripper`].feedback;
     if (gFb != null) {
@@ -653,7 +695,7 @@ function reset_arm(side) {
   for (let i = 0; i < ARM_DOF; i++) {
     const v = i === 3 ? HOME_ELBOW_J4 : 0;
     $(`${side}_j${i}`).value = v;
-    $(`${side}_t${i}`).textContent = fmtRadAsDeg(v);
+    $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(v);
   }
   touched[side] = 'joints';
   fire_arm(side, arm_duration(side));
@@ -771,6 +813,11 @@ function arm_duration(side) {
 
 function apply_snapshot(snap) {
   latestSnap = snap;
+  // Shared world-position axis across both arms: every x/y/z track spans it, so
+  // the six rows align; each side's reachable band is grayed per axis below.
+  const posBounds = ['left', 'right'].flatMap(s => snap[`${s}_arm`].pos_bounds);
+  const posMin = Math.min(...posBounds.map(b => b[0]));
+  const posMax = Math.max(...posBounds.map(b => b[1]));
   for (const side of ['left', 'right']) {
     const on = snap[`${side}_enabled`];
     enabled[side] = on;
@@ -779,21 +826,14 @@ function apply_snapshot(snap) {
     b.textContent = on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
     b.className = 'badge' + (on ? ' stream' : (a.in_flight ? ' flight' : ''));
     refresh_primary(side);
-    // Shared joint axis: span all seven joint limits, so each joint's track shows its
-    // travel relative to the others.
-    const jMin = a.limits ? Math.min(...a.limits.map(l => l[0])) : -PI;
-    const jMax = a.limits ? Math.max(...a.limits.map(l => l[1])) : PI;
     for (let i = 0; i < ARM_DOF; i++) {
-      $(`${side}_f${i}`).textContent = a.feedback ? fmtRadAsDeg(a.feedback[i]) : '---';
-      // Slider bounds + the visible min/max readout come from joint_limits.
-      const [lo, hi] = a.limits ? a.limits[i] : [-PI, PI];
+      $(`${side}_j${i}_f`).textContent = a.feedback ? fmtRadAsDeg(a.feedback[i]) : '---';
       const el = $(`${side}_j${i}`);
+      // The track spans the fixed +-JOINT_AXIS; joint_limits gray its dead ends,
+      // bound the thumb, and place the min/max readout.
       if (a.limits) {
-        if (el.min != lo) el.min = lo;
-        if (el.max != hi) el.max = hi;
-        $(`${side}_lo${i}`).textContent = fmtRadAsDeg(lo);
-        $(`${side}_hi${i}`).textContent = fmtRadAsDeg(hi);
-        place_subrange(`${side}_j${i}`, lo, hi, jMin, jMax);
+        const [lo, hi] = a.limits[i];
+        set_reachable(`${side}_j${i}`, lo, hi, -JOINT_AXIS, JOINT_AXIS, fmtRadAsDeg);
       }
       // While disabled the slider mirrors the measured pose (you must enable to
       // move), so the thumb shows where the arm is and enabling never jumps. While
@@ -809,13 +849,13 @@ function apply_snapshot(snap) {
         const src = (uiMode === 'streaming' && !on) ? a.feedback : a.joints;
         if (src) {
           el.value = src[i];
-          $(`${side}_t${i}`).textContent = fmtRadAsDeg(src[i]);
+          $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(src[i]);
         }
       }
       // Actual-position caret on the track.
-      const sh = $(`${side}_sh${i}`);
-      if (a.feedback && hi > lo) {
-        const pct = Math.max(0, Math.min(1, (a.feedback[i] - lo) / (hi - lo)));
+      const sh = $(`${side}_j${i}_ghost`);
+      if (a.feedback) {
+        const pct = Math.max(0, Math.min(1, (a.feedback[i] + JOINT_AXIS) / (2 * JOINT_AXIS)));
         sh.style.setProperty('--at', (pct * 100) + '%');
         sh.classList.remove('off');
       } else {
@@ -826,28 +866,24 @@ function apply_snapshot(snap) {
     // World position: the x/y/z sliders mirror the FK of the joint target while enabled
     // (so a joint move updates them) or the measured pose while disabled, each with the
     // measured value marked. Skip a control being edited.
-    const posMin = Math.min(...a.pos_bounds.map(b => b[0]));
-    const posMax = Math.max(...a.pos_bounds.map(b => b[1]));
     for (const ax of POS_AXES) {
       const i = ax.i;
-      // Per-side reach bounds from the snapshot drive the slider range, the min/max
-      // readout, and the caret, the same way joint limits drive the joint sliders.
+      // The track spans the shared cross-side axis; this side's reach on this axis
+      // (pos_bounds, per generation) grays the dead ends and bounds the thumb.
       const [pmin, pmax] = a.pos_bounds[i];
       const el = $(`${side}_p${i}`);
-      if (el.min != pmin) el.min = pmin;
-      if (el.max != pmax) el.max = pmax;
-      $(`${side}_plo${i}`).textContent = fmt(pmin);
-      $(`${side}_phi${i}`).textContent = fmt(pmax);
-      place_subrange(`${side}_p${i}`, pmin, pmax, posMin, posMax);
-      $(`${side}_pf${i}`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
+      if (el.min != posMin) el.min = posMin;
+      if (el.max != posMax) el.max = posMax;
+      set_reachable(`${side}_p${i}`, pmin, pmax, posMin, posMax, fmt);
+      $(`${side}_p${i}_f`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
       const composingPose = uiMode === 'actions' && touched[side] === 'pose';
       if (!composingPose && document.activeElement !== el) {
         const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
-        if (src) { el.value = src[i]; $(`${side}_pt${i}`).textContent = fmt(src[i]); }
+        if (src) { el.value = src[i]; $(`${side}_p${i}_t`).textContent = fmt(src[i]); }
       }
-      const ph = $(`${side}_ph${i}`);
-      if (a.pose_feedback && pmax > pmin) {
-        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - pmin) / (pmax - pmin)));
+      const ph = $(`${side}_p${i}_ghost`);
+      if (a.pose_feedback && posMax > posMin) {
+        const pct = Math.max(0, Math.min(1, (a.pose_feedback[i] - posMin) / (posMax - posMin)));
         ph.style.setProperty('--at', (pct * 100) + '%');
         ph.classList.remove('off');
       } else {
@@ -874,12 +910,12 @@ function apply_snapshot(snap) {
     psiEl.classList.toggle('readonly-track', uiMode !== 'streaming');
     if (document.activeElement !== psiEl) {
       const src = (uiMode === 'streaming' && !on) ? a.arm_angle_feedback : a.arm_angle;
-      if (src != null) { psiEl.value = src; $(`${side}_psit`).textContent = fmtRadAsDeg(src); }
+      if (src != null) { psiEl.value = src; $(`${side}_psi_t`).textContent = fmtRadAsDeg(src); }
     }
-    $(`${side}_psif`).textContent = a.arm_angle_feedback != null ? fmtRadAsDeg(a.arm_angle_feedback) : '---';
-    const psih = $(`${side}_psih`);
+    $(`${side}_psi_f`).textContent = a.arm_angle_feedback != null ? fmtRadAsDeg(a.arm_angle_feedback) : '---';
+    const psih = $(`${side}_psi_ghost`);
     if (a.arm_angle_feedback != null) {
-      const pct = Math.max(0, Math.min(1, (a.arm_angle_feedback + PI) / (2 * PI)));
+      const pct = Math.max(0, Math.min(1, (a.arm_angle_feedback + JOINT_AXIS) / (2 * JOINT_AXIS)));
       psih.style.setProperty('--at', (pct * 100) + '%');
       psih.classList.remove('off');
     } else {
