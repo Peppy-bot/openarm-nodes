@@ -1,6 +1,6 @@
 // openarm_backbone: the bimanual coordination node. Consumes the operator
 // arm_joint_commands and gripper_commands streams; exposes the joint /
-// Cartesian / gripper move actions and executes them itself; conforms to
+// Cartesian / gripper move actions and executes them itself; implements
 // collision_status; and drives each arm and each gripper over its own pairing
 // (arm_link / gripper_link): governed setpoints stream down each pair and the
 // measured state streams back on it. See src/main.rs for the architecture.
@@ -9,6 +9,14 @@
   manifest: {
     name: "openarm_backbone",
     tag: "v1",
+    implements: [
+      {
+        // Emits the live nearest-pair distance + links, for the operator readout.
+        name: "openarm_collision_status",
+        tag: "v1",
+        link_id: "collision",
+      },
+    ],
     depends_on: {
       contracts: [
         {
@@ -90,13 +98,6 @@
     }
   },
   interfaces: {
-    conforms_to: [
-      {
-        // Emits the live nearest-pair distance + links, for the operator readout.
-        name: "openarm_collision_status",
-        tag: "v1"
-      }
-    ],
     actions: {
       // The backbone's move actions, addressed by side id. The backbone runs each move
       // itself (trajectory + governor + governed stream); progress is observed
@@ -215,6 +216,9 @@
       ]
     },
     topics: {
+      emits: [
+        { link_id: "collision", name: "collision_status" },
+      ],
       consumes: [
         {
           name: "arm_joint_commands",

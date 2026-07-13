@@ -8,6 +8,12 @@
   manifest: {
     name: "openarm_commander",
     tag: "v1",
+    implements: [
+      { name: "openarm_arm_joint_commands", tag: "v1", link_id: "arm_commands" },
+      { name: "openarm_gripper_commands", tag: "v1", link_id: "gripper_commands" },
+      // Runtime on/off for the backbone's self-collision governor, driven by the UI.
+      { name: "openarm_governor_control", tag: "v1", link_id: "governor" },
+    ],
     depends_on: {
       nodes: [
         // The backbone; the commander fires its move_arm_joints action (the "Send"
@@ -20,14 +26,11 @@
       ],
       contracts: [
         // Measured joint state of both arms, for live UI progress. The launcher
-        // binds the slot to the state producer(s) and the panel tells arms apart
-        // by `arm_id`; a bound producer that isn't streaming yet just means no
+        // binds one slot per state producer and the panel tells arms apart by
+        // `arm_id`; a bound producer that isn't streaming yet just means no
         // readout. This replaces reading move progress off the action feedback.
-        {
-          name: "openarm_arm_states",
-          tag: "v1",
-          link_id: "arm_states"
-        },
+        { name: "openarm_arm_states", tag: "v1", link_id: "left_arm_states" },
+        { name: "openarm_arm_states", tag: "v1", link_id: "right_arm_states" },
         // Live nearest-pair self-collision distance + links from the backbone,
         // for the proximity readout. Bound to the backbone instance in the
         // launcher.
@@ -39,11 +42,8 @@
         // Measured gripper opening of both grippers, for the live aperture
         // readout. Bound like arm_states and told apart by gripper_id; the
         // grippers stream this to the backbone and the panel alike.
-        {
-          name: "openarm_gripper_states",
-          tag: "v1",
-          link_id: "gripper_states"
-        }
+        { name: "openarm_gripper_states", tag: "v1", link_id: "left_gripper_states" },
+        { name: "openarm_gripper_states", tag: "v1", link_id: "right_gripper_states" },
       ]
     }
   },
@@ -53,23 +53,6 @@
     // is what lets the panel drive an enabled arm/gripper continuously instead of
     // one move at a time; the backbone governs each and re-streams the governed value,
     // so a follower clamps, rate-limits, and times out on its side.
-    conforms_to: [
-      {
-        name: "openarm_arm_joint_commands",
-        tag: "v1"
-      },
-      {
-        name: "openarm_gripper_commands",
-        tag: "v1"
-      },
-      // Runtime on/off for the backbone's self-collision governor, driven by the UI
-      // checkbox and re-published periodically (lossy QoS) so a dropped toggle
-      // cannot strand the backbone.
-      {
-        name: "openarm_governor_control",
-        tag: "v1"
-      }
-    ],
     actions: {
       // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.
@@ -93,19 +76,22 @@
       ]
     },
     topics: {
+      // The UI's producer streams. The governor control is re-published
+      // periodically (lossy QoS) so a dropped toggle cannot strand the backbone.
+      emits: [
+        { link_id: "arm_commands", name: "arm_joint_commands" },
+        { link_id: "gripper_commands", name: "gripper_commands" },
+        { link_id: "governor", name: "governor_control" },
+      ],
       consumes: [
-        {
-          name: "arm_states",
-          link_id: "arm_states"
-        },
+        { name: "arm_states", link_id: "left_arm_states" },
+        { name: "arm_states", link_id: "right_arm_states" },
         {
           name: "collision_status",
           link_id: "proximity"
         },
-        {
-          name: "gripper_states",
-          link_id: "gripper_states"
-        }
+        { name: "gripper_states", link_id: "left_gripper_states" },
+        { name: "gripper_states", link_id: "right_gripper_states" },
       ]
     }
   },

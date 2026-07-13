@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::arm_states_arm_states;
+use peppygen::consumed_topics::{left_arm_states_arm_states, right_arm_states_arm_states};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -24,35 +24,49 @@ pub async fn run(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
 ) {
-    let mut subscription = match arm_states_arm_states::subscribe(&runner).await {
+    let mut left_subscription = match left_arm_states_arm_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
-            error!(error = %e, "arm_states subscribe");
+            error!(error = %e, "left_arm_states subscribe");
+            return;
+        }
+    };
+    let mut right_subscription = match right_arm_states_arm_states::subscribe(&runner).await {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "right_arm_states subscribe");
             return;
         }
     };
     loop {
-        let received = tokio::select! {
+        let (slot, received) = tokio::select! {
             _ = token.cancelled() => return,
-            received = subscription.next() => received,
+            received = left_subscription.next() => (
+                "left_arm_states",
+                received.map(|pair| pair.map(|(_producer, msg)| (msg.arm_id, msg.positions))),
+            ),
+            received = right_subscription.next() => (
+                "right_arm_states",
+                received.map(|pair| pair.map(|(_producer, msg)| (msg.arm_id, msg.positions))),
+            ),
         };
-        let (_producer, msg) = match received {
+        let (arm_id, positions) = match received {
             Ok(Some(pair)) => pair,
             Ok(None) => return,
             Err(e) => {
-                error!(error = %e, "arm_states receive");
+                error!(error = %e, slot, "arm_states receive");
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
-        let Some(side) = Side::from_arm_id(msg.arm_id) else {
-            warn!(arm_id = msg.arm_id, "arm_states: unknown arm_id; ignoring");
+        let Some(side) = Side::from_arm_id(arm_id) else {
+            warn!(arm_id, "arm_states: unknown arm_id; ignoring");
             continue;
         };
         if feedback
             .send(Feedback::ArmMeasured {
                 side,
-                joints: msg.positions,
+                joints: positions,
             })
             .await
             .is_err()

@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::gripper_states_gripper_states;
+use peppygen::consumed_topics::{
+    left_gripper_states_gripper_states, right_gripper_states_gripper_states,
+};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -20,43 +22,55 @@ pub async fn run(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
 ) {
-    let mut subscription = match gripper_states_gripper_states::subscribe(&runner).await {
+    let mut left_subscription = match left_gripper_states_gripper_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
-            error!(error = %e, "gripper_states subscribe");
+            error!(error = %e, "left_gripper_states subscribe");
+            return;
+        }
+    };
+    let mut right_subscription = match right_gripper_states_gripper_states::subscribe(&runner).await
+    {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "right_gripper_states subscribe");
             return;
         }
     };
     loop {
-        let received = tokio::select! {
+        let (slot, received) = tokio::select! {
             _ = token.cancelled() => return,
-            received = subscription.next() => received,
+            received = left_subscription.next() => (
+                "left_gripper_states",
+                received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.position))),
+            ),
+            received = right_subscription.next() => (
+                "right_gripper_states",
+                received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.position))),
+            ),
         };
-        let (_producer, msg) = match received {
+        let (gripper_id, position) = match received {
             Ok(Some(pair)) => pair,
             Ok(None) => return,
             Err(e) => {
-                error!(error = %e, "gripper_states receive");
+                error!(error = %e, slot, "gripper_states receive");
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
-        let Some(side) = Side::from_gripper_id(msg.gripper_id) else {
-            warn!(
-                gripper_id = msg.gripper_id,
-                "gripper_states: unknown gripper_id; ignoring"
-            );
+        let Some(side) = Side::from_gripper_id(gripper_id) else {
+            warn!(gripper_id, "gripper_states: unknown gripper_id; ignoring");
             continue;
         };
         if feedback
             .send(Feedback::GripperMeasured {
                 side,
-                opening: msg.position,
+                opening: position,
             })
             .await
             .is_err()
         {
-            return; // the owner is gone; nothing left to report to
+            return;
         }
     }
 }

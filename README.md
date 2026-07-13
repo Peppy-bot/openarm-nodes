@@ -11,24 +11,24 @@
 | [`openarm_backbone`](./openarm_backbone) | routes goals to the correct side |
 | [`openarm_commander`](./openarm_commander) | browser control panel |
 
-Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)), all conforming to the same contract. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter (`"v1"` or `"v2"`). The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
+Each sim-capable component comes in three flavours: the real-hardware node plus `_isaac` and `_mujoco` siblings (for example [`openarm_arm_isaac`](./openarm_arm_isaac) and [`openarm_arm_mujoco`](./openarm_arm_mujoco)). Together with the selected robot-initializer node, each flavour supplies the same stack-level capabilities; the sim bridge nodes use internal passthrough contracts to connect those capabilities to their engine. The two real gripper nodes share the same sim siblings, which pick the modeled gripper via a `hardware_version` parameter (`"v1"` or `"v2"`). The launcher decides which flavour fills each slot, so backbone and the UI never know which engine is underneath.
 
 This guide takes you from a fresh machine to a moving arm. MuJoCo is the quickest way to see everything working.
 
 ## 1. Prerequisites
 
 - Ubuntu 22.04 or 24.04
-- [Peppy](https://peppy.bot) 0.10 or newer, installed with `curl -fsSL https://peppy.bot/install.sh | sh`
+- [Peppy](https://peppy.bot) 0.16 or newer, installed with `curl -fsSL https://peppy.bot/install.sh | sh`
 - Docker, running
 - For Isaac only: an NVIDIA GPU with the [Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) configured
 
-Clone this repo together with [interfaces_hub](https://github.com/Peppy-bot/interfaces_hub) (the conformance contracts) and [launchers_hub](https://github.com/Peppy-bot/launchers_hub) (the stack launchers) so the paths below line up:
+Clone this repo together with [contracts-hub](https://github.com/Peppy-bot/contracts-hub) (the contracts) and [launchers-hub](https://github.com/Peppy-bot/launchers-hub) (the stack launchers) so the paths below line up:
 
 ```text
 ws/
-├── interfaces_hub/
-├── launchers_hub/
-└── openarm_nodes/
+├── contracts-hub/
+├── launchers-hub/
+└── openarm-nodes/
 ```
 
 ## 2. Start the daemon and register the repos
@@ -38,8 +38,8 @@ The daemon builds, runs, and connects every node. Registering the repos is what 
 ```sh
 peppy service serve &
 
-peppy repo add /path/to/ws/interfaces_hub
-peppy repo add /path/to/ws/openarm_nodes
+peppy repo add /path/to/ws/contracts-hub
+peppy repo add /path/to/ws/openarm-nodes
 peppy repo refresh
 ```
 

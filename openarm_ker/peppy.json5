@@ -15,22 +15,22 @@
   manifest: {
     name: "openarm_ker",
     tag: "v1",
+    implements: [
+      { name: "openarm_arm_joint_commands", tag: "v1", link_id: "arm_commands" },
+      { name: "openarm_gripper_commands", tag: "v1", link_id: "gripper_commands" },
+    ],
   },
   interfaces: {
     // Streams both arms' leader setpoints and both trigger openings to the backbone,
     // told apart by id; the backbone governs everything and drives the followers over
     // its own pairings. governor_control stays owned by the openarm_commander
     // panel: this node produces motion, not governor tuning.
-    conforms_to: [
-      {
-        name: "openarm_arm_joint_commands",
-        tag: "v1"
-      },
-      {
-        name: "openarm_gripper_commands",
-        tag: "v1"
-      }
-    ]
+    topics: {
+      emits: [
+        { link_id: "arm_commands", name: "arm_joint_commands" },
+        { link_id: "gripper_commands", name: "gripper_commands" },
+      ],
+    },
   },
   execution: {
     language: "rust",

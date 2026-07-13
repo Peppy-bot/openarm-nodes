@@ -1,6 +1,6 @@
 # openarm_gripper_isaac
 
-Drives one side of the OpenArm gripper (either hardware generation, selected by `hardware_version`) inside Isaac Sim. It conforms to `openarm_gripper:v1`, the same contract the real gripper drivers implement, so backbone and the UI work with it unchanged.
+Drives one side of the OpenArm gripper (either hardware generation, selected by `hardware_version`) inside Isaac Sim. It implements `openarm_gripper_sim_passthrough:v1`, exposing the resolved sim-internal command stream while consuming the shared gripper-state contract.
 
 It attaches to the Isaac world that `openarm_robot_initializer_isaac` owns, so that node has to be running first. `move_gripper` takes the jaw opening in meters (0.0 closed, fully open at the generation's jaw width: 0.044 on v1, 0.0697 on v2); the sim maps it onto each finger joint's own travel.
 

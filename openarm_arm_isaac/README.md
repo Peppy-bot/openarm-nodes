@@ -1,6 +1,6 @@
 # openarm_arm_isaac
 
-Drives one side of the OpenArm (7 joints, either hardware generation) inside Isaac Sim. It conforms to `openarm_arm_sim_passthrough:v1`, relabeling the backbone's governed setpoint stream onto the sim-internal passthrough topic, so backbone and the UI work with it unchanged.
+Drives one side of the OpenArm (7 joints, either hardware generation) inside Isaac Sim. It implements `openarm_arm_sim_passthrough:v1`, relabeling the backbone's governed setpoint stream onto the sim-internal passthrough topic, so backbone and the UI work with it unchanged.
 
 It attaches to the Isaac world that `openarm_robot_initializer_isaac` owns, so that node has to be running first. Targets beyond a joint's physical range are clamped to the model's limits, so the arm always goes as far as it can and the result says so.
 
