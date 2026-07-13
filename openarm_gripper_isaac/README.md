@@ -14,7 +14,7 @@ Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in
 
 ## Run
 
-One instance drives one side; `gripper_id` picks the side (0 = left, 1 = right). Every declared slot must be bound when an instance starts, and this node and the sim consume from each other (the gripper reads `gripper_states` from the sim, the sim reads the gripper's `gripper_sim_passthrough`), so the pair can only start through a launcher, which plans and binds all instances together. The [top-level README](../README.md) has the complete sequence:
+One instance drives one side; `gripper_id` picks the side (0 = left, 1 = right). The `engine_states` slot must be bound when an instance starts (the `backbone` pairing is optional; the follower idles until the backbone pairs it), and this node and the sim consume from each other (the gripper reads `gripper_states` from the sim, the sim reads the gripper's `gripper_sim_passthrough`), so the pair can only start through a launcher, which plans and binds all instances together. The [top-level README](../README.md) has the complete sequence:
 
 ```sh
 peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_isaac.json5

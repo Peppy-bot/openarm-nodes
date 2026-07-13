@@ -14,7 +14,7 @@ Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in
 
 ## Run
 
-Every backbone slot must be bound at start (the daemon rejects an instance with an unbound slot), so run it through a launcher rather than by hand. The [top-level README](../README.md) has the complete build-and-launch sequence:
+The backbone's contract slots (`robot_init`, `commander`, `collision_ctrl`) must be bound at start (the daemon rejects an instance with one unbound); the four arm/gripper `*_link` pairings are optional and are established by the launcher's `pairings:` block, so run it through a launcher rather than by hand. The [top-level README](../README.md) has the complete build-and-launch sequence:
 
 ```sh
 peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
@@ -42,7 +42,7 @@ The gripper's `position` is its total aperture in meters (0.0 closed, 0.044 full
 It's waiting on the robot_initializer's `is_ready`. Check the sim actually loaded with `peppy node info openarm_robot_initializer_<engine>:v1`.
 
 **Goals are rejected immediately**
-A bound producer isn't running, usually because a launcher binding points at an instance that is down or unhealthy. Compare the launcher's `bindings` block against `peppy stack list`.
+A bound producer isn't running, or that arm or gripper's pairing was never established. Compare the launcher's `bindings` and `pairings` blocks against `peppy stack list`.
 
 **A goal is accepted but never completes**
 The downstream arm or gripper is unhealthy. Check its log with `peppy node info openarm_arm_<engine>:v1`.
