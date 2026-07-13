@@ -145,7 +145,7 @@ pub async fn run_move_arm(
     }
 }
 
-/// Build a world-frame isometry from the interface arrays: position `[x, y, z]`
+/// Build a world-frame isometry from the wire arrays: position `[x, y, z]`
 /// and quaternion `[x, y, z, w]` (normalized; validated non-degenerate above).
 fn pose_from_arrays(p: [f64; 3], q: [f64; 4]) -> Isometry3<f64> {
     let rotation = UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]));

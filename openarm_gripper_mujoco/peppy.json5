@@ -10,6 +10,9 @@
     implements: [
       // The resolved aperture handed to the sim engine (sim-internal passthrough).
       { name: "openarm_gripper_sim_passthrough", tag: "v1", link_id: "sim_passthrough" },
+      // This gripper's measured opening, re-emitted per side from the engine's
+      // broadcast, so consumers bind this follower exactly like the real gripper.
+      { name: "openarm_gripper_states", tag: "v1", link_id: "states" },
     ],
     depends_on: {
       pairings: [
@@ -26,12 +29,13 @@
         },
       ],
       contracts: [
-        // Measured opening from the sim, relayed to the paired backbone.
-        // Bound to the sim instance at launch.
+        // Measured opening from the sim engine, demuxed by gripper_id and relayed
+        // to the paired backbone and the per-side states re-emit. Bound to the
+        // sim instance at launch.
         {
           name: "openarm_gripper_states",
           tag: "v1",
-          link_id: "state",
+          link_id: "engine_states",
         },
       ],
     },
@@ -40,9 +44,10 @@
     topics: {
       emits: [
         { link_id: "sim_passthrough", name: "gripper_sim_passthrough" },
+        { link_id: "states", name: "gripper_states" },
       ],
       consumes: [
-        { name: "gripper_states", link_id: "state" },
+        { name: "gripper_states", link_id: "engine_states" },
       ],
     },
   },

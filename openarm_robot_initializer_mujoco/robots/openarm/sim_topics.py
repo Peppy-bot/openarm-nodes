@@ -66,10 +66,10 @@ class SimTopicIO:
         self._arm_pub = await arm_states.declare_publisher(self._node_runner)
         self._gripper_pub = await gripper_states.declare_publisher(self._node_runner)
         self._tasks = [
-            asyncio.create_task(self._consume_arm(left_arm_cmd, "left_arm_cmd")),
-            asyncio.create_task(self._consume_arm(right_arm_cmd, "right_arm_cmd")),
-            asyncio.create_task(self._consume_gripper(left_gripper_cmd, "left_gripper_cmd")),
-            asyncio.create_task(self._consume_gripper(right_gripper_cmd, "right_gripper_cmd")),
+            asyncio.create_task(self._consume_arm(left_arm_cmd, 0, "left_arm_cmd")),
+            asyncio.create_task(self._consume_arm(right_arm_cmd, 1, "right_arm_cmd")),
+            asyncio.create_task(self._consume_gripper(left_gripper_cmd, 0, "left_gripper_cmd")),
+            asyncio.create_task(self._consume_gripper(right_gripper_cmd, 1, "right_gripper_cmd")),
         ]
 
     async def stop(self) -> None:
@@ -78,7 +78,7 @@ class SimTopicIO:
         # Let the cancellations land so the consume loops exit before teardown.
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    async def _consume_arm(self, topic, slot_name: str) -> None:
+    async def _consume_arm(self, topic, expected_arm_id: int, slot_name: str) -> None:
         subscription = await topic.subscribe(self._node_runner)
         while True:
             try:
@@ -95,17 +95,22 @@ class SimTopicIO:
                 await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
+            # The slot fixes the side; a command tagged for the other arm is a
+            # mis-binding, not a routing hint.
+            if msg.arm_id != expected_arm_id:
+                logger.warning(
+                    f"dropping arm command with arm_id={msg.arm_id} on {slot_name}"
+                )
+                continue
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
             ):
                 logger.warning(f"dropping non-finite arm command for arm_id={msg.arm_id}")
                 continue
-            slot = self._arm_cmd.get(msg.arm_id)
-            if slot is not None:
-                slot.set((msg.positions, msg.velocities))
+            self._arm_cmd[expected_arm_id].set((msg.positions, msg.velocities))
 
-    async def _consume_gripper(self, topic, slot_name: str) -> None:
+    async def _consume_gripper(self, topic, expected_gripper_id: int, slot_name: str) -> None:
         subscription = await topic.subscribe(self._node_runner)
         while True:
             try:
@@ -122,14 +127,17 @@ class SimTopicIO:
                 await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
+            if msg.gripper_id != expected_gripper_id:
+                logger.warning(
+                    f"dropping gripper command with gripper_id={msg.gripper_id} on {slot_name}"
+                )
+                continue
             if not math.isfinite(msg.position):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
                 )
                 continue
-            slot = self._gripper_cmd.get(msg.gripper_id)
-            if slot is not None:
-                slot.set(msg.position)
+            self._gripper_cmd[expected_gripper_id].set(msg.position)
 
     # --- called from the physics thread ---
 

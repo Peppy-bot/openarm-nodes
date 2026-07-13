@@ -7,7 +7,7 @@ It attaches to the Isaac world that `openarm_robot_initializer_isaac` owns, so t
 ## Build
 
 ```sh
-peppy node add /path/to/ws/openarm_nodes/openarm_arm_isaac -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm-nodes/openarm_arm_isaac -sb --idle-timeout 1800
 ```
 
 Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in `peppy stack list` once built.
@@ -17,7 +17,7 @@ Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in
 One instance drives one side; `arm_id` picks the side (0 = left, 1 = right). Every declared slot must be bound when an instance starts, and this node and the sim consume from each other (the arm reads `arm_states` from the sim, the sim reads the arm's `arm_sim_passthrough`), so the pair can only start through a launcher, which plans and binds all instances together. The [top-level README](../README.md) has the complete sequence:
 
 ```sh
-peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_isaac.json5
+peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_isaac.json5
 ```
 
 ## Troubleshooting

@@ -1,8 +1,8 @@
 //! openarm_backbone - bimanual coordinator. It owns all arm motion: it
-//! consumes the operator joint stream and exposes the joint / Cartesian move
+//! consumes the commander's joint stream and exposes the joint / Cartesian move
 //! actions, generates the trajectories, runs the self-collision governor over
 //! both arms together, and streams the governed per-arm setpoints the arms
-//! follow. Grippers run through the backbone the same way: the operator opening
+//! follow. Grippers run through the backbone the same way: the commander's opening
 //! stream and move_gripper goals both feed the coordinator, the openings ride
 //! the same governed configuration as the arm joints (a gripper cannot open its
 //! fingers into the other arm), and the governed opening streams to each

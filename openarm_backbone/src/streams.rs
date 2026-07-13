@@ -1,4 +1,4 @@
-//! Inbound stream plumbing for the backbone: the operator arm and gripper command
+//! Inbound stream plumbing for the backbone: the commander's arm and gripper command
 //! streams, both paired arms' measured joint state, both paired grippers'
 //! measured aperture, and the runtime governor controls. Each listener holds
 //! one subscription and keeps the latest well-formed message in a watch channel
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::{
     collision_ctrl_governor_control, commander_arm_joint_commands,
-    commander_gripper_gripper_commands,
+    commander_gripper_commands,
 };
 use peppygen::pairings::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
 use peppylib::messaging::ProducerRef;
@@ -29,7 +29,7 @@ const UNKNOWN_ARM_WARN_PERIOD: Duration = Duration::from_secs(1);
 /// rate. Transient errors still recover; a genuinely dead stream just idles.
 const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
-/// The latest operator joint setpoint for one arm. `seq` distinguishes a fresh
+/// The latest commander joint setpoint for one arm. `seq` distinguishes a fresh
 /// command from one already acted on; `producer` is the source the follow logic
 /// locks to; `recv_at` is the arrival time the watchdog uses to tell a live
 /// stream from a stale leftover.
@@ -41,12 +41,12 @@ pub struct JointCommand {
     pub positions: JointVec,
 }
 
-/// The latest operator opening command for one gripper (m), fed by the
+/// The latest commander opening command for one gripper (m), fed by the
 /// `gripper_commands` stream. Carries the same follow fields as
 /// [`JointCommand`]: `seq` distinguishes a fresh command from one already acted
-/// on, `producer` is the source the coordinator's follow locks to (the slot may
-/// be bound to several producers, so without the lock two producers would
-/// interleave), and
+/// on, `producer` is the source the coordinator's follow locks to (the slot
+/// binds one producer, but the lock pins the live stream across producer
+/// restarts so stale and fresh streams cannot interleave), and
 /// `recv_at` is the arrival time the deadman uses to tell a live stream from a
 /// released one. The width stays in meters (the wire unit); the coordinator
 /// parses it into the governed opening fraction.
@@ -176,7 +176,7 @@ id_demux_listener!(
     /// gripper's 1-DOF opening: a non-finite position is dropped so a producer gone
     /// bad lets the follow lock time out instead of driving the fingers.
     run_gripper_command_listener,
-    commander_gripper_gripper_commands,
+    commander_gripper_commands,
     "gripper_commands",
     gripper_id,
     GripperCommand,
@@ -318,7 +318,7 @@ pub async fn run_gripper_state_listener(
     }
 }
 
-/// The backbone's runtime governor controls from the operator: the on/off toggle plus
+/// The backbone's runtime governor controls from the commander: the on/off toggle plus
 /// the live-tunable band and stream speed cap. Raw values; the governor and
 /// planners validate them as they apply (an invalid band or speed is ignored,
 /// keeping the last good one), so the toggle still takes effect regardless.

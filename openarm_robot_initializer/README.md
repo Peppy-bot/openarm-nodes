@@ -17,17 +17,17 @@ Robot assets (USD, MJCF, meshes) are baked into the sim base images, so there is
 The first build pulls the sim base image (about 1 GB for MuJoCo, 7.5 GB for Isaac), so give it a generous idle timeout or the daemon will kill the build mid-download:
 
 ```sh
-peppy node add /path/to/ws/openarm_nodes/openarm_robot_initializer_mujoco -sb --idle-timeout 18000
+peppy node add /path/to/ws/openarm-nodes/openarm_robot_initializer_mujoco -sb --idle-timeout 18000
 ```
 
 Swap in `openarm_robot_initializer_isaac` or `openarm_robot_initializer` (real) as needed. Rebuild after code changes by re-running with `--force`. When the build finishes, `peppy stack list` shows the node at `Stage: Ready`.
 
 ## Run
 
-Every declared slot must be bound when an instance starts, and the sim variants and the arm/gripper bridge nodes consume from each other (the sim reads their passthrough streams on `arm_cmd` / `gripper_cmd`, the bridges read the sim's state streams), so the stack can only start through a launcher, which plans and binds all instances together. The same goes for the real variant, whose four `hardware_ready` slots the launcher binds to the driver instances. The launchers in [launchers_hub/openarm](https://github.com/Peppy-bot/launchers_hub/tree/main/openarm) do exactly that; the [top-level README](../README.md) walks through the whole sequence:
+Every declared slot must be bound when an instance starts, and the sim variants and the arm/gripper bridge nodes consume from each other (the sim reads their passthrough streams on the per-side `left/right_arm_cmd` and `left/right_gripper_cmd` slots, the bridges read the sim's state streams), so the stack can only start through a launcher, which plans and binds all instances together. The same goes for the real variant, whose four `hardware_ready` slots the launcher binds to the driver instances. The launchers in [launchers-hub/openarm](https://github.com/Peppy-bot/launchers-hub/tree/main/openarm) do exactly that; the [top-level README](../README.md) walks through the whole sequence:
 
 ```sh
-peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5
+peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
 ```
 
 MuJoCo runs headless and renders to your browser at **http://localhost:8080**. Isaac runs headless and streams over WebRTC; connect with the [Isaac Sim livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). If you want a native window on the same machine instead, launch with `PEPPY_BRIDGE_HEADLESS=0` set in the environment.

@@ -1,7 +1,8 @@
-// Live gripper opening for the UI. Consumes the always-on `gripper_states` stream from
-// any gripper, demuxes by `gripper_id`, and reports the latest measured opening to the
-// owner. Mirrors joint_states.rs for the arm: it runs continuously, so the panel shows
-// live aperture whether or not a move is in flight.
+// Live gripper opening for the UI. Consumes each side's always-on `gripper_states`
+// slot and reports the latest measured opening to the owner. The slot fixes the
+// side; a message whose `gripper_id` disagrees with its slot is rejected. Mirrors
+// joint_states.rs for the arm: it runs continuously, so the panel shows live
+// aperture whether or not a move is in flight.
 
 use std::sync::Arc;
 
@@ -38,30 +39,41 @@ pub async fn run(
         }
     };
     loop {
-        let (slot, received) = tokio::select! {
+        let (slot, side, received) = tokio::select! {
             _ = token.cancelled() => return,
             received = left_subscription.next() => (
                 "left_gripper_states",
+                Side::Left,
                 received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.position))),
             ),
             received = right_subscription.next() => (
                 "right_gripper_states",
+                Side::Right,
                 received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.position))),
             ),
         };
         let (gripper_id, position) = match received {
             Ok(Some(pair)) => pair,
-            Ok(None) => return,
+            Ok(None) => {
+                error!(
+                    slot,
+                    "gripper_states subscription closed; live gripper readouts stopped"
+                );
+                return;
+            }
             Err(e) => {
                 error!(error = %e, slot, "gripper_states receive");
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
-        let Some(side) = Side::from_gripper_id(gripper_id) else {
-            warn!(gripper_id, "gripper_states: unknown gripper_id; ignoring");
+        if gripper_id != side.gripper_id() {
+            warn!(
+                gripper_id,
+                slot, "gripper_states: gripper_id does not match its slot; ignoring"
+            );
             continue;
-        };
+        }
         if feedback
             .send(Feedback::GripperMeasured {
                 side,

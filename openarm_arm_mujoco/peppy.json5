@@ -14,6 +14,9 @@
     implements: [
       // The resolved joint setpoint handed to the sim engine (sim-internal passthrough).
       { name: "openarm_arm_sim_passthrough", tag: "v1", link_id: "sim_passthrough" },
+      // This arm's measured state, re-emitted per side from the engine's broadcast,
+      // so consumers bind this follower exactly like the real arm.
+      { name: "openarm_arm_states", tag: "v1", link_id: "states" },
     ],
     depends_on: {
       pairings: [
@@ -30,12 +33,13 @@
         },
       ],
       contracts: [
-        // Measured joint state from the sim engine, relayed to the paired backbone.
-        // Bound to the sim instance at launch; entries told apart by arm_id.
+        // Measured joint state from the sim engine, demuxed by arm_id and relayed
+        // to the paired backbone and the per-side states re-emit. Bound to the
+        // sim instance at launch.
         {
           name: "openarm_arm_states",
           tag: "v1",
-          link_id: "state",
+          link_id: "engine_states",
         },
       ],
     },
@@ -44,9 +48,10 @@
     topics: {
       emits: [
         { link_id: "sim_passthrough", name: "arm_sim_passthrough" },
+        { link_id: "states", name: "arm_states" },
       ],
       consumes: [
-        { name: "arm_states", link_id: "state" },
+        { name: "arm_states", link_id: "engine_states" },
       ],
     },
   },

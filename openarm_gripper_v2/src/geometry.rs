@@ -1,7 +1,7 @@
 //! v2 gripper joint↔motor geometry: the linear meters↔radians mapping and the travel
 //! limit for the revolute pinch gripper. The motor speaks radians (0 = closed, opening
 //! toward [`OPEN_RAD`]); user-facing positions are the equivalent jaw opening in meters,
-//! so the shared gripper interface (position in meters) serves both generations.
+//! so the shared gripper contract (position in meters) serves both generations.
 
 use openarm_can::v20;
 

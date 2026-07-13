@@ -7,7 +7,7 @@ Slider ranges come from the generation's description (`hardware_version` paramet
 ## Build
 
 ```sh
-peppy node add /path/to/ws/openarm_nodes/openarm_commander -sb --idle-timeout 1800
+peppy node add /path/to/ws/openarm-nodes/openarm_commander -sb --idle-timeout 1800
 ```
 
 Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in `peppy stack list` once built.
@@ -17,19 +17,20 @@ Re-run with `--force` after code changes. The node shows up at `Stage: Ready` in
 It needs a running backbone, so the usual way is through a launcher; the [top-level README](../README.md) has the complete sequence:
 
 ```sh
-peppy stack launch /path/to/ws/launchers_hub/openarm/openarm_teleop_mujoco.json5
+peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
 ```
 
-You can also run it alone against an already-running stack. Every declared slot must be bound at start: the `backbone` and `proximity` slots to the backbone instance, and the state slots to whatever produces them in your stack (the sim instance here, the arm/gripper drivers on real hardware). The required parameters have no defaults, so they are supplied too:
+You can also run it alone against an already-running stack. Every declared slot must be bound at start: the `backbone` slot to the backbone instance, and each per-side state slot to that side's arm or gripper instance (sim followers here, the drivers on real hardware). The required parameters have no defaults, so they are supplied too:
 
 ```sh
 peppy node run openarm_commander:v1 \
     command_rate_hz=100 hardware_version=v2 max_ee_velocity_m_s=0.5 \
     collision_governor_enabled=true d_stop=0.005 d_safe=0.02 \
     --bind backbone@backbone_inst \
-    --bind proximity@backbone_inst \
-    --bind arm_states@sim \
-    --bind gripper_states@sim
+    --bind left_arm_states@left_arm_inst \
+    --bind right_arm_states@right_arm_inst \
+    --bind left_gripper_states@left_grip_inst \
+    --bind right_gripper_states@right_grip_inst
 ```
 
 Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to the generation's full jaw width (0.044 m on v1, 0.0697 m on v2), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.

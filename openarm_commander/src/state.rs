@@ -21,22 +21,9 @@ impl Side {
         }
     }
 
-    pub fn from_arm_id(arm_id: u8) -> Option<Self> {
-        match arm_id {
-            0 => Some(Self::Left),
-            1 => Some(Self::Right),
-            _ => None,
-        }
-    }
-
     /// The wire `gripper_id` (0 = left, 1 = right); the same 0/1 encoding as the arm.
     pub fn gripper_id(self) -> u8 {
         self.arm_id()
-    }
-
-    /// Parse a wire `gripper_id` (0 = left, 1 = right), or `None` if out of range.
-    pub fn from_gripper_id(gripper_id: u8) -> Option<Self> {
-        Self::from_arm_id(gripper_id)
     }
 
     pub fn label(self) -> &'static str {
