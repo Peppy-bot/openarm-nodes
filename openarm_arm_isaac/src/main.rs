@@ -148,19 +148,21 @@ fn main() -> Result<()> {
                 if msg.arm_id != arm_id || !finite {
                     continue;
                 }
-                let result = async {
-                    let broadcast =
-                        arm_states::build_message(arm_id, msg.positions, msg.velocities)
-                            .map_err(|e| e.to_string())?;
-                    states_pub
-                        .publish(broadcast)
-                        .await
+                // Publish independently, the paired command-loop input first: a
+                // failure on either leg never suppresses the other.
+                let paired = async {
+                    let msg = backbone::arm_states::build_message(msg.positions, msg.velocities)
                         .map_err(|e| e.to_string())?;
-                    let paired = backbone::arm_states::build_message(msg.positions, msg.velocities)
-                        .map_err(|e| e.to_string())?;
-                    peer_pub.publish(paired).await.map_err(|e| e.to_string())
+                    peer_pub.publish(msg).await.map_err(|e| e.to_string())
                 }
                 .await;
+                let broadcast = async {
+                    let msg = arm_states::build_message(arm_id, msg.positions, msg.velocities)
+                        .map_err(|e| e.to_string())?;
+                    states_pub.publish(msg).await.map_err(|e| e.to_string())
+                }
+                .await;
+                let result = paired.and(broadcast);
                 match result {
                     Ok(()) => failing = false,
                     Err(e) if !failing => {

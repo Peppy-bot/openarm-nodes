@@ -51,7 +51,10 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
                 continue;
             }
         };
-        if msg.gripper_id != gripper_id.as_u8() || !msg.position.is_finite() {
+        if msg.gripper_id != gripper_id.as_u8()
+            || !msg.position.is_finite()
+            || !msg.force.is_finite()
+        {
             continue;
         }
         // Re-emit on the per-side broadcast for launch-bound monitors.

@@ -30,7 +30,7 @@ Every declared slot must be bound when an instance starts, and the sim variants 
 peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
 ```
 
-MuJoCo runs headless and renders to your browser at **http://localhost:8080**. Isaac runs headless and streams over WebRTC; connect with the [Isaac Sim livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). If you want a native window on the same machine instead, launch with `PEPPY_BRIDGE_HEADLESS=0` set in the environment.
+MuJoCo runs headless and renders to your browser at **http://localhost:8080**. Isaac runs headless and streams over WebRTC; connect with the [Isaac Sim livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). If you want a native window on the same machine instead, set `headless: false` in the sim instance's `arguments` in the launcher.
 
 Watch it come up with:
 
