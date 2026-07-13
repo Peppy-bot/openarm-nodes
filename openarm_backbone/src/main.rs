@@ -51,19 +51,21 @@ where
     });
 }
 
-/// Build one arm model from the embedded OpenArm description, with the elbow
-/// singularity margin applied. The description carries no solver dep and exports the
-/// margin as a constant; applying it here is the single site the backbone imposes it, so the
-/// model's `limits()` carry it for IK seeding, trajectory sizing, and the chase clamp.
+/// Build one side's arm model from the embedded OpenArm description, with the elbow
+/// singularity margin applied. The description exports the URDF, the per-side chain
+/// base link, and the margin as constants; composing them here is the single site the
+/// backbone imposes the margin, so the model's `limits()` carry it for IK seeding,
+/// trajectory sizing, and the chase clamp.
 fn arm_model(
     version: HardwareVersion,
-    base_link: &str,
+    side: Side,
 ) -> std::result::Result<srs_model::Arm, srs_model::SrsError> {
     Ok(
-        srs_model::Arm::from_urdf(version.urdf(), base_link)?.with_lower_floor(
-            version.elbow_joint_index(),
-            version.elbow_singularity_floor_rad(),
-        ),
+        srs_model::Arm::from_urdf(version.urdf(), version.base_link(side.description()))?
+            .with_lower_floor(
+                version.elbow_joint_index(),
+                version.elbow_singularity_floor_rad(),
+            ),
     )
 }
 
@@ -132,19 +134,15 @@ fn main() -> Result<()> {
         // Two arm models (FK/IK/Jacobian/limits, with the elbow singularity margin)
         // and the bimanual collision model, all from the embedded OpenArm description.
         // A bad base link aborts bringup.
-        let left_model = arm_model(hardware_version, &params.left_base).unwrap_or_else(|e| {
-            panic!("build left arm model from base '{}': {e}", params.left_base)
-        });
-        let right_model = arm_model(hardware_version, &params.right_base).unwrap_or_else(|e| {
-            panic!(
-                "build right arm model from base '{}': {e}",
-                params.right_base
-            )
-        });
-        info!(
-            "arm models loaded (left '{}', right '{}')",
-            params.left_base, params.right_base
-        );
+        let left_model = arm_model(hardware_version, Side::Left)
+            .unwrap_or_else(|e| panic!("build left arm model: {e}"));
+        let right_model = arm_model(hardware_version, Side::Right)
+            .unwrap_or_else(|e| panic!("build right arm model: {e}"));
+        // The per-side chain base links, single-sourced from the version: the same
+        // names the arm models were built from, reused for the collision model.
+        let left_base = hardware_version.base_link(Side::Left.description());
+        let right_base = hardware_version.base_link(Side::Right.description());
+        info!("arm models loaded (left '{left_base}', right '{right_base}')");
 
         // The collision model needs the URDF string (joint limits are irrelevant to it,
         // so no margin) and the meshes on disk; the file-based builder reads the meshes
@@ -167,8 +165,8 @@ fn main() -> Result<()> {
         let governor = governor::Governor::build(
             hardware_version.urdf(),
             meshes_dir,
-            &params.left_base,
-            &params.right_base,
+            left_base,
+            right_base,
             params.d_stop,
             params.d_safe,
             max_joint_velocity_rad_s

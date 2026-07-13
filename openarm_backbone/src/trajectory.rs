@@ -349,8 +349,7 @@ mod tests {
     ];
 
     fn v2_right_arm() -> Arm {
-        crate::arm_model(HardwareVersion::V2, "openarm_right_base_link")
-            .expect("bundled v2 URDF builds")
+        crate::arm_model(HardwareVersion::V2, crate::Side::Right).expect("bundled v2 URDF builds")
     }
 
     fn world_pose(position: [f64; 3], quat_xyzw: [f64; 4]) -> Isometry3<f64> {
@@ -721,11 +720,8 @@ mod tests {
     // --- plan_cartesian (real arm model) ----------------------------------
 
     fn left_arm() -> Arm {
-        crate::arm_model(
-            openarm_description::HardwareVersion::V1,
-            "openarm_left_link0",
-        )
-        .expect("build left arm from bundled URDF")
+        crate::arm_model(openarm_description::HardwareVersion::V1, crate::Side::Left)
+            .expect("build left arm from bundled URDF")
     }
 
     #[test]

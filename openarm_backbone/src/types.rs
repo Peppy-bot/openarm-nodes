@@ -52,4 +52,13 @@ impl Side {
             Side::Right => "right",
         }
     }
+
+    /// This side as the description crate's `Side`, for reading its per-side data
+    /// (base link, joint limits) from `openarm_description`.
+    pub fn description(self) -> openarm_description::Side {
+        match self {
+            Side::Left => openarm_description::Side::Left,
+            Side::Right => openarm_description::Side::Right,
+        }
+    }
 }

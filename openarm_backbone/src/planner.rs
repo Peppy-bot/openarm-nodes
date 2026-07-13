@@ -726,11 +726,8 @@ mod tests {
         // of ~0.05 (the singularity floor applied by crate::arm_model), hard against the
         // boundary singularity. A power-up pose with the elbow below it must seed at the
         // limit, not off it.
-        let model = crate::arm_model(
-            openarm_description::HardwareVersion::V1,
-            "openarm_left_link0",
-        )
-        .expect("build left arm from bundled URDF");
+        let model = crate::arm_model(openarm_description::HardwareVersion::V1, crate::Side::Left)
+            .expect("build left arm from bundled URDF");
         let limits = model.limits();
         let cfg = PlanConfig {
             limits,

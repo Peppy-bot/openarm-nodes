@@ -2246,7 +2246,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#e4610ff6310cee6faf86abe0d17d057594735d5b"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Farm-constructor#613a212dd92f693ffaf1fea9727acf9319a7ed37"
 dependencies = [
  "urdf-rs",
 ]
