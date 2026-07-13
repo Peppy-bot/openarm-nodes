@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::exposed_actions::{move_arm, move_arm_joints};
-use peppylib::messaging::ProducerRef;
 use srs_model::nalgebra::{Isometry3, SVector};
 use srs_model::{Arm, ArmAnglePolicy, Jacobian, Limit};
 use tokio::sync::mpsc;
@@ -41,7 +40,6 @@ pub struct PlanConfig {
     pub max_joint_velocity_rad_s: JointVec,
     pub max_ee_velocity_m_s: f64,
     pub limits: [Limit; ARM_DOF],
-    pub stream_timeout: Duration,
 }
 
 /// A goal accepted by an action handler and handed to the planner.
@@ -70,26 +68,20 @@ impl Drop for BusyGuard {
     }
 }
 
-/// The locked commander producer and the chase target it drives.
-struct Lock {
-    producer: ProducerRef,
-    target: JointVec,
-    last_seq: u64,
-    last_fresh: Instant,
-}
-
 enum Mode {
-    /// Ambient: chase the locked commander stream, or hold when none is streaming.
-    Follow { lock: Option<Lock> },
+    /// Ambient: chase the commander stream, or hold when none is streaming.
+    Follow,
     /// Tracking a quintic joint trajectory for an accepted move_arm_joints goal.
-    JointMove {
-        traj: JointTrajectory,
-        ctx: move_arm_joints::GoalContext,
-        _busy: BusyGuard,
-    },
+    JointMove(JointMove),
     /// Tracking a Cartesian pose trajectory for an accepted move_arm goal, solving
     /// IK each tick for the joint target.
     CartesianMove(CartesianMove),
+}
+
+struct JointMove {
+    traj: JointTrajectory,
+    ctx: move_arm_joints::GoalContext,
+    _busy: BusyGuard,
 }
 
 struct CartesianMove {
@@ -128,7 +120,7 @@ impl Planner {
             side,
             model,
             cfg,
-            mode: Mode::Follow { lock: None },
+            mode: Mode::Follow,
             setpoint: [0.0; ARM_DOF],
         }
     }
@@ -172,10 +164,10 @@ impl Planner {
         busy: &Arc<AtomicBool>,
         now: Instant,
     ) -> JointVec {
-        let mut mode = std::mem::replace(&mut self.mode, Mode::Follow { lock: None });
+        let mut mode = std::mem::replace(&mut self.mode, Mode::Follow);
         // A move preempts Follow; while a move runs the action handler rejects new
         // goals as busy, so the channel only delivers a goal in Follow.
-        if matches!(mode, Mode::Follow { .. })
+        if matches!(mode, Mode::Follow)
             && let Ok(goal) = goals.try_recv()
         {
             mode = self.start_goal(goal, busy.clone(), now).await;
@@ -219,15 +211,15 @@ impl Planner {
         now: Instant,
     ) -> Advance {
         match mode {
-            Mode::Follow { mut lock } => {
-                let target = follow_target(&mut lock, command, self.setpoint, &self.cfg, now);
+            Mode::Follow => {
+                let target = follow_target(command, self.setpoint, &self.cfg);
                 Advance {
                     target,
-                    next_mode: Mode::Follow { lock },
+                    next_mode: Mode::Follow,
                     is_follow: true,
                 }
             }
-            Mode::JointMove { traj, ctx, _busy } => {
+            Mode::JointMove(JointMove { traj, ctx, _busy }) => {
                 let q_des = traj.sample(now);
                 let cancelled = ctx.is_cancelled();
                 if cancelled || traj.is_complete(now) {
@@ -254,13 +246,13 @@ impl Planner {
                     let target = if cancelled { self.setpoint } else { q_des };
                     Advance {
                         target,
-                        next_mode: Mode::Follow { lock: None },
+                        next_mode: Mode::Follow,
                         is_follow: false,
                     }
                 } else {
                     Advance {
                         target: q_des,
-                        next_mode: Mode::JointMove { traj, ctx, _busy },
+                        next_mode: Mode::JointMove(JointMove { traj, ctx, _busy }),
                         is_follow: false,
                     }
                 }
@@ -284,7 +276,7 @@ impl Planner {
                 .await;
             return Advance {
                 target: m.prev_q_des,
-                next_mode: Mode::Follow { lock: None },
+                next_mode: Mode::Follow,
                 is_follow: false,
             };
         }
@@ -304,7 +296,7 @@ impl Planner {
             .await;
             return Advance {
                 target: m.prev_q_des,
-                next_mode: Mode::Follow { lock: None },
+                next_mode: Mode::Follow,
                 is_follow: false,
             };
         };
@@ -329,7 +321,7 @@ impl Planner {
             .await;
             return Advance {
                 target: m.prev_q_des,
-                next_mode: Mode::Follow { lock: None },
+                next_mode: Mode::Follow,
                 is_follow: false,
             };
         }
@@ -348,7 +340,7 @@ impl Planner {
             .await;
             Advance {
                 target: sol.q,
-                next_mode: Mode::Follow { lock: None },
+                next_mode: Mode::Follow,
                 is_follow: false,
             }
         } else {
@@ -381,11 +373,11 @@ impl Planner {
                     self.cfg.max_joint_velocity_rad_s,
                     duration_s,
                 );
-                Mode::JointMove {
+                Mode::JointMove(JointMove {
                     traj,
                     ctx,
                     _busy: busy,
-                }
+                })
             }
             Goal::Cartesian {
                 target,
@@ -417,7 +409,7 @@ impl Planner {
                         error!("{}: move_arm complete: {e}", self.side.label());
                     }
                     // `busy` drops here: the slot is released even on this early exit.
-                    return Mode::Follow { lock: None };
+                    return Mode::Follow;
                 };
                 info!(
                     "{}: move_arm start, duration={duration:.3}s",
@@ -460,13 +452,6 @@ impl Planner {
     }
 }
 
-/// Whether `recv_at` is within `timeout` of `now`: the watchdog window telling a
-/// live stream from a stale leftover (shared with the coordinator's gripper
-/// follow, whose lock uses the same window).
-pub(crate) fn fresh(recv_at: Instant, now: Instant, timeout: Duration) -> bool {
-    now.duration_since(recv_at) <= timeout
-}
-
 /// Scale the chase step so the end-effector's linear speed stays under `max_ee`,
 /// using the Jacobian at the measured configuration (mirrors the arm's Follow). A
 /// step that does not move the hand passes unchanged.
@@ -488,48 +473,15 @@ fn cap_ee_speed(
     std::array::from_fn(|i| setpoint[i] + delta[i] * scale)
 }
 
-/// Resolve the Follow target: chase the locked commander command, acquiring or
-/// releasing the producer lock by freshness, holding `held` when none is live.
-fn follow_target(
-    lock: &mut Option<Lock>,
-    command: &Option<JointCommand>,
-    held: JointVec,
-    cfg: &PlanConfig,
-    now: Instant,
-) -> JointVec {
-    match lock.as_mut() {
-        Some(l) => {
-            if let Some(c) = command
-                && c.producer == l.producer
-                && c.seq != l.last_seq
-            {
-                l.target = clamp_to_limits(&c.positions, &cfg.limits);
-                l.last_seq = c.seq;
-                l.last_fresh = now;
-            }
-            if !fresh(l.last_fresh, now, cfg.stream_timeout) {
-                *lock = None;
-                held
-            } else {
-                l.target
-            }
-        }
-        None => match command
-            .as_ref()
-            .filter(|c| fresh(c.recv_at, now, cfg.stream_timeout))
-        {
-            Some(c) => {
-                let target = clamp_to_limits(&c.positions, &cfg.limits);
-                *lock = Some(Lock {
-                    producer: c.producer.clone(),
-                    target,
-                    last_seq: c.seq,
-                    last_fresh: now,
-                });
-                target
-            }
-            None => held,
-        },
+/// Resolve the Follow target: chase the commander command (clamped into the
+/// joint limits), holding `held` when none has arrived. The command stream is
+/// paired to one producer, so there is nothing to arbitrate; if the producer stops
+/// the latest command simply persists and the arm holds it through the MIT loop, so
+/// no freshness deadman is needed.
+fn follow_target(command: &Option<JointCommand>, held: JointVec, cfg: &PlanConfig) -> JointVec {
+    match command {
+        Some(c) => clamp_to_limits(&c.positions, &cfg.limits),
+        None => held,
     }
 }
 
@@ -559,7 +511,7 @@ fn exceeds_velocity_limits(
 mod tests {
     use super::*;
 
-    fn test_cfg(stream_timeout_ms: u64) -> PlanConfig {
+    fn test_cfg() -> PlanConfig {
         PlanConfig {
             cycle_period: Duration::from_millis(10),
             max_joint_velocity_rad_s: [10.0; ARM_DOF],
@@ -568,21 +520,11 @@ mod tests {
                 lo: -10.0,
                 hi: 10.0,
             }; ARM_DOF],
-            stream_timeout: Duration::from_millis(stream_timeout_ms),
         }
     }
 
-    fn producer(instance: &str) -> ProducerRef {
-        ProducerRef::new("core".to_string(), instance.to_string())
-    }
-
-    fn joint_cmd(instance: &str, seq: u64, positions: JointVec, recv_at: Instant) -> JointCommand {
-        JointCommand {
-            seq,
-            producer: producer(instance),
-            recv_at,
-            positions,
-        }
+    fn joint_cmd(positions: JointVec) -> JointCommand {
+        JointCommand { positions }
     }
 
     #[test]
@@ -599,7 +541,7 @@ mod tests {
         let limits = model.limits();
         let cfg = PlanConfig {
             limits,
-            ..test_cfg(100)
+            ..test_cfg()
         };
         let mut planner = Planner::new(Side::Left, model, cfg);
 
@@ -633,117 +575,19 @@ mod tests {
     }
 
     #[test]
-    fn fresh_tracks_the_watchdog_window() {
-        let now = Instant::now();
-        let timeout = Duration::from_millis(100);
-        assert!(fresh(now, now, timeout));
-        assert!(fresh(now - Duration::from_millis(50), now, timeout));
-        assert!(!fresh(now - Duration::from_millis(150), now, timeout));
-    }
-
-    #[test]
-    fn follow_acquires_lock_and_tracks_the_command() {
-        let now = Instant::now();
-        let mut lock = None;
+    fn follow_tracks_the_command() {
         let target = follow_target(
-            &mut lock,
-            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], now)),
+            &Some(joint_cmd([0.2; ARM_DOF])),
             [0.9; ARM_DOF],
-            &test_cfg(100),
-            now,
+            &test_cfg(),
         );
-        assert!(lock.is_some());
         assert_eq!(target, [0.2; ARM_DOF]);
     }
 
     #[test]
-    fn follow_holds_when_no_stream() {
-        let mut lock = None;
+    fn follow_holds_when_no_command() {
         let held = [0.3; ARM_DOF];
-        let target = follow_target(&mut lock, &None, held, &test_cfg(100), Instant::now());
-        assert!(lock.is_none());
-        assert_eq!(target, held);
-    }
-
-    #[test]
-    fn follow_releases_lock_after_timeout_then_holds() {
-        let t0 = Instant::now();
-        let mut lock = None;
-        follow_target(
-            &mut lock,
-            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)),
-            [0.0; ARM_DOF],
-            &test_cfg(100),
-            t0,
-        );
-        assert!(lock.is_some());
-        let held = [0.5; ARM_DOF];
-        let target = follow_target(
-            &mut lock,
-            &None,
-            held,
-            &test_cfg(100),
-            t0 + Duration::from_millis(150),
-        );
-        assert!(
-            lock.is_none(),
-            "lock should release after the stream goes stale"
-        );
-        assert_eq!(target, held);
-    }
-
-    #[test]
-    fn follow_ignores_a_foreign_producer_while_locked() {
-        let t0 = Instant::now();
-        let mut lock = None;
-        follow_target(
-            &mut lock,
-            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)),
-            [0.0; ARM_DOF],
-            &test_cfg(100),
-            t0,
-        );
-        // A fresh command from a different producer (new seq, new positions) must
-        // not steer the locked arm: single-source contract.
-        let target = follow_target(
-            &mut lock,
-            &Some(joint_cmd("other", 2, [1.0; ARM_DOF], t0)),
-            [0.0; ARM_DOF],
-            &test_cfg(100),
-            t0,
-        );
-        assert_eq!(target, [0.2; ARM_DOF]);
-    }
-
-    #[test]
-    fn follow_applies_each_seq_once() {
-        let t0 = Instant::now();
-        let mut lock = None;
-        follow_target(
-            &mut lock,
-            &Some(joint_cmd("teleop", 1, [0.2; ARM_DOF], t0)),
-            [0.0; ARM_DOF],
-            &test_cfg(100),
-            t0,
-        );
-        // New seq updates the target.
-        let target = follow_target(
-            &mut lock,
-            &Some(joint_cmd("teleop", 2, [0.5; ARM_DOF], t0)),
-            [0.0; ARM_DOF],
-            &test_cfg(100),
-            t0,
-        );
-        assert_eq!(target, [0.5; ARM_DOF]);
-        // Same seq again (even with different positions) is not re-applied.
-        let target = follow_target(
-            &mut lock,
-            &Some(joint_cmd("teleop", 2, [0.9; ARM_DOF], t0)),
-            [0.0; ARM_DOF],
-            &test_cfg(100),
-            t0,
-        );
-        assert_eq!(target, [0.5; ARM_DOF]);
+        assert_eq!(follow_target(&None, held, &test_cfg()), held);
     }
 
     #[test]

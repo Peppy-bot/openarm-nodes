@@ -73,10 +73,6 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
-        assert!(
-            params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
-            "stream_timeout_s must be a positive finite number"
-        );
         // The move timeout feeds Duration::from_secs_f64 (which panics on a bad
         // value mid-spawn) and a non-positive tolerance would keep any gripper
         // goal from ever converging; both fail at bringup instead.
@@ -119,7 +115,6 @@ fn main() -> Result<()> {
         );
 
         let cycle_period = Duration::from_micros(1_000_000 / params.control_rate_hz as u64);
-        let stream_timeout = Duration::from_secs_f64(params.stream_timeout_s);
 
         // Which OpenArm generation the arms are; selects the embedded description for both
         // the srs_model arms and the bimanual collision model.
@@ -206,7 +201,6 @@ fn main() -> Result<()> {
             max_joint_velocity_rad_s,
             max_ee_velocity_m_s: params.max_ee_velocity_m_s,
             limits,
-            stream_timeout,
         };
         let planners = ArmPair::new(
             Planner::new(Side::Left, left_model, plan_cfg(left_limits)),
@@ -285,7 +279,6 @@ fn main() -> Result<()> {
                 config_rx,
                 coordinator::RunConfig {
                     cycle_period,
-                    stream_timeout,
                     gripper_tolerance_m: params.gripper_position_tolerance,
                     gripper_move_timeout: Duration::from_secs_f64(params.gripper_motion_timeout_s),
                 },
