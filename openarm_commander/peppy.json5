@@ -44,7 +44,7 @@
     // gripper openings on gripper_commands, both told apart by id. Producing these
     // is what lets the panel drive an enabled arm/gripper continuously instead of
     // one move at a time; the backbone governs each and re-streams the governed value,
-    // so a follower clamps, rate-limits, and times out on its side.
+    // so a follower clamps and rate-limits on its side.
     actions: {
       // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.

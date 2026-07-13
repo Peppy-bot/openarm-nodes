@@ -317,7 +317,7 @@ pub async fn run(
         // Publish each active side's governed opening on its pairing slot (the
         // slot scopes the stream to its paired gripper, so the message carries
         // only the opening, in metres); an idle side stays silent and its
-        // gripper's watchdog holds the jaws.
+        // gripper holds the jaws.
         type BuildOpening = fn(f64) -> peppygen::Result<peppylib::Payload>;
         for (side, gripper_pub, build, opening_frac, active) in [
             (
