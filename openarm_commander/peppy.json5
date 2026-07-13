@@ -1,6 +1,6 @@
-// openarm_commander: operator entry point. Serves a browser-based
+// openarm_commander: the browser-based commander. Serves a
 // control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that streams
-// operator arm and gripper setpoints to the backbone (which governs and re-streams
+// commander arm and gripper setpoints to the backbone (which governs and re-streams
 // them), jogs the arm in joint or Cartesian (world-frame IK) space, and fires
 // move_arm_joints / move_arm / move_gripper goals at openarm_backbone.
 {
@@ -8,70 +8,43 @@
   manifest: {
     name: "openarm_commander",
     tag: "v1",
+    implements: [
+      { name: "openarm_commands", tag: "v1", link_id: "commands" },
+      // Runtime on/off for the backbone's self-collision governor, driven by the UI.
+      { name: "openarm_governor_control", tag: "v1", link_id: "governor" },
+    ],
     depends_on: {
       nodes: [
-        // The backbone; the commander fires its move_arm_joints action (the "Send"
-        // button). Bound to the backbone instance in the launcher.
+        // The backbone: the move actions the panel fires (move_arm_joints is the
+        // "Send" button) and the collision_status feed behind the proximity
+        // readout. Bound to the backbone instance in the launcher.
         {
           name: "openarm_backbone",
           tag: "v1",
           link_id: "backbone"
         }
       ],
-      interfaces: [
-        // Measured joint state of both arms, for live UI progress. Wildcard
-        // (`from_any`) so the panel binds to whatever arms are running and tells
-        // them apart by `arm_id`; optional, so the commander still boots with no
-        // arm up. This replaces reading move progress off the action feedback.
-        {
-          name: "openarm_arm_states",
-          tag: "v1",
-          link_id: "arm_states",
-          from_any: true
-        },
-        // Live nearest-pair self-collision distance + links from the backbone, for the
-        // proximity readout. Wildcard + optional like the state streams.
-        {
-          name: "openarm_collision_status",
-          tag: "v1",
-          link_id: "proximity",
-          from_any: true
-        },
+      contracts: [
+        // Measured joint state of both arms, for live UI progress. The launcher
+        // binds one slot per state producer and the panel tells arms apart by
+        // `arm_id`; a bound producer that isn't streaming yet just means no
+        // readout. This replaces reading move progress off the action feedback.
+        { name: "openarm_arm_states", tag: "v1", link_id: "left_arm_states" },
+        { name: "openarm_arm_states", tag: "v1", link_id: "right_arm_states" },
         // Measured gripper opening of both grippers, for the live aperture
-        // readout. Wildcard (`from_any`) + told apart by gripper_id, like
-        // arm_states; the grippers stream this to the backbone and the panel alike.
-        {
-          name: "openarm_gripper_states",
-          tag: "v1",
-          link_id: "gripper_states",
-          from_any: true
-        }
+        // readout. Bound like arm_states and told apart by gripper_id; the
+        // grippers stream this to the backbone and the panel alike.
+        { name: "openarm_gripper_states", tag: "v1", link_id: "left_gripper_states" },
+        { name: "openarm_gripper_states", tag: "v1", link_id: "right_gripper_states" },
       ]
     }
   },
   interfaces: {
-    // Streams operator setpoints to the backbone: arm targets on arm_joint_commands and
+    // Streams commander setpoints to the backbone: arm targets on arm_joint_commands and
     // gripper openings on gripper_commands, both told apart by id. Producing these
     // is what lets the panel drive an enabled arm/gripper continuously instead of
     // one move at a time; the backbone governs each and re-streams the governed value,
     // so a follower clamps, rate-limits, and times out on its side.
-    conforms_to: [
-      {
-        name: "openarm_arm_joint_commands",
-        tag: "v1"
-      },
-      {
-        name: "openarm_gripper_commands",
-        tag: "v1"
-      },
-      // Runtime on/off for the backbone's self-collision governor, driven by the UI
-      // checkbox and re-published periodically (lossy QoS) so a dropped toggle
-      // cannot strand the backbone.
-      {
-        name: "openarm_governor_control",
-        tag: "v1"
-      }
-    ],
     actions: {
       // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.
@@ -95,19 +68,22 @@
       ]
     },
     topics: {
+      // The UI's producer streams. The governor control is re-published
+      // periodically (lossy QoS) so a dropped toggle cannot strand the backbone.
+      emits: [
+        { link_id: "commands", name: "arm_joint_commands" },
+        { link_id: "commands", name: "gripper_commands" },
+        { link_id: "governor", name: "governor_control" },
+      ],
       consumes: [
-        {
-          name: "arm_states",
-          link_id: "arm_states"
-        },
+        { name: "arm_states", link_id: "left_arm_states" },
+        { name: "arm_states", link_id: "right_arm_states" },
         {
           name: "collision_status",
-          link_id: "proximity"
+          link_id: "backbone"
         },
-        {
-          name: "gripper_states",
-          link_id: "gripper_states"
-        }
+        { name: "gripper_states", link_id: "left_gripper_states" },
+        { name: "gripper_states", link_id: "right_gripper_states" },
       ]
     }
   },
@@ -117,7 +93,7 @@
       def_file: "apptainer.def"
     },
     parameters: {
-      // Rate (Hz) at which enabled operator arm targets are re-published on
+      // Rate (Hz) at which enabled commander arm targets are re-published on
       // arm_joint_commands, which the backbone consumes. Must stay comfortably
       // above 1 / the backbone's stream_timeout_s so the producer lock survives
       // between operator inputs.
@@ -129,7 +105,7 @@
       // governor_control and retunable from the UI. Require > 0. The sim launchers
       // set a permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
-      // Launch state for the rest of the governor controls the operator streams live
+      // Launch state for the rest of the governor controls the commander streams live
       // on governor_control, set per deployment in step with openarm_backbone. The
       // band requires 0 < d_stop < d_safe.
       collision_governor_enabled: "bool",

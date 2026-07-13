@@ -19,8 +19,10 @@ from typing import Optional
 import peppylib
 from peppygen.emitted_topics.openarm_arm_states.v1 import arm_states
 from peppygen.emitted_topics.openarm_gripper_states.v1 import gripper_states
-from peppygen.consumed_topics import arm_cmd_arm_sim_passthrough as arm_cmd
-from peppygen.consumed_topics import gripper_cmd_gripper_sim_passthrough as gripper_cmd
+from peppygen.consumed_topics import left_arm_cmd_arm_sim_passthrough as left_arm_cmd
+from peppygen.consumed_topics import left_gripper_cmd_gripper_sim_passthrough as left_gripper_cmd
+from peppygen.consumed_topics import right_arm_cmd_arm_sim_passthrough as right_arm_cmd
+from peppygen.consumed_topics import right_gripper_cmd_gripper_sim_passthrough as right_gripper_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +66,10 @@ class SimTopicIO:
         self._arm_pub = await arm_states.declare_publisher(self._node_runner)
         self._gripper_pub = await gripper_states.declare_publisher(self._node_runner)
         self._tasks = [
-            asyncio.create_task(self._consume_arm()),
-            asyncio.create_task(self._consume_gripper()),
+            asyncio.create_task(self._consume_arm(left_arm_cmd, 0, "left_arm_cmd")),
+            asyncio.create_task(self._consume_arm(right_arm_cmd, 1, "right_arm_cmd")),
+            asyncio.create_task(self._consume_gripper(left_gripper_cmd, 0, "left_gripper_cmd")),
+            asyncio.create_task(self._consume_gripper(right_gripper_cmd, 1, "right_gripper_cmd")),
         ]
 
     async def stop(self) -> None:
@@ -74,8 +78,8 @@ class SimTopicIO:
         # Let the cancellations land so the consume loops exit before teardown.
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    async def _consume_arm(self) -> None:
-        subscription = await arm_cmd.subscribe(self._node_runner)
+    async def _consume_arm(self, topic, expected_arm_id: int, slot_name: str) -> None:
+        subscription = await topic.subscribe(self._node_runner)
         while True:
             try:
                 pair = await subscription.next()
@@ -87,22 +91,27 @@ class SimTopicIO:
                 # A corrupt frame is dropped and logged rather than killing
                 # this consume task; the pause keeps a persistent fault from
                 # hot-spinning the loop.
-                logger.warning(f"arm command consume error: {exc}")
+                logger.warning(f"{slot_name} command consume error: {exc}")
                 await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
+            # The slot fixes the side; a command tagged for the other arm is a
+            # mis-binding, not a routing hint.
+            if msg.arm_id != expected_arm_id:
+                logger.warning(
+                    f"dropping arm command with arm_id={msg.arm_id} on {slot_name}"
+                )
+                continue
             # Drop a poisoned command rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
             ):
                 logger.warning(f"dropping non-finite arm command for arm_id={msg.arm_id}")
                 continue
-            slot = self._arm_cmd.get(msg.arm_id)
-            if slot is not None:
-                slot.set((msg.positions, msg.velocities))
+            self._arm_cmd[expected_arm_id].set((msg.positions, msg.velocities))
 
-    async def _consume_gripper(self) -> None:
-        subscription = await gripper_cmd.subscribe(self._node_runner)
+    async def _consume_gripper(self, topic, expected_gripper_id: int, slot_name: str) -> None:
+        subscription = await topic.subscribe(self._node_runner)
         while True:
             try:
                 pair = await subscription.next()
@@ -114,18 +123,21 @@ class SimTopicIO:
                 # A corrupt frame is dropped and logged rather than killing
                 # this consume task; the pause keeps a persistent fault from
                 # hot-spinning the loop.
-                logger.warning(f"gripper command consume error: {exc}")
+                logger.warning(f"{slot_name} command consume error: {exc}")
                 await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
+            if msg.gripper_id != expected_gripper_id:
+                logger.warning(
+                    f"dropping gripper command with gripper_id={msg.gripper_id} on {slot_name}"
+                )
+                continue
             if not math.isfinite(msg.position):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
                 )
                 continue
-            slot = self._gripper_cmd.get(msg.gripper_id)
-            if slot is not None:
-                slot.set(msg.position)
+            self._gripper_cmd[expected_gripper_id].set(msg.position)
 
     # --- called from the physics thread ---
 

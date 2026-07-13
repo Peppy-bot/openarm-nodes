@@ -1,6 +1,6 @@
-// openarm_backbone: the bimanual coordination node. Consumes the operator
+// openarm_backbone: the bimanual coordination node. Consumes the commander's
 // arm_joint_commands and gripper_commands streams; exposes the joint /
-// Cartesian / gripper move actions and executes them itself; conforms to
+// Cartesian / gripper move actions and executes them itself; emits
 // collision_status; and drives each arm and each gripper over its own pairing
 // (arm_link / gripper_link): governed setpoints stream down each pair and the
 // measured state streams back on it. See src/main.rs for the architecture.
@@ -10,37 +10,26 @@
     name: "openarm_backbone",
     tag: "v1",
     depends_on: {
-      interfaces: [
+      contracts: [
         {
           name: "openarm_robot_initializer",
           tag: "v1",
           link_id: "robot_init"
         },
-        // Operator joint setpoint stream, `from_any`: the backbone binds to whatever
-        // commander is running and tells sides apart by arm_id.
+        // The commander's streamed setpoints, arm and gripper, bound to the one
+        // commanding instance; sides told apart by arm_id / gripper_id. The
+        // backbone governs both streams before anything reaches a follower.
         {
-          name: "openarm_arm_joint_commands",
+          name: "openarm_commands",
           tag: "v1",
-          link_id: "commander",
-          from_any: true
+          link_id: "commander"
         },
-        // Operator gripper opening stream, `from_any`: the same commander streams
-        // the desired opening per side (gripper_id); the backbone governs it (the finger
-        // opening barrier) and drives each gripper over its pairing slot below,
-        // exactly as it does for the arm joint stream.
-        {
-          name: "openarm_gripper_commands",
-          tag: "v1",
-          link_id: "commander_gripper",
-          from_any: true
-        },
-        // Runtime on/off for the governor. Wildcard + optional: the backbone holds its
-        // launch-time default until the first message.
+        // Runtime governor controls, bound to the commander; the backbone
+        // holds its launch-time defaults until the first message.
         {
           name: "openarm_governor_control",
           tag: "v1",
-          link_id: "collision_ctrl",
-          from_any: true
+          link_id: "collision_ctrl"
         }
       ],
       pairings: [
@@ -92,13 +81,6 @@
     }
   },
   interfaces: {
-    conforms_to: [
-      {
-        // Emits the live nearest-pair distance + links, for the operator readout.
-        name: "openarm_collision_status",
-        tag: "v1"
-      }
-    ],
     actions: {
       // The backbone's move actions, addressed by side id. The backbone runs each move
       // itself (trajectory + governor + governed stream); progress is observed
@@ -205,10 +187,7 @@
               success: "bool",
               message: "string",
               // Measured opening (m) when the action ended.
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64"
-              },
+              final_position: "f64",
               // Wall-clock duration of the action (s).
               action_time: "f64"
             }
@@ -217,6 +196,27 @@
       ]
     },
     topics: {
+      emits: [
+        {
+          // Nearest self-collision pair: the signed surface distance between the
+          // two arms and the two links forming that pair.
+          name: "collision_status",
+          qos_profile: "sensor_data",
+          message_format: {
+            // Signed surface distance (m) of the nearest checked pair: positive is
+            // clearance, negative is penetration depth.
+            distance: "f64",
+            // The two links forming that nearest pair.
+            link_a: "string",
+            link_b: "string",
+            // Disposition of the commanded motion, mutually exclusive: throttled
+            // means it is being scaled down to hold the band, stopped means it is
+            // fully denied at the stop floor. Both false when motion is unrestricted.
+            throttled: "bool",
+            stopped: "bool"
+          }
+        },
+      ],
       consumes: [
         {
           name: "arm_joint_commands",
@@ -224,7 +224,7 @@
         },
         {
           name: "gripper_commands",
-          link_id: "commander_gripper"
+          link_id: "commander"
         },
         {
           name: "governor_control",
@@ -285,11 +285,11 @@
       max_joint_velocity_rad_s_6: { $type: "f64", $default: 20.943946 },
       max_joint_velocity_rad_s_7: { $type: "f64", $default: 20.943946 },
       // End-effector linear-speed cap (m/s) for the stream chase, used only until
-      // the first governor_control message; after that the operator's streamed cap
+      // the first governor_control message; after that the commander's streamed cap
       // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
-      // How long (s) the backbone keeps following an operator stream after its last
+      // How long (s) the backbone keeps following a commander stream after its last
       // message before releasing the lock and holding.
       stream_timeout_s: "f64",
       // Completion tolerance (m) for backbone-executed move_gripper goals: the goal

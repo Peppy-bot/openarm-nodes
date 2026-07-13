@@ -1,12 +1,15 @@
-// Live gripper opening for the UI. Consumes the always-on `gripper_states` stream from
-// any gripper, demuxes by `gripper_id`, and reports the latest measured opening to the
-// owner. Mirrors joint_states.rs for the arm: it runs continuously, so the panel shows
-// live aperture whether or not a move is in flight.
+// Live gripper opening for the UI. Consumes each side's always-on `gripper_states`
+// slot and reports the latest measured opening to the owner. The slot fixes the
+// side; a message whose `gripper_id` disagrees with its slot is rejected. Mirrors
+// joint_states.rs for the arm: it runs continuously, so the panel shows live
+// aperture whether or not a move is in flight.
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::gripper_states_gripper_states;
+use peppygen::consumed_topics::{
+    left_gripper_states_gripper_states, right_gripper_states_gripper_states,
+};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -20,43 +23,66 @@ pub async fn run(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
 ) {
-    let mut subscription = match gripper_states_gripper_states::subscribe(&runner).await {
+    let mut left_subscription = match left_gripper_states_gripper_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
-            error!(error = %e, "gripper_states subscribe");
+            error!(error = %e, "left_gripper_states subscribe");
+            return;
+        }
+    };
+    let mut right_subscription = match right_gripper_states_gripper_states::subscribe(&runner).await
+    {
+        Ok(subscription) => subscription,
+        Err(e) => {
+            error!(error = %e, "right_gripper_states subscribe");
             return;
         }
     };
     loop {
-        let received = tokio::select! {
+        let (slot, side, received) = tokio::select! {
             _ = token.cancelled() => return,
-            received = subscription.next() => received,
+            received = left_subscription.next() => (
+                "left_gripper_states",
+                Side::Left,
+                received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.position))),
+            ),
+            received = right_subscription.next() => (
+                "right_gripper_states",
+                Side::Right,
+                received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.position))),
+            ),
         };
-        let (_producer, msg) = match received {
+        let (gripper_id, position) = match received {
             Ok(Some(pair)) => pair,
-            Ok(None) => return,
+            Ok(None) => {
+                error!(
+                    slot,
+                    "gripper_states subscription closed; live gripper readouts stopped"
+                );
+                return;
+            }
             Err(e) => {
-                error!(error = %e, "gripper_states receive");
+                error!(error = %e, slot, "gripper_states receive");
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
-        let Some(side) = Side::from_gripper_id(msg.gripper_id) else {
+        if gripper_id != side.gripper_id() {
             warn!(
-                gripper_id = msg.gripper_id,
-                "gripper_states: unknown gripper_id; ignoring"
+                gripper_id,
+                slot, "gripper_states: gripper_id does not match its slot; ignoring"
             );
             continue;
-        };
+        }
         if feedback
             .send(Feedback::GripperMeasured {
                 side,
-                opening: msg.position,
+                opening: position,
             })
             .await
             .is_err()
         {
-            return; // the owner is gone; nothing left to report to
+            return;
         }
     }
 }

@@ -1,13 +1,15 @@
 //! Isaac sim follower: republish the paired backbone's governed setpoints onto the
 //! sim's arm_sim_passthrough topic, and relay the engine's measured state back
-//! to the backbone on the pairing. All motion, trajectory, and collision logic lives
-//! in openarm_backbone; this node only relabels the governed stream for the
-//! engine and the engine's state for the backbone. A held subscription receives
+//! to the backbone on the pairing, re-emitting it on the per-side arm_states
+//! broadcast. All motion, trajectory, and collision logic lives in
+//! openarm_backbone; this node only relabels the governed stream for the
+//! engine and the engine's state for its consumers. A held subscription receives
 //! every setpoint in order with no re-subscribe gap; a separate task publishes
 //! the latest, so neither arm is starved (the same shape the real arm uses).
 
-use peppygen::consumed_topics::state_arm_states;
+use peppygen::consumed_topics::engine_states_arm_states;
 use peppygen::emitted_topics::openarm_arm_sim_passthrough::v1::arm_sim_passthrough;
+use peppygen::emitted_topics::openarm_arm_states::v1::arm_states;
 use peppygen::pairings::backbone;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
@@ -111,16 +113,22 @@ fn main() -> Result<()> {
 
         // State relay task: this arm's engine measurements (the broadcast
         // arm_states the sim emits, demuxed by arm_id) flow to the paired backbone on
-        // the pairing's arm_states, the command loop's state input. Non-finite
-        // samples are dropped so the backbone never anchors on a bad measurement.
+        // the pairing's arm_states, the command loop's state input, and are
+        // re-emitted on this follower's per-side arm_states, so monitors bind the
+        // follower exactly like the real arm. Non-finite samples are dropped so
+        // no consumer anchors on a bad measurement.
         let relay = tokio::spawn(async move {
-            let mut sub = match state_arm_states::subscribe(&node_runner).await {
+            let mut sub = match engine_states_arm_states::subscribe(&node_runner).await {
                 Ok(s) => s,
                 Err(e) => return error!("arm_states subscribe: {e}"),
             };
             let peer_pub = match backbone::arm_states::declare_publisher(&node_runner).await {
                 Ok(p) => p,
                 Err(e) => return error!("declare paired arm_states publisher: {e}"),
+            };
+            let states_pub = match arm_states::declare_publisher(&node_runner).await {
+                Ok(p) => p,
+                Err(e) => return error!("declare arm_states publisher: {e}"),
             };
             let mut failing = false;
             loop {
@@ -140,13 +148,21 @@ fn main() -> Result<()> {
                 if msg.arm_id != arm_id || !finite {
                     continue;
                 }
-                let result = async {
-                    let payload =
-                        backbone::arm_states::build_message(msg.positions, msg.velocities)
-                            .map_err(|e| e.to_string())?;
-                    peer_pub.publish(payload).await.map_err(|e| e.to_string())
+                // Publish independently, the paired command-loop input first: a
+                // failure on either leg never suppresses the other.
+                let paired = async {
+                    let msg = backbone::arm_states::build_message(msg.positions, msg.velocities)
+                        .map_err(|e| e.to_string())?;
+                    peer_pub.publish(msg).await.map_err(|e| e.to_string())
                 }
                 .await;
+                let broadcast = async {
+                    let msg = arm_states::build_message(arm_id, msg.positions, msg.velocities)
+                        .map_err(|e| e.to_string())?;
+                    states_pub.publish(msg).await.map_err(|e| e.to_string())
+                }
+                .await;
+                let result = paired.and(broadcast);
                 match result {
                     Ok(()) => failing = false,
                     Err(e) if !failing => {

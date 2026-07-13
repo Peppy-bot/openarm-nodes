@@ -1,5 +1,5 @@
 //! Per-arm motion planner: the mode state machine that turns one arm's inputs
-//! (the operator joint stream, and accepted joint / Cartesian move goals) into a
+//! (the commander's joint stream, and accepted joint / Cartesian move goals) into a
 //! candidate joint setpoint each tick. It does NOT command anything and does not
 //! know about the other arm: it produces a candidate, the coordinator governs
 //! both arms' candidates against the collision model, and feeds the governed
@@ -10,7 +10,7 @@
 //! target at the per-joint velocity limits (Follow also caps end-effector speed),
 //! so streaming and moves stay smooth under throttling - when the governor holds
 //! the setpoint, the chase simply catches up at the velocity limit once clear,
-//! with no jump. Follow's target is the operator command; a joint move's target
+//! with no jump. Follow's target is the commander command; a joint move's target
 //! is the quintic sample; a Cartesian move's target is the IK of the pose sample.
 
 use std::sync::Arc;
@@ -70,7 +70,7 @@ impl Drop for BusyGuard {
     }
 }
 
-/// The locked operator producer and the chase target it drives.
+/// The locked commander producer and the chase target it drives.
 struct Lock {
     producer: ProducerRef,
     target: JointVec,
@@ -79,7 +79,7 @@ struct Lock {
 }
 
 enum Mode {
-    /// Ambient: chase the locked operator stream, or hold when none is streaming.
+    /// Ambient: chase the locked commander stream, or hold when none is streaming.
     Follow { lock: Option<Lock> },
     /// Tracking a quintic joint trajectory for an accepted move_arm_joints goal.
     JointMove {
@@ -154,7 +154,7 @@ impl Planner {
         self.setpoint
     }
 
-    /// Retune the end-effector speed cap at runtime (the operator's control).
+    /// Retune the end-effector speed cap at runtime (the commander's control).
     /// Ignores a non-positive or non-finite value, keeping the current cap.
     pub fn set_max_ee_velocity(&mut self, v: f64) {
         if v.is_finite() && v > 0.0 {
@@ -488,7 +488,7 @@ fn cap_ee_speed(
     std::array::from_fn(|i| setpoint[i] + delta[i] * scale)
 }
 
-/// Resolve the Follow target: chase the locked operator command, acquiring or
+/// Resolve the Follow target: chase the locked commander command, acquiring or
 /// releasing the producer lock by freshness, holding `held` when none is live.
 fn follow_target(
     lock: &mut Option<Lock>,
@@ -533,7 +533,7 @@ fn follow_target(
     }
 }
 
-/// Decompose a world-frame pose into the interface's `(position, quaternion)`.
+/// Decompose a world-frame pose into the wire `(position, quaternion)` arrays.
 fn world_pose_arrays(pose: &Isometry3<f64>) -> ([f64; 3], [f64; 4]) {
     let t = pose.translation.vector;
     let r = pose.rotation;

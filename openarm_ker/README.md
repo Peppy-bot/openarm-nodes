@@ -46,7 +46,7 @@ To pin them:
    leader joint one at a time to identify its channel and sign against the
    follower's j1..j7 convention; sweep each trigger for its closed/open
    angles.
-4. Record the values in the launcher (`launchers_hub/openarm/
+4. Record the values in the launcher (`launchers-hub/openarm/
    openarm_v2_ker_teleop*.json5`) and turn `log_raw` back off.
 
 First engaged run: keep the backbone's `max_ee_velocity_m_s` conservative;

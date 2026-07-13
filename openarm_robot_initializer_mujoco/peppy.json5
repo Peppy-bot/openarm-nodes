@@ -1,4 +1,4 @@
-// MuJoCo implementation of robot_initializer. Conforms to
+// MuJoCo implementation of robot_initializer. Implements
 // openarm_robot_initializer:v1 (is_ready signal) and is the simulation's
 // state source: it emits the measured joint and gripper state for both arms /
 // both grippers (discriminated by arm_id / gripper_id) and consumes the
@@ -10,38 +10,40 @@
   manifest: {
     name: "openarm_robot_initializer_mujoco",
     tag: "v1",
+    implements: [
+      { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_ready" },
+      // Measured state for both arms / both grippers; consumers tell sides apart
+      // by arm_id / gripper_id.
+      { name: "openarm_arm_states", tag: "v1", link_id: "arm_states" },
+      { name: "openarm_gripper_states", tag: "v1", link_id: "gripper_states" },
+    ],
     depends_on: {
-      interfaces: [
-        // Per-arm / per-gripper sim passthrough setpoints, consumed from any
-        // instance (`from_any`): one sim process drives both sides and tells
-        // them apart by arm_id / gripper_id in the message.
-        {
-          name: "openarm_arm_sim_passthrough",
-          tag: "v1",
-          link_id: "arm_cmd",
-          from_any: true,
-        },
-        {
-          name: "openarm_gripper_sim_passthrough",
-          tag: "v1",
-          link_id: "gripper_cmd",
-          from_any: true,
-        },
+      contracts: [
+        // Per-arm / per-gripper sim passthrough setpoints. Each side has its own
+        // launcher binding; the sim process still verifies arm_id / gripper_id.
+        { name: "openarm_arm_sim_passthrough", tag: "v1", link_id: "left_arm_cmd" },
+        { name: "openarm_arm_sim_passthrough", tag: "v1", link_id: "right_arm_cmd" },
+        { name: "openarm_gripper_sim_passthrough", tag: "v1", link_id: "left_gripper_cmd" },
+        { name: "openarm_gripper_sim_passthrough", tag: "v1", link_id: "right_gripper_cmd" },
       ],
     },
   },
   interfaces: {
-    conforms_to: [
-      { name: "openarm_robot_initializer", tag: "v1" },
-      // Measured state for both arms / both grippers; consumers tell sides apart
-      // by arm_id / gripper_id.
-      { name: "openarm_arm_states", tag: "v1" },
-      { name: "openarm_gripper_states", tag: "v1" },
-    ],
     topics: {
+      emits: [
+        { link_id: "arm_states", name: "arm_states" },
+        { link_id: "gripper_states", name: "gripper_states" },
+      ],
       consumes: [
-        { name: "arm_sim_passthrough", link_id: "arm_cmd" },
-        { name: "gripper_sim_passthrough", link_id: "gripper_cmd" },
+        { name: "arm_sim_passthrough", link_id: "left_arm_cmd" },
+        { name: "arm_sim_passthrough", link_id: "right_arm_cmd" },
+        { name: "gripper_sim_passthrough", link_id: "left_gripper_cmd" },
+        { name: "gripper_sim_passthrough", link_id: "right_gripper_cmd" },
+      ],
+    },
+    services: {
+      exposes: [
+        { link_id: "robot_ready", name: "is_ready" },
       ],
     },
   },

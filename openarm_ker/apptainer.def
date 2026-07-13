@@ -9,7 +9,7 @@ From: tuatini/peppy-rust-cargo-base
     export DEBIAN_FRONTEND=noninteractive
 
     apt-get update -y
-    apt-get install -y --no-install-recommends libusb-1.0-0-dev pkg-config
+    apt-get install -y --no-install-recommends libusb-1.0-0-dev libudev-dev pkg-config
 
     cd /opt/openarm_ker
     cargo build --release

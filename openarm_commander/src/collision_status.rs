@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::proximity_collision_status;
+use peppygen::consumed_topics::backbone_collision_status;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::error;
@@ -19,7 +19,7 @@ pub async fn run(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
 ) {
-    let mut subscription = match proximity_collision_status::subscribe(&runner).await {
+    let mut subscription = match backbone_collision_status::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "collision_status subscribe");

@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_collision_status::v1::collision_status;
+use peppygen::emitted_topics::collision_status;
 use peppygen::exposed_actions::move_gripper;
 use peppygen::pairings::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
 use peppylib::runtime::CancellationToken;
@@ -34,8 +34,8 @@ use crate::{ArmPair, JointVec, Side};
 /// indefinite quiet stall.
 const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 
-/// One arm's inbound channels into the coordinator: the operator arm command
-/// stream, the operator gripper opening command stream, the measured arm state,
+/// One arm's inbound channels into the coordinator: the commander's arm command
+/// stream, the commander's gripper opening command stream, the measured arm state,
 /// the measured gripper opening, the accepted-goal queues, and the single-flight
 /// busy flags (one for arm moves, one for gripper moves).
 pub struct ArmChannels {
@@ -175,7 +175,7 @@ pub async fn run(
         opening(&channels.right.gripper),
     );
     // In-flight backbone-executed gripper moves, one single-flight slot per side, and
-    // each side's producer-locked follow on the operator's opening stream.
+    // each side's producer-locked follow on the commander's opening stream.
     let mut gripper_moves: ArmPair<Option<GripperMove>> = ArmPair::new(None, None);
     let mut gripper_follows: ArmPair<Option<GripperFollow>> = ArmPair::new(None, None);
 
@@ -186,7 +186,7 @@ pub async fn run(
     let mut tick: u64 = 0;
     let mut pacer = Pacer::new(cycle_period).expect("control_rate_hz is asserted > 0 at startup");
     loop {
-        // Apply the latest operator controls (cheap no-ops when unchanged; invalid
+        // Apply the latest commander controls (cheap no-ops when unchanged; invalid
         // band/speed values are rejected by the setters, keeping the last good).
         let cfg = *governor_config.borrow();
         governor.set_enabled(cfg.enabled);
@@ -229,7 +229,7 @@ pub async fn run(
         .await;
 
         // Resolve each gripper's target for this tick: an in-flight move owns the
-        // opening; otherwise a fresh operator command drives it; otherwise the
+        // opening; otherwise a fresh commander command drives it; otherwise the
         // side idles, silent on the wire (the gripper's own watchdog holds the
         // jaws) with the tracked opening re-anchored to the measured jaws so a
         // resume ramps from where the fingers really are.
@@ -456,7 +456,7 @@ async fn wait_for_first<T>(
 
 /// Advance one arm's planner to its candidate setpoint for this tick: anchor on the
 /// measured pose (or the held setpoint if no measurement yet), feed the latest
-/// operator command, and admit any pending move goal.
+/// commander command, and admit any pending move goal.
 async fn tick_arm(channels: &mut ArmChannels, planner: &mut Planner, now: Instant) -> JointVec {
     let measured_q = match *channels.measured.borrow() {
         Some(s) => s.positions,
@@ -516,7 +516,7 @@ async fn service_gripper_move(
     };
     let m = mv.take().expect("in-flight move checked above");
     let elapsed = now.duration_since(m.started).as_secs_f64();
-    let measured_m = vec![measured_frac * jaw_open_m];
+    let measured_m = measured_frac * jaw_open_m;
     let result = if cancelled {
         m.ctx
             .complete_cancelled(success, message.into(), measured_m, elapsed)
@@ -532,7 +532,7 @@ async fn service_gripper_move(
 }
 
 /// The side's target opening fraction for this tick: an in-flight backbone-executed
-/// move owns it; otherwise the operator's streamed command drives it through the
+/// move owns it; otherwise the commander's streamed command drives it through the
 /// producer-locked follow; otherwise `None` (idle).
 fn gripper_target(
     mv: &Option<GripperMove>,
@@ -556,8 +556,9 @@ fn gripper_target(
 
 /// The locked gripper-command producer and the target fraction it drives: the
 /// opening analog of the planner's follow lock, sharing its semantics (the
-/// stream is `from_any`, so without the lock two producers would interleave and
-/// a foreign stream could hold the deadman open).
+/// slot binds one producer, but the lock still pins the live stream so a
+/// replaced or restarted producer instance cannot interleave with the one
+/// being followed or hold the deadman open).
 struct GripperFollow {
     producer: ProducerRef,
     target_frac: f64,
@@ -565,7 +566,7 @@ struct GripperFollow {
     last_fresh: Instant,
 }
 
-/// Resolve the streamed opening target: chase the locked operator command,
+/// Resolve the streamed opening target: chase the locked commander command,
 /// acquiring or releasing the producer lock by freshness (the opening analog of
 /// the planner's `follow_target`). The wire metres parse into the governed
 /// fraction here, clamped into the jaw travel at the boundary. `None` when no
