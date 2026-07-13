@@ -58,8 +58,8 @@ pub enum Feedback {
 }
 
 /// The setpoints to stream this tick. `None` for a side means its deadman is off, so
-/// the publisher emits nothing and the backbone's watchdog holds. Recomputed every command
-/// tick and read by the publisher tasks on their own cadence.
+/// the publisher emits nothing and the backbone holds the last setpoint. Recomputed
+/// every command tick and read by the publisher tasks on their own cadence.
 #[derive(Clone, Copy, Debug)]
 pub struct CommandFrame {
     pub arms: BySide<Option<[f64; ARM_DOF]>>,

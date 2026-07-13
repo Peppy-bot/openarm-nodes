@@ -44,10 +44,7 @@
       recv_timeout_us: { $type: "u32", $default: 1000 },
       // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
       // consumers' needs vary too much for a default to be meaningful.
-      state_rate_hz: "u32",
-      // How long (s) the gripper keeps following a stream after its last message
-      // before holding. Safety watchdog.
-      stream_timeout_s: "f64"
+      state_rate_hz: "u32"
     }
   },
   interfaces: {

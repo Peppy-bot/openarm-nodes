@@ -1,5 +1,5 @@
 // Ambient following of a streamed gripper opening: drive the motor toward the
-// latest fresh command; when the stream goes stale, hold by issuing no CAN
+// latest command; until the first command arrives, hold by issuing no CAN
 // traffic so the motor's PD keeps its last setpoint. The opening is commanded
 // directly; the motor's PD eases to it.
 
@@ -23,8 +23,6 @@ pub const KD: f64 = 0.2;
 pub struct ControlConfig {
     pub cycle_period: Duration,
     pub recv_timeout_us: i32,
-    /// How long a streamed command stays fresh before the follow loop holds.
-    pub stream_timeout: Duration,
 }
 
 pub async fn run(
@@ -42,15 +40,9 @@ pub async fn run(
             _ = ticker.tick() => {}
         }
 
-        // Follow only a command still within the stream timeout; otherwise hold
-        // (issue no CAN traffic, the motor's PD keeps its last setpoint).
-        let position = {
-            let guard = cmd.borrow();
-            guard
-                .as_ref()
-                .filter(|c| c.recv_at.elapsed() <= cfg.stream_timeout)
-                .map(|c| c.position)
-        };
+        // Follow the latest command; until one arrives, hold (issue no CAN
+        // traffic, the motor's PD keeps its last setpoint).
+        let position = cmd.borrow().as_ref().map(|c| c.position);
         let Some(position) = position else {
             continue;
         };

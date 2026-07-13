@@ -94,9 +94,7 @@
     },
     parameters: {
       // Rate (Hz) at which enabled commander arm targets are re-published on
-      // arm_joint_commands, which the backbone consumes. Must stay comfortably
-      // above 1 / the backbone's stream_timeout_s so the producer lock survives
-      // between operator inputs.
+      // arm_joint_commands, which the backbone consumes.
       command_rate_hz: "u32",
       // Robot generation ("v1" or "v2"): picks the panel joint + gripper ranges
       // (URDF limits + jaw width), so the launcher must be explicit.

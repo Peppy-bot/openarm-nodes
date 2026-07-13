@@ -1,5 +1,5 @@
-// Ambient following of a streamed gripper opening: publish the latest fresh
-// opening to the sim; when the stream goes stale, hold by publishing nothing so
+// Ambient following of a streamed gripper opening: publish the latest opening
+// to the sim; until the first command arrives, hold by publishing nothing so
 // the sim keeps its last setpoint. The opening is published directly; the sim
 // splits it across the fingers and its servo eases to it.
 
@@ -31,15 +31,9 @@ pub async fn run(
             _ = ticker.tick() => {}
         }
 
-        // Follow only a command still within the stream timeout; otherwise hold
-        // (publish nothing, the sim keeps the last setpoint).
-        let position = {
-            let guard = cmd.borrow();
-            guard
-                .as_ref()
-                .filter(|c| c.recv_at.elapsed() <= params.stream_timeout)
-                .map(|c| c.position)
-        };
+        // Follow the latest command; until one arrives, hold (publish nothing,
+        // the sim keeps the last setpoint).
+        let position = cmd.borrow().as_ref().map(|c| c.position);
         let Some(position) = position else {
             continue;
         };

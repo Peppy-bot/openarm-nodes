@@ -66,9 +66,6 @@
       hardware_version: "string",
       // Control-loop rate (Hz) for the follow loop.
       control_rate_hz: "u32",
-      // How long (s) the gripper keeps following a stream after its last message
-      // before holding. Safety watchdog.
-      stream_timeout_s: "f64",
     },
   },
 }

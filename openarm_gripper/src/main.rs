@@ -39,10 +39,6 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
-        assert!(
-            params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
-            "stream_timeout_s must be a positive finite number"
-        );
 
         let cfg = ControlConfig {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
@@ -52,7 +48,6 @@ fn main() -> Result<()> {
                     params.recv_timeout_us
                 )
             }),
-            stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
         };
 
         // Instance lock: crash if another instance with the same gripper_id is

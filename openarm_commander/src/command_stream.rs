@@ -3,9 +3,9 @@
 // `gripper_commands`, plus the operator's governor controls on `governor_control`. Both
 // are tagged with their id (arm_id / gripper_id) and go to the backbone, which governs each
 // and re-streams the governed value the followers track. A side with `None` in the
-// frame has its deadman off, so nothing is published and the backbone's stream timeout
-// lapses and it holds. Re-publishing every tick (even an unchanged frame) keeps the
-// backbone's stream watchdog alive between operator inputs.
+// frame has its deadman off, so nothing is published and the backbone holds that side
+// at its last governed setpoint. Re-publishing every tick (even an unchanged frame)
+// keeps the stream trivially fresh for a backbone that starts or re-pairs mid-session.
 //
 // The owner is the sole writer of state and the sole jog integrator; these tasks only
 // forward the latest frame. Each side+stream runs its own publish task on its own
