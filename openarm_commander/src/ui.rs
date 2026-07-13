@@ -34,9 +34,9 @@ const DEFAULT_PORT: u16 = 8765;
 const PROXIMITY_STALE_AFTER: Duration = Duration::from_millis(500);
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
-// Joint + gripper ranges from the generation's bundled URDF and jaw width; the
-// single source for slider bounds (via the WS snapshot) and for clamping
-// incoming commands. Resolved once at startup by [`init_limits`].
+// Joint ranges from the generation's bundled URDF plus the unitless gripper
+// opening range; the single source for slider bounds (via the WS snapshot) and
+// for clamping incoming commands. Resolved once at startup by [`init_limits`].
 #[derive(Clone, Copy)]
 struct JointLimits {
     gripper: [f64; 2],
@@ -54,7 +54,7 @@ impl JointLimits {
 
     fn resolve(version: HardwareVersion) -> Self {
         Self {
-            gripper: [0.0, version.jaw_open_m()],
+            gripper: [0.0, 1.0],
             left: version.joint_limits(openarm_description::Side::Left),
             right: version.joint_limits(openarm_description::Side::Right),
         }
@@ -65,8 +65,9 @@ static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
 
 /// Resolve the panel's clamp/display ranges from the generation's description:
 /// arm joints via its `joint_limits` (URDF limits with the elbow held off its
-/// singularity floor, matching the backbone's clamp) and the gripper from the jaw
-/// width. Must run before the UI serves.
+/// singularity floor, matching the backbone's clamp); the gripper is the
+/// unitless opening fraction [0, 1] on every generation. Must run before the
+/// UI serves.
 pub fn init_limits(version: HardwareVersion) {
     assert!(
         LIMITS.set(JointLimits::resolve(version)).is_ok(),
@@ -80,8 +81,9 @@ fn joint_limits() -> &'static JointLimits {
         .expect("init_limits must run before the UI serves")
 }
 
-/// The gripper opening range `[closed, open]` (m); the owner clamps gripper commands
-/// into it, the same single source the sliders bound against.
+/// The gripper opening range `[closed, open]` as a fraction of full jaw travel;
+/// the owner clamps gripper commands into it, the same single source the
+/// sliders bound against.
 pub(crate) fn gripper_limits() -> [f64; 2] {
     joint_limits().gripper
 }
@@ -284,7 +286,7 @@ struct ArmView {
 #[derive(Serialize)]
 struct GripperView {
     position: f64,
-    // Measured opening (m) from the gripper_states stream.
+    // Measured opening fraction from the gripper_states stream.
     feedback: Option<f64>,
     min: f64,
     max: f64,

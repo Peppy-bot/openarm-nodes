@@ -46,7 +46,7 @@ pub async fn run(
             .unwrap_or_else(|e| e.into_inner())
             .get_state()
             .position;
-        let opening = geometry::motor_rad_to_meters(motor_rad);
+        let opening = geometry::motor_rad_to_fraction(motor_rad);
         // Skip a poisoned sample rather than publishing NaN/Inf to consumers,
         // matching the finiteness guards on the command paths.
         if !opening.is_finite() {

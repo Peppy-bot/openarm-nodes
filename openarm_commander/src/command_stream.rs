@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::openarm_commands::v1::arm_joint_commands;
-use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
 use peppygen::emitted_topics::openarm_commands::v1::gripper_commands;
+use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::sync::watch;
@@ -99,8 +99,8 @@ pub async fn run(
                 )
             },
         ));
-        // Gripper: stream the opening (m) while enabled, tagged with gripper_id for the
-        // backbone to demux (mirror of the arm stream above).
+        // Gripper: stream the opening fraction while enabled, tagged with
+        // gripper_id for the backbone to demux (mirror of the arm stream above).
         let gripper_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub.clone(),
@@ -108,9 +108,9 @@ pub async fn run(
             token.clone(),
             format!("{} gripper", side.label()),
             move || {
-                let position = gripper_rx.borrow().grippers[side]?;
+                let opening = gripper_rx.borrow().grippers[side]?;
                 Some(
-                    gripper_commands::build_message(side.gripper_id(), position)
+                    gripper_commands::build_message(side.gripper_id(), opening)
                         .map_err(|e| e.to_string()),
                 )
             },

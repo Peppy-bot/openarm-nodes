@@ -60,10 +60,6 @@
       // The gripper_id at runtime (0 = left, 1 = right). Two instances are
       // expected; the bin's file-lock + gripper_id guard rejects collisions.
       gripper_id: "u8",
-      // Gripper generation: "v1" (prismatic fingers, jaw opening in meters) or
-      // "v2" (revolute pinch fingers). Selects the meters -> sim finger-target
-      // mapping, so the launcher must be explicit.
-      hardware_version: "string",
       // Control-loop rate (Hz) for the follow loop.
       control_rate_hz: "u32",
     },

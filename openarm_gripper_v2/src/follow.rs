@@ -1,6 +1,6 @@
-// Ambient following of a streamed gripper opening: drive the motor toward the
-// latest command; until the first command arrives, hold by issuing no CAN
-// traffic so the motor keeps its last setpoint. The opening is commanded
+// Ambient following of a streamed gripper opening fraction: drive the motor
+// toward the latest command; until the first command arrives, hold by issuing
+// no CAN traffic so the motor keeps its last setpoint. The opening is commanded
 // directly; the motor's position mode eases to it.
 
 use std::sync::{Arc, Mutex};
@@ -12,12 +12,14 @@ use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
 use crate::command_stream::GripperCommand;
-use crate::geometry::{self, GRIPPER_LIMITS_M};
+use crate::geometry::Geometry;
 
 #[derive(Clone)]
 pub struct ControlConfig {
     pub cycle_period: Duration,
     pub recv_timeout_us: i32,
+    /// This instance's signed opening-fraction to motor-radian mapping.
+    pub geometry: Geometry,
     /// POS_FORCE absolute speed limit (rad/s at the motor).
     pub speed_rad_s: f64,
     /// POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap.
@@ -41,12 +43,11 @@ pub async fn run(
 
         // Follow the latest command; until one arrives, hold (issue no CAN
         // traffic, the motor's PD keeps its last setpoint).
-        let position = cmd.borrow().as_ref().map(|c| c.position);
-        let Some(position) = position else {
+        let opening = cmd.borrow().as_ref().map(|c| c.opening);
+        let Some(opening) = opening else {
             continue;
         };
-        let target_m = position.clamp(GRIPPER_LIMITS_M.lo, GRIPPER_LIMITS_M.hi);
-        let target_motor_rad = geometry::meters_to_motor_rad(target_m);
+        let target_motor_rad = cfg.geometry.fraction_to_motor_rad(opening.clamp(0.0, 1.0));
 
         // unwrap_or_else: drive even if the mutex was poisoned by a panic
         // elsewhere, so a transient fault doesn't strand the follow loop.

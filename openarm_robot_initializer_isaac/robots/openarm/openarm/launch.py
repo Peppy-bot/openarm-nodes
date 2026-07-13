@@ -37,11 +37,6 @@ def _scene_path(hardware_version: str) -> Path:
     return _ASSETS_DIR / f"openarm_bimanual_{_version(hardware_version)}.usd"
 
 
-# Full-open jaw width (m) per generation: the bridge scales the aperture on the
-# gripper passthrough/state topics against each finger joint's DOF travel.
-# Values mirror openarm_description::jaw_open_m; v2 is the modeled pad-gap
-# width pending hardware confirmation.
-_JAW_OPEN_M = {"v1": 0.044, "v2": 0.0697}
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
 
 _ready = threading.Event()
@@ -148,7 +143,6 @@ def main() -> None:
         _stop,
         handoff.io,
         handoff.state_rate_hz,
-        _JAW_OPEN_M[_version(handoff.hardware_version)],
     ).run()
 
 

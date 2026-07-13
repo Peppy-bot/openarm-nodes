@@ -16,12 +16,13 @@ use peppygen::pairings::backbone;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
-use crate::geometry;
+use crate::geometry::Geometry;
 
 pub async fn run(
     runner: Arc<NodeRunner>,
     gripper_id: u8,
     state_rate_hz: u32,
+    geometry: Geometry,
     gripper: Arc<Mutex<GripperCan>>,
     token: CancellationToken,
 ) {
@@ -45,7 +46,7 @@ pub async fn run(
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_state();
-        let opening = geometry::motor_rad_to_meters(state.position);
+        let opening = geometry.motor_rad_to_fraction(state.position);
         let force = state.torque;
         // Skip a poisoned sample rather than publishing NaN/Inf to consumers,
         // matching the finiteness guards on the command paths.

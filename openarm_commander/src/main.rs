@@ -33,8 +33,9 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let token = node_runner.cancellation_token().clone();
-        // The generation picks the panel's joint/gripper ranges (URDF limits +
-        // jaw width); everything else in the commander is version-blind.
+        // The generation picks the panel's arm joint ranges (URDF limits); the
+        // gripper axis is the unitless opening fraction and everything else in
+        // the commander is version-blind.
         let version: HardwareVersion = params
             .hardware_version
             .parse()

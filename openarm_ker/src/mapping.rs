@@ -7,9 +7,9 @@
 // Conventions: channels are the device's 1-based CH labels (stored 0-based),
 // each side lists its 7 joint channels in follower j1..j7 order, and
 // `q = sign * radians(angle) + offset` clamps into the follower's URDF limits.
-// Trigger angles interpolate linearly from closed_deg (pad gap 0) to open_deg
-// (jaw_open_m) and clamp into [0, jaw_open_m]; an inverted device direction is
-// just closed_deg > open_deg.
+// Trigger angles interpolate linearly from closed_deg (opening 0) to open_deg
+// (opening 1) and clamp into [0, 1]; an inverted device direction is just
+// closed_deg > open_deg.
 
 use std::fmt;
 
@@ -167,7 +167,6 @@ pub struct TriggerMap {
     channel: usize,
     closed_deg: f64,
     open_deg: f64,
-    jaw_open_m: f64,
 }
 
 impl TriggerMap {
@@ -176,7 +175,6 @@ impl TriggerMap {
         channel_1based: u32,
         closed_deg: f64,
         open_deg: f64,
-        jaw_open_m: f64,
     ) -> Result<Self, MapError> {
         if channel_1based == 0 {
             return Err(MapError::ZeroChannel { param });
@@ -188,15 +186,14 @@ impl TriggerMap {
             channel: channel_1based as usize - 1,
             closed_deg,
             open_deg,
-            jaw_open_m,
         })
     }
 
-    /// Map one frame's trigger angle to a pad-gap opening in [0, jaw_open_m].
-    pub fn opening_m(&self, angles_deg: &[f32]) -> Result<f64, MapError> {
+    /// Map one frame's trigger angle to an opening fraction in [0, 1].
+    pub fn opening(&self, angles_deg: &[f32]) -> Result<f64, MapError> {
         let angle = angle_at(angles_deg, self.channel)?;
         let travel = (angle - self.closed_deg) / (self.open_deg - self.closed_deg);
-        Ok((travel * self.jaw_open_m).clamp(0.0, self.jaw_open_m))
+        Ok(travel.clamp(0.0, 1.0))
     }
 }
 
@@ -258,20 +255,17 @@ impl Calibration {
             ],
             version.joint_limits(Side::Right),
         )?;
-        let jaw = version.jaw_open_m();
         let left_trigger = TriggerMap::new(
             "left_trigger",
             p.left_trigger_channel,
             p.left_trigger_closed_deg,
             p.left_trigger_open_deg,
-            jaw,
         )?;
         let right_trigger = TriggerMap::new(
             "right_trigger",
             p.right_trigger_channel,
             p.right_trigger_closed_deg,
             p.right_trigger_open_deg,
-            jaw,
         )?;
 
         let all: Vec<usize> = left
@@ -425,36 +419,34 @@ mod tests {
     #[test]
     fn trigger_maps_linearly_and_clamps() {
         let cal = calibration();
-        let jaw = HardwareVersion::V2.jaw_open_m();
         let mut angles = [0.0f32; 16];
 
         angles[7] = 0.0;
-        assert_eq!(cal.left_trigger.opening_m(&frame(angles)).unwrap(), 0.0);
+        assert_eq!(cal.left_trigger.opening(&frame(angles)).unwrap(), 0.0);
         angles[7] = 20.0;
-        let mid = cal.left_trigger.opening_m(&frame(angles)).unwrap();
-        assert!((mid - jaw / 2.0).abs() < 1e-9);
+        let mid = cal.left_trigger.opening(&frame(angles)).unwrap();
+        assert!((mid - 0.5).abs() < 1e-9);
         angles[7] = 40.0;
-        assert_eq!(cal.left_trigger.opening_m(&frame(angles)).unwrap(), jaw);
+        assert_eq!(cal.left_trigger.opening(&frame(angles)).unwrap(), 1.0);
         angles[7] = 80.0;
         assert_eq!(
-            cal.left_trigger.opening_m(&frame(angles)).unwrap(),
-            jaw,
-            "past-open clamps to the jaw width"
+            cal.left_trigger.opening(&frame(angles)).unwrap(),
+            1.0,
+            "past-open clamps to fully open"
         );
         angles[7] = -10.0;
-        assert_eq!(cal.left_trigger.opening_m(&frame(angles)).unwrap(), 0.0);
+        assert_eq!(cal.left_trigger.opening(&frame(angles)).unwrap(), 0.0);
     }
 
     #[test]
     fn inverted_trigger_direction_works() {
         // The right trigger runs 40 deg (closed) down to 0 deg (open).
         let cal = calibration();
-        let jaw = HardwareVersion::V2.jaw_open_m();
         let mut angles = [0.0f32; 16];
         angles[15] = 40.0;
-        assert_eq!(cal.right_trigger.opening_m(&frame(angles)).unwrap(), 0.0);
+        assert_eq!(cal.right_trigger.opening(&frame(angles)).unwrap(), 0.0);
         angles[15] = 0.0;
-        assert_eq!(cal.right_trigger.opening_m(&frame(angles)).unwrap(), jaw);
+        assert_eq!(cal.right_trigger.opening(&frame(angles)).unwrap(), 1.0);
     }
 
     #[test]

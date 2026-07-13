@@ -3,9 +3,9 @@ use std::time::Instant;
 use crate::pose::Jog;
 
 pub const ARM_DOF: usize = openarm_description::ARM_DOF;
-// Range bounds come from the description's URDF (resolved by ui::init_limits);
+// The gripper axis is the unitless opening fraction (0 = closed, 1 = open);
 // this is only the startup default for the gripper target.
-pub const GRIPPER_CLOSED_M: f64 = 0.0;
+pub const GRIPPER_CLOSED: f64 = 0.0;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -107,7 +107,7 @@ impl ArmTarget {
 #[derive(Clone, Debug)]
 pub struct GripperTarget {
     pub position: f64,
-    // Measured gripper opening (m) from the gripper_states stream.
+    // Measured gripper opening fraction from the gripper_states stream.
     pub last_feedback: Option<f64>,
     // A discrete move_gripper (Actions mode) is in flight: refuses a second Execute
     // and drives the gripper card's in-flight badge. Streaming mode never sets it.
@@ -117,7 +117,7 @@ pub struct GripperTarget {
 impl GripperTarget {
     pub fn closed() -> Self {
         Self {
-            position: GRIPPER_CLOSED_M,
+            position: GRIPPER_CLOSED,
             last_feedback: None,
             in_flight: false,
         }
