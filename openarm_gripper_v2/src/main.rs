@@ -40,10 +40,6 @@ fn main() -> Result<()> {
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
         assert!(
-            params.stream_timeout_s.is_finite() && params.stream_timeout_s > 0.0,
-            "stream_timeout_s must be a positive finite number"
-        );
-        assert!(
             params.speed_rad_s.is_finite() && params.speed_rad_s > 0.0,
             "speed_rad_s must be a positive finite number"
         );
@@ -60,7 +56,6 @@ fn main() -> Result<()> {
                     params.recv_timeout_us
                 )
             }),
-            stream_timeout: Duration::from_secs_f64(params.stream_timeout_s),
             speed_rad_s: params.speed_rad_s,
             force_limit_pu: params.force_limit_pu,
         };

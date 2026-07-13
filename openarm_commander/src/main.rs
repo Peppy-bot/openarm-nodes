@@ -97,7 +97,7 @@ fn main() -> Result<()> {
 
         // The always-on publisher: streams each enabled side's governed setpoint from
         // the owner's command frame at command_rate_hz. A disabled side has None in the
-        // frame, so nothing is published and the backbone's watchdog holds it.
+        // frame, so nothing is published and the backbone holds its last setpoint.
         tokio::spawn(command_stream::run(
             node_runner.clone(),
             params.command_rate_hz,

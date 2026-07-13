@@ -1,5 +1,5 @@
 // Ambient following of a streamed gripper opening: drive the motor toward the
-// latest fresh command; when the stream goes stale, hold by issuing no CAN
+// latest command; until the first command arrives, hold by issuing no CAN
 // traffic so the motor keeps its last setpoint. The opening is commanded
 // directly; the motor's position mode eases to it.
 
@@ -18,8 +18,6 @@ use crate::geometry::{self, GRIPPER_LIMITS_M};
 pub struct ControlConfig {
     pub cycle_period: Duration,
     pub recv_timeout_us: i32,
-    /// How long a streamed command stays fresh before the follow loop holds.
-    pub stream_timeout: Duration,
     /// POS_FORCE absolute speed limit (rad/s at the motor).
     pub speed_rad_s: f64,
     /// POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap.
@@ -41,15 +39,9 @@ pub async fn run(
             _ = ticker.tick() => {}
         }
 
-        // Follow only a command still within the stream timeout; otherwise hold
-        // (issue no CAN traffic, the motor's PD keeps its last setpoint).
-        let position = {
-            let guard = cmd.borrow();
-            guard
-                .as_ref()
-                .filter(|c| c.recv_at.elapsed() <= cfg.stream_timeout)
-                .map(|c| c.position)
-        };
+        // Follow the latest command; until one arrives, hold (issue no CAN
+        // traffic, the motor's PD keeps its last setpoint).
+        let position = cmd.borrow().as_ref().map(|c| c.position);
         let Some(position) = position else {
             continue;
         };

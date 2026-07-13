@@ -22,10 +22,8 @@ use tracing::{error, info, warn};
 
 use control_core::Pacer;
 
-use peppylib::messaging::ProducerRef;
-
 use crate::governor::{GovState, Governor, Guard};
-use crate::planner::{BusyGuard, Goal, Planner, fresh};
+use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
 use crate::{ArmPair, JointVec, Side};
 
@@ -49,13 +47,12 @@ pub struct ArmChannels {
     pub gripper_busy: Arc<AtomicBool>,
 }
 
-/// The coordinator's run parameters: the control-cycle period, how long a
-/// command stream stays fresh before its input counts as released (an operator
-/// who stops streaming freezes at the last governed setpoint), and the
-/// backbone-executed gripper moves' completion tolerance and timeout.
+/// The coordinator's run parameters: the control-cycle period and the
+/// backbone-executed gripper moves' completion tolerance and timeout. A commander
+/// that stops streaming simply leaves its last governed setpoint in place (the
+/// follower holds it), so there is no freshness deadman to configure.
 pub struct RunConfig {
     pub cycle_period: Duration,
-    pub stream_timeout: Duration,
     pub gripper_tolerance_m: f64,
     pub gripper_move_timeout: Duration,
 }
@@ -95,7 +92,6 @@ pub async fn run(
 ) -> peppygen::Result<()> {
     let RunConfig {
         cycle_period,
-        stream_timeout,
         gripper_tolerance_m,
         gripper_move_timeout,
     } = config;
@@ -174,10 +170,8 @@ pub async fn run(
         opening(&channels.left.gripper),
         opening(&channels.right.gripper),
     );
-    // In-flight backbone-executed gripper moves, one single-flight slot per side, and
-    // each side's producer-locked follow on the commander's opening stream.
+    // In-flight backbone-executed gripper moves, one single-flight slot per side.
     let mut gripper_moves: ArmPair<Option<GripperMove>> = ArmPair::new(None, None);
-    let mut gripper_follows: ArmPair<Option<GripperFollow>> = ArmPair::new(None, None);
 
     let dt = cycle_period.as_secs_f64();
     // The proximity readout is for human eyes, so publish it at ~20 Hz rather than
@@ -229,27 +223,12 @@ pub async fn run(
         .await;
 
         // Resolve each gripper's target for this tick: an in-flight move owns the
-        // opening; otherwise a fresh commander command drives it; otherwise the
-        // side idles, silent on the wire (the gripper's own watchdog holds the
-        // jaws) with the tracked opening re-anchored to the measured jaws so a
-        // resume ramps from where the fingers really are.
+        // opening; otherwise the latest commander command drives it; otherwise the
+        // side idles (never commanded, or unpaired), silent on the wire with the
+        // governed opening anchored to the measured jaws.
         let targets = ArmPair::new(
-            gripper_target(
-                &gripper_moves.left,
-                &mut gripper_follows.left,
-                &channels.left,
-                jaw_open_m,
-                stream_timeout,
-                now,
-            ),
-            gripper_target(
-                &gripper_moves.right,
-                &mut gripper_follows.right,
-                &channels.right,
-                jaw_open_m,
-                stream_timeout,
-                now,
-            ),
+            gripper_target(&gripper_moves.left, &channels.left, jaw_open_m),
+            gripper_target(&gripper_moves.right, &channels.right, jaw_open_m),
         );
         if targets.left.is_none() {
             governed_openings.left = measured_openings.left;
@@ -338,7 +317,7 @@ pub async fn run(
         // Publish each active side's governed opening on its pairing slot (the
         // slot scopes the stream to its paired gripper, so the message carries
         // only the opening, in metres); an idle side stays silent and its
-        // gripper's watchdog holds the jaws.
+        // gripper holds the jaws.
         type BuildOpening = fn(f64) -> peppygen::Result<peppylib::Payload>;
         for (side, gripper_pub, build, opening_frac, active) in [
             (
@@ -532,83 +511,28 @@ async fn service_gripper_move(
 }
 
 /// The side's target opening fraction for this tick: an in-flight backbone-executed
-/// move owns it; otherwise the commander's streamed command drives it through the
-/// producer-locked follow; otherwise `None` (idle).
+/// move owns it; otherwise the commander's streamed command drives it;
+/// otherwise `None` (idle: before any command, or on an unpaired side).
 fn gripper_target(
     mv: &Option<GripperMove>,
-    follow: &mut Option<GripperFollow>,
     channels: &ArmChannels,
     jaw_open_m: f64,
-    stream_timeout: Duration,
-    now: Instant,
 ) -> Option<f64> {
     if let Some(m) = mv {
         return Some(m.target_frac);
     }
-    follow_gripper_target(
-        follow,
-        &channels.gripper_command.borrow().clone(),
-        jaw_open_m,
-        stream_timeout,
-        now,
-    )
+    follow_gripper_target(&channels.gripper_command.borrow().clone(), jaw_open_m)
 }
 
-/// The locked gripper-command producer and the target fraction it drives: the
-/// opening analog of the planner's follow lock, sharing its semantics (the
-/// slot binds one producer, but the lock still pins the live stream so a
-/// replaced or restarted producer instance cannot interleave with the one
-/// being followed or hold the deadman open).
-struct GripperFollow {
-    producer: ProducerRef,
-    target_frac: f64,
-    last_seq: u64,
-    last_fresh: Instant,
-}
-
-/// Resolve the streamed opening target: chase the locked commander command,
-/// acquiring or releasing the producer lock by freshness (the opening analog of
-/// the planner's `follow_target`). The wire metres parse into the governed
-/// fraction here, clamped into the jaw travel at the boundary. `None` when no
-/// producer is live.
-fn follow_gripper_target(
-    lock: &mut Option<GripperFollow>,
-    command: &Option<GripperCommand>,
-    jaw_open_m: f64,
-    stream_timeout: Duration,
-    now: Instant,
-) -> Option<f64> {
-    let parse = |position_m: f64| (position_m / jaw_open_m).clamp(0.0, 1.0);
-    match lock.as_mut() {
-        Some(l) => {
-            if let Some(c) = command
-                && c.producer == l.producer
-                && c.seq != l.last_seq
-            {
-                l.target_frac = parse(c.position_m);
-                l.last_seq = c.seq;
-                l.last_fresh = now;
-            }
-            if !fresh(l.last_fresh, now, stream_timeout) {
-                *lock = None;
-                return None;
-            }
-            Some(l.target_frac)
-        }
-        None => {
-            let c = command
-                .as_ref()
-                .filter(|c| fresh(c.recv_at, now, stream_timeout))?;
-            let target_frac = parse(c.position_m);
-            *lock = Some(GripperFollow {
-                producer: c.producer.clone(),
-                target_frac,
-                last_seq: c.seq,
-                last_fresh: now,
-            });
-            Some(target_frac)
-        }
-    }
+/// Resolve the streamed opening target: the latest commander command parsed into
+/// the governed jaw fraction (clamped into the jaw travel), or `None` when none has
+/// arrived. The stream is paired to one producer, so there is nothing to
+/// arbitrate; a stopped producer just leaves the last opening in place, held by the
+/// gripper.
+fn follow_gripper_target(command: &Option<GripperCommand>, jaw_open_m: f64) -> Option<f64> {
+    command
+        .as_ref()
+        .map(|c| (c.position_m / jaw_open_m).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -616,118 +540,21 @@ mod tests {
     use super::*;
 
     const JAW: f64 = 0.08;
-    const TIMEOUT: Duration = Duration::from_millis(500);
-
-    fn producer(instance: &str) -> ProducerRef {
-        ProducerRef::new("core".to_string(), instance.to_string())
-    }
-
-    fn cmd(instance: &str, seq: u64, position_m: f64, recv_at: Instant) -> Option<GripperCommand> {
-        Some(GripperCommand {
-            seq,
-            producer: producer(instance),
-            recv_at,
-            position_m,
-        })
+    fn cmd(position_m: f64) -> Option<GripperCommand> {
+        Some(GripperCommand { position_m })
     }
 
     #[test]
     fn follow_parses_the_wire_metres_into_a_clamped_fraction() {
-        let now = Instant::now();
-        let mut lock = None;
         // Half the jaw travel parses to 0.5; past-travel and negative commands
         // clamp into [0, 1] at this boundary.
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 1, 0.04, now), JAW, TIMEOUT, now),
-            Some(0.5)
-        );
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 2, 1.0, now), JAW, TIMEOUT, now),
-            Some(1.0)
-        );
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 3, -0.5, now), JAW, TIMEOUT, now),
-            Some(0.0)
-        );
+        assert_eq!(follow_gripper_target(&cmd(0.04), JAW), Some(0.5));
+        assert_eq!(follow_gripper_target(&cmd(1.0), JAW), Some(1.0));
+        assert_eq!(follow_gripper_target(&cmd(-0.5), JAW), Some(0.0));
     }
 
     #[test]
-    fn follow_ignores_a_foreign_producer_while_locked() {
-        let now = Instant::now();
-        let mut lock = None;
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 1, 0.04, now), JAW, TIMEOUT, now),
-            Some(0.5)
-        );
-        // A fresh command from a different producer must not steal the follow:
-        // the locked target stands.
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("intruder", 9, 0.08, now), JAW, TIMEOUT, now),
-            Some(0.5),
-            "a foreign producer hijacked the gripper follow"
-        );
-    }
-
-    #[test]
-    fn follow_releases_on_staleness_then_relocks_to_the_live_producer() {
-        let start = Instant::now();
-        let mut lock = None;
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 1, 0.04, start), JAW, TIMEOUT, start),
-            Some(0.5)
-        );
-        // The locked producer goes silent past the deadman window: the follow
-        // releases (None; the coordinator goes silent and re-anchors)...
-        let later = start + TIMEOUT + Duration::from_millis(1);
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 1, 0.04, start), JAW, TIMEOUT, later),
-            None,
-            "a stale command kept driving the gripper"
-        );
-        assert!(lock.is_none(), "the stale lock was not released");
-        // ...and a fresh producer (any producer) may then acquire it.
-        assert_eq!(
-            follow_gripper_target(
-                &mut lock,
-                &cmd("other", 1, 0.08, later),
-                JAW,
-                TIMEOUT,
-                later
-            ),
-            Some(1.0)
-        );
-    }
-
-    #[test]
-    fn follow_holds_the_last_target_between_messages_while_fresh() {
-        let start = Instant::now();
-        let mut lock = None;
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 1, 0.04, start), JAW, TIMEOUT, start),
-            Some(0.5)
-        );
-        // No new message (same seq) inside the window: the target stands, driven
-        // by the lock's freshness rather than the command's arrival time.
-        let mid = start + TIMEOUT / 2;
-        assert_eq!(
-            follow_gripper_target(&mut lock, &cmd("op", 1, 0.04, start), JAW, TIMEOUT, mid),
-            Some(0.5)
-        );
-    }
-
-    #[test]
-    fn follow_stays_idle_without_a_fresh_command() {
-        let now = Instant::now();
-        let mut lock = None;
-        assert_eq!(
-            follow_gripper_target(&mut lock, &None, JAW, TIMEOUT, now),
-            None
-        );
-        let stale = cmd("op", 1, 0.04, now - TIMEOUT * 2);
-        assert_eq!(
-            follow_gripper_target(&mut lock, &stale, JAW, TIMEOUT, now),
-            None,
-            "a leftover command acquired the follow"
-        );
+    fn follow_stays_idle_without_a_command() {
+        assert_eq!(follow_gripper_target(&None, JAW), None);
     }
 }

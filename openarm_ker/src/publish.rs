@@ -3,9 +3,9 @@
 // `arm_joint_commands` and one streams the trigger opening on
 // `gripper_commands`, both tagged with their id and governed by the backbone before
 // anything reaches a follower. A tick publishes nothing when the newest sample
-// is missing, stale, or disengaged, so the backbone's stream timeouts lapse and the
-// robot holds: skipping is the deadman. Re-publishing an unchanged sample every
-// tick keeps the backbone's stream watchdogs alive between device frames.
+// is missing, stale, or disengaged, so the robot holds at its last governed
+// setpoints: skipping is the deadman. Re-publishing an unchanged sample every
+// tick keeps the stream trivially fresh for a backbone that starts mid-session.
 //
 // Each side+stream runs its own publish task on its own interval, cloning the
 // shared per-topic publisher. A single shared loop publishing Left then Right

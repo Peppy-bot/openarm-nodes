@@ -44,7 +44,7 @@
     // gripper openings on gripper_commands, both told apart by id. Producing these
     // is what lets the panel drive an enabled arm/gripper continuously instead of
     // one move at a time; the backbone governs each and re-streams the governed value,
-    // so a follower clamps, rate-limits, and times out on its side.
+    // so a follower clamps and rate-limits on its side.
     actions: {
       // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.
@@ -94,9 +94,7 @@
     },
     parameters: {
       // Rate (Hz) at which enabled commander arm targets are re-published on
-      // arm_joint_commands, which the backbone consumes. Must stay comfortably
-      // above 1 / the backbone's stream_timeout_s so the producer lock survives
-      // between operator inputs.
+      // arm_joint_commands, which the backbone consumes.
       command_rate_hz: "u32",
       // Robot generation ("v1" or "v2"): picks the panel joint + gripper ranges
       // (URDF limits + jaw width), so the launcher must be explicit.

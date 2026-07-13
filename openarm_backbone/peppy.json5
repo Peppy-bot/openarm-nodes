@@ -289,9 +289,6 @@
       // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
-      // How long (s) the backbone keeps following a commander stream after its last
-      // message before releasing the lock and holding.
-      stream_timeout_s: "f64",
       // Completion tolerance (m) for backbone-executed move_gripper goals: the goal
       // completes when the measured opening is within this of the target.
       gripper_position_tolerance: { $type: "f64", $default: 0.001 },

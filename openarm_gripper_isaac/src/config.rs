@@ -7,19 +7,13 @@ use peppygen::Parameters;
 #[derive(Copy, Clone, Debug)]
 pub struct ControlParams {
     pub control_period: Duration,
-    pub stream_timeout: Duration,
 }
 
 impl ControlParams {
     pub fn from_params(p: &Parameters) -> Self {
         assert!(p.control_rate_hz > 0, "control_rate_hz must be > 0");
-        assert!(
-            p.stream_timeout_s.is_finite() && p.stream_timeout_s > 0.0,
-            "stream_timeout_s must be a positive finite number"
-        );
         Self {
             control_period: Duration::from_micros(1_000_000 / p.control_rate_hz as u64),
-            stream_timeout: Duration::from_secs_f64(p.stream_timeout_s),
         }
     }
 }

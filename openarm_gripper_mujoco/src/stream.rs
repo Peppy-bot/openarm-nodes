@@ -3,11 +3,9 @@
 // in a watch channel for the follow loop. Subscribing while unpaired is legal:
 // the subscription stays silent until a backbone pairs, and only the paired
 // peer's messages surface, so there is no gripper_id filter. A non-finite
-// position is dropped, so a backbone gone bad lets the follow lock time out
-// instead of driving the gripper.
+// position is dropped rather than driving the gripper.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use peppygen::NodeRunner;
 use peppygen::pairings::backbone;
@@ -17,7 +15,6 @@ use tracing::{error, warn};
 
 #[derive(Clone, Copy)]
 pub struct GripperCommand {
-    pub recv_at: Instant,
     pub position: f64,
 }
 
@@ -51,7 +48,6 @@ pub async fn run(
             continue;
         }
         latest.send_replace(Some(GripperCommand {
-            recv_at: Instant::now(),
             position: msg.position,
         }));
     }

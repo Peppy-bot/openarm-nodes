@@ -6,7 +6,7 @@
 // openarm_commander: arm setpoints on arm_joint_commands (the backbone
 // governs them into per-arm setpoints), gripper openings on the pairing
 // slots. The KER's thumb button is the engage deadman: while disengaged the
-// node emits nothing and every consumer's stream timeout holds the robot.
+// node emits nothing and the robot holds at its last setpoints.
 // KER's joint structure matches OpenArm v2 1:1 (links scaled to 70%), so no
 // coordinate transform is involved; v1 followers accept the same joint-space
 // stream but are not geometrically equivalent.
@@ -47,9 +47,7 @@
       // defaulted: KER mirrors v2, so the launcher states the target explicitly.
       hardware_version: "string",
       // Rate (Hz) at which engaged setpoints are re-published on
-      // arm_joint_commands and the gripper slots. Must stay comfortably above
-      // 1 / the consumers' stream_timeout_s so the streams survive between
-      // frames.
+      // arm_joint_commands and the gripper slots.
       command_rate_hz: "u32",
       // KER channel wiring and calibration, CSV strings parsed once at
       // startup. Channels are the device's 1-based CH indices; each side lists
@@ -79,8 +77,8 @@
       // (the escape hatch if a unit's button reads unreliably).
       engage_mode: { $type: "string", $default: "toggle" },
       // Stop publishing when the newest KER frame is older than this (s); the
-      // consumers' stream timeouts then hold the robot. Must exceed the
-      // device's frame period.
+      // followers then hold their last setpoints. Must exceed the device's
+      // frame period.
       stale_timeout_s: { $type: "f64", $default: 0.25 },
       // Bring-up aid: log the raw channel table (degrees, unmapped) at 1 Hz.
       log_raw: { $type: "bool", $default: false }

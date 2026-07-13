@@ -10,11 +10,9 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::{
-    collision_ctrl_governor_control, commander_arm_joint_commands,
-    commander_gripper_commands,
+    collision_ctrl_governor_control, commander_arm_joint_commands, commander_gripper_commands,
 };
 use peppygen::pairings::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
-use peppylib::messaging::ProducerRef;
 use tokio::sync::watch;
 use tracing::{error, warn};
 
@@ -29,32 +27,19 @@ const UNKNOWN_ARM_WARN_PERIOD: Duration = Duration::from_secs(1);
 /// rate. Transient errors still recover; a genuinely dead stream just idles.
 const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
-/// The latest commander joint setpoint for one arm. `seq` distinguishes a fresh
-/// command from one already acted on; `producer` is the source the follow logic
-/// locks to; `recv_at` is the arrival time the watchdog uses to tell a live
-/// stream from a stale leftover.
+/// The latest commander joint setpoint for one arm, kept by the arm command
+/// listener and read each tick by the planner's Follow. The command stream is
+/// paired to one producer, so the latest message is simply the one to chase.
 #[derive(Clone)]
 pub struct JointCommand {
-    pub seq: u64,
-    pub producer: ProducerRef,
-    pub recv_at: Instant,
     pub positions: JointVec,
 }
 
-/// The latest commander opening command for one gripper (m), fed by the
-/// `gripper_commands` stream. Carries the same follow fields as
-/// [`JointCommand`]: `seq` distinguishes a fresh command from one already acted
-/// on, `producer` is the source the coordinator's follow locks to (the slot
-/// binds one producer, but the lock pins the live stream across producer
-/// restarts so stale and fresh streams cannot interleave), and
-/// `recv_at` is the arrival time the deadman uses to tell a live stream from a
-/// released one. The width stays in meters (the wire unit); the coordinator
-/// parses it into the governed opening fraction.
+/// The latest commander opening command for one gripper, fed by the
+/// `gripper_commands` stream. The width stays in meters (the wire unit); the
+/// coordinator parses it into the governed opening fraction.
 #[derive(Clone)]
 pub struct GripperCommand {
-    pub seq: u64,
-    pub producer: ProducerRef,
-    pub recv_at: Instant,
     pub position_m: f64,
 }
 
@@ -88,114 +73,94 @@ fn warn_unknown_id(stream: &str, field: &str, id: u8, last: &mut Option<Instant>
     }
 }
 
-/// The id-demuxed inbound listeners share one skeleton: hold the subscription
-/// forever, back off on receive errors, demux by the wire id (0 = left,
-/// 1 = right; out-of-range dropped with a throttled warn), and keep the latest
-/// well-formed message per side in `latest[id]`. Defined once so a fix to the
-/// shared behavior cannot drift across copies. `parse` builds the stored value
-/// from the running per-side sequence counter, the producer, and the message, or
-/// returns `None` to drop it (warning for its own reason).
-macro_rules! id_demux_listener {
-    (
-        $(#[$doc:meta])*
-        $name:ident, $topic:path, $stream:literal, $id_field:ident, $value:ty,
-        |$seq:ident, $producer:ident, $msg:ident| $parse:expr
-    ) => {
-        $(#[$doc])*
-        pub async fn $name(runner: Arc<NodeRunner>, latest: [watch::Sender<Option<$value>>; 2]) {
-            use $topic as topic;
-            let mut sub = match topic::subscribe(&runner).await {
-                Ok(s) => s,
-                Err(e) => return error!("{}: subscribe: {e}", $stream),
-            };
-            let mut seqs: [u64; 2] = [0, 0];
-            let mut last_unknown_warn: Option<Instant> = None;
-            loop {
-                let (received_producer, received_msg) = match sub.next().await {
-                    Ok(Some(received)) => received,
-                    Ok(None) => return, // subscription closed: node shutting down
-                    Err(e) => {
-                        error!("{}: receive: {e}", $stream);
-                        tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-                        continue;
-                    }
-                };
-                let Some(idx) =
-                    Side::from_arm_id(received_msg.$id_field).map(Side::index)
-                else {
-                    warn_unknown_id(
-                        $stream,
-                        stringify!($id_field),
-                        received_msg.$id_field,
-                        &mut last_unknown_warn,
-                    );
-                    continue;
-                };
-                seqs[idx] += 1;
-                let parse = |$seq: u64, $producer: ProducerRef, $msg: topic::Message| $parse;
-                match parse(seqs[idx], received_producer, received_msg) {
-                    Some(value) => {
-                        latest[idx].send_replace(Some(value));
-                    }
-                    None => seqs[idx] -= 1, // dropped: the sequence marks stored values only
-                }
-            }
-        }
+/// Receive `arm_joint_commands` forever, keeping the latest well-formed message
+/// per arm in `latest[id]`. Holds one subscription (no re-subscribe gap), backs
+/// off on a receive error, and drops an out-of-range or non-finite message rather
+/// than driving an arm.
+pub async fn run_joint_command_listener(
+    runner: Arc<NodeRunner>,
+    latest: [watch::Sender<Option<JointCommand>>; 2],
+) {
+    let mut sub = match commander_arm_joint_commands::subscribe(&runner).await {
+        Ok(s) => s,
+        Err(e) => return error!("arm_joint_commands: subscribe: {e}"),
     };
-}
-
-id_demux_listener!(
-    /// Receive `arm_joint_commands` forever, keeping the latest well-formed message
-    /// per arm. A message with any non-finite position is dropped so a producer gone
-    /// bad lets the follow lock time out instead of driving an arm.
-    run_joint_command_listener,
-    commander_arm_joint_commands,
-    "arm_joint_commands",
-    arm_id,
-    JointCommand,
-    |seq, producer, msg| {
+    let mut last_unknown_warn: Option<Instant> = None;
+    loop {
+        let msg = match sub.next().await {
+            Ok(Some((_producer, msg))) => msg,
+            Ok(None) => return, // subscription closed: node shutting down
+            Err(e) => {
+                error!("arm_joint_commands: receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        let Some(idx) = Side::from_arm_id(msg.arm_id).map(Side::index) else {
+            warn_unknown_id(
+                "arm_joint_commands",
+                "arm_id",
+                msg.arm_id,
+                &mut last_unknown_warn,
+            );
+            continue;
+        };
         if !msg.positions.iter().all(|v| v.is_finite()) {
             warn!(
                 "arm_joint_commands: dropping arm {} message with non-finite positions",
                 msg.arm_id
             );
-            return None;
+            continue;
         }
-        Some(JointCommand {
-            seq,
-            producer,
-            recv_at: Instant::now(),
+        latest[idx].send_replace(Some(JointCommand {
             positions: msg.positions,
-        })
+        }));
     }
-);
+}
 
-id_demux_listener!(
-    /// Receive `gripper_commands` forever, keeping the latest well-formed opening
-    /// command per gripper. The mirror of `run_joint_command_listener` for the
-    /// gripper's 1-DOF opening: a non-finite position is dropped so a producer gone
-    /// bad lets the follow lock time out instead of driving the fingers.
-    run_gripper_command_listener,
-    commander_gripper_commands,
-    "gripper_commands",
-    gripper_id,
-    GripperCommand,
-    |seq, producer, msg| {
+/// Receive `gripper_commands` forever, keeping the latest well-formed opening per
+/// gripper in `latest[id]`. The 1-DOF mirror of [`run_joint_command_listener`]: an
+/// out-of-range or non-finite message is dropped rather than driving the fingers.
+pub async fn run_gripper_command_listener(
+    runner: Arc<NodeRunner>,
+    latest: [watch::Sender<Option<GripperCommand>>; 2],
+) {
+    let mut sub = match commander_gripper_commands::subscribe(&runner).await {
+        Ok(s) => s,
+        Err(e) => return error!("gripper_commands: subscribe: {e}"),
+    };
+    let mut last_unknown_warn: Option<Instant> = None;
+    loop {
+        let msg = match sub.next().await {
+            Ok(Some((_producer, msg))) => msg,
+            Ok(None) => return,
+            Err(e) => {
+                error!("gripper_commands: receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
+                continue;
+            }
+        };
+        let Some(idx) = Side::from_gripper_id(msg.gripper_id).map(Side::index) else {
+            warn_unknown_id(
+                "gripper_commands",
+                "gripper_id",
+                msg.gripper_id,
+                &mut last_unknown_warn,
+            );
+            continue;
+        };
         if !msg.position.is_finite() {
             warn!(
                 "gripper_commands: dropping gripper {} message with non-finite position",
                 msg.gripper_id
             );
-            return None;
+            continue;
         }
-        Some(GripperCommand {
-            seq,
-            producer,
-            recv_at: Instant::now(),
+        latest[idx].send_replace(Some(GripperCommand {
             position_m: msg.position,
-        })
+        }));
     }
-);
+}
 
 /// Receive both paired arms' measured state forever (the arm_link back-channel),
 /// keeping the latest per side. The slot IS the side (a pairing delivers only
