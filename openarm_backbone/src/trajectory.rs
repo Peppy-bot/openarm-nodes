@@ -218,11 +218,22 @@ fn walk_line(
     max_joint_velocity_rad_s: &JointVec,
     policy: ArmAnglePolicy,
 ) -> Option<LineWalk> {
+    // Normalise the start (k = 0) onto the seed's own arm angle before steering: the
+    // raw seed may not equal its FromSeed re-solve (the IK picks the nearest feasible
+    // arm angle, which can differ at a redundancy or joint-limit boundary), and the
+    // runtime begins from that normalised config. Steering, and the guards, then
+    // accrue from k = 1 - steering the elbow at k = 0 (a zero-motion point) would
+    // validate a branch the runtime, starting at zero elbow budget, never follows.
     let mut prev_q: Option<JointVec> = None;
     let mut peak_ratio = 0.0_f64;
     for k in 0..=CARTESIAN_PLAN_SAMPLES {
         let pose = interpolate_pose(start, end, k as f64 * CARTESIAN_PLAN_DS);
-        let sol = model.solve_ik(&model.base_pose(&pose), policy, &seed)?;
+        let step_policy = if k == 0 {
+            ArmAnglePolicy::FromSeed
+        } else {
+            policy
+        };
+        let sol = model.solve_ik(&model.base_pose(&pose), step_policy, &seed)?;
         if let Some(prev) = prev_q {
             for i in 0..ARM_DOF {
                 let step = (sol.q[i] - prev[i]).abs();
@@ -280,6 +291,11 @@ pub fn plan_cartesian(
             true,
         ),
     ];
+    // The EE speed cap is not enforced per tick on the move path (unlike Follow), so
+    // size the duration to respect it up front alongside the joint limits: a short
+    // requested duration must not drive the hand past max_ee_velocity_m_s.
+    let ee_ratio =
+        (end.translation.vector - start.translation.vector).norm() / limits.max_ee_velocity_m_s;
     for (policy, steer_elbow) in tiers {
         let Some(walk) = walk_line(
             model,
@@ -291,7 +307,8 @@ pub fn plan_cartesian(
         ) else {
             continue;
         };
-        let duration_s = velocity_limited_duration(walk.peak_ratio, requested_duration_secs);
+        let duration_s =
+            velocity_limited_duration(walk.peak_ratio.max(ee_ratio), requested_duration_secs);
         if duration_s <= duration_cap {
             return Some(CartesianPlan::Line {
                 duration_s,
@@ -812,6 +829,37 @@ mod tests {
         assert!(
             floored >= 5.0 - EPS,
             "duration must floor at the requested duration"
+        );
+    }
+
+    // The move path does not cap end-effector speed per tick (unlike Follow), so the
+    // line duration must be sized to respect it up front. A near-zero request would
+    // otherwise let joint limits alone drive the hand past the cap; the duration must
+    // floor at QUINTIC_PEAK_VELOCITY * line_length / max_ee_velocity.
+    #[test]
+    fn line_duration_respects_the_ee_speed_cap() {
+        let mut arm = left_arm();
+        let seed = [0.0, 0.3, 0.0, 0.8, 0.0, 0.5, 0.0];
+        let ee = arm.at(&seed).ee_pose();
+        let start = arm.world_pose(&ee);
+        let mut goal = start;
+        goal.translation.vector.z += 0.05;
+        let line_len = 0.05;
+
+        let cap = 0.05; // tight EE cap (m/s) so it binds the duration, not the joints
+        let limits = PlanLimits {
+            max_joint_velocity_rad_s: &V_MAX,
+            max_ee_velocity_m_s: cap,
+            control_period: TEST_DT,
+        };
+        let Some(CartesianPlan::Line { duration_s, .. }) =
+            plan_cartesian(&mut arm, &start, &goal, seed, &limits, 0.0)
+        else {
+            panic!("a small lift should plan as a line");
+        };
+        assert!(
+            duration_s >= QUINTIC_PEAK_VELOCITY * line_len / cap - EPS,
+            "duration {duration_s:.3}s must respect the EE cap floor"
         );
     }
 
