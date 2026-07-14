@@ -13,7 +13,13 @@ const SERVICE_TIMEOUT: Duration = Duration::from_secs(5);
 // launcher-pinned via link_ids, so no runtime discovery is needed.
 pub async fn wait_until_ready(runner: &NodeRunner, token: &CancellationToken) {
     loop {
-        match robot_init_is_ready::poll(runner, SERVICE_TIMEOUT).await {
+        match robot_init_is_ready::poll(
+            runner,
+            robot_init_is_ready::bound_producer(runner),
+            SERVICE_TIMEOUT,
+        )
+        .await
+        {
             Ok(resp) if resp.data.ready => {
                 info!("robot_initializer reported ready");
                 return;

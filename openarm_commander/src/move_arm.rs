@@ -82,6 +82,7 @@ async fn run(
 
     let downstream = match backbone_move_arm::ActionHandle::fire_goal(
         &runner,
+        backbone_move_arm::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,
