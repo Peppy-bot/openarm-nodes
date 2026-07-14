@@ -106,9 +106,17 @@ fn main() -> Result<()> {
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
             "max_ee_velocity_m_s must be a positive finite number"
         );
+        // Enforce the documented contract: the cutoff must sit below the control loop's
+        // Nyquist frequency, or the low-pass does not attenuate (and above it is
+        // meaningless). A hard bound at Nyquist; the node default sits well under it.
+        let nyquist_hz = params.control_rate_hz as f64 / 2.0;
         assert!(
-            params.velocity_filter_cutoff_hz.is_finite() && params.velocity_filter_cutoff_hz > 0.0,
-            "velocity_filter_cutoff_hz must be a positive finite number"
+            params.velocity_filter_cutoff_hz.is_finite()
+                && params.velocity_filter_cutoff_hz > 0.0
+                && params.velocity_filter_cutoff_hz < nyquist_hz,
+            "velocity_filter_cutoff_hz ({}) must be in (0, Nyquist = control_rate_hz/2 = {})",
+            params.velocity_filter_cutoff_hz,
+            nyquist_hz
         );
         // The governor and the commander UI must reject the same bands; validate here
         // (reusing the governor's own predicate) so a bad launcher value fails at
