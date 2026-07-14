@@ -254,13 +254,6 @@
       // the arms, so the launcher must be explicit. The torso proxy is shared across
       // generations (the bimanual stand is unchanged).
       hardware_version: "string",
-      // Per-side base links selecting the two SRS chains in the embedded description, used
-      // for both srs_model arms and the bimanual collision model. v1 uses
-      // "openarm_{left,right}_link0"; v2 renamed them to "openarm_{left,right}_base_link".
-      // The governor's torso proxy (see the `torso` module) is hand-fitted to the shared
-      // stand mesh; the collision model's build() aborts without the expected torso.
-      left_base: { $type: "string", $default: "openarm_left_link0" },
-      right_base: { $type: "string", $default: "openarm_right_link0" },
       // Coordination loop rate (Hz): the rate governed setpoints are streamed at.
       control_rate_hz: "u32",
       // Self-collision governor band (m), signed surface distance between the two

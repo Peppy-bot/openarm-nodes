@@ -32,6 +32,15 @@ impl Side {
             Self::Right => "right",
         }
     }
+
+    /// The description crate's side selector, for its per-side lookups in the embedded
+    /// URDF (the arm chain base link).
+    pub fn description(self) -> openarm_description::Side {
+        match self {
+            Self::Left => openarm_description::Side::Left,
+            Self::Right => openarm_description::Side::Right,
+        }
+    }
 }
 
 /// A value stored per side, indexed by [`Side`]: `things[side]` reads or writes the

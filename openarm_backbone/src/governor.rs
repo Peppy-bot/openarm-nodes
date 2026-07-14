@@ -893,19 +893,11 @@ mod tests {
 
     fn governor_for(version: openarm_description::HardwareVersion, enabled: bool) -> Governor {
         let meshes_dir = fixture_meshes_dir(version);
-        let (left_base, right_base) = match version {
-            openarm_description::HardwareVersion::V1 => {
-                ("openarm_left_link0", "openarm_right_link0")
-            }
-            openarm_description::HardwareVersion::V2 => {
-                ("openarm_left_base_link", "openarm_right_base_link")
-            }
-        };
         Governor::build(
             version.urdf(),
             meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
-            left_base,
-            right_base,
+            version.base_link(openarm_description::Side::Left),
+            version.base_link(openarm_description::Side::Right),
             D_STOP,
             D_SAFE,
             MAX_JOINT_VELOCITY_RAD_S,
@@ -973,8 +965,8 @@ mod tests {
         let mut g = Governor::build(
             openarm_description::HardwareVersion::V1.urdf(),
             meshes_dir.to_str().expect("meshes dir path is valid UTF-8"),
-            "openarm_left_link0",
-            "openarm_right_link0",
+            openarm_description::HardwareVersion::V1.base_link(openarm_description::Side::Left),
+            openarm_description::HardwareVersion::V1.base_link(openarm_description::Side::Right),
             D_STOP,
             D_SAFE,
             0.05,

@@ -437,29 +437,13 @@ fn orientation_step(current: &Pose, desired: &Pose, cap_rad: f64) -> Option<Vect
 /// singularity floor applied (mirrors `openarm_backbone`'s `arm_model`). A bad base
 /// link aborts bringup, matching how the backbone fails.
 fn build_arm(version: HardwareVersion, side: Side) -> Arm {
-    let urdf = version.urdf();
-    let base = base_link(urdf, side);
-    Arm::from_urdf(urdf, &base)
+    let base = version.base_link(side.description());
+    Arm::from_urdf(version.urdf(), base)
         .unwrap_or_else(|e| panic!("build {} arm model from base '{base}': {e}", side.label()))
         .with_lower_floor(
             version.elbow_joint_index(),
             version.elbow_singularity_floor_rad(),
         )
-}
-
-/// The base link where `side`'s SRS chain starts: the parent of its first joint. The
-/// joint names (`openarm_{side}_joint1`) are stable across generations, but the base
-/// link name is not (v1 `..._link0`, v2 `..._base_link`), so resolve it from the URDF
-/// rather than hardcode a per-version name.
-fn base_link(urdf: &str, side: Side) -> String {
-    let robot = urdf_rs::read_from_string(urdf).expect("bundled URDF must parse");
-    let joint1 = format!("openarm_{}_joint1", side.label());
-    robot
-        .joints
-        .iter()
-        .find(|j| j.name == joint1)
-        .map(|j| j.parent.link.clone())
-        .unwrap_or_else(|| panic!("URDF missing joint {joint1}"))
 }
 
 /// Per-joint velocity limits (rad/s) for `side`, j1..j7, from the bundled URDF:

@@ -46,10 +46,6 @@
       // built from. Required, not defaulted: running the wrong generation's model on the
       // hardware would mis-compensate gravity/Coriolis, so the launcher must be explicit.
       hardware_version: "string",
-      // Link where this arm's SRS chain starts, selecting the side in the embedded
-      // OpenArm description (openarm_description). v1: "openarm_left_link0"; v2:
-      // "openarm_left_base_link" (v2 renamed the per-arm base link).
-      base_link: "string",
       // Hardware-loop rate (Hz). Required: pick deliberately per deployment. The
       // stack currently unifies on 100 Hz (backbone stream rate and arm loop rate match);
       // confirm `overruns=0` at the target rate during bring-up.
