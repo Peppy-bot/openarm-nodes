@@ -14,7 +14,7 @@ mod stream;
 
 use control::ControlConfig;
 use openarm_can::{ARM_MOTOR_TYPES, ARM_RECV_IDS, ARM_SEND_IDS, ArmCan, CallbackMode};
-use openarm_description::HardwareVersion;
+use openarm_description::{HardwareVersion, Side};
 use peppygen::exposed_services::openarm_hardware_ready::v1::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
@@ -31,18 +31,19 @@ pub const ARM_DOF: usize = 7;
 /// One joint-space vector (positions, velocities, or torques), j1..j7.
 pub type JointVec = [f64; ARM_DOF];
 
-/// `arm_id` values (0 = left, 1 = right). Geometry and joint limits come from the
-/// URDF via `base_link`; `arm_id` tags the broadcast measured state (the command
-/// loop itself is scoped by the arm_link pairing, no id needed).
+/// `arm_id` values (0 = left, 1 = right). The chain base link and joint limits come
+/// from the embedded description keyed by [`Side`]; `arm_id` also tags the broadcast
+/// measured state (the command loop itself is scoped by the arm_link pairing, no id
+/// needed).
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
-/// Human-readable side for the given `arm_id`, panicking on an unknown value so a
+/// The arm side for the given `arm_id`, panicking on an unknown value so a
 /// misconfigured run fails loudly at startup.
-fn side_label(arm_id: u8) -> &'static str {
+fn side_for(arm_id: u8) -> Side {
     match arm_id {
-        ARM_ID_LEFT => "left",
-        ARM_ID_RIGHT => "right",
+        ARM_ID_LEFT => Side::Left,
+        ARM_ID_RIGHT => Side::Right,
         other => {
             panic!("arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {other}")
         }
@@ -72,7 +73,7 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
-        let side = side_label(arm_id);
+        let side = side_for(arm_id);
 
         // Which OpenArm generation this arm drives; selects the embedded description.
         let hardware_version: HardwareVersion = params
@@ -80,12 +81,17 @@ fn main() -> Result<()> {
             .parse()
             .unwrap_or_else(|e| panic!("{e}"));
 
+        // The chain base link this side's SRS model is walked out from: a fact of the
+        // generation's URDF, resolved from the description rather than configured, so a
+        // v2 arm can't be launched with a v1 base-link name.
+        let base_link = hardware_version.base_link(side);
+
         // Build the srs_model arm from this generation's embedded OpenArm description:
         // forward kinematics for the in-process gravity/Coriolis feedforward, plus joint
         // limits off the same parsed chain. The elbow singularity margin is a control
         // policy the description exports per generation; apply it so limits() carries it.
         // A non-SRS or short chain from base_link errors here.
-        let model = srs_model::Arm::from_urdf(hardware_version.urdf(), &params.base_link)
+        let model = srs_model::Arm::from_urdf(hardware_version.urdf(), base_link)
             .map(|arm| {
                 arm.with_lower_floor(
                     hardware_version.elbow_joint_index(),
@@ -93,15 +99,9 @@ fn main() -> Result<()> {
                 )
             })
             .unwrap_or_else(|e| {
-                panic!(
-                    "build {hardware_version} arm model from base '{}': {e}",
-                    params.base_link
-                )
+                panic!("build {hardware_version} arm model from base '{base_link}': {e}")
             });
-        info!(
-            "model loaded ({hardware_version}, base '{}')",
-            params.base_link
-        );
+        info!("model loaded ({hardware_version}, base '{base_link}')");
 
         // Gravity acts along world -Z, so it is only correct if the URDF carries the
         // mount tree above base_link to orient that frame. We do not force one (a
@@ -109,9 +109,8 @@ fn main() -> Result<()> {
         // which frame is in play: identity mount means base_link is the URDF root.
         if model.base_from_world() == Isometry3::identity() {
             warn!(
-                "no world->base mount tree above '{}': gravity/Coriolis evaluated in the \
-                 base frame (correct only if base_link's frame is gravity-aligned)",
-                params.base_link
+                "no world->base mount tree above '{base_link}': gravity/Coriolis evaluated in \
+                 the base frame (correct only if base_link's frame is gravity-aligned)"
             );
         } else {
             info!("mount tree resolved: gravity/Coriolis evaluated in the world frame");
@@ -135,7 +134,7 @@ fn main() -> Result<()> {
         };
 
         info!(
-            "config: arm_id={arm_id} ({side}) rate={}Hz recv_timeout={}us",
+            "config: arm_id={arm_id} ({side:?}) rate={}Hz recv_timeout={}us",
             params.control_rate_hz, cfg.recv_timeout_us
         );
         info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
