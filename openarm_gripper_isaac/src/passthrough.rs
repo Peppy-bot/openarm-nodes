@@ -1,5 +1,5 @@
-// Emit the resolved gripper aperture (m) to the sim on the typed
-// gripper_sim_passthrough topic. The sim bridge maps the aperture onto its
+// Emit the resolved gripper opening fraction to the sim on the typed
+// gripper_sim_passthrough topic. The sim bridge maps the fraction onto its
 // finger joints' own travel.
 
 use peppygen::NodeRunner;
@@ -15,9 +15,9 @@ pub async fn declare_publisher(runner: &NodeRunner) -> Result<TopicPublisher, St
 pub async fn publish(
     publisher: &TopicPublisher,
     gripper_id: u8,
-    opening_m: f64,
+    opening: f64,
 ) -> Result<(), String> {
     let payload =
-        gripper_sim_passthrough::build_message(gripper_id, opening_m).map_err(|e| e.to_string())?;
+        gripper_sim_passthrough::build_message(gripper_id, opening).map_err(|e| e.to_string())?;
     publisher.publish(payload).await.map_err(|e| e.to_string())
 }

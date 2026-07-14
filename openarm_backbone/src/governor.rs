@@ -155,9 +155,9 @@ pub struct Governor {
     /// Largest single-joint speed (rad/s). The per-tick floor scan bounds its probe
     /// count to the velocity-limited step and asserts no step exceeds it.
     max_joint_velocity_rad_s: f64,
-    /// Full-open jaw travel (m); converts a gripper opening command (m, the wire
-    /// unit) to the model's opening fraction when the gripper barrier places the
-    /// fingers.
+    /// Full-open jaw travel (m); converts the physical opening-rate cap
+    /// ([`MAX_OPENING_RATE_M_S`]) into fraction space, where every opening DOF
+    /// (wire and model alike) lives.
     jaw_open_m: f64,
     enabled: bool,
     guard: Guard,
@@ -593,13 +593,6 @@ impl Governor {
         } else {
             APPROACH_VELOCITY_AT_SAFE_M_S * (d - self.d_stop) / (self.d_safe - self.d_stop)
         }
-    }
-
-    /// Full-open jaw travel (m). Lets the coordinator convert the wire opening
-    /// (metres) to the governed fraction without carrying its own copy of the
-    /// geometry (the governor owns it, alongside the collision model).
-    pub fn jaw_open_m(&self) -> f64 {
-        self.jaw_open_m
     }
 
     /// Largest rate (fraction/s) the coordinator's chase may drive an opening

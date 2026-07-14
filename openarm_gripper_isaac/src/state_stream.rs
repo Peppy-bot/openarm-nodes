@@ -52,13 +52,13 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
             }
         };
         if msg.gripper_id != gripper_id.as_u8()
-            || !msg.position.is_finite()
+            || !msg.opening.is_finite()
             || !msg.force.is_finite()
         {
             continue;
         }
         // Re-emit on the per-side broadcast for launch-bound monitors.
-        match gripper_states::build_message(msg.gripper_id, msg.position, msg.force) {
+        match gripper_states::build_message(msg.gripper_id, msg.opening, msg.force) {
             Ok(payload) => {
                 if let Err(e) = states_pub.publish(payload).await {
                     error!(error = %e, "gripper_states publish");
@@ -67,7 +67,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
             Err(e) => error!(error = %e, "gripper_states build"),
         }
         // Relay to the paired backbone; silently dropped while unpaired.
-        match backbone::gripper_states::build_message(msg.position) {
+        match backbone::gripper_states::build_message(msg.opening) {
             Ok(payload) => {
                 if let Err(e) = peer_pub.publish(payload).await {
                     error!(error = %e, "paired gripper_states publish");

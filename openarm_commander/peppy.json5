@@ -96,8 +96,9 @@
       // Rate (Hz) at which enabled commander arm targets are re-published on
       // arm_joint_commands, which the backbone consumes.
       command_rate_hz: "u32",
-      // Robot generation ("v1" or "v2"): picks the panel joint + gripper ranges
-      // (URDF limits + jaw width), so the launcher must be explicit.
+      // Robot generation ("v1" or "v2"): picks the panel's arm joint ranges
+      // (URDF limits), so the launcher must be explicit. The gripper axis is
+      // the unitless opening fraction on every generation.
       hardware_version: "string",
       // Operator's launch end-effector speed cap (m/s), streamed live to the backbone on
       // governor_control and retunable from the UI. Require > 0. The sim launchers

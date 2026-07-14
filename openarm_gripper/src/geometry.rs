@@ -1,40 +1,21 @@
-//! Gripper joint↔motor geometry: the linear meters↔radians mapping and the
-//! travel limit. The motor speaks radians; user-facing positions are in meters.
+//! Gripper joint↔motor geometry: the linear opening-fraction↔motor-radian
+//! mapping. The motor speaks radians (0 = closed, full open at [`OPEN_RAD`]);
+//! the wire speaks the opening fraction (0 = closed, 1 = fully open). Both v1
+//! grippers share the one mapping (the sides are not mirrored).
 
-/// Fully-open gripper travel in meters (OpenArm V1.0); the closed end is 0.
-pub const OPEN_M: f64 = 0.044;
-
-/// Motor angle in radians at full open. The joint position maps linearly to motor
-/// angle (0 m ↔ 0 rad, [`OPEN_M`] ↔ [`OPEN_RAD`]); the open direction is negative
-/// in the motor frame. Matches ROS2 openarm/v10_simple_hardware.
+/// Motor angle in radians at full open; the closed end is 0. The open direction
+/// is negative in the motor frame. Matches ROS2 openarm/v10_simple_hardware.
 #[allow(clippy::approx_constant)]
 pub const OPEN_RAD: f64 = -1.0472;
 
-/// Inclusive position window `[lo, hi]` (meters) for the gripper.
-#[derive(Debug, Clone, Copy)]
-pub struct Limit {
-    pub lo: f64,
-    pub hi: f64,
+/// Opening fraction (0 = closed, 1 = fully open) to motor radians.
+pub fn fraction_to_motor_rad(fraction: f64) -> f64 {
+    fraction * OPEN_RAD
 }
 
-impl Limit {
-    const fn new(lo: f64, hi: f64) -> Self {
-        Self { lo, hi }
-    }
-}
-
-/// Physical travel window of the gripper: fully closed (0) to fully open.
-pub const GRIPPER_LIMITS_M: Limit = Limit::new(0.0, OPEN_M);
-
-/// Linear joint-meter → motor-radian mapping. Closed = 0 m ↔ 0 rad,
-/// open = [`OPEN_M`] ↔ [`OPEN_RAD`].
-pub fn meters_to_motor_rad(pos_m: f64) -> f64 {
-    (pos_m / OPEN_M) * OPEN_RAD
-}
-
-/// Inverse of [`meters_to_motor_rad`]: motor angle back to joint position in meters.
-pub fn motor_rad_to_meters(motor_rad: f64) -> f64 {
-    (motor_rad / OPEN_RAD) * OPEN_M
+/// Inverse of [`fraction_to_motor_rad`].
+pub fn motor_rad_to_fraction(motor_rad: f64) -> f64 {
+    motor_rad / OPEN_RAD
 }
 
 #[cfg(test)]
@@ -42,38 +23,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn travel_window_is_closed_to_open() {
-        assert!((GRIPPER_LIMITS_M.lo - 0.0).abs() < 1e-12);
-        assert!((GRIPPER_LIMITS_M.hi - OPEN_M).abs() < 1e-12);
-        const { assert!(GRIPPER_LIMITS_M.lo < GRIPPER_LIMITS_M.hi) };
-    }
-
-    #[test]
-    fn mapping_signs_oppose() {
-        // 0 m → 0 rad, OPEN_M → OPEN_RAD. The open direction is negative in the
-        // motor frame; a sign flip would drive the gripper the wrong way.
-        const { assert!(OPEN_M > 0.0) };
+    fn closed_is_zero_and_open_is_negative() {
+        assert_eq!(fraction_to_motor_rad(0.0), 0.0);
+        assert_eq!(fraction_to_motor_rad(1.0), OPEN_RAD);
         const { assert!(OPEN_RAD < 0.0) };
     }
 
     #[test]
-    fn meters_to_motor_rad_is_linear_between_endpoints() {
-        // Closed and open ends define the line; midpoint should land exactly halfway.
-        assert!((meters_to_motor_rad(0.0) - 0.0).abs() < 1e-12);
-        assert!((meters_to_motor_rad(OPEN_M) - OPEN_RAD).abs() < 1e-12);
-        let mid = meters_to_motor_rad(OPEN_M / 2.0);
+    fn mapping_is_linear_and_round_trips() {
+        let mid = fraction_to_motor_rad(0.5);
         assert!((mid - OPEN_RAD / 2.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn motor_rad_and_meters_round_trip() {
-        // round-trip catches inverse mismatch (wrong constant in numerator/denominator).
-        for pos_m in [0.0, 0.01, OPEN_M / 3.0, OPEN_M] {
-            let back = motor_rad_to_meters(meters_to_motor_rad(pos_m));
-            assert!(
-                (back - pos_m).abs() < 1e-12,
-                "round-trip failed for {pos_m}"
-            );
+        for fraction in [0.0, 0.25, 1.0 / 3.0, 1.0] {
+            let back = motor_rad_to_fraction(fraction_to_motor_rad(fraction));
+            assert!((back - fraction).abs() < 1e-12, "round trip {fraction}");
         }
     }
 }

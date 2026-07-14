@@ -1,7 +1,7 @@
 //! Gripper move-action admission: the `move_gripper` handler the backbone exposes.
 //! Mirrors the arm move admission exactly: validate the goal (gripper_id,
-//! finiteness, jaw travel), claim the side's single-flight slot, and hand the
-//! accepted goal to the coordinator over its gripper goal channel. The
+//! finiteness, the [0, 1] opening range), claim the side's single-flight slot, and
+//! hand the accepted goal to the coordinator over its gripper goal channel. The
 //! coordinator runs the motion through the same per-tick governing as every
 //! other DOF, completes the goal on measured convergence, and releases the busy
 //! slot at the terminal.
@@ -24,7 +24,6 @@ pub async fn run_move_gripper(
     runner: Arc<NodeRunner>,
     goal_txs: [mpsc::Sender<GripperGoal>; 2],
     busy: [Arc<AtomicBool>; 2],
-    jaw_open_m: f64,
 ) -> Result<()> {
     let mut handle = ActionHandle::expose(&runner).await?;
     loop {
@@ -34,13 +33,13 @@ pub async fn run_move_gripper(
                 let Some(idx) = Side::from_gripper_id(d.gripper_id).map(Side::index) else {
                     return Ok(GoalResponse::reject("gripper_id out of range"));
                 };
-                if !d.position.is_finite() {
-                    return Ok(GoalResponse::reject("non-finite gripper position"));
+                if !d.opening.is_finite() {
+                    return Ok(GoalResponse::reject("non-finite gripper opening"));
                 }
-                if !(0.0..=jaw_open_m).contains(&d.position) {
+                if !(0.0..=1.0).contains(&d.opening) {
                     return Ok(GoalResponse::reject(format!(
-                        "position {} outside the jaw travel [0, {jaw_open_m}]",
-                        d.position
+                        "opening {} outside [0, 1]",
+                        d.opening
                     )));
                 }
                 if !claim(&busy[idx]) {
@@ -53,9 +52,9 @@ pub async fn run_move_gripper(
         let idx = Side::from_gripper_id(ctx.request().data.gripper_id)
             .map(Side::index)
             .expect("validated on accept");
-        let target_m = ctx.request().data.position;
+        let opening = ctx.request().data.opening;
         if goal_txs[idx]
-            .send(GripperGoal { target_m, ctx })
+            .send(GripperGoal { opening, ctx })
             .await
             .is_err()
         {

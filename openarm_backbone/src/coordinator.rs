@@ -59,15 +59,15 @@ pub struct ArmChannels {
 /// follower holds it), so there is no freshness deadman to configure.
 pub struct RunConfig {
     pub cycle_period: Duration,
-    pub gripper_tolerance_m: f64,
+    pub gripper_tolerance: f64,
     pub gripper_move_timeout: Duration,
 }
 
 /// An accepted `move_gripper` goal handed to the coordinator, which executes it
 /// through the same per-tick governing as everything else (the gripper analog of
-/// [`Goal`] for the arms).
+/// [`Goal`] for the arms). The opening is the validated goal fraction.
 pub struct GripperGoal {
-    pub target_m: f64,
+    pub opening: f64,
     pub ctx: move_gripper::GoalContext,
 }
 
@@ -98,7 +98,7 @@ pub async fn run(
 ) -> peppygen::Result<()> {
     let RunConfig {
         cycle_period,
-        gripper_tolerance_m,
+        gripper_tolerance,
         gripper_move_timeout,
     } = config;
     // One publisher per pairing slot (arms and grippers alike). Publishing while
@@ -168,9 +168,8 @@ pub async fn run(
     // Track the last governed opening fraction per gripper: the governed
     // configuration's `prev`. Anchored on the measured jaws (here and whenever a
     // side idles) so governing always ramps from where the fingers really are;
-    // jaw travel and the opening rate are read from the governor (their single
-    // owner) rather than carried here.
-    let jaw_open_m = governor.jaw_open_m();
+    // the opening rate is read from the governor (its single owner) rather than
+    // carried here.
     let opening_rate = governor.max_opening_rate_frac_s();
     let mut governed_openings = ArmPair::new(
         opening(&channels.left.gripper),
@@ -228,8 +227,7 @@ pub async fn run(
             &mut gripper_moves.left,
             &mut channels.left,
             measured_openings.left,
-            jaw_open_m,
-            gripper_tolerance_m,
+            gripper_tolerance,
             gripper_move_timeout,
             now,
         )
@@ -238,8 +236,7 @@ pub async fn run(
             &mut gripper_moves.right,
             &mut channels.right,
             measured_openings.right,
-            jaw_open_m,
-            gripper_tolerance_m,
+            gripper_tolerance,
             gripper_move_timeout,
             now,
         )
@@ -250,8 +247,8 @@ pub async fn run(
         // side idles (never commanded, or unpaired), silent on the wire with the
         // governed opening anchored to the measured jaws.
         let targets = ArmPair::new(
-            gripper_target(&gripper_moves.left, &channels.left, jaw_open_m),
-            gripper_target(&gripper_moves.right, &channels.right, jaw_open_m),
+            gripper_target(&gripper_moves.left, &channels.left),
+            gripper_target(&gripper_moves.right, &channels.right),
         );
         if targets.left.is_none() {
             governed_openings.left = measured_openings.left;
@@ -337,10 +334,10 @@ pub async fn run(
             }
         }
 
-        // Publish each active side's governed opening on its pairing slot (the
-        // slot scopes the stream to its paired gripper, so the message carries
-        // only the opening, in metres); an idle side stays silent and its
-        // gripper holds the jaws.
+        // Publish each active side's governed opening fraction on its pairing
+        // slot (the slot scopes the stream to its paired gripper, so the message
+        // carries only the opening); an idle side stays silent and its gripper
+        // holds the jaws.
         type BuildOpening = fn(f64) -> peppygen::Result<peppylib::Payload>;
         for (side, gripper_pub, build, opening_frac, active) in [
             (
@@ -361,7 +358,7 @@ pub async fn run(
             if !active {
                 continue;
             }
-            match build(opening_frac * jaw_open_m) {
+            match build(opening_frac) {
                 Ok(msg) => {
                     if let Err(e) = gripper_pub.publish(msg).await {
                         warn!("gripper_commands publish ({} gripper): {e}", side.label());
@@ -485,8 +482,7 @@ async fn service_gripper_move(
     mv: &mut Option<GripperMove>,
     channels: &mut ArmChannels,
     measured_frac: f64,
-    jaw_open_m: f64,
-    tolerance_m: f64,
+    tolerance: f64,
     timeout: Duration,
     now: Instant,
 ) {
@@ -494,7 +490,7 @@ async fn service_gripper_move(
         && let Ok(goal) = channels.gripper_goals.try_recv()
     {
         *mv = Some(GripperMove {
-            target_frac: (goal.target_m / jaw_open_m).clamp(0.0, 1.0),
+            target_frac: goal.opening,
             ctx: goal.ctx,
             started: now,
             deadline: now + timeout,
@@ -502,7 +498,7 @@ async fn service_gripper_move(
         });
     }
     let Some(m) = mv.as_ref() else { return };
-    let converged = (measured_frac - m.target_frac).abs() * jaw_open_m <= tolerance_m;
+    let converged = (measured_frac - m.target_frac).abs() <= tolerance;
     let (success, message, cancelled) = if m.ctx.is_cancelled() {
         (false, "goal cancelled", true)
     } else if converged {
@@ -518,14 +514,13 @@ async fn service_gripper_move(
     };
     let m = mv.take().expect("in-flight move checked above");
     let elapsed = now.duration_since(m.started).as_secs_f64();
-    let measured_m = measured_frac * jaw_open_m;
     let result = if cancelled {
         m.ctx
-            .complete_cancelled(success, message.into(), measured_m, elapsed)
+            .complete_cancelled(success, message.into(), measured_frac, elapsed)
             .await
     } else {
         m.ctx
-            .complete(success, message.into(), measured_m, elapsed)
+            .complete(success, message.into(), measured_frac, elapsed)
             .await
     };
     if let Err(e) = result {
@@ -536,49 +531,41 @@ async fn service_gripper_move(
 /// The side's target opening fraction for this tick: an in-flight backbone-executed
 /// move owns it; otherwise the commander's streamed command drives it;
 /// otherwise `None` (idle: before any command, or on an unpaired side).
-fn gripper_target(
-    mv: &Option<GripperMove>,
-    channels: &ArmChannels,
-    jaw_open_m: f64,
-) -> Option<f64> {
+fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<f64> {
     if let Some(m) = mv {
         return Some(m.target_frac);
     }
-    follow_gripper_target(&channels.gripper_command.borrow().clone(), jaw_open_m)
+    follow_gripper_target(&channels.gripper_command.borrow().clone())
 }
 
-/// Resolve the streamed opening target: the latest commander command parsed into
-/// the governed jaw fraction (clamped into the jaw travel), or `None` when none has
-/// arrived. The stream is paired to one producer, so there is nothing to
-/// arbitrate; a stopped producer just leaves the last opening in place, held by the
-/// gripper.
-fn follow_gripper_target(command: &Option<GripperCommand>, jaw_open_m: f64) -> Option<f64> {
-    command
-        .as_ref()
-        .map(|c| (c.position_m / jaw_open_m).clamp(0.0, 1.0))
+/// Resolve the streamed opening target: the latest commander command clamped
+/// into `[0, 1]`, or `None` when none has arrived. The stream is paired to one
+/// producer, so there is nothing to arbitrate; a stopped producer just leaves
+/// the last opening in place, held by the gripper.
+fn follow_gripper_target(command: &Option<GripperCommand>) -> Option<f64> {
+    command.as_ref().map(|c| c.opening.clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const JAW: f64 = 0.08;
-    fn cmd(position_m: f64) -> Option<GripperCommand> {
-        Some(GripperCommand { position_m })
+    fn cmd(opening: f64) -> Option<GripperCommand> {
+        Some(GripperCommand { opening })
     }
 
     #[test]
-    fn follow_parses_the_wire_metres_into_a_clamped_fraction() {
-        // Half the jaw travel parses to 0.5; past-travel and negative commands
-        // clamp into [0, 1] at this boundary.
-        assert_eq!(follow_gripper_target(&cmd(0.04), JAW), Some(0.5));
-        assert_eq!(follow_gripper_target(&cmd(1.0), JAW), Some(1.0));
-        assert_eq!(follow_gripper_target(&cmd(-0.5), JAW), Some(0.0));
+    fn follow_clamps_the_wire_fraction() {
+        // In-range passes through; past-open and negative commands clamp into
+        // [0, 1] at this boundary.
+        assert_eq!(follow_gripper_target(&cmd(0.5)), Some(0.5));
+        assert_eq!(follow_gripper_target(&cmd(1.5)), Some(1.0));
+        assert_eq!(follow_gripper_target(&cmd(-0.5)), Some(0.0));
     }
 
     #[test]
     fn follow_stays_idle_without_a_command() {
-        assert_eq!(follow_gripper_target(&None, JAW), None);
+        assert_eq!(follow_gripper_target(&None), None);
     }
 
     #[test]
@@ -590,24 +577,24 @@ mod tests {
         // performing the clear is covered by the live regression.
         let (tx, rx) = watch::channel(None);
 
-        tx.send_replace(cmd(0.04));
+        tx.send_replace(cmd(0.6));
         assert_eq!(
-            follow_gripper_target(&rx.borrow(), JAW),
-            Some(0.5),
+            follow_gripper_target(&rx.borrow()),
+            Some(0.6),
             "a live streamed opening is followed"
         );
 
         tx.send_replace(None);
         assert_eq!(
-            follow_gripper_target(&rx.borrow(), JAW),
+            follow_gripper_target(&rx.borrow()),
             None,
             "a consumed command leaves the gripper holding the move endpoint"
         );
 
-        tx.send_replace(cmd(0.02));
+        tx.send_replace(cmd(0.3));
         assert_eq!(
-            follow_gripper_target(&rx.borrow(), JAW),
-            Some(0.25),
+            follow_gripper_target(&rx.borrow()),
+            Some(0.3),
             "an opening after the move resumes following"
         );
     }

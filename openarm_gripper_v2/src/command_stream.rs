@@ -16,7 +16,7 @@ use tracing::{error, warn};
 
 #[derive(Clone, Copy)]
 pub struct GripperCommand {
-    pub position: f64,
+    pub opening: f64,
 }
 
 pub async fn run(
@@ -44,12 +44,12 @@ pub async fn run(
                 continue;
             }
         };
-        if !msg.position.is_finite() {
-            warn!("gripper_commands: dropping message with non-finite position");
+        if !msg.opening.is_finite() {
+            warn!("gripper_commands: dropping message with non-finite opening");
             continue;
         }
         latest.send_replace(Some(GripperCommand {
-            position: msg.position,
+            opening: msg.opening,
         }));
     }
 }

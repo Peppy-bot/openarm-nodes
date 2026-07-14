@@ -27,10 +27,10 @@ pub fn spawn(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     side: Side,
-    position: f64,
+    opening: f64,
 ) {
     tokio::spawn(async move {
-        run(runner, feedback, token, side, position).await;
+        run(runner, feedback, token, side, opening).await;
     });
 }
 
@@ -39,14 +39,14 @@ async fn run(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     side: Side,
-    position: f64,
+    opening: f64,
 ) {
     let label = side.label();
-    info!(side = label, position, "fire move_gripper");
+    info!(side = label, opening, "fire move_gripper");
 
     let goal = backbone_move_gripper::GoalRequest {
         gripper_id: side.gripper_id(),
-        position,
+        opening,
     };
 
     let downstream = match backbone_move_gripper::ActionHandle::fire_goal(

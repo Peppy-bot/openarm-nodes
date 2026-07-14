@@ -257,7 +257,8 @@
 <script>
 const PI = Math.PI;
 const ARM_DOF = 7;
-const GRIPPER_MAX = 0.044;
+// Gripper axis is the unitless opening fraction: 0 closed, 1 fully open.
+const GRIPPER_MAX = 1;
 // Shared full-width axis for every angular track (joints and the elbow swivel):
 // +-200deg exactly spans the widest joint on both hardware generations, so all
 // rows align and the grayed ends mark each joint's own limits.
@@ -444,18 +445,18 @@ function arcball_widget(side) {
 
 function build_gripper(side, label) {
   // No discrete buttons: the gripper is driven entirely by the streamed slider
-  // (closed at 0, open at the max), and the side's single Enable lives on the arm
+  // (closed at 0, fully open at 1), and the side's single Enable lives on the arm
   // card. The slider carries the same measured-position caret as the arm joints.
   const root = $(`${side}_gripper`);
   root.innerHTML = `
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_g_badge">idle</span></div>
     <div class="gripper">
       <div class="srow">
-        <input type="range" min="0" max="${GRIPPER_MAX}" step="0.0005" value="0" id="${side}_g"
+        <input type="range" min="0" max="${GRIPPER_MAX}" step="0.005" value="0" id="${side}_g"
                oninput="on_gripper_input('${side}')" />
         <div class="ghost off" id="${side}_g_ghost"></div>
       </div>
-      <span class="target" id="${side}_gt">0.0000 m</span>
+      <span class="target" id="${side}_gt">0.000</span>
       <span class="fb" id="${side}_gf">---</span>
     </div>
     <div class="actions">
@@ -693,7 +694,7 @@ function toggle_enable(side) {
     const gFb = latestSnap[`${side}_gripper`].feedback;
     if (gFb != null) {
       $(`${side}_g`).value = gFb;
-      $(`${side}_gt`).textContent = gFb.toFixed(4) + ' m';
+      $(`${side}_gt`).textContent = gFb.toFixed(3);
     }
   }
   ws.send(JSON.stringify({cmd: 'set_enabled', side, on: next}));
@@ -729,7 +730,7 @@ function fire_arm(side, duration_s) {
 
 // Slider moved: update the readout, and while enabled stream the new opening.
 function on_gripper_input(side) {
-  $(`${side}_gt`).textContent = parseFloat($(`${side}_g`).value).toFixed(4) + ' m';
+  $(`${side}_gt`).textContent = parseFloat($(`${side}_g`).value).toFixed(3);
   if (enabled[side]) send_gripper_target(side);
 }
 
@@ -922,10 +923,10 @@ function apply_snapshot(snap) {
     // never jumps. Actions: the slider holds the composed value the Execute fires.
     if (uiMode === 'streaming' && !on && g.feedback != null) {
       gs.value = g.feedback;
-      $(`${side}_gt`).textContent = g.feedback.toFixed(4) + ' m';
+      $(`${side}_gt`).textContent = g.feedback.toFixed(3);
     }
     $(`${side}_gf`).textContent = g.feedback != null
-      ? g.feedback.toFixed(4)
+      ? g.feedback.toFixed(3)
       : '---';
     // Measured-opening caret on the track, matching the arm joints.
     place_caret(`${side}_g`, g.feedback, g.min, g.max);

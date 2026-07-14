@@ -132,12 +132,12 @@ class SimTopicIO:
                     f"dropping gripper command with gripper_id={msg.gripper_id} on {slot_name}"
                 )
                 continue
-            if not math.isfinite(msg.position):
+            if not math.isfinite(msg.opening):
                 logger.warning(
                     f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
                 )
                 continue
-            self._gripper_cmd[expected_gripper_id].set(msg.position)
+            self._gripper_cmd[expected_gripper_id].set(msg.opening)
 
     # --- called from the physics thread ---
 
@@ -153,9 +153,9 @@ class SimTopicIO:
         if self._arm_pub is not None:
             self._schedule_publish(self._arm_pub, arm_states.build_message(arm_id, positions, velocities))
 
-    def publish_gripper_states(self, gripper_id: int, position: float, force: float = 0.0) -> None:
+    def publish_gripper_states(self, gripper_id: int, opening: float, force: float = 0.0) -> None:
         if self._gripper_pub is not None:
-            self._schedule_publish(self._gripper_pub, gripper_states.build_message(gripper_id, position, force))
+            self._schedule_publish(self._gripper_pub, gripper_states.build_message(gripper_id, opening, force))
 
     def _schedule_publish(self, publisher: peppylib.TopicPublisher, payload: bytes) -> None:
         # Hand the publish to the node loop and return immediately; the physics
