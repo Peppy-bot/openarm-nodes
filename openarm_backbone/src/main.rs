@@ -127,20 +127,15 @@ fn main() -> Result<()> {
 
         // Two arm models (FK/IK/Jacobian/limits, with the elbow singularity margin)
         // and the bimanual collision model, all from the embedded OpenArm description.
-        // A bad base link aborts bringup.
-        let left_model = arm_model(hardware_version, &params.left_base).unwrap_or_else(|e| {
-            panic!("build left arm model from base '{}': {e}", params.left_base)
-        });
-        let right_model = arm_model(hardware_version, &params.right_base).unwrap_or_else(|e| {
-            panic!(
-                "build right arm model from base '{}': {e}",
-                params.right_base
-            )
-        });
-        info!(
-            "arm models loaded (left '{}', right '{}')",
-            params.left_base, params.right_base
-        );
+        // The per-side chain base link is a fact of the generation's URDF, resolved from
+        // the description rather than configured, so a v2 launch cannot inherit a v1 name.
+        let left_base = hardware_version.base_link(openarm_description::Side::Left);
+        let right_base = hardware_version.base_link(openarm_description::Side::Right);
+        let left_model = arm_model(hardware_version, left_base)
+            .unwrap_or_else(|e| panic!("build left arm model from base '{left_base}': {e}"));
+        let right_model = arm_model(hardware_version, right_base)
+            .unwrap_or_else(|e| panic!("build right arm model from base '{right_base}': {e}"));
+        info!("arm models loaded (left '{left_base}', right '{right_base}')");
 
         // The collision model needs the URDF string (joint limits are irrelevant to it,
         // so no margin) and the meshes on disk; the file-based builder reads the meshes
@@ -163,8 +158,8 @@ fn main() -> Result<()> {
         let governor = governor::Governor::build(
             hardware_version.urdf(),
             meshes_dir,
-            &params.left_base,
-            &params.right_base,
+            left_base,
+            right_base,
             params.d_stop,
             params.d_safe,
             max_joint_velocity_rad_s

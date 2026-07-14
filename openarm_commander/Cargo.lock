@@ -2242,7 +2242,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#df2766f971cc676d575024276ec7718575cb0980"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#5418586edfc27d3af2d4af4171e04a6327eb60de"
 dependencies = [
  "urdf-rs",
 ]
@@ -3561,7 +3561,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#df2766f971cc676d575024276ec7718575cb0980"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#5418586edfc27d3af2d4af4171e04a6327eb60de"
 dependencies = [
  "k",
  "thiserror 2.0.18",
