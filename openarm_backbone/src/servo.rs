@@ -170,10 +170,16 @@ impl ServoState {
             dt_s,
             DLS_LAMBDA,
         );
-        // Smooth each joint so the command's jerk is bounded through the
-        // reconfiguration; the filtered value is both commanded and fed back as the
-        // next tick's seed.
-        let smoothed = std::array::from_fn(|i| self.smoothing[i].filter(next[i]));
+        // Smooth each joint to bound the command's jerk through the reconfiguration,
+        // then re-clamp the step to the joint velocity limit: a Butterworth overshoots
+        // its input, so without this the smoothed command could exceed the limit
+        // rate_step enforced on `next`. The clamp is the final safety stage, so the
+        // commanded velocity always holds regardless of the filter transient.
+        let smoothed = std::array::from_fn(|i| {
+            let filtered = self.smoothing[i].filter(next[i]);
+            let cap = max_joint_velocity_rad_s[i] * dt_s;
+            q[i] + (filtered - q[i]).clamp(-cap, cap)
+        });
         ServoStep::Stepped(smoothed)
     }
 }
