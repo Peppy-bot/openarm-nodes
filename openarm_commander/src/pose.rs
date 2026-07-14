@@ -379,9 +379,10 @@ pub enum JointJogStep {
 /// Advance a joint jog one tick: walk each joint of `current` toward `target` under a
 /// max velocity (`caps.joint_vel_rad_s`) and acceleration (`caps.joint_accel_rad_s2`),
 /// carrying `vel` so the velocity stays continuous. The approach speed is capped so the
-/// acceleration limit can still brake the joint to rest exactly on the target, so the
-/// ramp settles without overshoot. Targets are pre-clamped to joint limits by the caller,
-/// so a joint jog never blocks.
+/// acceleration limit can brake to rest by the target, and the position is clamped there
+/// so it never overshoots; the carried velocity then bleeds to rest over the next few
+/// ticks under the same cap. Targets are pre-clamped to joint limits by the caller, so a
+/// joint jog never blocks.
 pub fn joint_jog_tick(
     current: &[f64; ARM_DOF],
     target: &[f64; ARM_DOF],
@@ -395,18 +396,23 @@ pub fn joint_jog_tick(
 
     let next: [(f64, f64); ARM_DOF] = std::array::from_fn(|i| {
         let error = target[i] - current[i];
-        // Cap the approach speed so a_max can brake to rest exactly at the target.
+        // Approach speed capped so a_max can brake to rest by the target (no overshoot).
         let v_brake = (2.0 * a_max * error.abs()).sqrt();
         let v_desired = error.signum() * v_max.min(v_brake);
+        // |v_next - vel| <= dv_max, so the acceleration bound holds on every tick,
+        // including the last: the velocity is never teleported to zero.
         let v_next = vel[i] + (v_desired - vel[i]).clamp(-dv_max, dv_max);
         let step = v_next * dt;
-        // Once a tick would reach or cross the target, land exactly on it and stop: the
-        // discrete brake profile otherwise dithers a hair short of rest forever.
-        if step.abs() >= error.abs() {
-            (target[i], 0.0)
+        // Land on the target only when this step is directed at it and would reach or
+        // cross it (`step*error >= error^2`), clamping the position there so it never
+        // overshoots. A mid-drag reversal (velocity still opposing `error`) fails this
+        // test, so the joint decelerates and turns around instead of snapping backward.
+        let joint = if step * error >= error * error {
+            target[i]
         } else {
-            (current[i] + step, v_next)
-        }
+            current[i] + step
+        };
+        (joint, v_next)
     });
     let joints: [f64; ARM_DOF] = std::array::from_fn(|i| next[i].0);
     let vel: [f64; ARM_DOF] = std::array::from_fn(|i| next[i].1);
@@ -707,6 +713,55 @@ mod tests {
         }
         assert!(converged, "the jog converges within a bounded number of ticks");
         assert!(max_overshoot < 1e-6, "the ramp does not overshoot the target");
+    }
+
+    #[test]
+    fn joint_jog_tick_reversal_stays_within_the_acceleration_cap() {
+        let caps = JogCaps::per_tick(0.01, 0.5);
+        let dv_max = caps.joint_accel_rad_s2 * caps.dt_s;
+        let up = [3.0; ARM_DOF];
+        let mut q = [0.0; ARM_DOF];
+        let mut v = [0.0; ARM_DOF];
+        // Build up to cruise speed toward a far target.
+        for _ in 0..20 {
+            let JointJogStep::Stepped { joints, vel } = joint_jog_tick(&q, &up, &v, caps) else {
+                unreachable!("a far target does not converge yet")
+            };
+            q = joints;
+            v = vel;
+        }
+        assert!(v[0] > 2.0, "the joint is moving fast before the reversal");
+        // Reverse mid-drag: re-target just behind the current position while still moving
+        // forward. The old magnitude-only capture snapped backward and zeroed the velocity
+        // here; the fix must decelerate under the cap instead.
+        let down: [f64; ARM_DOF] = std::array::from_fn(|i| q[i] - 0.01);
+        let mut worst_accel: f64 = 0.0;
+        let mut max_overshoot: f64 = 0.0;
+        let mut converged = false;
+        for _ in 0..5000 {
+            match joint_jog_tick(&q, &down, &v, caps) {
+                JointJogStep::Stepped { joints, vel } => {
+                    for i in 0..ARM_DOF {
+                        worst_accel = worst_accel.max((vel[i] - v[i]).abs());
+                        // Overshoot = dropping below the reversed target.
+                        max_overshoot = max_overshoot.max(down[i] - joints[i]);
+                    }
+                    q = joints;
+                    v = vel;
+                }
+                JointJogStep::Converged(joints) => {
+                    assert_eq!(joints, down, "settles on the reversed target");
+                    converged = true;
+                    break;
+                }
+            }
+        }
+        assert!(converged, "the reversed jog converges");
+        assert!(
+            worst_accel <= dv_max + 1e-12,
+            "velocity change per tick stays within the accel cap through the reversal ({worst_accel} > {dv_max})"
+        );
+        assert!(max_overshoot < 1e-6, "the reversal does not overshoot the target");
     }
 
     #[test]
