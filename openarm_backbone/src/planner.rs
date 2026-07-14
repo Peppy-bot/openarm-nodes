@@ -591,6 +591,42 @@ mod tests {
     }
 
     #[test]
+    fn a_consumed_command_holds_the_move_endpoint_until_a_newer_one() {
+        // The move -> Follow handoff at the command-watch seam. An accepted move
+        // clears the side's command watch (what the action handler does with
+        // `send_replace(None)`), so Follow holds at the move's endpoint instead
+        // of chasing the pre-move streamed target, until a command that arrives
+        // after the clear. This locks the contract Follow relies on; that the
+        // handler performs the clear is covered by the live regression.
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        let endpoint = [0.2; ARM_DOF];
+
+        // Streamed before the move: Follow would chase it.
+        tx.send_replace(Some(joint_cmd([0.9; ARM_DOF])));
+        assert_eq!(
+            follow_target(&rx.borrow(), endpoint, &test_cfg()),
+            [0.9; ARM_DOF],
+            "a live streamed command is chased"
+        );
+
+        // The accepted move consumes it: Follow now holds at the move endpoint.
+        tx.send_replace(None);
+        assert_eq!(
+            follow_target(&rx.borrow(), endpoint, &test_cfg()),
+            endpoint,
+            "a consumed command leaves Follow on the move endpoint, not the stale stream"
+        );
+
+        // A command that arrives after the move resumes following.
+        tx.send_replace(Some(joint_cmd([0.4; ARM_DOF])));
+        assert_eq!(
+            follow_target(&rx.borrow(), endpoint, &test_cfg()),
+            [0.4; ARM_DOF],
+            "a command after the move resumes following"
+        );
+    }
+
+    #[test]
     fn cap_ee_speed_throttles_a_hand_moving_step_to_the_cap() {
         // Joint 0 moves the hand 1 m per rad along x; the rest do not move it.
         let mut jac = Jacobian::zeros();

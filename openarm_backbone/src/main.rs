@@ -208,11 +208,14 @@ fn main() -> Result<()> {
         );
 
         // Per-arm channels. Listeners fill the watch slots; action handlers send
-        // accepted goals; the coordinator reads all of it.
-        let (cmd_tx0, cmd_rx0) = watch::channel(None);
-        let (cmd_tx1, cmd_rx1) = watch::channel(None);
-        let (gripcmd_tx0, gripcmd_rx0) = watch::channel(None);
-        let (gripcmd_tx1, gripcmd_rx1) = watch::channel(None);
+        // accepted goals; the coordinator reads all of it and, while a move runs,
+        // clears that side's command watch. The command streams are held by the
+        // coordinator as their sender (read + clear); the listener keeps a clone,
+        // so no separate receiver is needed. State streams stay reader-side.
+        let (cmd_tx0, _) = watch::channel(None);
+        let (cmd_tx1, _) = watch::channel(None);
+        let (gripcmd_tx0, _) = watch::channel(None);
+        let (gripcmd_tx1, _) = watch::channel(None);
         let (meas_tx0, meas_rx0) = watch::channel(None);
         let (meas_tx1, meas_rx1) = watch::channel(None);
         let (grip_tx0, grip_rx0) = watch::channel(None);
@@ -238,8 +241,8 @@ fn main() -> Result<()> {
 
         let channels = ArmPair::new(
             ArmChannels {
-                command: cmd_rx0,
-                gripper_command: gripcmd_rx0,
+                command: cmd_tx0.clone(),
+                gripper_command: gripcmd_tx0.clone(),
                 measured: meas_rx0,
                 gripper: grip_rx0,
                 goals: goal_rx0,
@@ -248,8 +251,8 @@ fn main() -> Result<()> {
                 gripper_busy: gripper_busy[0].clone(),
             },
             ArmChannels {
-                command: cmd_rx1,
-                gripper_command: gripcmd_rx1,
+                command: cmd_tx1.clone(),
+                gripper_command: gripcmd_tx1.clone(),
                 measured: meas_rx1,
                 gripper: grip_rx1,
                 goals: goal_rx1,
