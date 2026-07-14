@@ -20,12 +20,12 @@ use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use control_core::Pacer;
+use control_core::{LowPassFilter, Pacer};
 
 use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
-use crate::{ArmPair, JointVec, Side};
+use crate::{ARM_DOF, ArmPair, JointVec, Side};
 
 /// How long [`seed`] waits for an arm's first measured state before warning that
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an
@@ -61,6 +61,11 @@ pub struct RunConfig {
     pub cycle_period: Duration,
     pub gripper_tolerance: f64,
     pub gripper_move_timeout: Duration,
+    /// Cutoff (Hz) for the low-pass on each published desired velocity. `dq` is a
+    /// per-tick position difference scaled by `1/dt`, so it amplifies any setpoint noise
+    /// by the control rate; filtering it keeps the arm's Kd term from buzzing on a noisy
+    /// stream without touching the desired position.
+    pub velocity_filter_cutoff_hz: f64,
 }
 
 /// An accepted `move_gripper` goal handed to the coordinator, which executes it
@@ -100,6 +105,7 @@ pub async fn run(
         cycle_period,
         gripper_tolerance,
         gripper_move_timeout,
+        velocity_filter_cutoff_hz,
     } = config;
     // One publisher per pairing slot (arms and grippers alike). Publishing while
     // a slot is unpaired is a legal no-op, so the backbone streams governed setpoints
@@ -179,6 +185,15 @@ pub async fn run(
     let mut gripper_moves: ArmPair<Option<GripperMove>> = ArmPair::new(None, None);
 
     let dt = cycle_period.as_secs_f64();
+    // One low-pass per joint per arm, smoothing the published desired velocity. The
+    // cutoff is validated positive-finite at bringup, so construction cannot fail here.
+    let make_filters = || -> [LowPassFilter; ARM_DOF] {
+        std::array::from_fn(|_| {
+            LowPassFilter::from_cutoff(velocity_filter_cutoff_hz, dt)
+                .expect("velocity_filter_cutoff_hz asserted finite and > 0 at startup")
+        })
+    };
+    let mut dq_filters = ArmPair::new(make_filters(), make_filters());
     // The proximity readout is for human eyes, so publish it at ~20 Hz rather than
     // the control rate: one extra distance query every `readout_every` ticks.
     let readout_every = (0.05 / dt).round().max(1.0) as u64;
@@ -304,10 +319,11 @@ pub async fn run(
         // Publish one governed setpoint per arm on its pairing slot; the slot
         // scopes the stream to its paired arm, so the message carries no arm_id.
         type BuildSetpoint = fn(JointVec, JointVec) -> peppygen::Result<peppylib::Payload>;
-        for (side, planner, arm_pub, build, prev_q, governed_q) in [
+        for (side, planner, filters, arm_pub, build, prev_q, governed_q) in [
             (
                 Side::Left,
                 &mut planners.left,
+                &mut dq_filters.left,
                 &left_arm_pub,
                 left_arm_link::arm_setpoints::build_message as BuildSetpoint,
                 prev.arms.left,
@@ -316,13 +332,17 @@ pub async fn run(
             (
                 Side::Right,
                 &mut planners.right,
+                &mut dq_filters.right,
                 &right_arm_pub,
                 right_arm_link::arm_setpoints::build_message as BuildSetpoint,
                 prev.arms.right,
                 governed.arms.right,
             ),
         ] {
-            let dq: JointVec = std::array::from_fn(|j| (governed_q[j] - prev_q[j]) / dt);
+            // Desired velocity is the per-tick position delta; low-pass it per joint so a
+            // noisy stream does not drive the arm's Kd term into buzz. The published
+            // position (`governed_q`) is untouched, so tracking is unaffected.
+            let dq = filtered_velocity(filters, &governed_q, &prev_q, dt);
             planner.commit(governed_q);
             match build(governed_q, dq) {
                 Ok(msg) => {
@@ -546,12 +566,69 @@ fn follow_gripper_target(command: &Option<GripperCommand>) -> Option<f64> {
     command.as_ref().map(|c| c.opening.clamp(0.0, 1.0))
 }
 
+/// The published desired velocity: per joint, the tick's position delta scaled to a rate
+/// and low-passed. `filters` carries the per-joint state across ticks, so the smoothing is
+/// over time, not within a tick. Only the velocity is shaped; the position (`governed_q`)
+/// is published as-is.
+fn filtered_velocity(
+    filters: &mut [LowPassFilter; ARM_DOF],
+    governed_q: &JointVec,
+    prev_q: &JointVec,
+    dt: f64,
+) -> JointVec {
+    std::array::from_fn(|j| filters[j].filter((governed_q[j] - prev_q[j]) / dt))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cmd(opening: f64) -> Option<GripperCommand> {
         Some(GripperCommand { opening })
+    }
+
+    const DT: f64 = 0.01;
+    // The node default; well below the 50 Hz Nyquist so it actually attenuates.
+    const CUTOFF_HZ: f64 = 15.0;
+
+    fn dq_filters() -> [LowPassFilter; ARM_DOF] {
+        std::array::from_fn(|_| LowPassFilter::from_cutoff(CUTOFF_HZ, DT).unwrap())
+    }
+
+    #[test]
+    fn filtered_velocity_differentiates_position_into_a_rate() {
+        // A steady position delta of 0.01 rad/tick at 100 Hz is a 1 rad/s velocity; the
+        // first tick seeds on that value (no startup transient).
+        let mut filters = dq_filters();
+        let prev = [0.0; ARM_DOF];
+        let q = [0.01; ARM_DOF];
+        let dq = filtered_velocity(&mut filters, &q, &prev, DT);
+        assert!(dq.iter().all(|v| (v - 1.0).abs() < 1e-12), "delta/dt is the rate");
+    }
+
+    #[test]
+    fn filtered_velocity_attenuates_a_noisy_stream() {
+        // A jittering position (alternating +/-) makes the raw per-tick velocity swing
+        // by +/- (2*amp/dt); the low-pass carries state across ticks and damps it.
+        let mut filters = dq_filters();
+        let amp = 0.001;
+        let mut prev = [0.0; ARM_DOF];
+        let mut worst_raw: f64 = 0.0;
+        let mut worst_filtered: f64 = 0.0;
+        for k in 0..200 {
+            let q = [if k % 2 == 0 { amp } else { -amp }; ARM_DOF];
+            let raw = (q[0] - prev[0]) / DT;
+            let filtered = filtered_velocity(&mut filters, &q, &prev, DT)[0];
+            if k > 1 {
+                worst_raw = worst_raw.max(raw.abs());
+                worst_filtered = worst_filtered.max(filtered.abs());
+            }
+            prev = q;
+        }
+        assert!(
+            worst_filtered < worst_raw * 0.5,
+            "the low-pass more than halves the jitter amplitude ({worst_filtered} vs {worst_raw})"
+        );
     }
 
     #[test]

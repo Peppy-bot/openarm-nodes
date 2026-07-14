@@ -283,6 +283,15 @@
       // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
+      // Cutoff (Hz) for the first-order low-pass on each published desired velocity.
+      // Desired velocity is a per-tick position delta scaled by the control rate, so it
+      // amplifies setpoint noise; filtering it keeps the arm's Kd term from buzzing on a
+      // noisy stream without touching the desired position. At the 100 Hz control rate
+      // (Nyquist 50 Hz) this must sit well below Nyquist to attenuate; ~15 Hz matches the
+      // enactic reference's one-pole (its 90 rad/s constant is ~14.3 Hz) and adds about one
+      // tick of group delay. A universal control constant (same across generations and
+      // sim/real), so it keeps a node default like the gains.
+      velocity_filter_cutoff_hz: { $type: "f64", $default: 15.0 },
       // Completion tolerance for backbone-executed move_gripper goals, as a
       // fraction of full jaw travel: the goal completes when the measured opening
       // is within this of the target.

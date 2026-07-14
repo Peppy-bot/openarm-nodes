@@ -106,6 +106,10 @@ fn main() -> Result<()> {
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
             "max_ee_velocity_m_s must be a positive finite number"
         );
+        assert!(
+            params.velocity_filter_cutoff_hz.is_finite() && params.velocity_filter_cutoff_hz > 0.0,
+            "velocity_filter_cutoff_hz must be a positive finite number"
+        );
         // The governor and the commander UI must reject the same bands; validate here
         // (reusing the governor's own predicate) so a bad launcher value fails at
         // bringup with a clear message rather than deep inside model construction.
@@ -281,6 +285,7 @@ fn main() -> Result<()> {
                     cycle_period,
                     gripper_tolerance: params.gripper_opening_tolerance,
                     gripper_move_timeout: Duration::from_secs_f64(params.gripper_motion_timeout_s),
+                    velocity_filter_cutoff_hz: params.velocity_filter_cutoff_hz,
                 },
                 token.clone(),
             ));
