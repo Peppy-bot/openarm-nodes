@@ -14,3 +14,17 @@ srs_model = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "
 bimanual_collision_model = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "bimanual_collision_model" }
 openarm_description = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "openarm_description", features = ["meshes"] }
 control_core = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "control_core" }
+
+# The collision narrowphase (GJK/EPA over convex hulls) and forward kinematics
+# are dense nalgebra f64 kernels. At the dev profile's opt-level 0 the governor's
+# simulation-loop tests, which fire thousands of distance queries, run ~100x
+# slower (~100s vs <1s). Optimizing only these geometry crates keeps this crate
+# itself unoptimized and debuggable while making the tests usable.
+[profile.dev.package.bimanual_collision_model]
+opt-level = 3
+
+[profile.dev.package.srs_model]
+opt-level = 3
+
+[profile.dev.package.nalgebra]
+opt-level = 3
