@@ -175,8 +175,9 @@
             request_message_format: {
               // Which gripper (0 = left, 1 = right).
               gripper_id: "u8",
-              // Target opening (m): 0.0 = closed, increasing toward fully open.
-              position: "f64"
+              // Target opening as a fraction of full jaw travel: 0 = closed,
+              // 1 = fully open.
+              opening: "f64"
             },
             response_message_format: {
               accepted: "bool"
@@ -186,8 +187,8 @@
             response_message_format: {
               success: "bool",
               message: "string",
-              // Measured opening (m) when the action ended.
-              final_position: "f64",
+              // Measured opening fraction when the action ended.
+              final_opening: "f64",
               // Wall-clock duration of the action (s).
               action_time: "f64"
             }
@@ -289,9 +290,10 @@
       // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
-      // Completion tolerance (m) for backbone-executed move_gripper goals: the goal
-      // completes when the measured opening is within this of the target.
-      gripper_position_tolerance: { $type: "f64", $default: 0.001 },
+      // Completion tolerance for backbone-executed move_gripper goals, as a
+      // fraction of full jaw travel: the goal completes when the measured opening
+      // is within this of the target.
+      gripper_opening_tolerance: { $type: "f64", $default: 0.015 },
       // Deadline (s) for backbone-executed move_gripper goals; a goal the governed
       // opening cannot reach (a collision clamp) fails here.
       gripper_motion_timeout_s: { $type: "f64", $default: 10.0 },

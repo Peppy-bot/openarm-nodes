@@ -74,12 +74,14 @@ fn main() -> Result<()> {
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         // The move timeout feeds Duration::from_secs_f64 (which panics on a bad
-        // value mid-spawn) and a non-positive tolerance would keep any gripper
-        // goal from ever converging; both fail at bringup instead.
+        // value mid-spawn); a non-positive tolerance would keep any gripper goal
+        // from ever converging and one at a full travel would complete every goal
+        // instantly. All fail at bringup instead.
         assert!(
-            params.gripper_position_tolerance.is_finite()
-                && params.gripper_position_tolerance > 0.0,
-            "gripper_position_tolerance must be a positive finite number"
+            params.gripper_opening_tolerance.is_finite()
+                && params.gripper_opening_tolerance > 0.0
+                && params.gripper_opening_tolerance < 1.0,
+            "gripper_opening_tolerance must be a fraction in (0, 1)"
         );
         assert!(
             params.gripper_motion_timeout_s.is_finite() && params.gripper_motion_timeout_s > 0.0,
@@ -282,7 +284,7 @@ fn main() -> Result<()> {
                 config_rx,
                 coordinator::RunConfig {
                     cycle_period,
-                    gripper_tolerance_m: params.gripper_position_tolerance,
+                    gripper_tolerance: params.gripper_opening_tolerance,
                     gripper_move_timeout: Duration::from_secs_f64(params.gripper_motion_timeout_s),
                 },
                 token.clone(),
@@ -302,7 +304,6 @@ fn main() -> Result<()> {
                 runner.clone(),
                 [grip_goal_tx0, grip_goal_tx1],
                 [gripper_busy[0].clone(), gripper_busy[1].clone()],
-                hardware_version.jaw_open_m(),
             ));
 
             // Inbound listeners buffer the latest message into the watch slots. They
@@ -324,11 +325,7 @@ fn main() -> Result<()> {
             );
             spawn_listener(
                 &mut set,
-                streams::run_gripper_state_listener(
-                    runner.clone(),
-                    [grip_tx0, grip_tx1],
-                    hardware_version.jaw_open_m(),
-                ),
+                streams::run_gripper_state_listener(runner.clone(), [grip_tx0, grip_tx1]),
             );
             spawn_listener(
                 &mut set,

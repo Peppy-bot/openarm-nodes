@@ -1,10 +1,10 @@
 // Always-on gripper_states publisher: emits the measured opening at
 // state_rate_hz regardless of mode: to the paired backbone on the pairing's
 // `gripper_states` topic (a legal no-op while unpaired) and to observers on
-// the broadcast stream (tagged with `gripper_id`). Reads the motor's
-// already-cached state (no CAN traffic of its own), so it
-// never contends with the move control loop for the bus; between moves the
-// gripper holds position, so the last cached reading stays correct.
+// the broadcast stream (tagged with `gripper_id`). Reads the motor's cached
+// state (no CAN traffic of its own), so it never contends with the follow loop
+// for the bus; the follow loop refreshes that cache every tick, so the reading
+// is always current.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,7 +46,7 @@ pub async fn run(
             .unwrap_or_else(|e| e.into_inner())
             .get_state()
             .position;
-        let opening = geometry::motor_rad_to_meters(motor_rad);
+        let opening = geometry::motor_rad_to_fraction(motor_rad);
         // Skip a poisoned sample rather than publishing NaN/Inf to consumers,
         // matching the finiteness guards on the command paths.
         if !opening.is_finite() {

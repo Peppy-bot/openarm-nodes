@@ -87,8 +87,9 @@ pub async fn run(
                 )
             },
         ));
-        // Gripper: stream the trigger opening (m) while streamable, tagged with
-        // the side's id for the backbone to demux (mirror of the arm stream above).
+        // Gripper: stream the trigger opening fraction while streamable, tagged
+        // with the side's id for the backbone to demux (mirror of the arm stream
+        // above).
         let sample_rx = rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub.clone(),
@@ -96,7 +97,7 @@ pub async fn run(
             token.clone(),
             format!("{} gripper", label(side)),
             move || {
-                let opening = streamable(&sample_rx, stale_timeout)?.opening_m(side);
+                let opening = streamable(&sample_rx, stale_timeout)?.opening(side);
                 Some(
                     gripper_commands::build_message(wire_id(side), opening)
                         .map_err(|e| e.to_string()),
@@ -177,8 +178,8 @@ mod tests {
         KerSample {
             left_joints: [0.0; 7],
             right_joints: [0.0; 7],
-            left_opening_m: 0.0,
-            right_opening_m: 0.0,
+            left_opening: 0.0,
+            right_opening: 0.0,
             engaged,
             received_at: Instant::now() - age,
         }

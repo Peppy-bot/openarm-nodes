@@ -22,7 +22,6 @@ class SimLauncher:
         stop: threading.Event,
         io,
         state_rate_hz: int,
-        jaw_open_m: float,
         headless: bool,
         viewer_host: str,
         viewer_port: int,
@@ -35,7 +34,6 @@ class SimLauncher:
         self._stop = stop
         self._io = io
         self._state_rate_hz = state_rate_hz
-        self._jaw_open_m = jaw_open_m
         self._headless = headless
         self._viewer_host = viewer_host
         self._viewer_port = viewer_port
@@ -55,9 +53,7 @@ class SimLauncher:
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
-        extension = MujocoBridgeExtension(
-            model, data, self._io, self._state_rate_hz, self._jaw_open_m
-        )
+        extension = MujocoBridgeExtension(model, data, self._io, self._state_rate_hz)
         try:
             extension.startup()
             self._ready.set()

@@ -57,19 +57,15 @@ class IsaacBridgeExtension:
     is ready, step() is a no-op except for the setup retry.
     """
 
-    def __init__(self, io: SimTopicIO, state_rate_hz: int, jaw_open_m: float) -> None:
+    def __init__(self, io: SimTopicIO, state_rate_hz: int) -> None:
         self._io = io
         # Telemetry is throttled to state_rate_hz: serializing every reader at
         # the physics tick saturates the single sim thread. Writers and the
         # physics step still run every tick.
         if state_rate_hz <= 0:
             raise ValueError(f"state_rate_hz must be positive, got {state_rate_hz}")
-        if not (jaw_open_m > 0.0):
-            raise ValueError(f"jaw_open_m must be positive, got {jaw_open_m}")
-        # Full-open jaw width (m); finger targets and measured opening scale
-        # against each finger joint's own travel, read from the articulation's
-        # DOF limits at setup.
-        self._jaw_open_m = jaw_open_m
+        # Signed full-open travel per finger joint, read from the articulation's
+        # DOF limits at setup; commanded opening fractions scale onto it.
         self._gripper_travels: dict[int, list[float]] = {}
         self._telemetry_period_s = 1.0 / state_rate_hz
         self._last_publish_s = 0.0
@@ -202,13 +198,12 @@ class IsaacBridgeExtension:
             opening = self._io.latest_gripper_command(gripper["gripper_id"])
             if opening is None:
                 continue
-            # Map the aperture (m) onto each finger's own signed travel, so the
-            # same command drives prismatic (v1) and revolute (v2) fingers.
-            fraction = opening / self._jaw_open_m
+            # Map the opening fraction onto each finger's own signed travel, so
+            # the same command drives prismatic (v1) and revolute (v2) fingers.
             travels = self._gripper_travels[gripper["gripper_id"]]
             self._gripper_actuators[gripper["gripper_id"]].write_targets(
                 {
-                    name: travel * fraction
+                    name: travel * opening
                     for name, travel in zip(gripper["fingers"], travels)
                 }
             )
@@ -231,11 +226,11 @@ class IsaacBridgeExtension:
             data = sensor.get_gripper_state()
             travels = self._gripper_travels[gripper_id]
             if data and len(data["positions"]) == len(travels):
-                # Aperture (m) = jaw width * mean per-finger travel fraction,
-                # the inverse of the command mapping above.
+                # Opening = mean per-finger travel fraction, the inverse of the
+                # command mapping above.
                 fractions = [q / t for q, t in zip(data["positions"], travels)]
                 self._io.publish_gripper_states(
-                    gripper_id, self._jaw_open_m * sum(fractions) / len(fractions)
+                    gripper_id, sum(fractions) / len(fractions)
                 )
 
     def shutdown(self) -> None:

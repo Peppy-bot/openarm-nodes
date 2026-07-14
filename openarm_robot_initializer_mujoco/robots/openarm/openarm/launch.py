@@ -36,11 +36,6 @@ def _scene_path(hardware_version: str) -> Path:
     return _ASSETS_DIR / f"openarm_bimanual_{_version(hardware_version)}.xml"
 
 
-# Full-open jaw width (m) per generation: the bridge scales the aperture on the
-# gripper passthrough/state topics against each finger joint's model travel.
-# Values mirror openarm_description::jaw_open_m; v2 is the modeled pad-gap
-# width pending hardware confirmation.
-_JAW_OPEN_M = {"v1": 0.044, "v2": 0.0697}
 _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(_MUJOCO_DIR))
@@ -75,7 +70,6 @@ async def _run_sim(params, node_runner) -> list:
                     _stop,
                     io,
                     params.state_rate_hz,
-                    _JAW_OPEN_M[_version(params.hardware_version)],
                     params.headless,
                     params.viewer_host,
                     params.viewer_port,

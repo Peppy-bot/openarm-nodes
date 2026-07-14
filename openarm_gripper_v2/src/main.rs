@@ -32,6 +32,11 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let gripper_id = params.gripper_id;
+        // Resolves this side's signed opening direction (the two v2 grippers are
+        // mechanically mirrored) and rejects an out-of-range id at bringup.
+        let motor_geometry = geometry::Geometry::from_gripper_id(gripper_id).unwrap_or_else(|| {
+            panic!("gripper_id must be 0 (left) or 1 (right), got {gripper_id}")
+        });
         let can_interface = params.can_interface.clone();
 
         // Rates feed `Duration::from_micros(1_000_000 / rate)`, so a rate above
@@ -56,6 +61,7 @@ fn main() -> Result<()> {
                     params.recv_timeout_us
                 )
             }),
+            geometry: motor_geometry,
             speed_rad_s: params.speed_rad_s,
             force_limit_pu: params.force_limit_pu,
         };
@@ -130,6 +136,7 @@ fn main() -> Result<()> {
             node_runner.clone(),
             gripper_id,
             params.state_rate_hz,
+            motor_geometry,
             gripper.clone(),
             node_runner.cancellation_token().clone(),
         ));

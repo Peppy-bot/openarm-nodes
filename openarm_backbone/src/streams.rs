@@ -36,11 +36,11 @@ pub struct JointCommand {
 }
 
 /// The latest commander opening command for one gripper, fed by the
-/// `gripper_commands` stream. The width stays in meters (the wire unit); the
-/// coordinator parses it into the governed opening fraction.
+/// `gripper_commands` stream: the raw wire opening fraction, clamped into
+/// `[0, 1]` by the coordinator as it applies it.
 #[derive(Clone)]
 pub struct GripperCommand {
-    pub position_m: f64,
+    pub opening: f64,
 }
 
 /// The latest measured joint position for one arm, fed by the arm_link
@@ -53,11 +53,9 @@ pub struct MeasuredState {
     pub positions: JointVec,
 }
 
-/// The latest measured opening of one gripper, parsed at ingestion from the
-/// pairing's aperture width into a fraction of the full jaw travel and clamped
-/// into `[0, 1]` (0 = closed, 1 = fully open), so downstream consumers never see
-/// raw hardware units or an out-of-range placement. Consumed every tick like the
-/// measured arm state.
+/// The latest measured opening of one gripper, clamped at ingestion into
+/// `[0, 1]` (0 = closed, 1 = fully open), so downstream consumers never see an
+/// out-of-range placement. Consumed every tick like the measured arm state.
 #[derive(Clone, Copy)]
 pub struct GripperOpening {
     pub fraction: f64,
@@ -151,13 +149,13 @@ pub async fn run_gripper_command_listener(
         };
         if !msg.opening.is_finite() {
             warn!(
-                "gripper_commands: dropping gripper {} message with non-finite position",
+                "gripper_commands: dropping gripper {} message with non-finite opening",
                 msg.gripper_id
             );
             continue;
         }
         latest[idx].send_replace(Some(GripperCommand {
-            position_m: msg.opening,
+            opening: msg.opening,
         }));
     }
 }
@@ -227,12 +225,11 @@ pub async fn run_joint_state_listener(
 /// side (a pairing delivers only its one peer's messages), so there is no id
 /// demux, and the backbone's collision model reads finger positions only from its
 /// exclusive command-loop peers: a stray broadcast producer cannot spoof the
-/// modeled fingers. A non-finite width is dropped so the model never places the
-/// fingers on a bad reading; the parsed fraction is clamped into the jaw travel.
+/// modeled fingers. A non-finite opening is dropped so the model never places
+/// the fingers on a bad reading; the fraction is clamped into `[0, 1]`.
 pub async fn run_gripper_state_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<GripperOpening>>; 2],
-    jaw_open_m: f64,
 ) {
     let (left, right) = tokio::join!(
         left_gripper_link::gripper_states::subscribe(&runner),
@@ -248,17 +245,16 @@ pub async fn run_gripper_state_listener(
             );
         }
     };
-    let parse = |side: Side, position_m: f64| -> Option<GripperOpening> {
-        let fraction = position_m / jaw_open_m;
-        if !fraction.is_finite() {
+    let parse = |side: Side, opening: f64| -> Option<GripperOpening> {
+        if !opening.is_finite() {
             warn!(
-                "gripper_states: dropping {} message with non-finite opening (width {position_m})",
+                "gripper_states: dropping {} message with non-finite opening",
                 side.label()
             );
             return None;
         }
         Some(GripperOpening {
-            fraction: fraction.clamp(0.0, 1.0),
+            fraction: opening.clamp(0.0, 1.0),
         })
     };
     loop {
@@ -269,8 +265,8 @@ pub async fn run_gripper_state_listener(
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.opening))),
         };
         match received {
-            Ok(Some(position_m)) => {
-                if let Some(opening) = parse(side, position_m) {
+            Ok(Some(wire_opening)) => {
+                if let Some(opening) = parse(side, wire_opening) {
                     latest[side.index()].send_replace(Some(opening));
                 }
             }

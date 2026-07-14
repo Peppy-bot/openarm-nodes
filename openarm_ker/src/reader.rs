@@ -41,8 +41,8 @@ const RAW_LOG_INTERVAL: Duration = Duration::from_secs(1);
 pub struct KerSample {
     pub left_joints: [f64; ARM_DOF],
     pub right_joints: [f64; ARM_DOF],
-    pub left_opening_m: f64,
-    pub right_opening_m: f64,
+    pub left_opening: f64,
+    pub right_opening: f64,
     pub engaged: bool,
     pub received_at: Instant,
 }
@@ -55,10 +55,10 @@ impl KerSample {
         }
     }
 
-    pub fn opening_m(&self, side: Side) -> f64 {
+    pub fn opening(&self, side: Side) -> f64 {
         match side {
-            Side::Left => self.left_opening_m,
-            Side::Right => self.right_opening_m,
+            Side::Left => self.left_opening,
+            Side::Right => self.right_opening,
         }
     }
 }
@@ -318,8 +318,8 @@ fn map_sample(
     Ok(KerSample {
         left_joints: calibration.left.joint_radians(&frame.angles_deg)?,
         right_joints: calibration.right.joint_radians(&frame.angles_deg)?,
-        left_opening_m: calibration.left_trigger.opening_m(&frame.angles_deg)?,
-        right_opening_m: calibration.right_trigger.opening_m(&frame.angles_deg)?,
+        left_opening: calibration.left_trigger.opening(&frame.angles_deg)?,
+        right_opening: calibration.right_trigger.opening(&frame.angles_deg)?,
         engaged,
         received_at: Instant::now(),
     })

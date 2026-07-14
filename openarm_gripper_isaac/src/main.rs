@@ -4,7 +4,6 @@ mod passthrough;
 mod state_stream;
 mod stream;
 
-use openarm_description::HardwareVersion;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
 use tracing::info;
@@ -19,13 +18,6 @@ fn main() -> Result<()> {
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         let gripper_id =
             GripperId::new(params.gripper_id).expect("gripper_id must be 0 (left) or 1 (right)");
-        // The hardware generation sets the jaw's full-open width; everything on
-        // the wire stays in aperture meters (the sim maps them onto its fingers).
-        let version: HardwareVersion = params
-            .hardware_version
-            .parse()
-            .unwrap_or_else(|e| panic!("hardware_version: {e}"));
-        let open_m = version.jaw_open_m();
         let token = node_runner.cancellation_token().clone();
         info!(
             "starting openarm_gripper_isaac instance={} gripper_id={}",
@@ -72,7 +64,6 @@ fn main() -> Result<()> {
         tokio::spawn(follow::run(
             passthrough_pub,
             gripper_id.as_u8(),
-            open_m,
             cmd_rx,
             control,
             token.clone(),

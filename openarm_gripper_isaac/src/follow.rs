@@ -1,7 +1,7 @@
-// Ambient following of a streamed gripper opening: publish the latest opening
-// to the sim; until the first command arrives, hold by publishing nothing so
-// the sim keeps its last setpoint. The opening is published directly; the sim
-// splits it across the fingers and its servo eases to it.
+// Ambient following of a streamed gripper opening fraction: publish the latest
+// opening to the sim; until the first command arrives, hold by publishing
+// nothing so the sim keeps its last setpoint. The opening is published
+// directly; the sim splits it across the fingers and its servo eases to it.
 
 use peppylib::TopicPublisher;
 use peppylib::runtime::CancellationToken;
@@ -16,7 +16,6 @@ use crate::stream::GripperCommand;
 pub async fn run(
     passthrough_pub: TopicPublisher,
     gripper_id: u8,
-    open_m: f64,
     cmd: watch::Receiver<Option<GripperCommand>>,
     params: ControlParams,
     token: CancellationToken,
@@ -33,13 +32,13 @@ pub async fn run(
 
         // Follow the latest command; until one arrives, hold (publish nothing,
         // the sim keeps the last setpoint).
-        let position = cmd.borrow().as_ref().map(|c| c.position);
-        let Some(position) = position else {
+        let opening = cmd.borrow().as_ref().map(|c| c.opening);
+        let Some(opening) = opening else {
             continue;
         };
         // Clamp defensively (a producer could stream out of range); the sim
-        // maps the aperture onto its finger joints.
-        let opening = position.clamp(0.0, open_m);
+        // maps the fraction onto each finger joint's own travel.
+        let opening = opening.clamp(0.0, 1.0);
 
         match passthrough::publish(&passthrough_pub, gripper_id, opening).await {
             Ok(()) => failing = false,
