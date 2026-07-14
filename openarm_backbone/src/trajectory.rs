@@ -451,7 +451,6 @@ mod tests {
                     );
                     return q;
                 }
-                crate::servo::ServoStep::Stalled => panic!("servo stalled short of the goal"),
             }
         }
         panic!("servo did not converge within the ceiling");

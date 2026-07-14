@@ -10,9 +10,11 @@
 //! instead of a blind joint-space swing.
 //!
 //! The plan rolls the identical law out offline (closed-form steps, well under a
-//! millisecond each) before accepting the goal, so feasibility and duration are
-//! known up front and a goal the servo cannot reach is rejected rather than
-//! started.
+//! millisecond each) before accepting the goal: a goal that converges within
+//! [`MAX_SERVO_S`] is accepted with that duration, one that does not is rejected
+//! rather than started. That offline proof is the only reachability check the
+//! servo needs, so the runtime just runs the law and trusts the plan, with
+//! [`MAX_SERVO_S`] as its lone backstop.
 
 use std::time::Duration;
 
@@ -36,32 +38,20 @@ const LEASH_M: f64 = 0.05;
 /// the streaming jog's convergence thresholds.
 const POS_CONVERGED_M: f64 = 5e-4;
 const ROT_CONVERGED_RAD: f64 = 2e-3;
-/// Stall detection: over each window, the reference must advance or the goal
-/// error (position or orientation) must shrink by the minimum amounts below, or
-/// the servo is going nowhere (an unreachable pose, or a wall the damping
-/// cannot carry it past).
-const STALL_WINDOW: Duration = Duration::from_secs(2);
-const MIN_REF_ADVANCE: f64 = 5e-3;
-const MIN_ERR_SHRINK_M: f64 = 1e-3;
-const MIN_ROT_SHRINK_RAD: f64 = 0.02;
-/// Hard ceiling on a servo move; a rollout still running past this is stalled
-/// in all but name.
+/// Hard ceiling on a servo move. The plan-time rollout runs at most this long; a
+/// goal that has not converged by then is taken as unreachable and rejected, and
+/// the runtime aborts a move still going past it (the rare case where the
+/// governor holds the arm off its path indefinitely).
 pub const MAX_SERVO_S: f64 = 30.0;
 
-/// One servo move's mutable state: where the reference is on the line and the
-/// last stall-window checkpoint. The joint state lives with the caller (the
-/// planner's commanded setpoint), which each tick's step advances.
+/// One servo move's mutable state: where the reference is on the line. The joint
+/// state lives with the caller (the planner's commanded setpoint), which each
+/// tick's step advances.
 pub struct ServoState {
     start: Isometry3<f64>,
     end: Isometry3<f64>,
     /// Reference progress along the line, 0..=1.
     reference_s: f64,
-    /// Stall checkpoint: reference progress and the goal position / orientation
-    /// errors at the window start, and the time budget left in the window.
-    window_ref_s: f64,
-    window_err_m: f64,
-    window_err_rad: f64,
-    window_left: Duration,
 }
 
 /// One tick's outcome.
@@ -70,13 +60,11 @@ pub enum ServoStep {
     Stepped(JointVec),
     /// Reached the goal pose within tolerance.
     Converged(JointVec),
-    /// No progress over a full stall window: the goal is not reachable this way.
-    Stalled,
 }
 
 impl ServoState {
-    /// Distance (m) from `q`'s end-effector to the goal position, for stall and
-    /// timeout reporting.
+    /// Distance (m) from `q`'s end-effector to the goal position, for timeout
+    /// reporting.
     pub fn position_err_m(&self, model: &mut Arm, q: &JointVec) -> f64 {
         let ee_base = model.at(q).ee_pose();
         let ee = model.world_pose(&ee_base);
@@ -88,16 +76,12 @@ impl ServoState {
             start,
             end,
             reference_s: 0.0,
-            window_ref_s: 0.0,
-            window_err_m: (end.translation.vector - start.translation.vector).norm(),
-            window_err_rad: start.rotation.angle_to(&end.rotation),
-            window_left: STALL_WINDOW,
         }
     }
 
     /// Advance one tick of `dt`: walk the reference (leashed to the arm), take
-    /// one damped resolved-rate step of the joints toward it, and report
-    /// convergence or a stall.
+    /// one damped resolved-rate step of the joints toward it, and report whether
+    /// the goal pose is reached.
     pub fn step(
         &mut self,
         model: &mut Arm,
@@ -155,32 +139,16 @@ impl ServoState {
             dt_s,
             DLS_LAMBDA,
         );
-
-        // Stall bookkeeping: across each window the reference must move or a
-        // goal error (position or orientation, since a move can end with pure
-        // rotation left) must shrink; otherwise the law is grinding in place.
-        self.window_left = self.window_left.saturating_sub(dt);
-        if self.window_left.is_zero() {
-            let advanced = self.reference_s - self.window_ref_s >= MIN_REF_ADVANCE;
-            let pos_shrunk = self.window_err_m - goal_pos_err >= MIN_ERR_SHRINK_M;
-            let rot_shrunk = self.window_err_rad - goal_rot_err >= MIN_ROT_SHRINK_RAD;
-            if !advanced && !pos_shrunk && !rot_shrunk {
-                return ServoStep::Stalled;
-            }
-            self.window_ref_s = self.reference_s;
-            self.window_err_m = goal_pos_err;
-            self.window_err_rad = goal_rot_err;
-            self.window_left = STALL_WINDOW;
-        }
         ServoStep::Stepped(next)
     }
 }
 
 /// Roll the servo law out offline at the control period per step: the plan-time
 /// proof that the law reaches the pose, returning how long it took, or `None`
-/// when it stalls (or runs past [`MAX_SERVO_S`]). Deterministic and identical to
-/// the runtime law, so an accepted goal executes the motion that was validated;
-/// a few thousand closed-form steps cost milliseconds.
+/// when it has not converged within [`MAX_SERVO_S`] (unreachable this way).
+/// Deterministic and identical to the runtime law, so an accepted goal executes
+/// the motion that was validated; a few thousand closed-form steps cost
+/// milliseconds.
 pub fn rollout(
     model: &mut Arm,
     start: &Isometry3<f64>,
@@ -202,7 +170,6 @@ pub fn rollout(
         ) {
             ServoStep::Stepped(next) => q = next,
             ServoStep::Converged(_) => return Some(k as f64 * dt.as_secs_f64()),
-            ServoStep::Stalled => return None,
         }
     }
     None

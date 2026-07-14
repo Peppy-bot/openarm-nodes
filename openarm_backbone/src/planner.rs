@@ -418,10 +418,12 @@ impl Planner {
                 match step {
                     ServoStep::Stepped(q) if !timed_out => (q, false),
                     ServoStep::Converged(q) => (q, true),
-                    ServoStep::Stepped(_) | ServoStep::Stalled => {
+                    ServoStep::Stepped(_) => {
                         let short_m = servo.position_err_m(&mut self.model, &m.prev_q_des);
-                        let message =
-                            format!("servo stopped {:.0} mm short of the goal", short_m * 1000.0);
+                        let message = format!(
+                            "servo did not converge within {MAX_SERVO_S:.0}s, {:.0} mm short of the goal",
+                            short_m * 1000.0
+                        );
                         self.finish_cartesian(&m.ctx, measured_q, false, &message, elapsed, false)
                             .await;
                         return Advance {
