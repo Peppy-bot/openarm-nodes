@@ -26,11 +26,12 @@
 
 use std::time::Duration;
 
+use control_core::filters::ButterworthFilter;
 use srs_model::Arm;
 use srs_model::nalgebra::{Isometry3, Rotation3, Vector3};
 
-use crate::JointVec;
 use crate::trajectory::{PlanLimits, interpolate_pose};
+use crate::{ARM_DOF, JointVec};
 
 /// Damping for the damped-least-squares resolved-rate step (Chiaverini/Nakamura):
 /// heavy enough to stay bounded through singular postures, light enough not to
@@ -56,14 +57,27 @@ const ROT_CONVERGED_RAD: f64 = 1e-2;
 /// governor holds the arm off its path indefinitely).
 pub const MAX_SERVO_S: f64 = 30.0;
 
-/// One servo move's mutable state: where the reference is on the line. The joint
-/// state lives with the caller (the planner's commanded setpoint), which each
-/// tick's step advances.
+/// Cutoff (Hz) for the per-joint Butterworth smoothing of the servo's joint command,
+/// so a reconfiguration through a singularity ramps rather than stepping - bounded
+/// jerk on the real arm. Only the servo needs it; the line and joint tiers are
+/// already quintic-smooth. MoveIt Servo's first-order default (`low_pass_filter_coeff`
+/// = 1.5) is a -3 dB cutoff of `atan(1/1.5) / (pi * Ts)`; at the 100 Hz control rate
+/// that is ~18.7 Hz, applied here to the steeper second-order filter so it smooths at
+/// least as much.
+const SERVO_SMOOTHING_CUTOFF_HZ: f64 = 18.7;
+
+/// One servo move's mutable state: where the reference is on the line, and the
+/// per-joint output smoothing. The joint state lives with the caller (the planner's
+/// commanded setpoint), which each tick's step advances.
 pub struct ServoState {
     start: Isometry3<f64>,
     end: Isometry3<f64>,
     /// Reference progress along the line, 0..=1.
     reference_s: f64,
+    /// Butterworth smoother per joint, bounding the jerk of the command. Run in both
+    /// the runtime step and the plan-time rollout, so the validated duration already
+    /// includes the (small) filter lag and the Q4 timeout stays honest.
+    smoothing: [ButterworthFilter; ARM_DOF],
 }
 
 /// One tick's outcome.
@@ -83,11 +97,16 @@ impl ServoState {
         (self.end.translation.vector - ee.translation.vector).norm()
     }
 
-    pub fn new(start: Isometry3<f64>, end: Isometry3<f64>) -> Self {
+    pub fn new(start: Isometry3<f64>, end: Isometry3<f64>, control_period: Duration) -> Self {
+        let ts = control_period.as_secs_f64();
         Self {
             start,
             end,
             reference_s: 0.0,
+            smoothing: std::array::from_fn(|_| {
+                ButterworthFilter::from_cutoff(SERVO_SMOOTHING_CUTOFF_HZ, ts)
+                    .expect("servo smoothing cutoff is valid for the control period")
+            }),
         }
     }
 
@@ -151,7 +170,11 @@ impl ServoState {
             dt_s,
             DLS_LAMBDA,
         );
-        ServoStep::Stepped(next)
+        // Smooth each joint so the command's jerk is bounded through the
+        // reconfiguration; the filtered value is both commanded and fed back as the
+        // next tick's seed.
+        let smoothed = std::array::from_fn(|i| self.smoothing[i].filter(next[i]));
+        ServoStep::Stepped(smoothed)
     }
 }
 
@@ -168,7 +191,7 @@ pub fn rollout(
     seed: JointVec,
     limits: &PlanLimits,
 ) -> Option<f64> {
-    let mut state = ServoState::new(*start, *end);
+    let mut state = ServoState::new(*start, *end, limits.control_period);
     let mut q = seed;
     let dt = limits.control_period;
     let steps = (MAX_SERVO_S / dt.as_secs_f64()).ceil() as usize;

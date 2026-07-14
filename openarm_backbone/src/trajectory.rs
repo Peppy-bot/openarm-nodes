@@ -423,7 +423,7 @@ mod tests {
         end: &Isometry3<f64>,
         seed: JointVec,
     ) -> JointVec {
-        let mut state = crate::servo::ServoState::new(*start, *end);
+        let mut state = crate::servo::ServoState::new(*start, *end, TEST_DT);
         let mut q = seed;
         let steps = (crate::servo::MAX_SERVO_S / TEST_DT.as_secs_f64()).ceil() as usize;
         for _ in 0..steps {

@@ -127,7 +127,9 @@ enum MovePath {
         steer_elbow: bool,
     },
     Servo {
-        servo: ServoState,
+        // Boxed: ServoState carries a per-joint filter bank, so inlining it would
+        // bloat every Mode/MovePath variant. One heap alloc per servo move.
+        servo: Box<ServoState>,
         started: Instant,
         prev_sample_at: Instant,
         // The plan-time rollout duration. The runtime aborts once the move runs
@@ -572,7 +574,11 @@ impl Planner {
                             self.side.label()
                         );
                         MovePath::Servo {
-                            servo: ServoState::new(start_world, target),
+                            servo: Box::new(ServoState::new(
+                                start_world,
+                                target,
+                                self.cfg.cycle_period,
+                            )),
                             started: now,
                             prev_sample_at: now,
                             budget_s: duration_s,
