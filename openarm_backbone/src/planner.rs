@@ -412,9 +412,9 @@ impl Planner {
             }
             // The guarded servo: one damped resolved-rate step toward the leashed
             // line reference per tick, the law the plan's rollout validated. Its
-            // steps are velocity-clamped by construction; the stall guard and the
-            // hard ceiling terminate a move the live geometry stops cooperating
-            // with (the plan proved the nominal path, not every disturbance).
+            // steps are velocity-clamped by construction; the hard ceiling
+            // terminates a move the live geometry stops cooperating with (the plan
+            // proved the nominal path, not every disturbance).
             MovePath::Servo {
                 servo,
                 prev_sample_at,
@@ -428,9 +428,14 @@ impl Planner {
                     .duration_since(*prev_sample_at)
                     .clamp(self.cfg.cycle_period / 2, self.cfg.cycle_period * 4);
                 *prev_sample_at = now;
+                // Feed the servo the governed setpoint, not the pre-governor target:
+                // if the governor holds the arm, the loop must advance from where the
+                // arm actually is, or it would run ahead and report convergence while
+                // the arm sits short of the goal.
+                let governed_q = self.setpoint;
                 let step = servo.step(
                     &mut self.model,
-                    &m.prev_q_des,
+                    &governed_q,
                     &self.cfg.max_joint_velocity_rad_s,
                     self.cfg.max_ee_velocity_m_s,
                     dt,
@@ -440,7 +445,7 @@ impl Planner {
                     ServoStep::Stepped(q) if !timed_out => (q, false),
                     ServoStep::Converged(q) => (q, true),
                     ServoStep::Stepped(_) => {
-                        let short_m = servo.position_err_m(&mut self.model, &m.prev_q_des);
+                        let short_m = servo.position_err_m(&mut self.model, &governed_q);
                         let message = format!(
                             "servo overran {SERVO_TIMEOUT_FACTOR:.0}x its {:.1}s rollout, {:.0} mm short of the goal",
                             budget_s,
