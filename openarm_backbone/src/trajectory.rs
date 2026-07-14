@@ -522,6 +522,43 @@ mod tests {
         assert!(!steer_elbow, "an easy move must not spend the elbow budget");
     }
 
+    // The steered elbow spends at most `ARM_ANGLE_STEP_PER_BLEND_RAD *
+    // CARTESIAN_PLAN_DS` radians of arm angle per plan sample. That budget must
+    // stay well inside the branch-jump guard `MAX_LINE_STEP_RAD`: if one elbow
+    // step could induce a joint move near the guard, steering would trip the
+    // very discontinuity check meant to catch real branch jumps. This pins the
+    // worst-case (full-budget, either direction) induced joint step comfortably
+    // under the guard from a well-conditioned pose, the justification for 2.0.
+    #[test]
+    fn elbow_budget_step_stays_under_the_branch_guard() {
+        let mut model = v2_right_arm();
+        let base = {
+            let ee = model.at(&READY).ee_pose();
+            model.base_pose(&model.world_pose(&ee))
+        };
+        let anchor = model
+            .solve_ik(&base, ArmAnglePolicy::FromSeed, &READY)
+            .expect("ready pose is reachable");
+        let budget = ARM_ANGLE_STEP_PER_BLEND_RAD * CARTESIAN_PLAN_DS;
+        for sign in [-1.0, 1.0] {
+            let stepped = model
+                .solve_ik(
+                    &base,
+                    ArmAnglePolicy::Fixed(anchor.arm_angle + sign * budget),
+                    &anchor.q,
+                )
+                .expect("a full-budget elbow step from a well-conditioned pose is feasible");
+            let induced = (0..ARM_DOF)
+                .map(|i| (stepped.q[i] - anchor.q[i]).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                induced < 0.5 * MAX_LINE_STEP_RAD,
+                "one elbow-budget step induced {induced:.4} rad, not comfortably under the \
+                 {MAX_LINE_STEP_RAD} branch guard"
+            );
+        }
+    }
+
     // A move that ends as pure rotation (position converges early, orientation
     // keeps slewing) must not trip the stall guard: rotational progress counts
     // as progress. Exercises the law directly with a large in-place
