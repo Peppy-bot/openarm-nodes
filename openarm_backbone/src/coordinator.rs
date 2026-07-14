@@ -9,7 +9,7 @@
 //! actually allowed to go.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
@@ -36,9 +36,15 @@ const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 /// stream, the commander's gripper opening command stream, the measured arm state,
 /// the measured gripper opening, the accepted-goal queues, and the single-flight
 /// busy flags (one for arm moves, one for gripper moves).
+///
+/// The two command streams are held as their `watch::Sender`, not a receiver: the
+/// coordinator both reads the latest (`borrow`) and clears it (`send_replace`)
+/// while a move runs on that side, so a setpoint still in flight when the move was
+/// fired cannot re-target the arm (or snap the jaws) when the move ends. The
+/// stream listener holds a clone of the same sender and fills it.
 pub struct ArmChannels {
-    pub command: watch::Receiver<Option<JointCommand>>,
-    pub gripper_command: watch::Receiver<Option<GripperCommand>>,
+    pub command: watch::Sender<Option<JointCommand>>,
+    pub gripper_command: watch::Sender<Option<GripperCommand>>,
     pub measured: watch::Receiver<Option<MeasuredState>>,
     pub gripper: watch::Receiver<Option<GripperOpening>>,
     pub goals: mpsc::Receiver<Goal>,
@@ -180,6 +186,23 @@ pub async fn run(
     let mut tick: u64 = 0;
     let mut pacer = Pacer::new(cycle_period).expect("control_rate_hz is asserted > 0 at startup");
     loop {
+        // A move in progress consumes its side's streamed command: while the busy
+        // flag is set, clear the command watch every tick so a setpoint still in
+        // flight when the move was fired (the commander streams at the control
+        // rate, so one is almost always queued) is wiped instead of surviving in
+        // the watch and re-targeting the arm (or the jaws) when the move ends and
+        // Follow resumes. Streaming and discrete moves are mutually exclusive per
+        // side (firing a move disables that side's streaming), so this never drops
+        // a command the operator still wants.
+        for ch in [&channels.left, &channels.right] {
+            if ch.busy.load(Ordering::Acquire) {
+                ch.command.send_replace(None);
+            }
+            if ch.gripper_busy.load(Ordering::Acquire) {
+                ch.gripper_command.send_replace(None);
+            }
+        }
+
         // Apply the latest commander controls (cheap no-ops when unchanged; invalid
         // band/speed values are rejected by the setters, keeping the last good).
         let cfg = *governor_config.borrow();
@@ -556,5 +579,36 @@ mod tests {
     #[test]
     fn follow_stays_idle_without_a_command() {
         assert_eq!(follow_gripper_target(&None, JAW), None);
+    }
+
+    #[test]
+    fn a_consumed_command_holds_the_move_endpoint_until_a_newer_one() {
+        // The gripper twin of the arm handoff: an accepted move_gripper clears
+        // the side's command watch (`send_replace(None)` in the handler), so the
+        // gripper follows nothing new and holds the move's endpoint until a
+        // command that arrives after the clear. Locks the contract; the handler
+        // performing the clear is covered by the live regression.
+        let (tx, rx) = watch::channel(None);
+
+        tx.send_replace(cmd(0.04));
+        assert_eq!(
+            follow_gripper_target(&rx.borrow(), JAW),
+            Some(0.5),
+            "a live streamed opening is followed"
+        );
+
+        tx.send_replace(None);
+        assert_eq!(
+            follow_gripper_target(&rx.borrow(), JAW),
+            None,
+            "a consumed command leaves the gripper holding the move endpoint"
+        );
+
+        tx.send_replace(cmd(0.02));
+        assert_eq!(
+            follow_gripper_target(&rx.borrow(), JAW),
+            Some(0.25),
+            "an opening after the move resumes following"
+        );
     }
 }
