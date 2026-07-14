@@ -330,10 +330,12 @@ pub enum JogStep {
     Blocked,
 }
 
-/// Position / angle slack within which a pose component counts as arrived. Half a
-/// millimetre and ~0.1 degrees: invisible on the panel, far above FK round-trip noise.
-const POS_CONVERGED_M: f64 = 5e-4;
-const ROT_CONVERGED_RAD: f64 = 2e-3;
+/// Position / angle slack within which a pose component counts as arrived: MoveIt
+/// Servo's `pose_tracking.linear_tolerance` / `angular_tolerance` defaults (1 mm,
+/// ~0.57 degrees), shared with the backbone servo's convergence. Invisible on the
+/// panel, far above FK round-trip noise.
+const POS_CONVERGED_M: f64 = 1e-3;
+const ROT_CONVERGED_RAD: f64 = 1e-2;
 const ARM_ANGLE_CONVERGED_RAD: f64 = 2e-3;
 /// A resolved-rate step that achieves less than this fraction of its demanded
 /// motion is pinned by joint limits: the envelope boundary in free space.

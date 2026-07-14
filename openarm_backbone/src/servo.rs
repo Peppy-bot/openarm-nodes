@@ -15,6 +15,14 @@
 //! rather than started. That offline proof is the only reachability check the
 //! servo needs, so the runtime just runs the law and trusts the plan, with
 //! [`MAX_SERVO_S`] as its lone backstop.
+//!
+//! Tuning constants are anchored to MoveIt Servo's defaults (`servo_parameters.yaml`)
+//! where the mechanism is the same: the reference slew rate and the convergence
+//! tolerances. The singularity strategy is deliberately the opposite of MoveIt's,
+//! which halts at a singularity (a plain pseudo-inverse with velocity scaled to zero
+//! by the Jacobian condition number); this servo damps (DLS) to pass THROUGH one,
+//! which is the reason the guarded servo exists, so it takes no condition-number
+//! thresholds and its damping has no MoveIt analogue.
 
 use std::time::Duration;
 
@@ -24,20 +32,24 @@ use srs_model::nalgebra::{Isometry3, Rotation3, Vector3};
 use crate::JointVec;
 use crate::trajectory::{PlanLimits, interpolate_pose};
 
-/// Damping for the resolved-rate steps: the value the operator's streaming jog
-/// has proven live, heavy enough to stay bounded through singular postures,
-/// light enough not to visibly lag the reference.
+/// Damping for the damped-least-squares resolved-rate step (Chiaverini/Nakamura):
+/// heavy enough to stay bounded through singular postures, light enough not to
+/// visibly lag the reference. No MoveIt analogue (MoveIt uses no damping); 0.05 is
+/// the streaming jog's field-proven value, shared with it via [`Arm::rate_step`].
 const DLS_LAMBDA: f64 = 0.05;
-/// Orientation slew rate of the reference (rad/s); position walks at the
-/// end-effector speed cap, which has no orientation analogue.
-const ROT_RATE_RAD_S: f64 = 1.5;
+/// Max angular velocity of the reference (rad/s): MoveIt Servo's `scale.rotational`
+/// default. Position walks at the operator's end-effector speed cap (the analogue
+/// of MoveIt's `scale.linear`), which the launcher sets.
+const ROT_RATE_RAD_S: f64 = 0.8;
 /// The reference stops walking while the arm is farther than this from it, so a
-/// wall crossing is ground through instead of the reference running away.
+/// wall crossing is ground through instead of the reference running away. Bespoke
+/// to the leashed-reference law; no MoveIt analogue.
 const LEASH_M: f64 = 0.05;
-/// A goal counts as reached within this position / orientation slack, matching
-/// the streaming jog's convergence thresholds.
-const POS_CONVERGED_M: f64 = 5e-4;
-const ROT_CONVERGED_RAD: f64 = 2e-3;
+/// A goal counts as reached within this position / orientation slack: MoveIt Servo's
+/// `pose_tracking.linear_tolerance` / `angular_tolerance` defaults, shared with the
+/// streaming jog's convergence thresholds.
+const POS_CONVERGED_M: f64 = 1e-3;
+const ROT_CONVERGED_RAD: f64 = 1e-2;
 /// Hard ceiling on a servo move. The plan-time rollout runs at most this long; a
 /// goal that has not converged by then is taken as unreachable and rejected, and
 /// the runtime aborts a move still going past it (the rare case where the
