@@ -147,12 +147,33 @@ pub const ARM_ANGLE_STEP_PER_BLEND_RAD: f64 = 2.0;
 /// which no continuous tracking can execute.
 const MAX_LINE_STEP_RAD: f64 = 0.35;
 
-/// Longest a line plan may run beyond the caller's requested duration before it
-/// reads as stuck rather than deliberate. A near-singular graze that slows a line
-/// to a few seconds is honest motion and beats a reconfiguration swing; one that
-/// balloons past this is effectively unexecutable as a line, so the planner falls
-/// through to its next tier.
-const MAX_UNREQUESTED_LINE_S: f64 = 10.0;
+/// A trackable straight line whose velocity-limited duration overruns the request
+/// by more than this factor is treated as too slow to keep straight: the servo,
+/// which reconfigures around the near-singular posture forcing the slowdown, is
+/// preferred. Relative rather than an absolute cap so the tolerance scales with
+/// the move - a long move gets proportional slack a short one does not, and a
+/// short move is not handed a fixed multi-second budget it never needed. Near a
+/// singularity the velocity-limited duration diverges, so the exact factor only
+/// arbitrates the mild-graze regime; 2x keeps a line that is merely slowed while
+/// sending a line that has to crawl to the servo.
+const LINE_OVERRUN_FACTOR: f64 = 2.0;
+
+/// Floor on the line-acceptance budget, covering a move requested with no
+/// meaningful duration (`requested ~= 0`, "as fast as possible"), where
+/// [`LINE_OVERRUN_FACTOR`] times the request degenerates to zero and would send
+/// every slowed line - even a well-conditioned one - to the servo. A line whose
+/// velocity-limited duration is within this many seconds is kept straight
+/// regardless of the request: a few seconds of near-singular graze is honest
+/// motion, not a stall.
+const MIN_LINE_BUDGET_S: f64 = 3.0;
+
+/// The longest velocity-limited duration a straight line may take and still be
+/// kept over the servo: [`LINE_OVERRUN_FACTOR`] times the request, floored at
+/// [`MIN_LINE_BUDGET_S`] so a near-zero request keeps a well-conditioned line
+/// instead of collapsing to zero and forcing every slowed line to the servo.
+fn line_duration_cap(requested_duration_secs: f64) -> f64 {
+    (requested_duration_secs * LINE_OVERRUN_FACTOR).max(MIN_LINE_BUDGET_S)
+}
 
 /// The motion limits a Cartesian plan sizes and validates against: the same
 /// values the runtime enforces, so acceptance and execution agree, plus the
@@ -233,10 +254,10 @@ fn walk_line(
 ///    it. The tier is accepted only if an offline rollout of the identical law
 ///    reaches the pose, so a servo move never starts blind.
 ///
-/// A line tier is accepted when it tracks continuously and its
-/// velocity-limited duration stays within the request (or
-/// [`MAX_UNREQUESTED_LINE_S`] past it). `None` when even the servo cannot reach
-/// the pose. Bounding `dq/ds` numerically along the walk turns "respect every
+/// A line tier is accepted when it tracks continuously and its velocity-limited
+/// duration stays within [`LINE_OVERRUN_FACTOR`] times the request (floored at
+/// [`MIN_LINE_BUDGET_S`] for a near-zero request). `None` when even the servo
+/// cannot reach the pose. Bounding `dq/ds` numerically along the walk turns "respect every
 /// joint velocity limit" into a minimum duration via
 /// [`velocity_limited_duration`], the same sizing the joint trajectory does
 /// analytically. Poses are in the world frame; IK runs in the arm base frame,
@@ -249,7 +270,7 @@ pub fn plan_cartesian(
     limits: &PlanLimits,
     requested_duration_secs: f64,
 ) -> Option<CartesianPlan> {
-    let duration_cap = requested_duration_secs.max(MAX_UNREQUESTED_LINE_S);
+    let duration_cap = line_duration_cap(requested_duration_secs);
     let tiers = [
         (ArmAnglePolicy::FromSeed, false),
         (
@@ -793,6 +814,25 @@ mod tests {
             floored >= 5.0 - EPS,
             "duration must floor at the requested duration"
         );
+    }
+
+    // The line-acceptance budget must scale with the request, not sit at a fixed
+    // absolute. A long move gets proportional overrun slack (an absolute cap gave
+    // a 20 s request zero tolerance, servoing the moment it slowed at all); a
+    // near-zero "as fast as possible" request falls back to the floor so a
+    // well-conditioned line is never forced to the servo by a zero budget.
+    #[test]
+    fn line_duration_cap_scales_with_request_and_floors_at_zero() {
+        // Near-zero request: the floor governs, so a quick line is still allowed.
+        assert!((line_duration_cap(0.0) - MIN_LINE_BUDGET_S).abs() < EPS);
+        // Small request below the crossover (MIN_LINE_BUDGET_S / LINE_OVERRUN_FACTOR):
+        // still the floor, never below it.
+        assert!((line_duration_cap(1.0) - MIN_LINE_BUDGET_S).abs() < EPS);
+        // Long request: proportional slack, strictly above the request (the old
+        // absolute cap collapsed to exactly the request here, i.e. zero tolerance).
+        let long = 20.0;
+        assert!((line_duration_cap(long) - long * LINE_OVERRUN_FACTOR).abs() < EPS);
+        assert!(line_duration_cap(long) > long);
     }
 
     #[test]
