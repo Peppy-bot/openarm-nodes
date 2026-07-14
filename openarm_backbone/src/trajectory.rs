@@ -937,4 +937,47 @@ mod tests {
         assert!(!traj.is_complete(traj.motion_start));
         assert!(traj.is_complete(traj.motion_start + traj.duration));
     }
+
+    // The steered-elbow tier must actually be reachable: from the Ready seed
+    // (EE at world (0.208, -0.212, 0.376), quat [x,y,z,w] =
+    // [-0.0865, -0.4576, 0.2891, 0.8364]), a constant-orientation reach up and
+    // across to this target has no continuously trackable held-elbow line (the
+    // seed elbow drives a mid-path branch jump), but steering the elbow toward
+    // higher manipulability keeps the line alive. Pins the middle tier: held
+    // fails, steered wins.
+    #[test]
+    fn steered_elbow_tier_engages_on_a_graze() {
+        let mut model = v2_right_arm();
+        let seed = READY;
+        let start = {
+            let ee = model.at(&seed).ee_pose();
+            model.world_pose(&ee)
+        };
+
+        let mut end = start;
+        end.translation.vector.x = 0.0325;
+        end.translation.vector.y = -0.3125;
+        end.translation.vector.z = 0.6900;
+
+        // Held elbow alone cannot track this straight line...
+        assert!(
+            walk_line(
+                &model,
+                &start,
+                &end,
+                seed,
+                v2_limits().max_joint_velocity_rad_s,
+                ArmAnglePolicy::FromSeed,
+            )
+            .is_none(),
+            "held-elbow line should not track this graze"
+        );
+        // ...so the planner selects the steered line (and it stays under the cap).
+        let Some(CartesianPlan::Line {
+            steer_elbow: true, ..
+        }) = plan_cartesian(&mut model, &start, &end, seed, &v2_limits(), 2.0)
+        else {
+            panic!("expected a steered-elbow line");
+        };
+    }
 }
