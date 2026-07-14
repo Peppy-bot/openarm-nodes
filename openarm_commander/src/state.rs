@@ -88,11 +88,11 @@ pub struct ArmTarget {
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
-    // What the operator is actively driving this side toward: a joint target (streamed
-    // straight, the backbone governs the ramp) or a Cartesian jog (stepped toward a world
-    // pose one capped increment per tick, held at the reach boundary). None when the
-    // side is idle. Arming either space clears the other, and it clears on
-    // enable/disable, since the two spaces must not fight.
+    // What the operator is actively driving this side toward: a joint target (the setpoint
+    // ramps toward it under a velocity/acceleration cap) or a Cartesian jog (stepped toward
+    // a world pose one capped increment per tick, held at the reach boundary). None when the
+    // side is idle. Arming either space clears the other, and it clears on enable/disable,
+    // since the two spaces must not fight.
     pub jog: Option<Jog>,
     // Whether a Cartesian jog is currently held at the reach boundary. Drives one-shot
     // status transitions (blocked <-> moving), so neither message latches or spams.
