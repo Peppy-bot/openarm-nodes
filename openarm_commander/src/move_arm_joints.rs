@@ -76,10 +76,11 @@ async fn run(
         duration_s,
     };
 
-    // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
-    // targeting moved from call-site args to launcher-pinned link_id bindings.
+    // The launcher-pinned, cardinality-one backbone slot provides the explicit
+    // target used for this goal and its feedback/cancel/result lifecycle.
     let downstream = match backbone_move_arm_joints::ActionHandle::fire_goal(
         &runner,
+        backbone_move_arm_joints::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,

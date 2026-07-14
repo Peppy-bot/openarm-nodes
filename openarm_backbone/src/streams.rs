@@ -149,7 +149,7 @@ pub async fn run_gripper_command_listener(
             );
             continue;
         };
-        if !msg.position.is_finite() {
+        if !msg.opening.is_finite() {
             warn!(
                 "gripper_commands: dropping gripper {} message with non-finite position",
                 msg.gripper_id
@@ -157,7 +157,7 @@ pub async fn run_gripper_command_listener(
             continue;
         }
         latest[idx].send_replace(Some(GripperCommand {
-            position_m: msg.position,
+            position_m: msg.opening,
         }));
     }
 }
@@ -265,8 +265,8 @@ pub async fn run_gripper_state_listener(
         // Whichever slot delivers next wins the select; the other stays queued in
         // its own subscription, so neither side can starve the other.
         let (side, received) = tokio::select! {
-            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| msg.position))),
-            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.position))),
+            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| msg.opening))),
+            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.opening))),
         };
         match received {
             Ok(Some(position_m)) => {

@@ -51,6 +51,7 @@ async fn run(
 
     let downstream = match backbone_move_gripper::ActionHandle::fire_goal(
         &runner,
+        backbone_move_gripper::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,
