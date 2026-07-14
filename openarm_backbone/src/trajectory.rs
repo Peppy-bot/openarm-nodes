@@ -189,8 +189,13 @@ pub enum CartesianPlan {
     /// The straight line is continuously trackable: track it over this duration,
     /// resolving the elbow the same way the plan did (`steer_elbow` on means the
     /// per-blend manipulability budget was needed to keep the line alive; off
-    /// means the elbow holds its seed angle, the quiet default).
-    Line { duration_s: f64, steer_elbow: bool },
+    /// means the elbow holds its seed angle, the quiet default). `start_q` is the
+    /// normalised start config the runtime must seed the line from (see [`LineWalk`]).
+    Line {
+        duration_s: f64,
+        steer_elbow: bool,
+        start_q: JointVec,
+    },
     /// No line exists: every continuous tracking demands a branch jump, is
     /// untrackably slow, or leaves reach mid-path. Reach the pose with the
     /// guarded servo law instead (the streaming jog's damped resolved-rate
@@ -204,6 +209,10 @@ pub enum CartesianPlan {
 struct LineWalk {
     /// Peak of `|dq_i/ds| / v_max_i` over the path: the binding joint/segment.
     peak_ratio: f64,
+    /// The normalised start config: the k = 0 FromSeed solution. The runtime line
+    /// must seed from this, not the raw setpoint, or plan and execution can follow
+    /// different IK branches at a redundancy or joint-limit boundary.
+    start_q: JointVec,
 }
 
 /// Walk the geometric path start->end at plan resolution, IK-solving each sample
@@ -214,39 +223,37 @@ fn walk_line(
     model: &Arm,
     start: &Isometry3<f64>,
     end: &Isometry3<f64>,
-    mut seed: JointVec,
+    seed: JointVec,
     max_joint_velocity_rad_s: &JointVec,
     policy: ArmAnglePolicy,
 ) -> Option<LineWalk> {
-    // Normalise the start (k = 0) onto the seed's own arm angle before steering: the
-    // raw seed may not equal its FromSeed re-solve (the IK picks the nearest feasible
-    // arm angle, which can differ at a redundancy or joint-limit boundary), and the
-    // runtime begins from that normalised config. Steering, and the guards, then
-    // accrue from k = 1 - steering the elbow at k = 0 (a zero-motion point) would
-    // validate a branch the runtime, starting at zero elbow budget, never follows.
-    let mut prev_q: Option<JointVec> = None;
+    // Normalise the start onto the seed's own arm angle before walking: the raw seed
+    // may not equal its FromSeed re-solve (the IK picks the nearest feasible arm
+    // angle, which can differ at a redundancy or joint-limit boundary). The runtime
+    // seeds the line from this same start_q, and steering (with its guards) accrues
+    // from the first real motion sample - steering the elbow at the start, a
+    // zero-motion point, would validate a branch the runtime never follows.
+    let start_q = model
+        .solve_ik(&model.base_pose(start), ArmAnglePolicy::FromSeed, &seed)?
+        .q;
+    let mut prev = start_q;
     let mut peak_ratio = 0.0_f64;
-    for k in 0..=CARTESIAN_PLAN_SAMPLES {
+    for k in 1..=CARTESIAN_PLAN_SAMPLES {
         let pose = interpolate_pose(start, end, k as f64 * CARTESIAN_PLAN_DS);
-        let step_policy = if k == 0 {
-            ArmAnglePolicy::FromSeed
-        } else {
-            policy
-        };
-        let sol = model.solve_ik(&model.base_pose(&pose), step_policy, &seed)?;
-        if let Some(prev) = prev_q {
-            for i in 0..ARM_DOF {
-                let step = (sol.q[i] - prev[i]).abs();
-                if step > MAX_LINE_STEP_RAD {
-                    return None;
-                }
-                peak_ratio = peak_ratio.max(step / CARTESIAN_PLAN_DS / max_joint_velocity_rad_s[i]);
+        let sol = model.solve_ik(&model.base_pose(&pose), policy, &prev)?;
+        for i in 0..ARM_DOF {
+            let step = (sol.q[i] - prev[i]).abs();
+            if step > MAX_LINE_STEP_RAD {
+                return None;
             }
+            peak_ratio = peak_ratio.max(step / CARTESIAN_PLAN_DS / max_joint_velocity_rad_s[i]);
         }
-        prev_q = Some(sol.q);
-        seed = sol.q;
+        prev = sol.q;
     }
-    Some(LineWalk { peak_ratio })
+    Some(LineWalk {
+        peak_ratio,
+        start_q,
+    })
 }
 
 /// Plan a Cartesian move, preferring the quietest execution that works:
@@ -313,6 +320,7 @@ pub fn plan_cartesian(
             return Some(CartesianPlan::Line {
                 duration_s,
                 steer_elbow,
+                start_q: walk.start_q,
             });
         }
     }
@@ -548,6 +556,7 @@ mod tests {
         let CartesianPlan::Line {
             duration_s,
             steer_elbow,
+            ..
         } = plan
         else {
             panic!("a trackable line must plan as a line");
@@ -657,6 +666,7 @@ mod tests {
         let CartesianPlan::Line {
             duration_s,
             steer_elbow,
+            ..
         } = plan
         else {
             panic!("an ordinary nudge must stay a line, not servo");
@@ -860,6 +870,42 @@ mod tests {
         assert!(
             duration_s >= QUINTIC_PEAK_VELOCITY * line_len / cap - EPS,
             "duration {duration_s:.3}s must respect the EE cap floor"
+        );
+    }
+
+    // The plan must carry the normalized start config (the FromSeed re-solve of the
+    // seed at the start pose) so the runtime seeds the line from the same branch the
+    // plan validated. This seed does not round-trip through FromSeed, so start_q
+    // differs from the raw seed - exactly the case the propagation guards against.
+    #[test]
+    fn line_plan_carries_the_normalized_start() {
+        let mut arm = left_arm();
+        let seed = [0.0, 0.3, 0.0, 0.8, 0.0, 0.5, 0.0];
+        let ee = arm.at(&seed).ee_pose();
+        let start = arm.world_pose(&ee);
+        let mut goal = start;
+        goal.translation.vector.z += 0.05;
+
+        let Some(CartesianPlan::Line { start_q, .. }) =
+            plan_cartesian(&mut arm, &start, &goal, seed, &v1_limits(), 0.0)
+        else {
+            panic!("a small lift should plan as a line");
+        };
+        let normalized = arm
+            .solve_ik(&arm.base_pose(&start), ArmAnglePolicy::FromSeed, &seed)
+            .expect("start reachable")
+            .q;
+        for i in 0..ARM_DOF {
+            assert!(
+                (start_q[i] - normalized[i]).abs() < 1e-9,
+                "start_q must be the FromSeed normalization of the seed"
+            );
+        }
+        // And for this seed the normalization actually moves the config, which is why
+        // seeding the runtime from it (rather than the raw setpoint) matters.
+        assert!(
+            (0..ARM_DOF).any(|i| (start_q[i] - seed[i]).abs() > 1e-3),
+            "this seed does not round-trip; start_q must differ from it"
         );
     }
 

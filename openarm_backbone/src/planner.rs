@@ -552,6 +552,7 @@ impl Planner {
                     CartesianPlan::Line {
                         duration_s,
                         steer_elbow,
+                        start_q,
                     } => {
                         info!(
                             "{}: move_arm start{}, duration={duration_s:.3}s",
@@ -563,8 +564,13 @@ impl Planner {
                             }
                         );
                         MovePath::Line {
+                            // Seed from the plan's normalised start, not self.setpoint:
+                            // the plan validated the walk from here, so execution must
+                            // begin on the same IK branch (they can differ at a
+                            // redundancy/limit boundary). The chase still moves the arm
+                            // from its actual setpoint, velocity-limited.
                             traj: CartesianTrajectory::new(start_world, target, duration_s),
-                            seed: self.setpoint,
+                            seed: start_q,
                             prev_sample_at: now,
                             prev_blend: 0.0,
                             steer_elbow,
