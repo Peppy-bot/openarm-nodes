@@ -64,15 +64,16 @@ impl GovState {
 /// tuning on hardware.
 const APPROACH_VELOCITY_AT_SAFE_M_S: f64 = 0.15;
 
-/// Largest rate (m/s) the coordinator's chase drives a gripper opening: the
-/// opening analog of the arm joint speed cap, bounding each tick's opening step
-/// before it reaches the governor (whose floor scan asserts and sizes probes
-/// against the same rate via
+/// Largest rate (opening fraction per second) the coordinator's chase drives a
+/// gripper opening: the opening analog of the arm joint speed cap, bounding each
+/// tick's opening step before it reaches the governor (whose floor scan asserts
+/// and sizes probes against the same rate via
 /// [`max_opening_rate_frac_s`](Governor::max_opening_rate_frac_s)). The gripper
-/// node and hardware own the real opening speed. `0.25 m/s` opens a ~0.07 m jaw
-/// in ~0.3 s. A module constant like the approach speed above; promote it to a
-/// parameter when tuning on hardware.
-const MAX_OPENING_RATE_M_S: f64 = 0.25;
+/// node and hardware own the real opening speed. Stated in opening fraction, the
+/// unit every opening DOF (wire and model alike) already uses: `3.0 /s` drives a
+/// full open or close in ~1/3 s. A module constant like the approach speed above;
+/// promote it to a parameter when tuning on hardware.
+const MAX_OPENING_RATE_FRAC_S: f64 = 3.0;
 
 /// Probe resolution of the floor scan on an opening DOF (fraction), the opening
 /// analog of `MAX_PROBE_ARC_RAD`: one probe per this much opening travel, ~0.7 mm
@@ -155,10 +156,6 @@ pub struct Governor {
     /// Largest single-joint speed (rad/s). The per-tick floor scan bounds its probe
     /// count to the velocity-limited step and asserts no step exceeds it.
     max_joint_velocity_rad_s: f64,
-    /// Full-open jaw travel (m); converts the physical opening-rate cap
-    /// ([`MAX_OPENING_RATE_M_S`]) into fraction space, where every opening DOF
-    /// (wire and model alike) lives.
-    jaw_open_m: f64,
     enabled: bool,
     guard: Guard,
     /// Whether the measured-state monitor is currently holding. Latched with
@@ -180,7 +177,6 @@ impl Governor {
         d_stop: f64,
         d_safe: f64,
         max_joint_velocity_rad_s: f64,
-        jaw_open_m: f64,
         enabled: bool,
     ) -> Result<Self, String> {
         if !valid_band(d_stop, d_safe) {
@@ -193,18 +189,12 @@ impl Governor {
                 "invalid max_joint_velocity_rad_s ({max_joint_velocity_rad_s}): must be finite and > 0"
             ));
         }
-        if !(jaw_open_m.is_finite() && jaw_open_m > 0.0) {
-            return Err(format!(
-                "invalid jaw_open_m ({jaw_open_m}): must be finite and > 0"
-            ));
-        }
         let model = build_collision_model(urdf, meshes_dir, left_base, right_base)?;
         Ok(Self {
             model,
             d_stop,
             d_safe,
             max_joint_velocity_rad_s,
-            jaw_open_m,
             enabled,
             guard: Guard::Clear,
             monitor_tripped: false,
@@ -599,7 +589,7 @@ impl Governor {
     /// candidate; the probe sizing and the velocity-limit assertion in
     /// [`clip_to_floor`](Self::clip_to_floor) are keyed to the same value.
     pub fn max_opening_rate_frac_s(&self) -> f64 {
-        MAX_OPENING_RATE_M_S / self.jaw_open_m
+        MAX_OPENING_RATE_FRAC_S
     }
 
     /// Largest per-tick step governed DOF `i` may take, from the chase's arm
@@ -901,7 +891,6 @@ mod tests {
             D_STOP,
             D_SAFE,
             MAX_JOINT_VELOCITY_RAD_S,
-            version.jaw_open_m(),
             enabled,
         )
         .expect("build governor from bundled description")
@@ -970,7 +959,6 @@ mod tests {
             D_STOP,
             D_SAFE,
             0.05,
-            openarm_description::HardwareVersion::V1.jaw_open_m(),
             true,
         )
         .expect("build governor from bundled description");
