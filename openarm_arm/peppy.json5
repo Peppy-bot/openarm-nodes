@@ -2,17 +2,29 @@
 // side, with a distinct `arm_id`. A follower of the bimanual backbone: it owns the
 // hardware control loop (gravity/Coriolis/friction feedforward from the
 // in-process srs_model, plus MIT control) and tracks the backbone's governed
-// setpoint, reporting measured state on the always-on `arm_states` stream. The
-// backbone (openarm_backbone) owns all trajectory generation, stream following, and
-// self-collision governing, so the arm carries no motion logic of its own.
+// setpoint. It reports measured state back to the backbone over the arm_link
+// pairing, and separately surfaces its measured state (joint_states) and the
+// setpoint it is tracking (joint_commands) on the generic contracts for any
+// observer such as a recorder. The backbone (openarm_backbone) owns all
+// trajectory generation, stream following, and self-collision governing, so the
+// arm carries no motion logic of its own.
 {
   peppy_schema: "node/v1",
   manifest: {
     name: "openarm_arm",
     tag: "v1",
     implements: [
-      // Measured state for the backbone (governor + trajectory anchor) and any monitor.
-      { name: "openarm_arm_states", tag: "v1", link_id: "states" },
+      // Measured joint state on the generic joint_states contract, for any
+      // observer (recorder, monitor). The backbone's control-loop state feed is
+      // the arm_link pairing, not this broadcast.
+      { name: "joint_states", tag: "v1", link_id: "states" },
+      // The setpoint this arm is currently tracking, on the generic
+      // joint_commands contract, so a recorder can capture the action aligned
+      // with the measured state above. The backbone is the origin (it streams
+      // this setpoint down the exclusive arm_link pairing, unobservable by a
+      // third party); the arm re-surfaces it per-arm so action lines up with
+      // this arm's state without any cross-producer ordering.
+      { name: "joint_commands", tag: "v1", link_id: "commands" },
       // Per-component readiness the real robot_initializer aggregates: ready once
       // motors are enabled and the control loop is serving.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
@@ -76,7 +88,8 @@
   interfaces: {
     topics: {
       emits: [
-        { link_id: "states", name: "arm_states" },
+        { link_id: "states", name: "joint_states" },
+        { link_id: "commands", name: "joint_commands" },
       ],
     },
     services: {

@@ -3,7 +3,8 @@
 //! hardware control loop (gravity/Coriolis/friction feedforward from the
 //! in-process srs_model, plus MIT control) and tracks the backbone's governed
 //! setpoint over the arm_link pairing, reporting measured state back on the
-//! same pairing and on the always-on broadcast `arm_states` stream. The
+//! same pairing and, for observers/recorders, on the generic joint_states
+//! (measured) and joint_commands (governed setpoint) contracts. The
 //! backbone (openarm_backbone) owns all trajectory generation, stream following, and
 //! self-collision governing, so this node carries no motion logic of its own; on
 //! shutdown it disables the motors and lets the arm go limp.
@@ -32,9 +33,9 @@ pub const ARM_DOF: usize = 7;
 pub type JointVec = [f64; ARM_DOF];
 
 /// `arm_id` values (0 = left, 1 = right). The chain base link and joint limits come
-/// from the embedded description keyed by [`Side`]; `arm_id` also tags the broadcast
-/// measured state (the command loop itself is scoped by the arm_link pairing, no id
-/// needed).
+/// from the embedded description keyed by [`Side`]. The observer joint_states /
+/// joint_commands streams carry no id (a consumer identifies this arm by its
+/// producer binding); the command loop is scoped by the arm_link pairing.
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
@@ -227,9 +228,9 @@ fn main() -> Result<()> {
         ));
         let publisher = tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
-            arm_id,
             Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
             measured_rx,
+            governed_rx.clone(),
         ));
         // Cancel the node the moment either stream task stops: a dead listener
         // or publisher would otherwise hold the arm silently while is_ready
