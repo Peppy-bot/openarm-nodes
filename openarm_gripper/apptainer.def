@@ -12,7 +12,7 @@ From: tuatini/peppy-rust-cargo-base
     apt-get install -y --no-install-recommends software-properties-common
     add-apt-repository -y ppa:openarm/main
     apt-get update -y
-    apt-get install -y --no-install-recommends libclang-dev libopenarm-can-dev
+    apt-get install -y --no-install-recommends libopenarm-can-dev
 
     cd /opt/openarm_gripper
     cargo build --release
