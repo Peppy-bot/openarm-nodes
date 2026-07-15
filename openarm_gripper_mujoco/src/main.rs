@@ -29,15 +29,23 @@ fn main() -> Result<()> {
             .await
             .expect("peppygen::clock::init");
 
-        // Relay the sim's measured opening (gripper_states) to the paired
-        // backbone. Supervised: if the consumer ever exits, whether a clean
-        // close on shutdown or an unexpected error, the state relay is dead, so
-        // cancel the node to restart it rather than leaving it healthy but inert.
+        // Stream listener -> follow loop: the listener keeps the latest streamed
+        // opening, the follow loop drives the sim toward it, and the state relay
+        // re-surfaces it as joint_commands. Created before the relay so the relay
+        // can read the tracked setpoint from the first tick.
+        let (cmd_tx, cmd_rx) = watch::channel(None);
+
+        // Relay the sim's measured opening to the paired backbone and to
+        // observers on the generic joint_states / joint_commands contracts.
+        // Supervised: if the consumer ever exits, whether a clean close on
+        // shutdown or an unexpected error, the state relay is dead, so cancel the
+        // node to restart it rather than leaving it healthy but inert.
         {
             let runner = node_runner.clone();
             let token = token.clone();
+            let tracked = cmd_rx.clone();
             tokio::spawn(async move {
-                state_stream::run(runner, gripper_id, token.clone()).await;
+                state_stream::run(runner, gripper_id, tracked, token.clone()).await;
                 token.cancel();
             });
         }
@@ -47,10 +55,6 @@ fn main() -> Result<()> {
             .await
             .expect("declare passthrough publisher");
         let control = ControlParams::from_params(&params);
-
-        // Stream listener -> follow loop: the listener keeps the latest streamed
-        // opening, the follow loop drives the sim toward it.
-        let (cmd_tx, cmd_rx) = watch::channel(None);
         // Supervised like the state stream: a dead command consumer leaves the
         // gripper unresponsive to streamed openings.
         {
