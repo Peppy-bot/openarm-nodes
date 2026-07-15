@@ -12,8 +12,11 @@
     tag: "v1",
     implements: [
       { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_ready" },
-      // Measured state for both arms / both grippers; consumers tell sides apart
-      // by arm_id / gripper_id.
+      // Sim-internal engine transport: the combined measured state for both arms
+      // / both grippers, id-discriminated. This is the one place an id is still
+      // load-bearing, because the engine is a single producer for both sides. The
+      // per-side followers consume it, demux by arm_id / gripper_id, and re-emit
+      // the generic joint_states / joint_commands contracts for external observers.
       { name: "openarm_arm_states", tag: "v1", link_id: "arm_states" },
       { name: "openarm_gripper_states", tag: "v1", link_id: "gripper_states" },
     ],
