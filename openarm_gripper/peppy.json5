@@ -7,8 +7,17 @@
     name: "openarm_gripper",
     tag: "v1",
     implements: [
-      // Always-on measured opening for teleop and monitoring.
-      { name: "openarm_gripper_states", tag: "v1", link_id: "states" },
+      // Measured opening on the generic joint_states contract as a 1-DOF joint
+      // (positions[0]), for any observer such as a recorder. The backbone's
+      // control-loop state feed is the gripper_link pairing, not this contract.
+      { name: "joint_states", tag: "v1", link_id: "states" },
+      // The opening setpoint this gripper is tracking, on the generic
+      // joint_commands contract, so a recorder can capture the action aligned
+      // with the measured opening above. The backbone is the origin (it streams
+      // this setpoint down the exclusive gripper_link pairing, unobservable by a
+      // third party); the gripper re-surfaces it per-gripper so action lines up
+      // with this gripper's state without any cross-producer ordering.
+      { name: "joint_commands", tag: "v1", link_id: "commands" },
       // Per-component readiness for the real robot_initializer.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
     ],
@@ -42,15 +51,17 @@
       control_rate_hz: "u32",
       // Per-cycle CAN read deadline (μs). Must fit the cycle budget (10 ms at 100 Hz).
       recv_timeout_us: { $type: "u32", $default: 1000 },
-      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
-      // consumers' needs vary too much for a default to be meaningful.
+      // Rate (Hz) of the always-on measured-opening stream (joint_states /
+      // joint_commands); consumers' needs vary too much for a default to be
+      // meaningful.
       state_rate_hz: "u32"
     }
   },
   interfaces: {
     topics: {
       emits: [
-        { link_id: "states", name: "gripper_states" },
+        { link_id: "states", name: "joint_states" },
+        { link_id: "commands", name: "joint_commands" },
       ],
     },
     services: {

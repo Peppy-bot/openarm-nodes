@@ -112,14 +112,22 @@ fn main() -> Result<()> {
 
         let gripper = Arc::new(Mutex::new(gripper));
 
-        // Always-on gripper_states publisher: reads the motor's cached state at
-        // state_rate_hz and emits the opening. It issues no CAN traffic of its
-        // own, so it never contends with the follow loop for the bus.
+        // Stream listener -> follow loop: the listener keeps the latest streamed
+        // opening addressed to this gripper, the follow loop drives the motor
+        // toward it, and the state publisher re-surfaces it as joint_commands.
+        // Created before the publisher so the publisher can read the tracked
+        // setpoint from the first tick.
+        let (cmd_tx, cmd_rx) = watch::channel(None);
+
+        // Measured-opening publisher: reads the motor's cached state at
+        // state_rate_hz and emits joint_states (measured) + joint_commands (the
+        // tracked setpoint). It issues no CAN traffic of its own, so it never
+        // contends with the follow loop for the bus.
         tokio::spawn(stream::run(
             node_runner.clone(),
-            gripper_id,
             params.state_rate_hz,
             gripper.clone(),
+            cmd_rx.clone(),
             node_runner.cancellation_token().clone(),
         ));
 
@@ -164,10 +172,6 @@ fn main() -> Result<()> {
             });
         }
 
-        // Stream listener -> follow loop: the listener keeps the latest streamed
-        // opening addressed to this gripper, the follow loop drives the motor
-        // toward it.
-        let (cmd_tx, cmd_rx) = watch::channel(None);
         // Supervised: if the command consumer ever exits, whether a clean close
         // on shutdown or an unexpected error, streamed openings are dead, so
         // cancel the node to restart it rather than leaving it healthy but inert.
