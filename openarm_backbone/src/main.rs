@@ -179,7 +179,6 @@ fn main() -> Result<()> {
                 .iter()
                 .copied()
                 .fold(0.0_f64, f64::max),
-            hardware_version.jaw_open_m(),
             params.collision_governor_enabled,
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));
