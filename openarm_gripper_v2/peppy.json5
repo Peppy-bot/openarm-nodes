@@ -8,8 +8,17 @@
     name: "openarm_gripper_v2",
     tag: "v1",
     implements: [
-      // Always-on measured opening for teleop and monitoring.
-      { name: "openarm_gripper_states", tag: "v1", link_id: "states" },
+      // Measured opening on the generic joint_states contract (positions[0]),
+      // with the sensed grip force as effort[0], for any observer such as a
+      // recorder. The backbone's control-loop state feed is the gripper_link
+      // pairing, not this contract.
+      { name: "joint_states", tag: "v1", link_id: "states" },
+      // The opening setpoint commanded to this gripper on the generic
+      // joint_commands contract, so a recorder captures the action aligned with
+      // the measured opening above. Per-gripper here (the backbone that computes
+      // it is one node driving both grippers and cannot emit a per-gripper
+      // stream); see stream.rs.
+      { name: "joint_commands", tag: "v1", link_id: "commands" },
       // Per-component readiness for the real robot_initializer.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
     ],
@@ -49,15 +58,17 @@
       // POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap the gripper
       // may apply. Default matches enactic's reference; raise for a firmer grip.
       force_limit_pu: { $type: "f64", $default: 0.15 },
-      // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
-      // consumers' needs vary too much for a default to be meaningful.
+      // Rate (Hz) of the always-on measured-opening streams (joint_states /
+      // joint_commands); consumers' needs vary too much for a default to be
+      // meaningful.
       state_rate_hz: "u32"
     }
   },
   interfaces: {
     topics: {
       emits: [
-        { link_id: "states", name: "gripper_states" },
+        { link_id: "states", name: "joint_states" },
+        { link_id: "commands", name: "joint_commands" },
       ],
     },
     services: {
