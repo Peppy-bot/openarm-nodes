@@ -257,6 +257,11 @@ const ARM_ANGLE_RATE_RAD_S: f64 = 1.2;
 /// singular postures, light enough not to visibly lag a jog step.
 const DLS_LAMBDA: f64 = 0.05;
 
+/// A joint jog is converged once every joint is within this of the target and nearly
+/// stopped; the jog then lands exactly on the target and retires.
+const JOINT_JOG_CONVERGED_RAD: f64 = 1e-4;
+const JOINT_JOG_STOP_RAD_S: f64 = 1e-3;
+
 /// Per-tick Cartesian step caps, derived from the actual tick period and the
 /// operator's live EE speed cap, so a different `command_rate_hz` or a retuned
 /// speed knob changes the step size, never the speed.
@@ -265,18 +270,24 @@ pub struct JogCaps {
     pub pos_step_m: f64,
     pub rot_step_rad: f64,
     pub arm_angle_step_rad: f64,
+    /// Joint-jog acceleration limit (rad/s^2): the physics is integrated against `dt_s`,
+    /// so this stays rate-valued. The whole jog is acceleration-limited (ramp up, brake to
+    /// rest), so no separate speed cap is needed.
+    pub joint_accel_rad_s2: f64,
     pub dt_s: f64,
 }
 
 impl JogCaps {
-    /// Caps for one tick of length `dt` seconds at `max_ee_velocity_m_s`. The
-    /// speed is the operator's governor knob, validated positive-finite at entry;
-    /// the clamp here only bounds a degenerate combination, it is not a tuning.
-    pub fn per_tick(dt_s: f64, max_ee_velocity_m_s: f64) -> Self {
+    /// Caps for one tick of length `dt` seconds at `max_ee_velocity_m_s`. The EE speed is
+    /// the operator's governor knob (validated positive-finite at entry); the joint-jog
+    /// acceleration is a node parameter, so a deployment can tune the jog feel without a
+    /// rebuild. The clamps here only bound a degenerate combination.
+    pub fn per_tick(dt_s: f64, max_ee_velocity_m_s: f64, joint_accel_rad_s2: f64) -> Self {
         Self {
             pos_step_m: (max_ee_velocity_m_s * dt_s).clamp(1e-5, 0.05),
             rot_step_rad: (JOG_ROT_RATE_RAD_S * dt_s).clamp(1e-4, 0.2),
             arm_angle_step_rad: (ARM_ANGLE_RATE_RAD_S * dt_s).clamp(1e-4, 0.2),
+            joint_accel_rad_s2,
             dt_s,
         }
     }
@@ -299,10 +310,11 @@ pub enum JogMode {
 /// arming either clears the other, since the spaces must not fight.
 #[derive(Clone, Copy, Debug)]
 pub enum Jog {
-    /// Joint sliders: stream these joints straight to the backbone, which governs the
-    /// ramp under its joint-velocity cap. Reconciles in one step, so the panel's
-    /// slider never lags the operator's drag (no node-side interpolation).
-    Joints([f64; ARM_DOF]),
+    /// Joint sliders: walk the streamed target toward the slider one acceleration-limited
+    /// step per tick (carrying `vel`, the per-joint jog velocity, across ticks), so the
+    /// arm ramps smoothly instead of snapping. `target` refreshes as the operator drags;
+    /// `vel` is preserved across those refreshes so a continuous drag keeps its momentum.
+    Joints { target: [f64; ARM_DOF], vel: [f64; ARM_DOF] },
     /// World-frame controls: step the joints one resolved-rate increment per tick
     /// toward the target, since the command wire carries only joints and a pose jump
     /// would teleport or branch-flip the arm.
@@ -328,6 +340,70 @@ pub enum JogStep {
     /// The next step is pinned by limits or the envelope boundary: hold this tick.
     /// The jog stays armed, so pulling the desired pose back into reach resumes it.
     Blocked,
+}
+
+/// One joint-jog tick's outcome (mirrors [`JogStep`]; joints have no reach boundary, so
+/// there is no `Blocked`).
+pub enum JointJogStep {
+    /// Every joint arrived and stopped; the setpoint lands exactly on the target and the
+    /// jog retires.
+    Converged([f64; ARM_DOF]),
+    /// Advanced one acceleration-limited step: the new joint setpoint to stream and the
+    /// carried per-joint velocity for the next tick.
+    Stepped {
+        joints: [f64; ARM_DOF],
+        vel: [f64; ARM_DOF],
+    },
+}
+
+/// Advance a joint jog one tick: walk each joint of `current` toward `target` under an
+/// acceleration limit (`caps.joint_accel_rad_s2`), carrying `vel` so the velocity stays
+/// continuous. The approach speed is set so the acceleration limit can brake to rest by
+/// the target, and the position is clamped there so it never overshoots; the carried
+/// velocity then bleeds to rest over the next few ticks under the same cap. Targets are
+/// pre-clamped to joint limits by the caller, so a joint jog never blocks.
+pub fn joint_jog_tick(
+    current: &[f64; ARM_DOF],
+    target: &[f64; ARM_DOF],
+    vel: &[f64; ARM_DOF],
+    caps: JogCaps,
+) -> JointJogStep {
+    let dt = caps.dt_s;
+    let a_max = caps.joint_accel_rad_s2;
+    let dv_max = a_max * dt;
+
+    let next: [(f64, f64); ARM_DOF] = std::array::from_fn(|i| {
+        let error = target[i] - current[i];
+        // Approach speed set so a_max can brake to rest by the target (no overshoot): the
+        // whole motion is acceleration-limited, ramping up then braking down.
+        let v_brake = (2.0 * a_max * error.abs()).sqrt();
+        let v_desired = error.signum() * v_brake;
+        // |v_next - vel| <= dv_max, so the acceleration bound holds on every tick,
+        // including the last: the velocity is never teleported to zero.
+        let v_next = vel[i] + (v_desired - vel[i]).clamp(-dv_max, dv_max);
+        let step = v_next * dt;
+        // Land on the target only when this step is directed at it and would reach or
+        // cross it (`step*error >= error^2`), clamping the position there so it never
+        // overshoots. A mid-drag reversal (velocity still opposing `error`) fails this
+        // test, so the joint decelerates and turns around instead of snapping backward.
+        let joint = if step * error >= error * error {
+            target[i]
+        } else {
+            current[i] + step
+        };
+        (joint, v_next)
+    });
+    let joints: [f64; ARM_DOF] = std::array::from_fn(|i| next[i].0);
+    let vel: [f64; ARM_DOF] = std::array::from_fn(|i| next[i].1);
+
+    let settled = (0..ARM_DOF).all(|i| {
+        (target[i] - joints[i]).abs() < JOINT_JOG_CONVERGED_RAD && vel[i].abs() < JOINT_JOG_STOP_RAD_S
+    });
+    if settled {
+        JointJogStep::Converged(*target)
+    } else {
+        JointJogStep::Stepped { joints, vel }
+    }
 }
 
 /// Position / angle slack within which a pose component counts as arrived: MoveIt
@@ -509,13 +585,16 @@ fn workspace_aabb(arm: &mut Arm) -> [[f64; 2]; 3] {
 mod tests {
     use super::*;
 
+    // Representative joint-jog acceleration for the tests (production value is a param).
+    const JOG_A: f64 = 10.0;
+
     fn models() -> ArmModels {
         ArmModels::from_version(HardwareVersion::V2)
     }
 
     // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
     fn test_caps() -> JogCaps {
-        JogCaps::per_tick(0.01, 0.5)
+        JogCaps::per_tick(0.01, 0.5, JOG_A)
     }
 
     fn cart(mode: JogMode, desired: Pose, arm_angle: f64) -> CartesianJog {
@@ -556,15 +635,115 @@ mod tests {
     #[test]
     fn caps_scale_with_rate_and_speed() {
         // Same speed at 100 Hz vs 500 Hz: a 5x smaller step, the identical velocity.
-        let hz100 = JogCaps::per_tick(0.01, 0.5);
-        let hz500 = JogCaps::per_tick(0.002, 0.5);
+        let hz100 = JogCaps::per_tick(0.01, 0.5, JOG_A);
+        let hz500 = JogCaps::per_tick(0.002, 0.5, JOG_A);
         assert!((hz100.pos_step_m - 0.005).abs() < 1e-12);
         assert!((hz500.pos_step_m - 0.001).abs() < 1e-12);
         assert!((hz100.pos_step_m / 0.01 - hz500.pos_step_m / 0.002).abs() < 1e-12);
         // Retuning the operator knob rescales the step 1:1.
-        assert!((JogCaps::per_tick(0.01, 0.25).pos_step_m - 0.0025).abs() < 1e-12);
+        assert!((JogCaps::per_tick(0.01, 0.25, JOG_A).pos_step_m - 0.0025).abs() < 1e-12);
         // The angular rate is the fixed jog constant, likewise per-tick.
         assert!((hz100.rot_step_rad - JOG_ROT_RATE_RAD_S * 0.01).abs() < 1e-12);
+        // The joint-jog acceleration is the fixed SI rate, independent of dt.
+        assert_eq!(hz100.joint_accel_rad_s2, JOG_A);
+        assert_eq!(hz500.joint_accel_rad_s2, JOG_A);
+    }
+
+    #[test]
+    fn joint_jog_tick_accelerates_from_rest_within_the_cap() {
+        let caps = JogCaps::per_tick(0.01, 0.5, JOG_A);
+        let current = [0.0; ARM_DOF];
+        // A far target so every joint keeps accelerating.
+        let target = [3.0; ARM_DOF];
+        // From rest, one tick may add at most a_max*dt to the velocity, so the position
+        // step is bounded by that: a small ramp, not a snap.
+        let JointJogStep::Stepped { joints, vel } = joint_jog_tick(&current, &target, &current, caps)
+        else {
+            panic!("a far target does not converge in one tick");
+        };
+        for i in 0..ARM_DOF {
+            assert!(vel[i] <= caps.joint_accel_rad_s2 * caps.dt_s + 1e-12, "accel-capped");
+            assert!(joints[i] > 0.0 && joints[i] < 0.05, "a small first step, not a snap");
+        }
+    }
+
+    #[test]
+    fn joint_jog_tick_settles_on_the_target_without_overshoot() {
+        let caps = JogCaps::per_tick(0.01, 0.5, JOG_A);
+        let target = [0.4, -0.3, 0.2, 0.9, -0.5, 0.6, -0.2];
+        let mut q = [0.0; ARM_DOF];
+        let mut v = [0.0; ARM_DOF];
+        let mut max_overshoot: f64 = 0.0;
+        let mut converged = false;
+        for _ in 0..5000 {
+            match joint_jog_tick(&q, &target, &v, caps) {
+                JointJogStep::Stepped { joints, vel } => {
+                    for i in 0..ARM_DOF {
+                        // Never crosses past the target (monotone approach, no overshoot).
+                        let past = (joints[i] - target[i]) * target[i].signum();
+                        max_overshoot = max_overshoot.max(past);
+                    }
+                    q = joints;
+                    v = vel;
+                }
+                JointJogStep::Converged(joints) => {
+                    assert_eq!(joints, target, "lands exactly on the target");
+                    converged = true;
+                    break;
+                }
+            }
+        }
+        assert!(converged, "the jog converges within a bounded number of ticks");
+        assert!(max_overshoot < 1e-6, "the ramp does not overshoot the target");
+    }
+
+    #[test]
+    fn joint_jog_tick_reversal_stays_within_the_acceleration_cap() {
+        let caps = JogCaps::per_tick(0.01, 0.5, JOG_A);
+        let dv_max = caps.joint_accel_rad_s2 * caps.dt_s;
+        let up = [3.0; ARM_DOF];
+        let mut q = [0.0; ARM_DOF];
+        let mut v = [0.0; ARM_DOF];
+        // Build up to cruise speed toward a far target.
+        for _ in 0..20 {
+            let JointJogStep::Stepped { joints, vel } = joint_jog_tick(&q, &up, &v, caps) else {
+                unreachable!("a far target does not converge yet")
+            };
+            q = joints;
+            v = vel;
+        }
+        assert!(v[0] > 2.0, "the joint is moving fast before the reversal");
+        // Reverse mid-drag: re-target just behind the current position while still moving
+        // forward. The old magnitude-only capture snapped backward and zeroed the velocity
+        // here; the fix must decelerate under the cap instead.
+        let down: [f64; ARM_DOF] = std::array::from_fn(|i| q[i] - 0.01);
+        let mut worst_accel: f64 = 0.0;
+        let mut max_overshoot: f64 = 0.0;
+        let mut converged = false;
+        for _ in 0..5000 {
+            match joint_jog_tick(&q, &down, &v, caps) {
+                JointJogStep::Stepped { joints, vel } => {
+                    for i in 0..ARM_DOF {
+                        worst_accel = worst_accel.max((vel[i] - v[i]).abs());
+                        // Overshoot = dropping below the reversed target.
+                        max_overshoot = max_overshoot.max(down[i] - joints[i]);
+                    }
+                    q = joints;
+                    v = vel;
+                }
+                JointJogStep::Converged(joints) => {
+                    assert_eq!(joints, down, "settles on the reversed target");
+                    converged = true;
+                    break;
+                }
+            }
+        }
+        assert!(converged, "the reversed jog converges");
+        assert!(
+            worst_accel <= dv_max + 1e-12,
+            "velocity change per tick stays within the accel cap through the reversal ({worst_accel} > {dv_max})"
+        );
+        assert!(max_overshoot < 1e-6, "the reversal does not overshoot the target");
     }
 
     #[test]
@@ -595,6 +774,7 @@ mod tests {
             pos_step_m: 0.05,
             rot_step_rad: 0.2,
             arm_angle_step_rad: 0.2,
+            joint_accel_rad_s2: JOG_A,
             dt_s: 0.01,
         };
         let desired = [p0[0] + 1.0, p0[1], p0[2], p0[3], p0[4], p0[5]];

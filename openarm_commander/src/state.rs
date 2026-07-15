@@ -88,11 +88,11 @@ pub struct ArmTarget {
     // Cancels the in-flight goal so a new Send preempts instead of being
     // rejected by the arm's single-flight gate.
     pub preempt: Option<tokio_util::sync::CancellationToken>,
-    // What the operator is actively driving this side toward: a joint target (streamed
-    // straight, the backbone governs the ramp) or a Cartesian jog (stepped toward a world
-    // pose one capped increment per tick, held at the reach boundary). None when the
-    // side is idle. Arming either space clears the other, and it clears on
-    // enable/disable, since the two spaces must not fight.
+    // What the operator is actively driving this side toward: a joint target (the setpoint
+    // ramps toward it under a velocity/acceleration cap) or a Cartesian jog (stepped toward
+    // a world pose one capped increment per tick, held at the reach boundary). None when the
+    // side is idle. Arming either space clears the other, and it clears on enable/disable,
+    // since the two spaces must not fight.
     pub jog: Option<Jog>,
     // Whether a Cartesian jog is currently held at the reach boundary. Drives one-shot
     // status transitions (blocked <-> moving), so neither message latches or spams.
@@ -151,6 +151,10 @@ pub struct UiState {
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
+    // Joint-slider jog feel, a node parameter so a deployment tunes the ramp without a
+    // rebuild: the acceleration the streamed target ramps toward the slider under (the
+    // whole jog is acceleration-limited). The backbone still governs the final ramp.
+    pub joint_jog_acceleration_rad_s2: f64,
     // The launch governor-enable state, restored on operator disconnect so an
     // operator who turned avoidance off cannot leave the backbone latched ungoverned,
     // while a deployment that launched ungoverned is not force-armed either.
@@ -200,6 +204,7 @@ impl UiState {
         d_stop: f64,
         d_safe: f64,
         max_ee_velocity_m_s: f64,
+        joint_jog_acceleration_rad_s2: f64,
     ) -> Self {
         Self {
             arms: BySide::splat(ArmTarget::home()),
@@ -210,6 +215,7 @@ impl UiState {
             d_stop,
             d_safe,
             max_ee_velocity_m_s,
+            joint_jog_acceleration_rad_s2,
             proximity: None,
             status: "ready".to_string(),
         }

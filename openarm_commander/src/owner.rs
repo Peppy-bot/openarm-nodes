@@ -23,7 +23,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken as GoalToken;
 
-use crate::pose::{ArmModels, CartesianJog, Jog, JogCaps, JogMode, JogStep, Pose, dist3, jog_tick};
+use crate::pose::{
+    ArmModels, CartesianJog, Jog, JogCaps, JogMode, JogStep, JointJogStep, Pose, dist3, jog_tick,
+    joint_jog_tick,
+};
 use crate::state::{ARM_DOF, ArmTarget, BySide, Proximity, Side, UiState};
 use crate::ui::{
     Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, sane_duration,
@@ -217,7 +220,11 @@ impl Owner {
     // off the measured pose). The step is pure (see `advance_jog`); caps re-derive from
     // the live EE-speed cap so retuning the knob changes jog speed.
     fn advance_jogs(&mut self, tick_dt_s: f64) {
-        let caps = JogCaps::per_tick(tick_dt_s, self.state.max_ee_velocity_m_s);
+        let caps = JogCaps::per_tick(
+            tick_dt_s,
+            self.state.max_ee_velocity_m_s,
+            self.state.joint_jog_acceleration_rad_s2,
+        );
         for side in [Side::Left, Side::Right] {
             if !self.state.enabled[side] {
                 continue;
@@ -339,10 +346,16 @@ impl Owner {
                 let side: Side = side.into();
                 clamp_to_limits(&mut joints, side);
                 if self.state.enabled[side] {
-                    // Arm a joint jog: the tick reconciles it in one step, so the slider
-                    // never lags. It replaces any live Cartesian jog (the spaces must
-                    // not fight); its status latch resets with it.
-                    self.state.arms[side].jog = Some(Jog::Joints(joints));
+                    // Arm (or re-target) a joint jog: the tick ramps the setpoint toward
+                    // the slider under a velocity/acceleration cap. Preserve the carried
+                    // jog velocity when a live drag re-targets, so a continuous drag keeps
+                    // its momentum; start from rest when arming fresh or switching from a
+                    // Cartesian jog (the spaces must not fight). Its status latch resets.
+                    let vel = match self.state.arms[side].jog {
+                        Some(Jog::Joints { vel, .. }) => vel,
+                        _ => [0.0; ARM_DOF],
+                    };
+                    self.state.arms[side].jog = Some(Jog::Joints { target: joints, vel });
                     self.state.arms[side].jog_blocked = false;
                 }
             }
@@ -622,11 +635,11 @@ enum JogEvent {
     Blocked { mode: JogMode, desired: Pose },
 }
 
-// Advance one side's active jog by one tick. A joint jog reconciles in a single step
-// (the streamed joints are the target; the backbone governs the ramp); a Cartesian jog steps
-// the joint target a capped increment toward the desired pose, holds it at the reach
-// boundary, and retires once converged. Pure: `jog_tick` briefly takes the model lock
-// inside it, but no UiState is held here, so the caller applies the result.
+// Advance one side's active jog by one tick. A joint jog walks the setpoint one
+// acceleration-limited step toward the slider target and retires once it settles there; a
+// Cartesian jog steps the joint target a capped increment toward the desired pose, holds it
+// at the reach boundary, and retires once converged. Pure: `jog_tick` briefly takes the
+// model lock inside it, but no UiState is held here, so the caller applies the result.
 fn advance_jog(arm: &ArmTarget, side: Side, models: &ArmModels, caps: JogCaps) -> JogAdvance {
     let hold = |jog, blocked| JogAdvance {
         joints: arm.joints,
@@ -636,11 +649,18 @@ fn advance_jog(arm: &ArmTarget, side: Side, models: &ArmModels, caps: JogCaps) -
     };
     let cartesian = match arm.jog {
         None => return hold(None, arm.jog_blocked),
-        // The backbone governs the joint ramp, so reconcile in one step and retire.
-        Some(Jog::Joints(target)) => {
+        // Ramp the setpoint toward the slider under the velocity/acceleration cap; a joint
+        // jog never blocks (targets are pre-clamped to limits), so no status event.
+        Some(Jog::Joints { target, vel }) => {
+            let (joints, jog) = match joint_jog_tick(&arm.joints, &target, &vel, caps) {
+                JointJogStep::Converged(joints) => (joints, None),
+                JointJogStep::Stepped { joints, vel } => {
+                    (joints, Some(Jog::Joints { target, vel }))
+                }
+            };
             return JogAdvance {
-                joints: target,
-                jog: None,
+                joints,
+                jog,
                 blocked: false,
                 event: None,
             };
@@ -707,7 +727,7 @@ mod tests {
 
     // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
     fn caps() -> JogCaps {
-        JogCaps::per_tick(0.01, 0.5)
+        JogCaps::per_tick(0.01, 0.5, 10.0)
     }
 
     fn arm(joints: [f64; ARM_DOF], jog: Option<Jog>, jog_blocked: bool) -> ArmTarget {
@@ -726,21 +746,45 @@ mod tests {
         })
     }
 
+    fn joint_jog(target: [f64; ARM_DOF]) -> Jog {
+        Jog::Joints {
+            target,
+            vel: [0.0; ARM_DOF],
+        }
+    }
+
     #[test]
-    fn joint_jog_reconciles_in_one_step_and_retires() {
+    fn joint_jog_ramps_toward_the_target_without_snapping() {
         let target = [0.1, -0.2, 0.3, 0.9, -0.1, 0.2, 0.05];
-        let a = arm([0.0; ARM_DOF], Some(Jog::Joints(target)), false);
+        let a = arm([0.0; ARM_DOF], Some(joint_jog(target)), false);
         let adv = advance_jog(&a, Side::Left, &models(), caps());
-        assert_eq!(
-            adv.joints, target,
-            "a joint jog snaps the setpoint to the target"
-        );
-        assert!(
-            adv.jog.is_none(),
-            "a joint jog retires after its single step"
-        );
+        // The first tick moves only a capped increment, not the whole way (no snap), and
+        // the jog stays armed to keep ramping.
+        assert_ne!(adv.joints, target, "the setpoint does not snap to the target");
+        assert!(adv.joints.iter().zip(target).all(|(j, t)| j.abs() <= t.abs() + 1e-12));
+        assert!(adv.jog.is_some(), "the jog stays armed while ramping");
         assert!(!adv.blocked);
         assert!(adv.event.is_none());
+    }
+
+    #[test]
+    fn joint_jog_converges_on_the_target_and_retires() {
+        let m = models();
+        let target = [0.1, -0.2, 0.3, 0.9, -0.1, 0.2, 0.05];
+        let mut a = arm([0.0; ARM_DOF], Some(joint_jog(target)), false);
+        // Thread each advance back into the arm exactly as the stream does.
+        let mut converged = false;
+        for _ in 0..2000 {
+            let adv = advance_jog(&a, Side::Left, &m, caps());
+            a.joints = adv.joints;
+            a.jog = adv.jog;
+            if adv.jog.is_none() {
+                converged = true;
+                assert_eq!(adv.joints, target, "it lands exactly on the target");
+                break;
+            }
+        }
+        assert!(converged, "the joint jog settles on the target and retires");
     }
 
     #[test]
@@ -833,7 +877,7 @@ mod tests {
     #[test]
     fn disconnect_disarms_sides_and_restores_governor_default_on() {
         // Launched with avoidance on; operator turned it off with both sides armed.
-        let mut s = UiState::new(true, 0.005, 0.02, 0.25);
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 10.0);
         s.collision_enabled = false;
         s.enabled[Side::Left] = true;
         s.enabled[Side::Right] = true;
@@ -851,7 +895,7 @@ mod tests {
     #[test]
     fn disconnect_restores_governor_default_off_when_launched_ungoverned() {
         // Launched deliberately ungoverned; operator turned avoidance on.
-        let mut s = UiState::new(false, 0.005, 0.02, 0.25);
+        let mut s = UiState::new(false, 0.005, 0.02, 0.25, 10.0);
         s.collision_enabled = true;
         reset_on_disconnect(&mut s);
         assert!(
