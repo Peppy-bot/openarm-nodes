@@ -20,7 +20,7 @@ use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use control_core::{LowPassFilter, Pacer};
+use control_core::{Pacer, filters::LowPassFilter};
 
 use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner};

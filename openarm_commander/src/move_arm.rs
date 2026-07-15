@@ -23,46 +23,44 @@ use crate::state::Side;
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[allow(clippy::too_many_arguments)]
+/// One discrete pose move, as fired at the backbone: the side, the world-frame target
+/// (position m, orientation quaternion `[x, y, z, w]`), the requested duration
+/// (0 = fastest safe), and whether to wait the preempt grace first (set when this
+/// move was queued behind the goal it cancelled).
+pub struct Goal {
+    pub side: Side,
+    pub position: [f64; 3],
+    pub orientation: [f64; 4],
+    pub duration_s: f64,
+    pub grace: bool,
+}
+
 pub fn spawn(
     runner: Arc<NodeRunner>,
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
-    side: Side,
-    position: [f64; 3],
-    orientation: [f64; 4],
-    duration_s: f64,
-    grace: bool,
+    goal: Goal,
 ) {
     tokio::spawn(async move {
-        run(
-            runner,
-            feedback,
-            token,
-            preempt,
-            side,
-            position,
-            orientation,
-            duration_s,
-            grace,
-        )
-        .await;
+        run(runner, feedback, token, preempt, goal).await;
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run(
     runner: Arc<NodeRunner>,
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
-    side: Side,
-    position: [f64; 3],
-    orientation: [f64; 4],
-    duration_s: f64,
-    grace: bool,
+    goal: Goal,
 ) {
+    let Goal {
+        side,
+        position,
+        orientation,
+        duration_s,
+        grace,
+    } = goal;
     // A queued preempt fires only after the backbone releases its single-flight gate.
     if grace {
         tokio::select! {
@@ -82,6 +80,7 @@ async fn run(
 
     let downstream = match backbone_move_arm::ActionHandle::fire_goal(
         &runner,
+        backbone_move_arm::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,

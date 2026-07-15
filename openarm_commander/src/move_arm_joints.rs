@@ -23,43 +23,42 @@ use crate::state::{ARM_DOF, Side};
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[allow(clippy::too_many_arguments)]
+/// One discrete joint move, as fired at the backbone: the side, the 7-joint target
+/// (rad), the requested duration (0 = fastest safe), and whether to wait the
+/// preempt grace first (set when this move was queued behind the goal it
+/// cancelled).
+pub struct Goal {
+    pub side: Side,
+    pub joint_positions: [f64; ARM_DOF],
+    pub duration_s: f64,
+    pub grace: bool,
+}
+
 pub fn spawn(
     runner: Arc<NodeRunner>,
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
-    side: Side,
-    joint_positions: [f64; ARM_DOF],
-    duration_s: f64,
-    grace: bool,
+    goal: Goal,
 ) {
     tokio::spawn(async move {
-        run(
-            runner,
-            feedback,
-            token,
-            preempt,
-            side,
-            joint_positions,
-            duration_s,
-            grace,
-        )
-        .await;
+        run(runner, feedback, token, preempt, goal).await;
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run(
     runner: Arc<NodeRunner>,
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
     preempt: tokio_util::sync::CancellationToken,
-    side: Side,
-    joint_positions: [f64; ARM_DOF],
-    duration_s: f64,
-    grace: bool,
+    goal: Goal,
 ) {
+    let Goal {
+        side,
+        joint_positions,
+        duration_s,
+        grace,
+    } = goal;
     // A queued preempt fires only after the backbone releases its single-flight gate.
     if grace {
         tokio::select! {
@@ -76,10 +75,11 @@ async fn run(
         duration_s,
     };
 
-    // v0.10 peppylib: fire_goal trims to (runner, timeout, request, qos). Instance
-    // targeting moved from call-site args to launcher-pinned link_id bindings.
+    // The launcher-pinned, cardinality-one backbone slot provides the explicit
+    // target used for this goal and its feedback/cancel/result lifecycle.
     let downstream = match backbone_move_arm_joints::ActionHandle::fire_goal(
         &runner,
+        backbone_move_arm_joints::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,

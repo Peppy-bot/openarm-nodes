@@ -66,10 +66,26 @@ async fn poll_components(
 // awaits) so an unreachable component caps a pass at one POLL_TIMEOUT, not four.
 async fn hardware_ready(runner: &NodeRunner) -> bool {
     let (la, ra, lg, rg) = tokio::join!(
-        left_arm_is_ready::poll(runner, POLL_TIMEOUT),
-        right_arm_is_ready::poll(runner, POLL_TIMEOUT),
-        left_gripper_is_ready::poll(runner, POLL_TIMEOUT),
-        right_gripper_is_ready::poll(runner, POLL_TIMEOUT),
+        left_arm_is_ready::poll(
+            runner,
+            left_arm_is_ready::bound_producer(runner),
+            POLL_TIMEOUT,
+        ),
+        right_arm_is_ready::poll(
+            runner,
+            right_arm_is_ready::bound_producer(runner),
+            POLL_TIMEOUT,
+        ),
+        left_gripper_is_ready::poll(
+            runner,
+            left_gripper_is_ready::bound_producer(runner),
+            POLL_TIMEOUT,
+        ),
+        right_gripper_is_ready::poll(
+            runner,
+            right_gripper_is_ready::bound_producer(runner),
+            POLL_TIMEOUT,
+        ),
     );
     matches!(la, Ok(r) if r.data.ready)
         && matches!(ra, Ok(r) if r.data.ready)

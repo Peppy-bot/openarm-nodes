@@ -24,13 +24,31 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::chase::{chase_step, clamp_to_limits};
+use crate::servo::{ServoState, ServoStep};
 use crate::streams::JointCommand;
-use crate::trajectory::{CartesianTrajectory, JointTrajectory, plan_cartesian_duration};
+use crate::trajectory::{
+    ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory, PlanLimits,
+    plan_cartesian, subdivided_blends,
+};
 use crate::{ARM_DOF, JointVec, Side};
 
 /// Slack the runtime per-tick Cartesian velocity check allows over the planned
 /// limit before aborting (mirrors the arm's backstop over the up-front plan).
 const VELOCITY_GUARD_MARGIN: f64 = 1.5;
+
+/// Slack the runtime servo allows over its plan-time rollout duration before
+/// aborting. The rollout proves the nominal path's length; the governor can hold
+/// the arm off that path, so allow the move this multiple of the rollout before
+/// declaring it stuck. Mirrors [`VELOCITY_GUARD_MARGIN`]'s role over the plan's
+/// velocity sizing: the timeout tracks the actual motion, not a flat ceiling.
+const SERVO_TIMEOUT_FACTOR: f64 = 2.0;
+
+/// Whether a servo move that has run `elapsed_s` has overrun its `budget_s`
+/// rollout duration by more than [`SERVO_TIMEOUT_FACTOR`], the runtime abort
+/// condition.
+fn servo_timed_out(elapsed_s: f64, budget_s: f64) -> bool {
+    elapsed_s > budget_s * SERVO_TIMEOUT_FACTOR
+}
 
 /// Per-arm static configuration for the planner (the motion limits relocated
 /// from the arm). Cloned per side.
@@ -85,12 +103,49 @@ struct JointMove {
 }
 
 struct CartesianMove {
-    traj: CartesianTrajectory,
+    path: MovePath,
     ctx: move_arm::GoalContext,
-    seed: JointVec,
+    // Last commanded joint target: held on cancel/failure so the arm never snaps.
     prev_q_des: JointVec,
-    prev_sample_at: Instant,
     _busy: BusyGuard,
+}
+
+/// How an admitted move_arm goal executes, per its [`CartesianPlan`]: track the
+/// straight line (solving IK each tick), or run the guarded servo when no
+/// continuous joint path tracks the line.
+enum MovePath {
+    Line {
+        traj: CartesianTrajectory,
+        seed: JointVec,
+        prev_sample_at: Instant,
+        // Blend parameter at the previous tick: the walk resumes from here, and a
+        // steered line's elbow budget scales with the blend progressed since, so
+        // the executed elbow travel matches the plan's.
+        prev_blend: f64,
+        // Resolve the elbow the way the plan validated: steered (manipulability
+        // budget) or held at the seed angle (the quiet default).
+        steer_elbow: bool,
+    },
+    Servo {
+        // Boxed: ServoState carries a per-joint filter bank, so inlining it would
+        // bloat every Mode/MovePath variant. One heap alloc per servo move.
+        servo: Box<ServoState>,
+        started: Instant,
+        prev_sample_at: Instant,
+        // The plan-time rollout duration. The runtime aborts once the move runs
+        // past `SERVO_TIMEOUT_FACTOR` times this, tying the timeout to the
+        // validated motion length rather than a flat ceiling.
+        budget_s: f64,
+    },
+}
+
+impl MovePath {
+    fn motion_start(&self) -> Instant {
+        match self {
+            Self::Line { traj, .. } => traj.motion_start,
+            Self::Servo { started, .. } => *started,
+        }
+    }
 }
 
 /// One mode's advance result: the joint target this tick, the next mode (the
@@ -261,16 +316,17 @@ impl Planner {
         }
     }
 
-    /// One Cartesian tick: sample the pose, solve IK (seeded), and complete on
-    /// cancel, IK failure, a velocity-guard trip, or normal completion. Any
-    /// terminal drops `m` (and with it the busy guard), releasing the slot.
+    /// One Cartesian tick: advance the move's path (line-tracking IK, or the
+    /// planned joint-space reconfiguration) and complete on cancel, IK failure, a
+    /// velocity-guard trip, or normal completion. Any terminal drops `m` (and with
+    /// it the busy guard), releasing the slot.
     async fn advance_cartesian(
         &mut self,
         mut m: CartesianMove,
         measured_q: JointVec,
         now: Instant,
     ) -> Advance {
-        let elapsed = now.duration_since(m.traj.motion_start).as_secs_f64();
+        let elapsed = now.duration_since(m.path.motion_start()).as_secs_f64();
         if m.ctx.is_cancelled() {
             self.finish_cartesian(&m.ctx, measured_q, false, "goal cancelled", elapsed, true)
                 .await;
@@ -280,72 +336,148 @@ impl Planner {
                 is_follow: false,
             };
         }
-        let base_target = self.model.base_pose(&m.traj.sample(now));
-        let Some(sol) = self
-            .model
-            .solve_ik(&base_target, ArmAnglePolicy::FromSeed, &m.seed)
-        else {
-            self.finish_cartesian(
-                &m.ctx,
-                measured_q,
-                false,
-                "IK failed mid-trajectory (unreachable / singular)",
-                elapsed,
-                false,
-            )
-            .await;
-            return Advance {
-                target: m.prev_q_des,
-                next_mode: Mode::Follow,
-                is_follow: false,
-            };
+        let (q_des, complete) = match &mut m.path {
+            MovePath::Line {
+                traj,
+                seed,
+                prev_sample_at,
+                prev_blend,
+                steer_elbow,
+            } => {
+                // Walk the blend progressed this tick at no coarser than the plan's
+                // validated resolution (a short move's quintic can outpace the plan
+                // grid), seed-chaining each sample; the last solution is the tick's
+                // setpoint. A steered line budgets the elbow per sub-step exactly
+                // like the plan's per-sample cap; a held line pins it to the seed.
+                let blend = traj.blend(now);
+                let mut q_next = *seed;
+                let mut s_prev = *prev_blend;
+                for s_k in subdivided_blends(*prev_blend, blend) {
+                    let policy = if *steer_elbow {
+                        ArmAnglePolicy::MaxManipulability {
+                            max_step_rad: ARM_ANGLE_STEP_PER_BLEND_RAD * (s_k - s_prev),
+                        }
+                    } else {
+                        ArmAnglePolicy::FromSeed
+                    };
+                    let base_target = self.model.base_pose(&traj.sample_at_blend(s_k));
+                    let Some(sol) = self.model.solve_ik(&base_target, policy, &q_next) else {
+                        self.finish_cartesian(
+                            &m.ctx,
+                            measured_q,
+                            false,
+                            "IK failed mid-trajectory (unreachable / singular)",
+                            elapsed,
+                            false,
+                        )
+                        .await;
+                        return Advance {
+                            target: m.prev_q_des,
+                            next_mode: Mode::Follow,
+                            is_follow: false,
+                        };
+                    };
+                    q_next = sol.q;
+                    s_prev = s_k;
+                }
+                let dt = now
+                    .duration_since(*prev_sample_at)
+                    .as_secs_f64()
+                    .max(self.cfg.cycle_period.as_secs_f64() * 0.5);
+                if exceeds_velocity_limits(
+                    &q_next,
+                    &m.prev_q_des,
+                    &self.cfg.max_joint_velocity_rad_s,
+                    dt,
+                ) {
+                    self.finish_cartesian(
+                        &m.ctx,
+                        measured_q,
+                        false,
+                        "joint velocity limit exceeded near singularity",
+                        elapsed,
+                        false,
+                    )
+                    .await;
+                    return Advance {
+                        target: m.prev_q_des,
+                        next_mode: Mode::Follow,
+                        is_follow: false,
+                    };
+                }
+                *seed = q_next;
+                *prev_sample_at = now;
+                *prev_blend = blend;
+                (q_next, traj.is_complete(now))
+            }
+            // The guarded servo: one damped resolved-rate step toward the leashed
+            // line reference per tick, the law the plan's rollout validated. Its
+            // steps are velocity-clamped by construction; the hard ceiling
+            // terminates a move the live geometry stops cooperating with (the plan
+            // proved the nominal path, not every disturbance).
+            MovePath::Servo {
+                servo,
+                prev_sample_at,
+                budget_s,
+                ..
+            } => {
+                // Measured dt keeps the feedback law honest under tick jitter
+                // (each step is velocity-scaled by the same dt), clamped so a
+                // scheduling stall cannot turn one tick into a giant step.
+                let dt = now
+                    .duration_since(*prev_sample_at)
+                    .clamp(self.cfg.cycle_period / 2, self.cfg.cycle_period * 4);
+                *prev_sample_at = now;
+                // Feed the servo the governed setpoint, not the pre-governor target:
+                // if the governor holds the arm, the loop must advance from where the
+                // arm actually is, or it would run ahead and report convergence while
+                // the arm sits short of the goal.
+                let governed_q = self.setpoint;
+                let step = servo.step(
+                    &mut self.model,
+                    &governed_q,
+                    &self.cfg.max_joint_velocity_rad_s,
+                    self.cfg.max_ee_velocity_m_s,
+                    dt,
+                );
+                let timed_out = servo_timed_out(elapsed, *budget_s);
+                match step {
+                    ServoStep::Stepped(q) if !timed_out => (q, false),
+                    ServoStep::Converged(q) => (q, true),
+                    ServoStep::Stepped(_) => {
+                        let short_m = servo.position_err_m(&mut self.model, &governed_q);
+                        let message = format!(
+                            "servo overran {SERVO_TIMEOUT_FACTOR:.0}x its {:.1}s rollout, {:.0} mm short of the goal",
+                            budget_s,
+                            short_m * 1000.0
+                        );
+                        self.finish_cartesian(&m.ctx, measured_q, false, &message, elapsed, false)
+                            .await;
+                        return Advance {
+                            target: m.prev_q_des,
+                            next_mode: Mode::Follow,
+                            is_follow: false,
+                        };
+                    }
+                }
+            }
         };
-        let dt = now
-            .duration_since(m.prev_sample_at)
-            .as_secs_f64()
-            .max(self.cfg.cycle_period.as_secs_f64() * 0.5);
-        if exceeds_velocity_limits(
-            &sol.q,
-            &m.prev_q_des,
-            &self.cfg.max_joint_velocity_rad_s,
-            dt,
-        ) {
-            self.finish_cartesian(
-                &m.ctx,
-                measured_q,
-                false,
-                "joint velocity limit exceeded near singularity",
-                elapsed,
-                false,
-            )
-            .await;
-            return Advance {
-                target: m.prev_q_des,
-                next_mode: Mode::Follow,
-                is_follow: false,
+        m.prev_q_des = q_des;
+        if complete {
+            let message = match &m.path {
+                MovePath::Line { .. } => "cartesian move complete",
+                MovePath::Servo { .. } => "cartesian move complete (servo-guided)",
             };
-        }
-        m.prev_q_des = sol.q;
-        m.prev_sample_at = now;
-        m.seed = sol.q;
-        if m.traj.is_complete(now) {
-            self.finish_cartesian(
-                &m.ctx,
-                measured_q,
-                true,
-                "cartesian move complete",
-                elapsed,
-                false,
-            )
-            .await;
+            self.finish_cartesian(&m.ctx, measured_q, true, message, elapsed, false)
+                .await;
             Advance {
-                target: sol.q,
+                target: q_des,
                 next_mode: Mode::Follow,
                 is_follow: false,
             }
         } else {
             Advance {
-                target: sol.q,
+                target: q_des,
                 next_mode: Mode::CartesianMove(m),
                 is_follow: false,
             }
@@ -386,20 +518,25 @@ impl Planner {
             } => {
                 let ee_base = self.model.at(&self.setpoint).ee_pose();
                 let start_world = self.model.world_pose(&ee_base);
-                let plan = plan_cartesian_duration(
-                    &self.model,
+                let plan = plan_cartesian(
+                    &mut self.model,
                     &start_world,
                     &target,
                     self.setpoint,
-                    &self.cfg.max_joint_velocity_rad_s,
+                    &PlanLimits {
+                        max_joint_velocity_rad_s: &self.cfg.max_joint_velocity_rad_s,
+                        max_ee_velocity_m_s: self.cfg.max_ee_velocity_m_s,
+                        control_period: self.cfg.cycle_period,
+                    },
                     duration_s,
                 );
-                let Some(duration) = plan else {
+                let Some(plan) = plan else {
                     let (pos, quat) = world_pose_arrays(&start_world);
                     if let Err(e) = ctx
                         .complete(
                             false,
-                            "target path unreachable / no in-limit IK solution".into(),
+                            "goal pose unreachable (no line tracks and the servo rollout stalls)"
+                                .into(),
                             pos,
                             quat,
                             0.0,
@@ -411,16 +548,58 @@ impl Planner {
                     // `busy` drops here: the slot is released even on this early exit.
                     return Mode::Follow;
                 };
-                info!(
-                    "{}: move_arm start, duration={duration:.3}s",
-                    self.side.label()
-                );
+                let path = match plan {
+                    CartesianPlan::Line {
+                        duration_s,
+                        steer_elbow,
+                        start_q,
+                    } => {
+                        info!(
+                            "{}: move_arm start{}, duration={duration_s:.3}s",
+                            self.side.label(),
+                            if steer_elbow {
+                                " (steered elbow)"
+                            } else {
+                                " (held elbow)"
+                            }
+                        );
+                        MovePath::Line {
+                            // Seed from the plan's normalised start, not self.setpoint:
+                            // the plan validated the walk from here, so execution must
+                            // begin on the same IK branch (they can differ at a
+                            // redundancy/limit boundary). The chase still moves the arm
+                            // from its actual setpoint, velocity-limited.
+                            traj: CartesianTrajectory::new(start_world, target, duration_s),
+                            seed: start_q,
+                            prev_sample_at: now,
+                            prev_blend: 0.0,
+                            steer_elbow,
+                        }
+                    }
+                    // No continuous joint path tracks the line: run the guarded
+                    // servo the rollout just validated, the same damped law the
+                    // operator's streaming jog crosses these walls with.
+                    CartesianPlan::Servo { duration_s } => {
+                        info!(
+                            "{}: move_arm start (servo-guided), rollout={duration_s:.3}s",
+                            self.side.label()
+                        );
+                        MovePath::Servo {
+                            servo: Box::new(ServoState::new(
+                                start_world,
+                                target,
+                                self.cfg.cycle_period,
+                            )),
+                            started: now,
+                            prev_sample_at: now,
+                            budget_s: duration_s,
+                        }
+                    }
+                };
                 Mode::CartesianMove(CartesianMove {
-                    traj: CartesianTrajectory::new(start_world, target, duration),
+                    path,
                     ctx,
-                    seed: self.setpoint,
                     prev_q_des: self.setpoint,
-                    prev_sample_at: now,
                     _busy: busy,
                 })
             }
@@ -662,5 +841,17 @@ mod tests {
         over[0] = 0.151;
         assert!(!exceeds_velocity_limits(&under, &prev, &vmax, dt));
         assert!(exceeds_velocity_limits(&over, &prev, &vmax, dt));
+    }
+
+    // The servo timeout scales with the plan's rollout duration, not a flat
+    // ceiling: an 8 s rollout tolerates up to 16 s (2x), a 1 s rollout only 2 s.
+    #[test]
+    fn servo_timeout_scales_with_the_rollout_budget() {
+        // Long validated motion gets proportionally longer before it is stuck.
+        assert!(!servo_timed_out(15.0, 8.0));
+        assert!(servo_timed_out(17.0, 8.0));
+        // Short validated motion is held to a short leash.
+        assert!(!servo_timed_out(1.9, 1.0));
+        assert!(servo_timed_out(2.1, 1.0));
     }
 }
