@@ -11,12 +11,11 @@
       // (positions[0]), for any observer such as a recorder. The backbone's
       // control-loop state feed is the gripper_link pairing, not this contract.
       { name: "joint_states", tag: "v1", link_id: "states" },
-      // The opening setpoint this gripper is tracking, on the generic
-      // joint_commands contract, so a recorder can capture the action aligned
-      // with the measured opening above. The backbone is the origin (it streams
-      // this setpoint down the exclusive gripper_link pairing, unobservable by a
-      // third party); the gripper re-surfaces it per-gripper so action lines up
-      // with this gripper's state without any cross-producer ordering.
+      // The opening setpoint commanded to this gripper, on the generic
+      // joint_commands contract, so a recorder captures the action aligned with
+      // the measured opening above. Per-gripper (the backbone that computes it is
+      // one node driving both grippers and cannot emit a per-gripper stream); see
+      // stream.rs.
       { name: "joint_commands", tag: "v1", link_id: "commands" },
       // Per-component readiness for the real robot_initializer.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },

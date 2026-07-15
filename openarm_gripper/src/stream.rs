@@ -8,13 +8,15 @@
 //   - the same observers, on the generic joint_commands contract (the opening
 //     setpoint this gripper is currently tracking, so a recorder can capture
 //     the action aligned with the measured opening).
-// The gripper is a follower, not the origin of that command: the backbone
-// computes the opening setpoint and streams it down the (exclusive)
-// gripper_link pairing, where no third party can observe it. Re-surfacing it
-// here, per-gripper alongside this gripper's own joint_states, is what lets a
-// recorder's action line up with this gripper's state with no cross-producer
-// ordering to keep in sync; it is the effective target at this gripper, not a
-// command the gripper issues.
+// The joint_commands stream lives on the gripper, not the backbone that
+// computes the setpoint, for two reasons: pairing traffic (the gripper_link the
+// setpoint arrives on) rides a wire discriminator no ordinary subscription
+// matches, so no observer can read it off the pairing; and the backbone is one
+// node driving both grippers, which cannot emit a per-gripper joint_commands (a
+// contract topic has one wire identity per node). The gripper can, because it
+// already holds its own side's setpoint: it republishes both directions of its
+// pairing here, the opening it sends up and the command it receives down, so a
+// recorder's action aligns with this gripper's state.
 //
 // Reads the motor's cached state (no CAN traffic of its own), so it never
 // contends with the follow loop for the bus; the follow loop refreshes that
@@ -91,7 +93,7 @@ pub async fn run(
             }
             Err(_) => {}
         }
-        // The opening setpoint this gripper is tracking, as the action a
+        // The opening setpoint commanded to this gripper, as the action a
         // recorder captures aligned with the measured opening. Held-last;
         // nothing published until the first command arrives.
         let latest_command = *tracked.borrow();

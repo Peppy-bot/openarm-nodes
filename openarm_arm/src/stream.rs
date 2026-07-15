@@ -29,8 +29,8 @@ pub struct GovernedSetpoint {
     pub dq_des: JointVec,
 }
 
-/// Measured joint state the control loop publishes each tick for the
-/// `arm_states` emitter, as wire arrays.
+/// Measured joint state the control loop publishes each tick for the state
+/// publisher, as wire arrays.
 #[derive(Clone, Copy)]
 pub struct MeasuredState {
     pub positions: JointVec,
@@ -156,15 +156,20 @@ pub async fn run_state_publisher(
             }
             Err(_) => {}
         }
-        // The setpoint this arm is currently tracking, surfaced as joint_commands
+        // The governed setpoint commanded to this arm, surfaced as joint_commands
         // so a recorder can capture the action aligned with the measured state
-        // above. The arm is a follower, not the origin: the backbone computes this
-        // setpoint and streams it down the (exclusive) arm_link pairing, where no
-        // third party can observe it. Re-surfacing it here, per-arm alongside the
-        // arm's own joint_states, is what lets action[i] line up with state[i] for
-        // this joint group with no cross-producer ordering to keep in sync. It is
-        // the effective target at this arm, not a command the arm issues. Held-last;
-        // nothing published until the first governed setpoint arrives.
+        // above (this is the arm's control input; the loop then clamps it to the
+        // joint limits before tracking). It lives on the arm, not the backbone
+        // that computes it, for two reasons:
+        // pairing traffic (the arm_link the setpoint arrives on) rides a wire
+        // discriminator no ordinary subscription matches, so no observer can read
+        // it off the pairing; and the backbone is one node governing both arms,
+        // which cannot emit a per-arm joint_commands (a contract topic has one
+        // wire identity per node). The arm can, because it already holds its own
+        // side's setpoint: it republishes both directions of its pairing here, the
+        // state it sends up and the command it receives down, so action[i] aligns
+        // with state[i] for this joint group. Held-last; nothing published until
+        // the first setpoint arrives.
         let latest_setpoint = *governed.borrow();
         if let Some(setpoint) = latest_setpoint {
             let command_result = async {

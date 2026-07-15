@@ -18,12 +18,10 @@
       // observer (recorder, monitor). The backbone's control-loop state feed is
       // the arm_link pairing, not this broadcast.
       { name: "joint_states", tag: "v1", link_id: "states" },
-      // The setpoint this arm is currently tracking, on the generic
-      // joint_commands contract, so a recorder can capture the action aligned
-      // with the measured state above. The backbone is the origin (it streams
-      // this setpoint down the exclusive arm_link pairing, unobservable by a
-      // third party); the arm re-surfaces it per-arm so action lines up with
-      // this arm's state without any cross-producer ordering.
+      // The governed setpoint commanded to this arm, on the generic
+      // joint_commands contract, so a recorder captures the action aligned with
+      // the measured state above. Per-arm (the backbone that computes it is one
+      // node driving both arms and cannot emit a per-arm stream); see stream.rs.
       { name: "joint_commands", tag: "v1", link_id: "commands" },
       // Per-component readiness the real robot_initializer aggregates: ready once
       // motors are enabled and the control loop is serving.
@@ -80,8 +78,8 @@
       kd5: { $type: "f64", $default: 0.2 },
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
-      // Rate (Hz) of the always-on measured-state stream (`arm_states`), which the
-      // backbone consumes. Required: consumers' needs vary too much for a default.
+      // Rate (Hz) of the always-on measured-state streams (joint_states /
+      // joint_commands). Required: consumers' needs vary too much for a default.
       state_rate_hz: "u32",
     }
   },
