@@ -139,21 +139,34 @@ struct Owner {
     pending: BySide<Option<ArmGoal>>,
 }
 
+/// The owner's channel ends, grouped for [`run`]: operator commands and feedback
+/// flow in, the command frame and the browser snapshot flow out. `feedback_tx` is
+/// the sender end the owner clones into each goal task it spawns.
+pub struct Channels {
+    pub command_rx: mpsc::Receiver<UiMsg>,
+    pub feedback_rx: mpsc::Receiver<Feedback>,
+    pub feedback_tx: mpsc::Sender<Feedback>,
+    pub frame_tx: watch::Sender<CommandFrame>,
+    pub snapshot_tx: watch::Sender<String>,
+}
+
 /// Run the owner until shutdown. Owns `state`; every other task holds only a channel
 /// end, so this is the one place `UiState` is read or written.
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     state: UiState,
     models: ArmModels,
     runner: Arc<NodeRunner>,
     command_rate_hz: u32,
     token: CancellationToken,
-    mut command_rx: mpsc::Receiver<UiMsg>,
-    mut feedback_rx: mpsc::Receiver<Feedback>,
-    feedback_tx: mpsc::Sender<Feedback>,
-    frame_tx: watch::Sender<CommandFrame>,
-    snapshot_tx: watch::Sender<String>,
+    channels: Channels,
 ) {
+    let Channels {
+        mut command_rx,
+        mut feedback_rx,
+        feedback_tx,
+        frame_tx,
+        snapshot_tx,
+    } = channels;
     let mut owner = Owner {
         state,
         models,
@@ -496,7 +509,16 @@ impl Owner {
         let token = self.token.clone();
         match goal {
             ArmGoal::Joints { joints, duration_s } => move_arm_joints::spawn(
-                runner, feedback, token, preempt, side, joints, duration_s, grace,
+                runner,
+                feedback,
+                token,
+                preempt,
+                move_arm_joints::Goal {
+                    side,
+                    joint_positions: joints,
+                    duration_s,
+                    grace,
+                },
             ),
             ArmGoal::Pose {
                 position,
@@ -508,11 +530,13 @@ impl Owner {
                 feedback,
                 token,
                 preempt,
-                side,
-                position,
-                orientation,
-                duration_s,
-                grace,
+                move_arm::Goal {
+                    side,
+                    position,
+                    orientation,
+                    duration_s,
+                    grace,
+                },
             ),
         }
         self.status(side, &format!("firing {action}"));

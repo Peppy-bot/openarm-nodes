@@ -12,8 +12,8 @@
 use std::sync::{Arc, Mutex};
 
 use openarm_description::HardwareVersion;
-use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3, Vector6};
-use srs_model::{Arm, ArmAnglePolicy, damped_pseudo_inverse};
+use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3};
+use srs_model::{Arm, ArmAnglePolicy};
 
 use crate::state::{ARM_DOF, Side};
 
@@ -171,39 +171,27 @@ impl ArmModels {
         task: RateTask,
         dt_s: f64,
     ) -> Option<[f64; ARM_DOF]> {
-        let mut model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
-        let jacobian = model.at(joints).jacobian();
-        // The Jacobian lives in the arm base frame; rotate the world-frame task in.
-        let to_base = model.base_from_world().rotation;
+        // The shared step (srs_model): rotates the task into the base frame,
+        // damped pseudo-inverse, velocity-scaled against the same limits the
+        // backbone chases under, clamped into position limits.
+        let (dp_world, dw_world) = match task {
+            RateTask::Linear(dx) => (dx, Vector3::zeros()),
+            RateTask::Angular(dx) => (Vector3::zeros(), dx),
+        };
+        let q = {
+            let mut model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+            model.rate_step(
+                joints,
+                dp_world,
+                dw_world,
+                self.velocity_limits(side),
+                dt_s,
+                DLS_LAMBDA,
+            )
+        };
         let dx_world = match task {
             RateTask::Linear(dx) | RateTask::Angular(dx) => dx,
         };
-        let dx = to_base * dx_world;
-        let twist = match task {
-            RateTask::Linear(_) => Vector6::new(dx.x, dx.y, dx.z, 0.0, 0.0, 0.0),
-            RateTask::Angular(_) => Vector6::new(0.0, 0.0, 0.0, dx.x, dx.y, dx.z),
-        };
-        let mut dq = damped_pseudo_inverse(&jacobian, DLS_LAMBDA) * twist;
-        // Velocity-consistent clamping (not accept/reject): scale the whole step
-        // down so every joint stays inside its velocity budget for this tick,
-        // preserving the step direction. The backbone chases under the same limits, so
-        // a clamped step is always followable within one tick.
-        let budget = self.velocity_limits(side);
-        let scale = (0..ARM_DOF)
-            .map(|i| {
-                let cap = budget[i] * dt_s;
-                if dq[i].abs() > cap {
-                    cap / dq[i].abs()
-                } else {
-                    1.0
-                }
-            })
-            .fold(1.0_f64, f64::min);
-        dq *= scale;
-        let limits = model.limits();
-        let q: [f64; ARM_DOF] =
-            std::array::from_fn(|i| (joints[i] + dq[i]).clamp(limits[i].lo, limits[i].hi));
-        drop(model);
         // Limits may have eaten the step: measure what actually moved along the
         // demanded direction and treat a mostly-pinned step as the boundary.
         let achieved = self.ee_pose_world(side, &q);
@@ -342,10 +330,12 @@ pub enum JogStep {
     Blocked,
 }
 
-/// Position / angle slack within which a pose component counts as arrived. Half a
-/// millimetre and ~0.1 degrees: invisible on the panel, far above FK round-trip noise.
-const POS_CONVERGED_M: f64 = 5e-4;
-const ROT_CONVERGED_RAD: f64 = 2e-3;
+/// Position / angle slack within which a pose component counts as arrived: MoveIt
+/// Servo's `pose_tracking.linear_tolerance` / `angular_tolerance` defaults (1 mm,
+/// ~0.57 degrees), shared with the backbone servo's convergence. Invisible on the
+/// panel, far above FK round-trip noise.
+const POS_CONVERGED_M: f64 = 1e-3;
+const ROT_CONVERGED_RAD: f64 = 1e-2;
 const ARM_ANGLE_CONVERGED_RAD: f64 = 2e-3;
 /// A resolved-rate step that achieves less than this fraction of its demanded
 /// motion is pinned by joint limits: the envelope boundary in free space.
