@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,46 @@ from pathlib import Path
 from bridge_extension import MujocoBridgeExtension
 
 logger = logging.getLogger(__name__)
+
+# The v2 base-image MJCF encodes 45 deg (0.7854 rad) of finger travel, but the
+# real v2 pinch gripper (and the corrected URDF the collision governor uses)
+# travels pi/2 per finger, 1:1 with the motor. Until the base image ships the
+# corrected scene, widen the finger joints and their position actuators to pi/2
+# at load so the sim geometry matches the hardware and the governor. Remove this
+# once openarm-mujoco-sim bakes the pi/2 scene (see FINGER_TRAVEL_FIX_PLAN.md).
+_V2_FINGER_OPEN_RAD = math.pi / 2
+_V2_FINGER_JOINTS = (
+    "openarm_left_finger_joint1",
+    "openarm_left_finger_joint2",
+    "openarm_right_finger_joint1",
+    "openarm_right_finger_joint2",
+)
+_JOINT_TRANSMISSION_TYPE = 0  # mjTRN_JOINT
+
+
+def _correct_v2_finger_travel(model) -> None:
+    """Overwrite each v2 finger joint's range and its driving position actuator's
+    ctrlrange to +/-pi/2, preserving the opening direction (left opens positive,
+    right negative). No-op for joints the model does not have."""
+    import mujoco  # pylint: disable=E0401
+
+    for name in _V2_FINGER_JOINTS:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if jid < 0:
+            continue
+        _, hi = model.jnt_range[jid]
+        corrected = (
+            (0.0, _V2_FINGER_OPEN_RAD) if hi > 0.0 else (-_V2_FINGER_OPEN_RAD, 0.0)
+        )
+        model.jnt_range[jid] = corrected
+        for act_i in range(model.nu):
+            if (
+                model.actuator_trntype[act_i] == _JOINT_TRANSMISSION_TYPE
+                and model.actuator_trnid[act_i, 0] == jid
+            ):
+                model.actuator_ctrlrange[act_i] = corrected
+                break
+    logger.info("Applied v2 finger-travel correction (pi/2) to the loaded model")
 
 
 class SimLauncher:
@@ -50,6 +91,8 @@ class SimLauncher:
 
         logger.info(f"Loading model: {self._xml_path}")
         model = mujoco.MjModel.from_xml_path(str(self._xml_path))
+        if self._xml_path.name.endswith("_v2.xml"):
+            _correct_v2_finger_travel(model)
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
