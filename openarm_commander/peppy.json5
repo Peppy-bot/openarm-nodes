@@ -104,6 +104,12 @@
       // governor_control and retunable from the UI. Require > 0. The sim launchers
       // set a permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
+      // Joint-slider jog feel: the acceleration (rad/s^2) the streamed target ramps toward
+      // the slider under. The whole jog is acceleration-limited (ramp up, brake to rest),
+      // so this alone sets the smoothness. A node parameter so it can be tuned per
+      // deployment without a rebuild; the backbone still governs the final motion. Lower is
+      // gentler.
+      joint_jog_acceleration_rad_s2: { $type: "f64", $default: 10.0 },
       // Launch state for the rest of the governor controls the commander streams live
       // on governor_control, set per deployment in step with openarm_backbone. The
       // band requires 0 < d_stop < d_safe.

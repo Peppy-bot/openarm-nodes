@@ -207,7 +207,11 @@ impl Owner {
     // off the measured pose). The step is pure (see `advance_jog`); caps re-derive from
     // the live EE-speed cap so retuning the knob changes jog speed.
     fn advance_jogs(&mut self, tick_dt_s: f64) {
-        let caps = JogCaps::per_tick(tick_dt_s, self.state.max_ee_velocity_m_s);
+        let caps = JogCaps::per_tick(
+            tick_dt_s,
+            self.state.max_ee_velocity_m_s,
+            self.state.joint_jog_acceleration_rad_s2,
+        );
         for side in [Side::Left, Side::Right] {
             if !self.state.enabled[side] {
                 continue;
@@ -699,7 +703,7 @@ mod tests {
 
     // The caps a 100 Hz tick at the sim launcher's 0.5 m/s knob derives.
     fn caps() -> JogCaps {
-        JogCaps::per_tick(0.01, 0.5)
+        JogCaps::per_tick(0.01, 0.5, 10.0)
     }
 
     fn arm(joints: [f64; ARM_DOF], jog: Option<Jog>, jog_blocked: bool) -> ArmTarget {
@@ -849,7 +853,7 @@ mod tests {
     #[test]
     fn disconnect_disarms_sides_and_restores_governor_default_on() {
         // Launched with avoidance on; operator turned it off with both sides armed.
-        let mut s = UiState::new(true, 0.005, 0.02, 0.25);
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 10.0);
         s.collision_enabled = false;
         s.enabled[Side::Left] = true;
         s.enabled[Side::Right] = true;
@@ -867,7 +871,7 @@ mod tests {
     #[test]
     fn disconnect_restores_governor_default_off_when_launched_ungoverned() {
         // Launched deliberately ungoverned; operator turned avoidance on.
-        let mut s = UiState::new(false, 0.005, 0.02, 0.25);
+        let mut s = UiState::new(false, 0.005, 0.02, 0.25, 10.0);
         s.collision_enabled = true;
         reset_on_disconnect(&mut s);
         assert!(

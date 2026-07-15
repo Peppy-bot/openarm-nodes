@@ -151,6 +151,10 @@ pub struct UiState {
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
+    // Joint-slider jog feel, a node parameter so a deployment tunes the ramp without a
+    // rebuild: the acceleration the streamed target ramps toward the slider under (the
+    // whole jog is acceleration-limited). The backbone still governs the final ramp.
+    pub joint_jog_acceleration_rad_s2: f64,
     // The launch governor-enable state, restored on operator disconnect so an
     // operator who turned avoidance off cannot leave the backbone latched ungoverned,
     // while a deployment that launched ungoverned is not force-armed either.
@@ -200,6 +204,7 @@ impl UiState {
         d_stop: f64,
         d_safe: f64,
         max_ee_velocity_m_s: f64,
+        joint_jog_acceleration_rad_s2: f64,
     ) -> Self {
         Self {
             arms: BySide::splat(ArmTarget::home()),
@@ -210,6 +215,7 @@ impl UiState {
             d_stop,
             d_safe,
             max_ee_velocity_m_s,
+            joint_jog_acceleration_rad_s2,
             proximity: None,
             status: "ready".to_string(),
         }

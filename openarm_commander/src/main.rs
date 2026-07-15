@@ -52,6 +52,11 @@ fn main() -> Result<()> {
             "max_ee_velocity_m_s must be a positive finite number"
         );
         assert!(
+            params.joint_jog_acceleration_rad_s2.is_finite()
+                && params.joint_jog_acceleration_rad_s2 > 0.0,
+            "joint_jog_acceleration_rad_s2 must be a positive finite number"
+        );
+        assert!(
             params.d_stop.is_finite()
                 && params.d_safe.is_finite()
                 && params.d_stop > 0.0
@@ -63,6 +68,7 @@ fn main() -> Result<()> {
             params.d_stop,
             params.d_safe,
             params.max_ee_velocity_m_s,
+            params.joint_jog_acceleration_rad_s2,
         );
 
         // Rate feeds `Duration::from_micros(1_000_000 / rate)`, so a rate above
