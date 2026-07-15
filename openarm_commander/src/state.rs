@@ -79,7 +79,7 @@ pub struct ArmTarget {
     pub joints: [f64; ARM_DOF],
     pub last_feedback: Option<[f64; ARM_DOF]>,
     // Whether `joints` has been initialized from a real measured pose yet. Set once,
-    // from the first arm_states feedback, so the target starts where the arm is
+    // from the first joint_states feedback, so the target starts where the arm is
     // instead of at the home default; thereafter only streaming and discrete moves
     // move it. Prevents re-seeding the gravity-sagged measured every disable, which
     // ratcheted the arm down across enable/disable cycles.
@@ -116,7 +116,7 @@ impl ArmTarget {
 #[derive(Clone, Debug)]
 pub struct GripperTarget {
     pub position: f64,
-    // Measured gripper opening fraction from the gripper_states stream.
+    // Measured gripper opening fraction from the joint_states stream.
     pub last_feedback: Option<f64>,
     // A discrete move_gripper (Actions mode) is in flight: refuses a second Execute
     // and drives the gripper card's in-flight badge. Streaming mode never sets it.

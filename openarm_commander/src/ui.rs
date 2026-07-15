@@ -286,7 +286,7 @@ struct ArmView {
 #[derive(Serialize)]
 struct GripperView {
     position: f64,
-    // Measured opening fraction from the gripper_states stream.
+    // Measured opening fraction from the joint_states stream.
     feedback: Option<f64>,
     min: f64,
     max: f64,

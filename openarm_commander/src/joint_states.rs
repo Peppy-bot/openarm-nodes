@@ -1,19 +1,20 @@
-// Live arm joint state for the UI. Consumes each side's always-on `arm_states`
-// slot and reports the latest measured positions to the owner. The slot fixes
-// the side; a message whose `arm_id` disagrees with its slot is rejected. It
-// runs continuously, so the panel shows live joint state whether or not a move
-// is in flight; the owner decides how to fold each measurement into the target.
+// Live arm joint state for the UI. Consumes each side's always-on joint_states
+// slot and reports the latest measured positions to the owner. The slot binding
+// fixes the side, so the producer identity is authoritative and no in-message id
+// is read. It runs continuously, so the panel shows live joint state whether or
+// not a move is in flight; the owner decides how to fold each measurement into
+// the target.
 
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::{left_arm_states_arm_states, right_arm_states_arm_states};
+use peppygen::consumed_topics::{left_arm_states_joint_states, right_arm_states_joint_states};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
 
 use crate::owner::Feedback;
-use crate::state::Side;
+use crate::state::{ARM_DOF, Side};
 
 /// Pause after a receive error before retrying, so a persistently broken subscription
 /// cannot spin a listener at full CPU or flood the log at the stream rate (shared with
@@ -25,14 +26,14 @@ pub async fn run(
     feedback: mpsc::Sender<Feedback>,
     token: CancellationToken,
 ) {
-    let mut left_subscription = match left_arm_states_arm_states::subscribe(&runner).await {
+    let mut left_subscription = match left_arm_states_joint_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "left_arm_states subscribe");
             return;
         }
     };
-    let mut right_subscription = match right_arm_states_arm_states::subscribe(&runner).await {
+    let mut right_subscription = match right_arm_states_joint_states::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
             error!(error = %e, "right_arm_states subscribe");
@@ -45,41 +46,44 @@ pub async fn run(
             received = left_subscription.next() => (
                 "left_arm_states",
                 Side::Left,
-                received.map(|pair| pair.map(|(_producer, msg)| (msg.arm_id, msg.positions))),
+                received.map(|pair| pair.map(|(_producer, msg)| msg.positions)),
             ),
             received = right_subscription.next() => (
                 "right_arm_states",
                 Side::Right,
-                received.map(|pair| pair.map(|(_producer, msg)| (msg.arm_id, msg.positions))),
+                received.map(|pair| pair.map(|(_producer, msg)| msg.positions)),
             ),
         };
-        let (arm_id, positions) = match received {
-            Ok(Some(pair)) => pair,
+        let positions = match received {
+            Ok(Some(positions)) => positions,
             Ok(None) => {
                 error!(
                     slot,
-                    "arm_states subscription closed; live joint readouts stopped"
+                    "joint_states subscription closed; live joint readouts stopped"
                 );
                 return;
             }
             Err(e) => {
-                error!(error = %e, slot, "arm_states receive");
+                error!(error = %e, slot, "joint_states receive");
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
-        if arm_id != side.arm_id() {
-            warn!(
-                arm_id,
-                slot, "arm_states: arm_id does not match its slot; ignoring"
-            );
-            continue;
-        }
+        // The arm producer reports exactly one position per joint; a different
+        // length is a misbound slot, so skip it rather than truncate silently.
+        let joints: [f64; ARM_DOF] = match positions.try_into() {
+            Ok(joints) => joints,
+            Err(positions) => {
+                warn!(
+                    slot,
+                    got = positions.len(),
+                    "joint_states: expected {ARM_DOF} arm joints; ignoring"
+                );
+                continue;
+            }
+        };
         if feedback
-            .send(Feedback::ArmMeasured {
-                side,
-                joints: positions,
-            })
+            .send(Feedback::ArmMeasured { side, joints })
             .await
             .is_err()
         {

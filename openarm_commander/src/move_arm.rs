@@ -109,7 +109,7 @@ async fn run(
     };
 
     // Await the move result, honoring preempt (a new Execute cancels this goal) and
-    // shutdown. Live progress is shown from the arm_states stream.
+    // shutdown. Live progress is shown from the joint_states stream.
     let result_fut = downstream.get_result(RESULT_TIMEOUT);
     tokio::pin!(result_fut);
     let mut preempted = false;

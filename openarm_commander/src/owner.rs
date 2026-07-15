@@ -355,7 +355,10 @@ impl Owner {
                         Some(Jog::Joints { vel, .. }) => vel,
                         _ => [0.0; ARM_DOF],
                     };
-                    self.state.arms[side].jog = Some(Jog::Joints { target: joints, vel });
+                    self.state.arms[side].jog = Some(Jog::Joints {
+                        target: joints,
+                        vel,
+                    });
                     self.state.arms[side].jog_blocked = false;
                 }
             }
@@ -760,8 +763,16 @@ mod tests {
         let adv = advance_jog(&a, Side::Left, &models(), caps());
         // The first tick moves only a capped increment, not the whole way (no snap), and
         // the jog stays armed to keep ramping.
-        assert_ne!(adv.joints, target, "the setpoint does not snap to the target");
-        assert!(adv.joints.iter().zip(target).all(|(j, t)| j.abs() <= t.abs() + 1e-12));
+        assert_ne!(
+            adv.joints, target,
+            "the setpoint does not snap to the target"
+        );
+        assert!(
+            adv.joints
+                .iter()
+                .zip(target)
+                .all(|(j, t)| j.abs() <= t.abs() + 1e-12)
+        );
         assert!(adv.jog.is_some(), "the jog stays armed while ramping");
         assert!(!adv.blocked);
         assert!(adv.event.is_none());
