@@ -185,15 +185,13 @@ pub async fn run(
     let mut gripper_moves: ArmPair<Option<GripperMove>> = ArmPair::new(None, None);
 
     let dt = cycle_period.as_secs_f64();
-    // One low-pass per joint per arm, smoothing the published desired velocity. The
-    // cutoff is validated positive-finite at bringup, so construction cannot fail here.
-    let make_filters = || -> [LowPassFilter; ARM_DOF] {
-        std::array::from_fn(|_| {
-            LowPassFilter::from_cutoff(velocity_filter_cutoff_hz, dt)
-                .expect("velocity_filter_cutoff_hz asserted finite and > 0 at startup")
-        })
-    };
-    let mut dq_filters = ArmPair::new(make_filters(), make_filters());
+    // One low-pass per joint per arm, smoothing the published desired velocity. `main`
+    // validates `0 < cutoff < Nyquist` at bringup, a strict superset of what `from_cutoff`
+    // rejects, so construction cannot fail: build one filter and copy it per joint (the
+    // same bringup-invariant pattern as `Pacer::new(...).expect(...)`).
+    let filter = LowPassFilter::from_cutoff(velocity_filter_cutoff_hz, dt)
+        .expect("velocity_filter_cutoff_hz is bringup-validated in (0, Nyquist)");
+    let mut dq_filters = ArmPair::new([filter; ARM_DOF], [filter; ARM_DOF]);
     // The proximity readout is for human eyes, so publish it at ~20 Hz rather than
     // the control rate: one extra distance query every `readout_every` ticks.
     let readout_every = (0.05 / dt).round().max(1.0) as u64;
