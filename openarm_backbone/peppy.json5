@@ -292,13 +292,6 @@
       // tick of group delay. A universal control constant (same across generations and
       // sim/real), so it keeps a node default like the gains.
       velocity_filter_cutoff_hz: { $type: "f64", $default: 15.0 },
-      // Completion tolerance for backbone-executed move_gripper goals, as a
-      // fraction of full jaw travel: the goal completes when the measured opening
-      // is within this of the target.
-      gripper_opening_tolerance: { $type: "f64", $default: 0.015 },
-      // Deadline (s) for backbone-executed move_gripper goals; a goal the governed
-      // opening cannot reach (a collision clamp) fails here.
-      gripper_motion_timeout_s: { $type: "f64", $default: 10.0 },
     }
   }
 }

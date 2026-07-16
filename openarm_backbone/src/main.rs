@@ -23,7 +23,7 @@ mod trajectory;
 mod types;
 
 pub(crate) use arm_pair::ArmPair;
-pub(crate) use types::{ARM_DOF, JointVec, Side};
+pub(crate) use types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -74,20 +74,6 @@ fn main() -> Result<()> {
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
-        // The move timeout feeds Duration::from_secs_f64 (which panics on a bad
-        // value mid-spawn); a non-positive tolerance would keep any gripper goal
-        // from ever converging and one at a full travel would complete every goal
-        // instantly. All fail at bringup instead.
-        assert!(
-            params.gripper_opening_tolerance.is_finite()
-                && params.gripper_opening_tolerance > 0.0
-                && params.gripper_opening_tolerance < 1.0,
-            "gripper_opening_tolerance must be a fraction in (0, 1)"
-        );
-        assert!(
-            params.gripper_motion_timeout_s.is_finite() && params.gripper_motion_timeout_s > 0.0,
-            "gripper_motion_timeout_s must be a positive finite number"
-        );
         let max_joint_velocity_rad_s: JointVec = [
             params.max_joint_velocity_rad_s_1,
             params.max_joint_velocity_rad_s_2,
@@ -291,8 +277,6 @@ fn main() -> Result<()> {
                 config_rx,
                 coordinator::RunConfig {
                     cycle_period,
-                    gripper_tolerance: params.gripper_opening_tolerance,
-                    gripper_move_timeout: Duration::from_secs_f64(params.gripper_motion_timeout_s),
                     velocity_filter_cutoff_hz: params.velocity_filter_cutoff_hz,
                 },
                 token.clone(),

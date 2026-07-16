@@ -25,7 +25,7 @@ use control_core::{Pacer, filters::LowPassFilter};
 use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
-use crate::{ARM_DOF, ArmPair, JointVec, Side};
+use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 
 /// How long [`seed`] waits for an arm's first measured state before warning that
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an
@@ -53,14 +53,11 @@ pub struct ArmChannels {
     pub gripper_busy: Arc<AtomicBool>,
 }
 
-/// The coordinator's run parameters: the control-cycle period and the
-/// backbone-executed gripper moves' completion tolerance and timeout. A commander
-/// that stops streaming simply leaves its last governed setpoint in place (the
-/// follower holds it), so there is no freshness deadman to configure.
+/// The coordinator's run parameters. A commander that stops streaming simply
+/// leaves its last governed setpoint in place (the follower holds it), so
+/// there is no freshness deadman to configure.
 pub struct RunConfig {
     pub cycle_period: Duration,
-    pub gripper_tolerance: f64,
-    pub gripper_move_timeout: Duration,
     /// Cutoff (Hz) for the low-pass on each published desired velocity. `dq` is a
     /// per-tick position difference scaled by `1/dt`, so it amplifies any setpoint noise
     /// by the control rate; filtering it keeps the arm's Kd term from buzzing on a noisy
@@ -77,14 +74,19 @@ pub struct GripperGoal {
 }
 
 /// A backbone-executed gripper move in flight: the opening chases `target_frac`
-/// through the governor until the measured jaws converge, the goal is cancelled,
-/// or the deadline lapses (a governed clamp short of the target ends here). The
-/// busy guard releases the side's single-flight slot on any exit.
+/// through the governor until the governed chase lands on the target, the goal
+/// is cancelled, or the move overruns its budget (a governed clamp short of the
+/// target ends here). Like the arm's trajectory tiers, completion is graded on
+/// the commanded motion, not the measured jaws; the result reports the measured
+/// opening and the caller judges it. The busy guard releases the side's
+/// single-flight slot on any exit.
 struct GripperMove {
     target_frac: f64,
     ctx: move_gripper::GoalContext,
     started: Instant,
-    deadline: Instant,
+    /// Nominal chase duration; the runtime aborts once the move runs past
+    /// `MOTION_TIMEOUT_FACTOR` times this, exactly as the arm servo does.
+    budget_s: f64,
     _busy: BusyGuard,
 }
 
@@ -103,8 +105,6 @@ pub async fn run(
 ) -> peppygen::Result<()> {
     let RunConfig {
         cycle_period,
-        gripper_tolerance,
-        gripper_move_timeout,
         velocity_filter_cutoff_hz,
     } = config;
     // One publisher per pairing slot (arms and grippers alike). Publishing while
@@ -234,23 +234,25 @@ pub async fn run(
         );
 
         // Service the backbone-executed gripper moves: admit a queued goal into a free
-        // side and complete an in-flight move on measured convergence,
-        // cancellation, or its deadline.
+        // side and complete an in-flight move on the chase landing, cancellation,
+        // or a budget overrun. The governed opening passed in is last tick's (this
+        // tick's is computed below), which is also the chase base a new goal
+        // budgets from.
         service_gripper_move(
             &mut gripper_moves.left,
             &mut channels.left,
+            governed_openings.left,
             measured_openings.left,
-            gripper_tolerance,
-            gripper_move_timeout,
+            opening_rate,
             now,
         )
         .await;
         service_gripper_move(
             &mut gripper_moves.right,
             &mut channels.right,
+            governed_openings.right,
             measured_openings.right,
-            gripper_tolerance,
-            gripper_move_timeout,
+            opening_rate,
             now,
         )
         .await;
@@ -491,17 +493,35 @@ async fn tick_arm(channels: &mut ArmChannels, planner: &mut Planner, now: Instan
         .await
 }
 
+/// Landing threshold for the governed chase, in opening fraction. Purely
+/// numerical: the rate-limited chase lands on its target up to IEEE rounding
+/// residue, and the governor passes an unthrottled candidate through
+/// bit-exact, so anything past this is a real clamp. Nanometer-scale jaw
+/// travel, orders of magnitude below actuator resolution; goal satisfaction
+/// is the caller's judgment from the reported `final_opening`.
+const OPENING_LANDED_FRAC: f64 = 1e-9;
+
+/// Nominal duration (s) of a gripper move admitted with the chase at
+/// `governed_frac`: the commanded travel at the opening rate. The gripper
+/// analog of the arm servo's plan-time rollout, graded by the same
+/// [`motion_timed_out`] rule.
+fn gripper_move_budget_s(governed_frac: f64, target_frac: f64, opening_rate_frac_s: f64) -> f64 {
+    (target_frac - governed_frac).abs() / opening_rate_frac_s
+}
+
 /// Admit a queued gripper goal into a free side and drive an in-flight move to
-/// its terminal: measured convergence within the tolerance completes it,
-/// cancellation ends it, and the deadline fails it (a collision-governed clamp
-/// short of the target also lands here, so the message says so). The busy slot
-/// releases with the move on every path.
+/// its terminal: the governed chase landing on the target completes it,
+/// cancellation ends it, and overrunning the budget sized at admission fails it
+/// (a collision-governed clamp short of the target lands here, so the message
+/// says so). Every terminal reports the measured jaws as `final_opening`; like
+/// the arm's post-move reached check, judging that against the goal belongs to
+/// the caller. The busy slot releases with the move on every path.
 async fn service_gripper_move(
     mv: &mut Option<GripperMove>,
     channels: &mut ArmChannels,
+    governed_frac: f64,
     measured_frac: f64,
-    tolerance: f64,
-    timeout: Duration,
+    opening_rate_frac_s: f64,
     now: Instant,
 ) {
     if mv.is_none()
@@ -511,34 +531,37 @@ async fn service_gripper_move(
             target_frac: goal.opening,
             ctx: goal.ctx,
             started: now,
-            deadline: now + timeout,
+            budget_s: gripper_move_budget_s(governed_frac, goal.opening, opening_rate_frac_s),
             _busy: BusyGuard(channels.gripper_busy.clone()),
         });
     }
     let Some(m) = mv.as_ref() else { return };
-    let converged = (measured_frac - m.target_frac).abs() <= tolerance;
+    let elapsed_s = now.duration_since(m.started).as_secs_f64();
+    let landed = (governed_frac - m.target_frac).abs() <= OPENING_LANDED_FRAC;
     let (success, message, cancelled) = if m.ctx.is_cancelled() {
-        (false, "goal cancelled", true)
-    } else if converged {
-        (true, "move complete", false)
-    } else if now >= m.deadline {
+        (false, "goal cancelled".to_string(), true)
+    } else if landed {
+        (true, "move complete".to_string(), false)
+    } else if motion_timed_out(elapsed_s, m.budget_s) {
         (
             false,
-            "timed out short of the target (a collision-governed clamp ends here)",
+            format!(
+                "overran {MOTION_TIMEOUT_FACTOR:.0}x its {:.1}s nominal travel, short of the target (a collision-governed clamp ends here)",
+                m.budget_s
+            ),
             false,
         )
     } else {
         return;
     };
     let m = mv.take().expect("in-flight move checked above");
-    let elapsed = now.duration_since(m.started).as_secs_f64();
     let result = if cancelled {
         m.ctx
-            .complete_cancelled(success, message.into(), measured_frac, elapsed)
+            .complete_cancelled(success, message, measured_frac, elapsed_s)
             .await
     } else {
         m.ctx
-            .complete(success, message.into(), measured_frac, elapsed)
+            .complete(success, message, measured_frac, elapsed_s)
             .await
     };
     if let Err(e) = result {
@@ -601,7 +624,10 @@ mod tests {
         let prev = [0.0; ARM_DOF];
         let q = [0.01; ARM_DOF];
         let dq = filtered_velocity(&mut filters, &q, &prev, DT);
-        assert!(dq.iter().all(|v| (v - 1.0).abs() < 1e-12), "delta/dt is the rate");
+        assert!(
+            dq.iter().all(|v| (v - 1.0).abs() < 1e-12),
+            "delta/dt is the rate"
+        );
     }
 
     #[test]
@@ -672,5 +698,50 @@ mod tests {
             Some(0.3),
             "an opening after the move resumes following"
         );
+    }
+
+    // The gripper budget mirrors the arm servo's rollout: the commanded travel
+    // at the opening rate, so a long move earns a long leash and a short one
+    // stays tight.
+    #[test]
+    fn gripper_budget_is_the_commanded_travel_at_the_opening_rate() {
+        const RATE: f64 = 3.0;
+        assert_eq!(gripper_move_budget_s(0.0, 1.0, RATE), 1.0 / RATE);
+        // Binary-exact travel (0.25) so the equality is exact.
+        assert_eq!(gripper_move_budget_s(0.5, 0.75, 2.0), 0.125);
+        // Direction of travel does not matter.
+        assert_eq!(
+            gripper_move_budget_s(0.8, 0.2, RATE),
+            gripper_move_budget_s(0.2, 0.8, RATE)
+        );
+    }
+
+    #[test]
+    fn gripper_move_times_out_at_the_shared_factor_over_budget() {
+        // A clamped full-travel move fails once it overruns 2x its budget,
+        // exactly as the arm servo grades its rollout.
+        let budget = gripper_move_budget_s(0.0, 1.0, 3.0);
+        assert!(!motion_timed_out(
+            budget * MOTION_TIMEOUT_FACTOR - 0.01,
+            budget
+        ));
+        assert!(motion_timed_out(
+            budget * MOTION_TIMEOUT_FACTOR + 0.01,
+            budget
+        ));
+    }
+
+    // The chase's landing arithmetic (`prev + (t - prev)`) can leave IEEE
+    // rounding residue; the landing threshold absorbs it so a finished chase
+    // cannot dangle one ulp short of terminal.
+    #[test]
+    fn landing_threshold_absorbs_chase_rounding_residue() {
+        let target: f64 = 0.7;
+        let mut governed: f64 = 0.13;
+        for _ in 0..1000 {
+            let step = (target - governed).clamp(-0.03, 0.03);
+            governed += step;
+        }
+        assert!((governed - target).abs() <= OPENING_LANDED_FRAC);
     }
 }
