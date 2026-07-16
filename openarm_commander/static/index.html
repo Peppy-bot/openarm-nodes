@@ -702,7 +702,10 @@ function toggle_enable(side) {
 
 function reset_arm(side) {
   // Home parks the arm: disable so the stream stops, then drive to the home pose
-  // (zeros, elbow held off the singularity) as a discrete, time-bounded move.
+  // (zeros, elbow held off the singularity) as a discrete, time-bounded move. The
+  // jaw closes alongside as its own discrete goal; the backbone governs the arm
+  // and the opening together, so the close rides the same collision-governed
+  // descent and an open jaw never parks splayed against the torso.
   if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
     const v = i === 3 ? HOME_ELBOW_J4 : 0;
@@ -711,6 +714,9 @@ function reset_arm(side) {
   }
   touched[side] = 'joints';
   fire_arm(side, arm_duration(side));
+  $(`${side}_g`).value = 0;
+  $(`${side}_gt`).textContent = '0.000';
+  execute_gripper(side);
 }
 
 // Read all seven joint sliders directly. Used by the discrete fires (Home, Ready,
