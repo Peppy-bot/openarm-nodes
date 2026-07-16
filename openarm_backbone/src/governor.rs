@@ -1925,23 +1925,31 @@ mod tests {
         let mut g = v2_governor(true);
         let arms = finger_into_other_arm();
         // Force a sub-floor state (finger opened into the other arm, as an
-        // upstream fault or disabled-period motion would leave it).
-        let stuck = GovState::new(arms, ArmPair::new(0.6, 0.0));
+        // upstream fault or disabled-period motion would leave it). The stuck
+        // opening must sit on the near side of the finger's sweep minimum
+        // (~0.55 at this pose) so closing is the motion that retracts it;
+        // asserted below so a geometry change fails as setup, not as a
+        // governor regression.
+        let stuck = GovState::new(arms, ArmPair::new(0.5, 0.0));
         let d_stuck = distance(&mut g, &stuck);
         assert!(
             d_stuck < D_STOP,
             "setup: the forced state breaches the floor"
         );
-        // Opening further is fully frozen (the floor is the current clearance).
         let opening_step = g.max_opening_rate_frac_s() * DT;
-        let deeper = GovState::new(arms, ArmPair::new(0.6 + opening_step, 0.0));
+        let deeper = GovState::new(arms, ArmPair::new(0.5 + opening_step, 0.0));
+        let closing = GovState::new(arms, ArmPair::new(0.5 - opening_step, 0.0));
+        assert!(
+            distance(&mut g, &deeper) < d_stuck && distance(&mut g, &closing) > d_stuck,
+            "setup: at this pose opening must deepen and closing must recover"
+        );
+        // Opening further is fully frozen (the floor is the current clearance).
         let held = g.govern(&stuck, &deeper, &stuck, DT);
         assert!(
             distance(&mut g, &held) >= d_stuck - 1e-9,
             "an opening below the floor deepened the breach"
         );
         // Closing recovers: the escape passes and clearance increases.
-        let closing = GovState::new(arms, ArmPair::new(0.6 - opening_step, 0.0));
         let governed = g.govern(&stuck, &closing, &stuck, DT);
         assert_eq!(governed, closing, "the closing escape was throttled");
         assert!(
