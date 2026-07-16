@@ -30,25 +30,12 @@ use crate::trajectory::{
     ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory, PlanLimits,
     plan_cartesian, subdivided_blends,
 };
-use crate::{ARM_DOF, JointVec, Side};
+use crate::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 
 /// Slack the runtime per-tick Cartesian velocity check allows over the planned
-/// limit before aborting (mirrors the arm's backstop over the up-front plan).
+/// limit before aborting (mirrors the arm's backstop over the up-front plan,
+/// as [`MOTION_TIMEOUT_FACTOR`] does over the rollout's duration).
 const VELOCITY_GUARD_MARGIN: f64 = 1.5;
-
-/// Slack the runtime servo allows over its plan-time rollout duration before
-/// aborting. The rollout proves the nominal path's length; the governor can hold
-/// the arm off that path, so allow the move this multiple of the rollout before
-/// declaring it stuck. Mirrors [`VELOCITY_GUARD_MARGIN`]'s role over the plan's
-/// velocity sizing: the timeout tracks the actual motion, not a flat ceiling.
-const SERVO_TIMEOUT_FACTOR: f64 = 2.0;
-
-/// Whether a servo move that has run `elapsed_s` has overrun its `budget_s`
-/// rollout duration by more than [`SERVO_TIMEOUT_FACTOR`], the runtime abort
-/// condition.
-fn servo_timed_out(elapsed_s: f64, budget_s: f64) -> bool {
-    elapsed_s > budget_s * SERVO_TIMEOUT_FACTOR
-}
 
 /// Per-arm static configuration for the planner (the motion limits relocated
 /// from the arm). Cloned per side.
@@ -133,7 +120,7 @@ enum MovePath {
         started: Instant,
         prev_sample_at: Instant,
         // The plan-time rollout duration. The runtime aborts once the move runs
-        // past `SERVO_TIMEOUT_FACTOR` times this, tying the timeout to the
+        // past `MOTION_TIMEOUT_FACTOR` times this, tying the timeout to the
         // validated motion length rather than a flat ceiling.
         budget_s: f64,
     },
@@ -440,14 +427,14 @@ impl Planner {
                     self.cfg.max_ee_velocity_m_s,
                     dt,
                 );
-                let timed_out = servo_timed_out(elapsed, *budget_s);
+                let timed_out = motion_timed_out(elapsed, *budget_s);
                 match step {
                     ServoStep::Stepped(q) if !timed_out => (q, false),
                     ServoStep::Converged(q) => (q, true),
                     ServoStep::Stepped(_) => {
                         let short_m = servo.position_err_m(&mut self.model, &governed_q);
                         let message = format!(
-                            "servo overran {SERVO_TIMEOUT_FACTOR:.0}x its {:.1}s rollout, {:.0} mm short of the goal",
+                            "servo overran {MOTION_TIMEOUT_FACTOR:.0}x its {:.1}s rollout, {:.0} mm short of the goal",
                             budget_s,
                             short_m * 1000.0
                         );
@@ -841,17 +828,5 @@ mod tests {
         over[0] = 0.151;
         assert!(!exceeds_velocity_limits(&under, &prev, &vmax, dt));
         assert!(exceeds_velocity_limits(&over, &prev, &vmax, dt));
-    }
-
-    // The servo timeout scales with the plan's rollout duration, not a flat
-    // ceiling: an 8 s rollout tolerates up to 16 s (2x), a 1 s rollout only 2 s.
-    #[test]
-    fn servo_timeout_scales_with_the_rollout_budget() {
-        // Long validated motion gets proportionally longer before it is stuck.
-        assert!(!servo_timed_out(15.0, 8.0));
-        assert!(servo_timed_out(17.0, 8.0));
-        // Short validated motion is held to a short leash.
-        assert!(!servo_timed_out(1.9, 1.0));
-        assert!(servo_timed_out(2.1, 1.0));
     }
 }

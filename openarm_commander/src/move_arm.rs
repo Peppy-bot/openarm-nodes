@@ -16,12 +16,12 @@ use tracing::{info, warn};
 
 use crate::owner::{Feedback, PREEMPT_GRACE};
 use crate::pose::{REACHED_ANGLE_TOL_RAD, REACHED_POS_TOL_M, dist3, quat_angle};
+use crate::result_wait::{RESULT_POLL, RESULT_RETRY_DELAY, result_poll_retryable};
 use crate::state::Side;
 
 // Goal-accept round-trip to a pinned producer; answered directly, so this only needs to
 // cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
-const RESULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One discrete pose move, as fired at the backbone: the side, the world-frame target
 /// (position m, orientation quaternion `[x, y, z, w]`), the requested duration
@@ -109,14 +109,20 @@ async fn run(
     };
 
     // Await the move result, honoring preempt (a new Execute cancels this goal) and
-    // shutdown. Live progress is shown from the arm_states stream.
-    let result_fut = downstream.get_result(RESULT_TIMEOUT);
-    tokio::pin!(result_fut);
+    // shutdown. Live progress is shown from the arm_states stream. The wait re-arms
+    // its bounded poll until a terminal outcome (see result_wait); the backbone's
+    // proportional deadline bounds the move itself.
     let mut preempted = false;
     let outcome = loop {
+        let result_fut = downstream.get_result(RESULT_POLL);
+        tokio::pin!(result_fut);
         tokio::select! {
             _ = token.cancelled() => {
-                finalize(&feedback, side, false, "shutting down; result abandoned").await;
+                // Best-effort cancel so shutdown leaves no unsupervised motion.
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(side = side.label(), error = %e, "shutdown cancel failed");
+                }
+                finalize(&feedback, side, false, "shutting down; move cancelled").await;
                 return;
             }
             _ = preempt.cancelled(), if !preempted => {
@@ -125,9 +131,21 @@ async fn run(
                     warn!(side = side.label(), error = %e, "preempt cancel failed");
                 }
             }
-            result = &mut result_fut => break result,
+            result = &mut result_fut => match result {
+                Err(e) if result_poll_retryable(&e) => {
+                    tokio::time::sleep(RESULT_RETRY_DELAY).await;
+                }
+                result => break result,
+            }
         }
     };
+    // A result error leaves the goal's fate unknown; cancel best-effort so a move
+    // somehow still running does not continue unsupervised.
+    if outcome.is_err()
+        && let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await
+    {
+        warn!(side = side.label(), error = %e, "cancel after result error failed");
+    }
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
             ResultOutcome::Completed(data) => {

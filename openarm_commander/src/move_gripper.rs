@@ -16,11 +16,12 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::owner::Feedback;
+use crate::result_wait::{RESULT_POLL, RESULT_RETRY_DELAY, result_poll_retryable};
 use crate::state::Side;
 
-// Goal-accept round-trip to a pinned producer; the gripper move itself is short.
+// Goal-accept round-trip to a pinned producer; answered directly, so this only needs to
+// cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
-const RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn spawn(
     runner: Arc<NodeRunner>,
@@ -80,25 +81,53 @@ async fn run(
     };
 
     // Await the result, honoring shutdown. A rejected concurrent goal cannot happen
-    // here: the owner refuses a second Execute while one is in flight, so unlike the arm
-    // moves there is no preempt branch and thus no loop.
-    let outcome = tokio::select! {
-        _ = token.cancelled() => {
-            finalize(&feedback, side, false, "shutting down; result abandoned").await;
-            return;
+    // here: the owner refuses a second Execute while one is in flight, so unlike the
+    // arm moves there is no preempt branch. The wait re-arms its bounded poll until
+    // a terminal outcome (see result_wait); the backbone's own deadline bounds the
+    // move itself.
+    let outcome = loop {
+        let result_fut = downstream.get_result(RESULT_POLL);
+        tokio::pin!(result_fut);
+        tokio::select! {
+            _ = token.cancelled() => {
+                // Best-effort cancel so shutdown leaves no unsupervised motion.
+                if let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await {
+                    warn!(side = side.label(), error = %e, "shutdown cancel failed");
+                }
+                finalize(&feedback, side, false, "shutting down; move cancelled").await;
+                return;
+            }
+            result = &mut result_fut => match result {
+                Err(e) if result_poll_retryable(&e) => {
+                    tokio::time::sleep(RESULT_RETRY_DELAY).await;
+                }
+                result => break result,
+            }
         }
-        result = downstream.get_result(RESULT_TIMEOUT) => result,
     };
+    // A result error leaves the goal's fate unknown; cancel best-effort so a move
+    // somehow still running does not continue unsupervised.
+    if outcome.is_err()
+        && let Err(e) = downstream.cancel_goal(GOAL_TIMEOUT).await
+    {
+        warn!(side = side.label(), error = %e, "cancel after result error failed");
+    }
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
             ResultOutcome::Completed(data) => {
+                // The backbone reports the command delivered and where the jaws
+                // measured; whether that opening is good (a grasp stops short of
+                // a full close on purpose) is this side's call to surface.
                 let msg = if data.success {
                     format!(
-                        "move_gripper ({}): success in {:.2}s",
-                        label, data.action_time
+                        "move_gripper ({}): success in {:.2}s, opening {:.2}",
+                        label, data.action_time, data.final_opening
                     )
                 } else {
-                    format!("move_gripper ({}) failed: {}", label, data.message)
+                    format!(
+                        "move_gripper ({}) failed at opening {:.2}: {}",
+                        label, data.final_opening, data.message
+                    )
                 };
                 (data.success, msg)
             }
