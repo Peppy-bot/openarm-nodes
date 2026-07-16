@@ -23,7 +23,7 @@
 // cache every tick, so the reading is always current.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
@@ -36,6 +36,14 @@ use tracing::{error, warn};
 
 use crate::command_stream::GripperCommand;
 use crate::geometry;
+
+/// The peppy-synchronized clock as a [`SystemTime`] stamp for the generic
+/// emissions, or an error while the clock is not ready (before
+/// `peppygen::clock::init`, or in sim mode before the first tick).
+fn stamp_now() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| e.to_string())?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
 
 pub async fn run(
     runner: Arc<NodeRunner>,
@@ -57,6 +65,7 @@ pub async fn run(
         Err(e) => return error!("declare paired gripper_states publisher: {e}"),
     };
     let period = Duration::from_micros(1_000_000 / state_rate_hz as u64);
+    let mut clock_failing = false;
     let mut observer_failing = false;
     let mut command_failing = false;
     let mut peer_failing = false;
@@ -77,28 +86,47 @@ pub async fn run(
             warn!("gripper_states: skipping non-finite motor sample");
             continue;
         }
+        // One synchronized stamp per tick, shared by joint_states and
+        // joint_commands so a recorder sees the state/action pair at one time.
+        // While the clock is not ready the stamped publishes are skipped (the
+        // pairing publish below does not carry a stamp and continues).
+        let stamp = match stamp_now() {
+            Ok(stamp) => {
+                clock_failing = false;
+                Some(stamp)
+            }
+            Err(e) => {
+                if !clock_failing {
+                    clock_failing = true;
+                    warn!("clock not ready, skipping stamped publishes: {e}");
+                }
+                None
+            }
+        };
         // Measured opening on the generic observer contract as a 1-DOF joint
         // (positions[0]). The v1.0 prismatic gripper senses neither velocity
         // nor grip force, so both are left empty rather than reported as zero.
-        let observer_result =
-            match joint_states::build_message(vec![opening], Vec::new(), Vec::new()) {
-                Ok(msg) => observer_pub.publish(msg).await.map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
-        match observer_result {
-            Ok(()) => observer_failing = false,
-            Err(e) if !observer_failing => {
-                observer_failing = true;
-                warn!("joint_states publish failing, suppressing repeats: {e}");
+        if let Some(stamp) = stamp {
+            let observer_result =
+                match joint_states::build_message(stamp, vec![opening], Vec::new(), Vec::new()) {
+                    Ok(msg) => observer_pub.publish(msg).await.map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+            match observer_result {
+                Ok(()) => observer_failing = false,
+                Err(e) if !observer_failing => {
+                    observer_failing = true;
+                    warn!("joint_states publish failing, suppressing repeats: {e}");
+                }
+                Err(_) => {}
             }
-            Err(_) => {}
         }
         // The opening setpoint commanded to this gripper, as the action a
         // recorder captures aligned with the measured opening. Held-last;
         // nothing published until the first command arrives.
         let latest_command = *tracked.borrow();
-        if let Some(command) = latest_command {
-            let command_result = match joint_commands::build_message(vec![command.opening]) {
+        if let (Some(stamp), Some(command)) = (stamp, latest_command) {
+            let command_result = match joint_commands::build_message(stamp, vec![command.opening]) {
                 Ok(msg) => command_pub.publish(msg).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };

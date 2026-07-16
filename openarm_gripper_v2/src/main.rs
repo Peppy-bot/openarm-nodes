@@ -31,6 +31,10 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // The synchronized clock stamping the joint_states / joint_commands
+        // emissions; must be initialized before the state publisher reads it.
+        peppygen::clock::init(&node_runner).await?;
+
         let gripper_id = params.gripper_id;
         // Resolves this side's signed opening direction (the two v2 grippers are
         // mechanically mirrored) and rejects an out-of-range id at bringup.

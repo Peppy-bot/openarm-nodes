@@ -25,12 +25,24 @@ type Setpoint = ([f64; 7], [f64; 7]);
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
+/// The peppy-synchronized clock as a [`std::time::SystemTime`] stamp for the
+/// generic emissions (sim time once the engine ticks the clock), or an error
+/// while the clock is not ready.
+fn stamp_now() -> std::result::Result<std::time::SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| e.to_string())?;
+    Ok(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(ns))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // The synchronized clock stamping the joint_states / joint_commands
+        // emissions; must be initialized before the relay task reads it.
+        peppygen::clock::init(&node_runner).await?;
+
         let arm_id = params.arm_id;
         assert!(
             arm_id == ARM_ID_LEFT || arm_id == ARM_ID_RIGHT,
@@ -143,6 +155,7 @@ fn main() -> Result<()> {
                 Ok(p) => p,
                 Err(e) => return error!("declare paired arm_states publisher: {e}"),
             };
+            let mut clock_failing = false;
             let mut observer_failing = false;
             let mut command_failing = false;
             let mut peer_failing = false;
@@ -163,32 +176,53 @@ fn main() -> Result<()> {
                 if msg.arm_id != arm_id || !finite {
                     continue;
                 }
+                // One synchronized stamp per relayed sample (sim time), shared
+                // by joint_states and joint_commands so a recorder sees the
+                // state/action pair at one time. While the clock is not ready
+                // (no sim tick yet) the stamped publishes are skipped; the
+                // pairing publish below does not carry a stamp and continues.
+                let stamp = match stamp_now() {
+                    Ok(stamp) => {
+                        clock_failing = false;
+                        Some(stamp)
+                    }
+                    Err(e) => {
+                        if !clock_failing {
+                            clock_failing = true;
+                            warn!("clock not ready, skipping stamped publishes: {e}");
+                        }
+                        None
+                    }
+                };
                 // Measured state on the generic observer contract (no arm_id;
                 // consumers identify this arm by its producer binding).
-                let observer = async {
-                    let m = joint_states::build_message(
-                        msg.positions.to_vec(),
-                        msg.velocities.to_vec(),
-                        Vec::new(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    observer_pub.publish(m).await.map_err(|e| e.to_string())
-                }
-                .await;
-                match observer {
-                    Ok(()) => observer_failing = false,
-                    Err(e) if !observer_failing => {
-                        observer_failing = true;
-                        warn!("joint_states publish failing, suppressing repeats: {e}");
+                if let Some(stamp) = stamp {
+                    let observer = async {
+                        let m = joint_states::build_message(
+                            stamp,
+                            msg.positions.to_vec(),
+                            msg.velocities.to_vec(),
+                            Vec::new(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        observer_pub.publish(m).await.map_err(|e| e.to_string())
                     }
-                    Err(_) => {}
+                    .await;
+                    match observer {
+                        Ok(()) => observer_failing = false,
+                        Err(e) if !observer_failing => {
+                            observer_failing = true;
+                            warn!("joint_states publish failing, suppressing repeats: {e}");
+                        }
+                        Err(_) => {}
+                    }
                 }
                 // The governed setpoint commanded to this arm, held-last, as the
                 // action a recorder captures aligned with the measured state.
                 let latest_setpoint = *relay_latest.borrow();
-                if let Some((q_des, _)) = latest_setpoint {
+                if let (Some(stamp), Some((q_des, _))) = (stamp, latest_setpoint) {
                     let command = async {
-                        let m = joint_commands::build_message(q_des.to_vec())
+                        let m = joint_commands::build_message(stamp, q_des.to_vec())
                             .map_err(|e| e.to_string())?;
                         command_pub.publish(m).await.map_err(|e| e.to_string())
                     }

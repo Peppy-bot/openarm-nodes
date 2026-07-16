@@ -14,6 +14,7 @@
 // consumer binds this follower exactly like the real gripper.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::engine_states_gripper_states;
@@ -26,6 +27,14 @@ use tracing::{error, warn};
 
 use crate::config::GripperId;
 use crate::stream::GripperCommand;
+
+/// The peppy-synchronized clock as a [`SystemTime`] stamp for the generic
+/// emissions (sim time once the engine ticks the clock), or an error while the
+/// clock is not ready.
+fn stamp_now() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| e.to_string())?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
 
 pub async fn run(
     runner: Arc<NodeRunner>,
@@ -49,6 +58,7 @@ pub async fn run(
         Ok(p) => p,
         Err(e) => return error!(error = %e, "declare paired gripper_states publisher"),
     };
+    let mut clock_failing = false;
     let mut observer_failing = false;
     let mut command_failing = false;
     let mut peer_failing = false;
@@ -70,25 +80,46 @@ pub async fn run(
         if msg.gripper_id != gripper_id.as_u8() || !msg.opening.is_finite() {
             continue;
         }
+        // One synchronized stamp per relayed sample (sim time), shared by
+        // joint_states and joint_commands so a recorder sees the state/action
+        // pair at one time. While the clock is not ready (no sim tick yet) the
+        // stamped publishes are skipped; the pairing publish below does not
+        // carry a stamp and continues.
+        let stamp = match stamp_now() {
+            Ok(stamp) => {
+                clock_failing = false;
+                Some(stamp)
+            }
+            Err(e) => {
+                if !clock_failing {
+                    clock_failing = true;
+                    warn!("clock not ready, skipping stamped publishes: {e}");
+                }
+                None
+            }
+        };
         // Measured opening on the generic observer contract as a 1-DOF joint
         // (positions[0]); the gripper senses neither velocity nor force.
-        let observer = match joint_states::build_message(vec![msg.opening], Vec::new(), Vec::new())
-        {
-            Ok(m) => observer_pub.publish(m).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
-        match observer {
-            Ok(()) => observer_failing = false,
-            Err(e) if !observer_failing => {
-                observer_failing = true;
-                warn!("joint_states publish failing, suppressing repeats: {e}");
+        if let Some(stamp) = stamp {
+            let observer =
+                match joint_states::build_message(stamp, vec![msg.opening], Vec::new(), Vec::new())
+                {
+                    Ok(m) => observer_pub.publish(m).await.map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+            match observer {
+                Ok(()) => observer_failing = false,
+                Err(e) if !observer_failing => {
+                    observer_failing = true;
+                    warn!("joint_states publish failing, suppressing repeats: {e}");
+                }
+                Err(_) => {}
             }
-            Err(_) => {}
         }
         // The opening setpoint commanded to this gripper, held-last.
         let latest_command = *tracked.borrow();
-        if let Some(command) = latest_command {
-            let result = match joint_commands::build_message(vec![command.opening]) {
+        if let (Some(stamp), Some(command)) = (stamp, latest_command) {
+            let result = match joint_commands::build_message(stamp, vec![command.opening]) {
                 Ok(m) => command_pub.publish(m).await.map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };

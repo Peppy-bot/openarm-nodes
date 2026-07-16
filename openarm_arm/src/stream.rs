@@ -8,7 +8,7 @@
 //! node.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::joint_commands::v1::joint_commands;
@@ -35,6 +35,14 @@ pub struct GovernedSetpoint {
 pub struct MeasuredState {
     pub positions: JointVec,
     pub velocities: JointVec,
+}
+
+/// The peppy-synchronized clock as a [`SystemTime`] stamp for the generic
+/// emissions, or an error while the clock is not ready (before
+/// `peppygen::clock::init`, or in sim mode before the first tick).
+fn stamp_now() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| e.to_string())?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
 }
 
 /// The control loop's connections to the stream tasks: the inbound governed
@@ -124,6 +132,7 @@ pub async fn run_state_publisher(
     }
     let mut pacer =
         Pacer::new(period).expect("state publish period is non-zero (derives from state_rate_hz)");
+    let mut clock_failing = false;
     let mut observer_failing = false;
     let mut command_failing = false;
     let mut peer_failing = false;
@@ -132,29 +141,49 @@ pub async fn run_state_publisher(
             return;
         }
         let m = (*measured.borrow()).expect("gated on first measurement");
+        // One synchronized stamp per tick, shared by joint_states and
+        // joint_commands so a recorder sees the state/action pair at one time.
+        // While the clock is not ready the stamped publishes are skipped (the
+        // pairing publish below does not carry a stamp and continues).
+        let stamp = match stamp_now() {
+            Ok(stamp) => {
+                clock_failing = false;
+                Some(stamp)
+            }
+            Err(e) => {
+                if !clock_failing {
+                    clock_failing = true;
+                    warn!("clock not ready, skipping stamped publishes: {e}");
+                }
+                None
+            }
+        };
         // Measured joint state on the generic observer contract (no arm_id;
         // consumers identify this arm by its producer binding).
-        let observer_result = async {
-            let joints = joint_states::build_message(
-                m.positions.to_vec(),
-                m.velocities.to_vec(),
-                Vec::new(),
-            )
-            .map_err(|e| e.to_string())?;
-            observer_pub
-                .publish(joints)
-                .await
+        if let Some(stamp) = stamp {
+            let observer_result = async {
+                let joints = joint_states::build_message(
+                    stamp,
+                    m.positions.to_vec(),
+                    m.velocities.to_vec(),
+                    Vec::new(),
+                )
                 .map_err(|e| e.to_string())?;
-            Ok::<(), String>(())
-        }
-        .await;
-        match observer_result {
-            Ok(()) => observer_failing = false,
-            Err(e) if !observer_failing => {
-                observer_failing = true;
-                warn!("joint_states publish failing, suppressing repeats: {e}");
+                observer_pub
+                    .publish(joints)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<(), String>(())
             }
-            Err(_) => {}
+            .await;
+            match observer_result {
+                Ok(()) => observer_failing = false,
+                Err(e) if !observer_failing => {
+                    observer_failing = true;
+                    warn!("joint_states publish failing, suppressing repeats: {e}");
+                }
+                Err(_) => {}
+            }
         }
         // The governed setpoint commanded to this arm, surfaced as joint_commands
         // so a recorder can capture the action aligned with the measured state
@@ -171,9 +200,9 @@ pub async fn run_state_publisher(
         // with state[i] for this joint group. Held-last; nothing published until
         // the first setpoint arrives.
         let latest_setpoint = *governed.borrow();
-        if let Some(setpoint) = latest_setpoint {
+        if let (Some(stamp), Some(setpoint)) = (stamp, latest_setpoint) {
             let command_result = async {
-                let cmd = joint_commands::build_message(setpoint.q_des.to_vec())
+                let cmd = joint_commands::build_message(stamp, setpoint.q_des.to_vec())
                     .map_err(|e| e.to_string())?;
                 command_pub.publish(cmd).await.map_err(|e| e.to_string())?;
                 Ok::<(), String>(())
