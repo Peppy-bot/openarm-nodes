@@ -2,7 +2,7 @@
 //! side, with a distinct `arm_id`. A follower of the bimanual backbone: it owns the
 //! hardware control loop (gravity/Coriolis/friction feedforward from the
 //! in-process srs_model, plus MIT control) and tracks the backbone's governed
-//! setpoint over the arm_link pairing, reporting measured state back on the
+//! setpoint over the joint_link pairing, reporting measured state back on the
 //! same pairing and on the always-on broadcast `arm_states` stream. The
 //! backbone (openarm_backbone) owns all trajectory generation, stream following, and
 //! self-collision governing, so this node carries no motion logic of its own; on
@@ -33,7 +33,7 @@ pub type JointVec = [f64; ARM_DOF];
 
 /// `arm_id` values (0 = left, 1 = right). The chain base link and joint limits come
 /// from the embedded description keyed by [`Side`]; `arm_id` also tags the broadcast
-/// measured state (the command loop itself is scoped by the arm_link pairing, no id
+/// measured state (the command loop itself is scoped by the joint_link pairing, no id
 /// needed).
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;

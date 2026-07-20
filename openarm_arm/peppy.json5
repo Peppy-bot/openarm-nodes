@@ -24,9 +24,9 @@
         // arm_id demux). Optional: the arm boots and holds with no backbone paired,
         // and the pair is established at the backbone's start (launcher `links:`).
         {
-          name: "openarm_arm_link",
+          name: "joint_link",
           tag: "v1",
-          role: "arm",
+          role: "follower",
           link_id: "backbone",
           optional: true,
         },
