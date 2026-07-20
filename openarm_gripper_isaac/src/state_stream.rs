@@ -6,6 +6,7 @@
 // the real gripper.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::engine_states::gripper_states as engine_states_gripper_states;
@@ -66,8 +67,9 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
             }
             Err(e) => error!(error = %e, "gripper_states build"),
         }
-        // Relay to the paired backbone; silently dropped while unpaired.
-        match backbone::gripper_states::build_message(msg.opening) {
+        // Relay to the paired backbone; silently dropped while unpaired. The
+        // engine's sim torque rides along as the pairing effort.
+        match backbone::gripper_states::build_message(SystemTime::now(), msg.opening, msg.force) {
             Ok(payload) => {
                 if let Err(e) = peer_pub.publish(payload).await {
                     error!(error = %e, "paired gripper_states publish");

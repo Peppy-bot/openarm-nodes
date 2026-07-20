@@ -21,9 +21,9 @@
         // unpaired (moves still work via backbone goals) and is paired at
         // the backbone's start.
         {
-          name: "openarm_gripper_link",
+          name: "gripper_link",
           tag: "v1",
-          role: "gripper",
+          role: "follower",
           link_id: "backbone",
           optional: true,
         },

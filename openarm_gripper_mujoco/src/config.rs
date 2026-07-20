@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use peppygen::Parameters;
 
-// Follow-loop timing for streamed gripper_commands, parsed from the node
+// Follow-loop timing for streamed gripper_setpoints, parsed from the node
 // parameters. No velocity cap: the gripper streams the latest opening directly.
 #[derive(Copy, Clone, Debug)]
 pub struct ControlParams {

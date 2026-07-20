@@ -7,7 +7,7 @@
 // is always current.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
@@ -53,12 +53,13 @@ pub async fn run(
             warn!("gripper_states: skipping non-finite motor sample");
             continue;
         }
-        // The v1.0 prismatic gripper does not sense grip force; report 0.
-        let force = 0.0;
+        // The v1.0 prismatic gripper does not sense grip force; report 0 on
+        // both the broadcast force and the pairing effort.
+        let effort = 0.0;
         // The broadcast and paired publishes serve unrelated consumers, so
         // each runs and reports independently: one failing must not starve
         // the other.
-        let broadcast_result = match gripper_states::build_message(gripper_id, opening, force) {
+        let broadcast_result = match gripper_states::build_message(gripper_id, opening, effort) {
             Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };
@@ -70,10 +71,11 @@ pub async fn run(
             }
             Err(_) => {}
         }
-        let peer_result = match backbone::gripper_states::build_message(opening) {
-            Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
+        let peer_result =
+            match backbone::gripper_states::build_message(SystemTime::now(), opening, effort) {
+                Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
         match peer_result {
             Ok(()) => peer_failing = false,
             Err(e) if !peer_failing => {

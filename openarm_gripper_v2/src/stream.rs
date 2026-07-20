@@ -7,7 +7,7 @@
 // is always current.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
@@ -47,17 +47,19 @@ pub async fn run(
             .unwrap_or_else(|e| e.into_inner())
             .get_state();
         let opening = geometry.motor_rad_to_fraction(state.position);
-        let force = state.torque;
+        // Motor current-derived torque estimate (N*m at the motor shaft),
+        // carried as the broadcast force and the pairing effort.
+        let effort = state.torque;
         // Skip a poisoned sample rather than publishing NaN/Inf to consumers,
         // matching the finiteness guards on the command paths.
-        if !opening.is_finite() || !force.is_finite() {
+        if !opening.is_finite() || !effort.is_finite() {
             warn!("gripper_states: skipping non-finite motor sample");
             continue;
         }
         // The broadcast and paired publishes serve unrelated consumers, so
         // each runs and reports independently: one failing must not starve
         // the other.
-        let broadcast_result = match gripper_states::build_message(gripper_id, opening, force) {
+        let broadcast_result = match gripper_states::build_message(gripper_id, opening, effort) {
             Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         };
@@ -69,10 +71,11 @@ pub async fn run(
             }
             Err(_) => {}
         }
-        let peer_result = match backbone::gripper_states::build_message(opening) {
-            Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
+        let peer_result =
+            match backbone::gripper_states::build_message(SystemTime::now(), opening, effort) {
+                Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
         match peer_result {
             Ok(()) => peer_failing = false,
             Err(e) if !peer_failing => {

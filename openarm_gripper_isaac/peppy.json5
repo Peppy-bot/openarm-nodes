@@ -1,5 +1,5 @@
 // Isaac sim implementation of openarm_gripper. Follows streamed
-// gripper_commands and emits the resolved aperture on gripper_sim_passthrough for
+// gripper_setpoints and emits the resolved aperture on gripper_sim_passthrough for
 // the sim to actuate; relays the sim's gripper_states to the paired backbone.
 // Typed peppygen topics throughout, no raw peppylib.
 {
@@ -21,9 +21,9 @@
         // back, both scoped to the pair (no gripper_id demux). Optional and
         // mirrors the real gripper, so both follow the same contract.
         {
-          name: "openarm_gripper_link",
+          name: "gripper_link",
           tag: "v1",
-          role: "gripper",
+          role: "follower",
           link_id: "backbone",
           optional: true,
         },
