@@ -1,5 +1,5 @@
 // Isaac sim follower for one openarm arm. A thin bridge: it follows the backbone's
-// governed setpoints over the arm_link pairing (collision-governed,
+// governed setpoints over the joint_link pairing (collision-governed,
 // rate-limited, the backbone owns all trajectory generation) and republishes the
 // resolved (q_des, dq_des) on the sim-internal arm_sim_passthrough topic for
 // the engine to actuate, relaying the engine's measured state back to the
@@ -25,9 +25,9 @@
         // pair (no arm_id demux). Optional: the follower boots and idles with no
         // backbone paired; the pair is established at the backbone's start.
         {
-          name: "openarm_arm_link",
+          name: "joint_link",
           tag: "v1",
-          role: "arm",
+          role: "follower",
           link_id: "backbone",
           optional: true,
         },
@@ -48,13 +48,13 @@
     topics: {
       emits: [
         // The `backbone` pairing slot: the topic this role emits.
-        { link_id: "backbone", name: "arm_states" },
+        { link_id: "backbone", name: "joint_states" },
         { link_id: "sim_passthrough", name: "arm_sim_passthrough" },
         { link_id: "states", name: "arm_states" },
       ],
       consumes: [
         // The counterpart role's topic on the same slot.
-        { link_id: "backbone", name: "arm_setpoints" },
+        { link_id: "backbone", name: "joint_setpoints" },
         { name: "arm_states", link_id: "engine_states" },
       ],
     },
