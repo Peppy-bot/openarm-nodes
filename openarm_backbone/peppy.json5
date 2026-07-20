@@ -35,20 +35,20 @@
       pairings: [
         // The exclusive command loop with each arm: the backbone plays the commander
         // role, streams the governed joint setpoint down each slot's
-        // arm_setpoints, and reads that arm's measured state back on the slot's
-        // arm_states (the governor's d_now and the trajectory anchor); the slot
+        // joint_setpoints, and reads that arm's measured state back on the slot's
+        // joint_states (the governor's d_now and the trajectory anchor); the slot
         // scopes both directions, so no arm_id demux and no other producer can
         // drive an arm or pose as its state. Optional like the gripper slots
         // below, established at this instance's start (launcher `links:`).
         {
-          name: "openarm_arm_link",
+          name: "joint_link",
           tag: "v1",
           role: "commander",
           link_id: "left_arm_link",
           optional: true
         },
         {
-          name: "openarm_arm_link",
+          name: "joint_link",
           tag: "v1",
           role: "commander",
           link_id: "right_arm_link",
@@ -64,14 +64,14 @@
         // stays gated) and each pair is established at this instance's start
         // (launcher `links:`).
         {
-          name: "openarm_gripper_link",
+          name: "gripper_link",
           tag: "v1",
           role: "commander",
           link_id: "left_gripper_link",
           optional: true
         },
         {
-          name: "openarm_gripper_link",
+          name: "gripper_link",
           tag: "v1",
           role: "commander",
           link_id: "right_gripper_link",

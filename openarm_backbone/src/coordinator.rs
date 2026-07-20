@@ -111,33 +111,33 @@ pub async fn run(
     // a slot is unpaired is a legal no-op, so the backbone streams governed setpoints
     // regardless and a follower simply starts tracking once its pair is
     // established.
-    let left_arm_pub = match left_arm_link::arm_setpoints::declare_publisher(&runner).await {
+    let left_arm_pub = match left_arm_link::joint_setpoints::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare left arm_setpoints publisher: {e}");
+            error!("declare left joint_setpoints publisher: {e}");
             return Err(e);
         }
     };
-    let right_arm_pub = match right_arm_link::arm_setpoints::declare_publisher(&runner).await {
+    let right_arm_pub = match right_arm_link::joint_setpoints::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare right arm_setpoints publisher: {e}");
+            error!("declare right joint_setpoints publisher: {e}");
             return Err(e);
         }
     };
     let left_gripper_pub =
-        match left_gripper_link::gripper_commands::declare_publisher(&runner).await {
+        match left_gripper_link::gripper_setpoints::declare_publisher(&runner).await {
             Ok(p) => p,
             Err(e) => {
-                error!("declare left gripper_commands publisher: {e}");
+                error!("declare left gripper_setpoints publisher: {e}");
                 return Err(e);
             }
         };
     let right_gripper_pub =
-        match right_gripper_link::gripper_commands::declare_publisher(&runner).await {
+        match right_gripper_link::gripper_setpoints::declare_publisher(&runner).await {
             Ok(p) => p,
             Err(e) => {
-                error!("declare right gripper_commands publisher: {e}");
+                error!("declare right gripper_setpoints publisher: {e}");
                 return Err(e);
             }
         };
@@ -318,14 +318,19 @@ pub async fn run(
 
         // Publish one governed setpoint per arm on its pairing slot; the slot
         // scopes the stream to its paired arm, so the message carries no arm_id.
-        type BuildSetpoint = fn(JointVec, JointVec) -> peppygen::Result<peppylib::Payload>;
+        type BuildSetpoint = fn(
+            std::time::SystemTime,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        ) -> peppygen::Result<peppylib::Payload>;
         for (side, planner, filters, arm_pub, build, prev_q, governed_q) in [
             (
                 Side::Left,
                 &mut planners.left,
                 &mut dq_filters.left,
                 &left_arm_pub,
-                left_arm_link::arm_setpoints::build_message as BuildSetpoint,
+                left_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.left,
                 governed.arms.left,
             ),
@@ -334,7 +339,7 @@ pub async fn run(
                 &mut planners.right,
                 &mut dq_filters.right,
                 &right_arm_pub,
-                right_arm_link::arm_setpoints::build_message as BuildSetpoint,
+                right_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.right,
                 governed.arms.right,
             ),
@@ -344,13 +349,18 @@ pub async fn run(
             // position (`governed_q`) is untouched, so tracking is unaffected.
             let dq = filtered_velocity(filters, &governed_q, &prev_q, dt);
             planner.commit(governed_q);
-            match build(governed_q, dq) {
+            match build(
+                std::time::SystemTime::now(),
+                governed_q.to_vec(),
+                dq.to_vec(),
+                Vec::new(),
+            ) {
                 Ok(msg) => {
                     if let Err(e) = arm_pub.publish(msg).await {
-                        warn!("arm_setpoints publish ({} arm): {e}", side.label());
+                        warn!("joint_setpoints publish ({} arm): {e}", side.label());
                     }
                 }
-                Err(e) => error!("build arm_setpoints ({} arm): {e}", side.label()),
+                Err(e) => error!("build joint_setpoints ({} arm): {e}", side.label()),
             }
         }
 
@@ -358,19 +368,19 @@ pub async fn run(
         // slot (the slot scopes the stream to its paired gripper, so the message
         // carries only the opening); an idle side stays silent and its gripper
         // holds the jaws.
-        type BuildOpening = fn(f64) -> peppygen::Result<peppylib::Payload>;
+        type BuildOpening = fn(std::time::SystemTime, f64) -> peppygen::Result<peppylib::Payload>;
         for (side, gripper_pub, build, opening_frac, active) in [
             (
                 Side::Left,
                 &left_gripper_pub,
-                left_gripper_link::gripper_commands::build_message as BuildOpening,
+                left_gripper_link::gripper_setpoints::build_message as BuildOpening,
                 governed_openings.left,
                 targets.left.is_some(),
             ),
             (
                 Side::Right,
                 &right_gripper_pub,
-                right_gripper_link::gripper_commands::build_message as BuildOpening,
+                right_gripper_link::gripper_setpoints::build_message as BuildOpening,
                 governed_openings.right,
                 targets.right.is_some(),
             ),
@@ -378,7 +388,7 @@ pub async fn run(
             if !active {
                 continue;
             }
-            match build(opening_frac) {
+            match build(std::time::SystemTime::now(), opening_frac) {
                 Ok(msg) => {
                     if let Err(e) = gripper_pub.publish(msg).await {
                         warn!("gripper_commands publish ({} gripper): {e}", side.label());

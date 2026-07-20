@@ -160,7 +160,7 @@ pub async fn run_gripper_command_listener(
     }
 }
 
-/// Receive both paired arms' measured state forever (the arm_link back-channel),
+/// Receive both paired arms' measured state forever (the joint_link back-channel),
 /// keeping the latest per side. The slot IS the side (a pairing delivers only
 /// its one peer), so there is no id demux, and the governor anchors only on its
 /// exclusive command-loop peers: a stray broadcast producer cannot pose as an
@@ -171,27 +171,34 @@ pub async fn run_joint_state_listener(
     latest: [watch::Sender<Option<MeasuredState>>; 2],
 ) {
     let (left, right) = tokio::join!(
-        left_arm_link::arm_states::subscribe(&runner),
-        right_arm_link::arm_states::subscribe(&runner),
+        left_arm_link::joint_states::subscribe(&runner),
+        right_arm_link::joint_states::subscribe(&runner),
     );
     let (mut left, mut right) = match (left, right) {
         (Ok(l), Ok(r)) => (l, r),
         (l, r) => {
             return error!(
-                "arm_states subscribe: left {:?}, right {:?}",
+                "joint_states subscribe: left {:?}, right {:?}",
                 l.err(),
                 r.err()
             );
         }
     };
-    let parse = |side: Side, positions: JointVec, velocities: JointVec| -> Option<MeasuredState> {
+    let parse = |side: Side, positions: Vec<f64>, velocities: Vec<f64>| -> Option<MeasuredState> {
         let finite = positions
             .iter()
             .chain(velocities.iter())
             .all(|v| v.is_finite());
-        if !finite {
+        let Ok(positions) = JointVec::try_from(positions) else {
             warn!(
-                "arm_states: dropping {} message with non-finite state",
+                "joint_states: dropping {} message with a non-arm joint count",
+                side.label()
+            );
+            return None;
+        };
+        if !finite || velocities.len() != positions.len() {
+            warn!(
+                "joint_states: dropping {} message with non-finite or malformed state",
                 side.label()
             );
             return None;
