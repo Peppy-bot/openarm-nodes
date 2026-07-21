@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
-use peppygen::consumed_actions::backbone_move_gripper;
-use peppygen::consumed_actions::backbone_move_gripper::ResultOutcome;
+use peppygen::consumed_actions::backbone::move_gripper as backbone_move_gripper;
+use peppygen::consumed_actions::backbone::move_gripper::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{info, warn};

@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use openarm_description::Side;
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_commands::v1::arm_joint_commands;
-use peppygen::emitted_topics::openarm_commands::v1::gripper_commands;
+use peppygen::emitted_topics::commands::arm_joint_commands;
+use peppygen::emitted_topics::commands::gripper_commands;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::sync::watch;

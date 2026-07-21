@@ -7,9 +7,8 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::{
-    left_gripper_states_gripper_states, right_gripper_states_gripper_states,
-};
+use peppygen::consumed_topics::left_gripper_states::gripper_states as left_gripper_states_gripper_states;
+use peppygen::consumed_topics::right_gripper_states::gripper_states as right_gripper_states_gripper_states;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{error, warn};

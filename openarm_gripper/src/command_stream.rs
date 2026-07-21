@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::pairings::backbone;
+use peppygen::paired_topics::backbone;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tracing::{error, warn};

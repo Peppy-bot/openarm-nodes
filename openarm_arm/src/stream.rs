@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_arm_states::v1::arm_states;
-use peppygen::pairings::backbone;
+use peppygen::emitted_topics::states::arm_states;
+use peppygen::paired_topics::backbone;
 use tokio::sync::watch;
 use tracing::{error, warn};
 

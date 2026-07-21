@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_gripper_states::v1::gripper_states;
-use peppygen::pairings::backbone;
+use peppygen::emitted_topics::states::gripper_states;
+use peppygen::paired_topics::backbone;
 use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 

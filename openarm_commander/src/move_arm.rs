@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
-use peppygen::consumed_actions::backbone_move_arm;
-use peppygen::consumed_actions::backbone_move_arm::ResultOutcome;
+use peppygen::consumed_actions::backbone::move_arm as backbone_move_arm;
+use peppygen::consumed_actions::backbone::move_arm::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
