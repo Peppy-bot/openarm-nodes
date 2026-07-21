@@ -18,9 +18,10 @@ use tracing::{error, warn};
 
 use crate::{JointVec, Side};
 
-/// At most one unknown-id warning per stream in this window, so a misrouted
-/// producer is visible in the log without flooding it at the stream rate.
-const UNKNOWN_ARM_WARN_PERIOD: Duration = Duration::from_secs(1);
+/// At most one dropped-message warning per stream in this window, so a
+/// misrouted or persistently malformed producer is visible in the log
+/// without flooding it at the stream rate.
+const THROTTLED_WARN_PERIOD: Duration = Duration::from_secs(1);
 
 /// Pause after a receive error before retrying, so a persistently broken
 /// subscription cannot spin the listener at full CPU or flood the log at the stream
@@ -43,12 +44,12 @@ pub struct GripperCommand {
     pub opening: f64,
 }
 
-/// The latest measured joint position for one arm, fed by the arm_link
-/// pairing's `arm_states` back-channel. The backbone anchors trajectories and
+/// The latest measured joint position for one arm, fed by the joint_link
+/// pairing's `joint_states` back-channel. The backbone anchors trajectories and
 /// governor queries on position; the governed velocity feedforward is the
 /// commanded step, not a measurement, so the stream's velocities are validated
 /// but not retained.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeasuredState {
     pub positions: JointVec,
 }
@@ -56,19 +57,63 @@ pub struct MeasuredState {
 /// The latest measured opening of one gripper, clamped at ingestion into
 /// `[0, 1]` (0 = closed, 1 = fully open), so downstream consumers never see an
 /// out-of-range placement. Consumed every tick like the measured arm state.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GripperOpening {
     pub fraction: f64,
 }
 
-/// Warn that a message carried an out-of-range id (`field` names it: `arm_id`
-/// or `gripper_id`), throttled to at most once per [`UNKNOWN_ARM_WARN_PERIOD`].
-fn warn_unknown_id(stream: &str, field: &str, id: u8, last: &mut Option<Instant>) {
+/// Run `emit` at most once per [`THROTTLED_WARN_PERIOD`] per `last` state.
+fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
     let now = Instant::now();
-    if last.is_none_or(|t| now.duration_since(t) >= UNKNOWN_ARM_WARN_PERIOD) {
-        warn!("{stream}: dropping message for unknown {field} {id}");
+    if last.is_none_or(|t| now.duration_since(t) >= THROTTLED_WARN_PERIOD) {
+        emit();
         *last = Some(now);
     }
+}
+
+/// Warn that a message carried an out-of-range id (`field` names it: `arm_id`
+/// or `gripper_id`), throttled to at most once per [`THROTTLED_WARN_PERIOD`].
+fn warn_unknown_id(stream: &str, field: &str, id: u8, last: &mut Option<Instant>) {
+    warn_throttled(last, || {
+        warn!("{stream}: dropping message for unknown {field} {id}");
+    });
+}
+
+/// Parses one paired arm's inbound joint_states payload. This backbone drives
+/// fixed 7-joint arms whose followers always measure velocity, so a message
+/// must carry exactly [`crate::ARM_DOF`] positions with matching velocities,
+/// all finite; the generic contract's empty-velocities form is deliberately
+/// rejected here rather than half-accepted.
+fn parse_joint_state(
+    positions: Vec<f64>,
+    velocities: Vec<f64>,
+) -> Result<MeasuredState, &'static str> {
+    let finite = positions
+        .iter()
+        .chain(velocities.iter())
+        .all(|v| v.is_finite());
+    let velocity_count = velocities.len();
+    let Ok(positions) = JointVec::try_from(positions) else {
+        return Err("a non-arm joint count");
+    };
+    if velocity_count != positions.len() {
+        return Err("a velocity count that does not match its joints");
+    }
+    if !finite {
+        return Err("non-finite values");
+    }
+    Ok(MeasuredState { positions })
+}
+
+/// Parses one paired gripper's inbound measured opening: finite, clamped
+/// into the contract's `[0, 1]`.
+fn parse_gripper_state(opening: f64) -> Result<GripperOpening, &'static str> {
+    if !opening.is_finite() {
+        return Err("a non-finite opening");
+    }
+    Ok(GripperOpening {
+        fraction: opening.clamp(0.0, 1.0),
+    })
 }
 
 /// Receive `arm_joint_commands` forever, keeping the latest well-formed message
@@ -184,27 +229,7 @@ pub async fn run_joint_state_listener(
             );
         }
     };
-    let parse = |side: Side, positions: Vec<f64>, velocities: Vec<f64>| -> Option<MeasuredState> {
-        let finite = positions
-            .iter()
-            .chain(velocities.iter())
-            .all(|v| v.is_finite());
-        let Ok(positions) = JointVec::try_from(positions) else {
-            warn!(
-                "joint_states: dropping {} message with a non-arm joint count",
-                side.label()
-            );
-            return None;
-        };
-        if !finite || velocities.len() != positions.len() {
-            warn!(
-                "joint_states: dropping {} message with non-finite or malformed state",
-                side.label()
-            );
-            return None;
-        }
-        Some(MeasuredState { positions })
-    };
+    let mut last_reject_warn: Option<Instant> = None;
     loop {
         // Whichever slot delivers next wins the select; the other stays queued in
         // its own subscription, so neither side can starve the other.
@@ -213,14 +238,20 @@ pub async fn run_joint_state_listener(
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.positions, msg.velocities)))),
         };
         match received {
-            Ok(Some((positions, velocities))) => {
-                if let Some(state) = parse(side, positions, velocities) {
+            Ok(Some((positions, velocities))) => match parse_joint_state(positions, velocities) {
+                Ok(state) => {
                     latest[side.index()].send_replace(Some(state));
                 }
-            }
+                Err(reason) => warn_throttled(&mut last_reject_warn, || {
+                    warn!(
+                        "joint_states: dropping {} message with {reason}",
+                        side.label()
+                    );
+                }),
+            },
             Ok(None) => return, // subscription closed: node shutting down
             Err(e) => {
-                error!("arm_states receive ({}): {e}", side.label());
+                error!("joint_states receive ({}): {e}", side.label());
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
             }
         }
@@ -252,18 +283,7 @@ pub async fn run_gripper_state_listener(
             );
         }
     };
-    let parse = |side: Side, opening: f64| -> Option<GripperOpening> {
-        if !opening.is_finite() {
-            warn!(
-                "gripper_states: dropping {} message with non-finite opening",
-                side.label()
-            );
-            return None;
-        }
-        Some(GripperOpening {
-            fraction: opening.clamp(0.0, 1.0),
-        })
-    };
+    let mut last_reject_warn: Option<Instant> = None;
     loop {
         // Whichever slot delivers next wins the select; the other stays queued in
         // its own subscription, so neither side can starve the other.
@@ -272,11 +292,17 @@ pub async fn run_gripper_state_listener(
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.opening))),
         };
         match received {
-            Ok(Some(wire_opening)) => {
-                if let Some(opening) = parse(side, wire_opening) {
+            Ok(Some(wire_opening)) => match parse_gripper_state(wire_opening) {
+                Ok(opening) => {
                     latest[side.index()].send_replace(Some(opening));
                 }
-            }
+                Err(reason) => warn_throttled(&mut last_reject_warn, || {
+                    warn!(
+                        "gripper_states: dropping {} message with {reason}",
+                        side.label()
+                    );
+                }),
+            },
             Ok(None) => return, // subscription closed: node shutting down
             Err(e) => {
                 error!("gripper_states receive ({}): {e}", side.label());
@@ -325,5 +351,57 @@ pub async fn run_governor_config_listener(
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::ARM_DOF;
+
+    #[test]
+    fn joint_state_requires_arm_dof_positions_with_matching_velocities() {
+        let state = parse_joint_state(vec![0.1; ARM_DOF], vec![0.0; ARM_DOF]).unwrap();
+        assert_eq!(state.positions, [0.1; ARM_DOF]);
+        assert!(parse_joint_state(vec![0.1; ARM_DOF - 1], vec![0.0; ARM_DOF - 1]).is_err());
+        assert!(parse_joint_state(vec![0.1; ARM_DOF + 1], vec![0.0; ARM_DOF + 1]).is_err());
+        assert!(parse_joint_state(vec![], vec![]).is_err());
+        assert!(parse_joint_state(vec![0.1; ARM_DOF], vec![0.0; ARM_DOF - 1]).is_err());
+    }
+
+    #[test]
+    fn joint_state_rejects_the_contracts_empty_velocities_form() {
+        // Deliberate strictness: this backbone's followers always measure
+        // velocity, so the generic contract's unmeasured (empty) form is
+        // treated as malformed instead of half-accepted.
+        assert_eq!(
+            parse_joint_state(vec![0.1; ARM_DOF], vec![]),
+            Err("a velocity count that does not match its joints")
+        );
+    }
+
+    #[test]
+    fn joint_state_rejects_non_finite_values() {
+        let mut positions = vec![0.1; ARM_DOF];
+        positions[3] = f64::NAN;
+        assert_eq!(
+            parse_joint_state(positions, vec![0.0; ARM_DOF]),
+            Err("non-finite values")
+        );
+        let mut velocities = vec![0.0; ARM_DOF];
+        velocities[6] = f64::INFINITY;
+        assert_eq!(
+            parse_joint_state(vec![0.1; ARM_DOF], velocities),
+            Err("non-finite values")
+        );
+    }
+
+    #[test]
+    fn gripper_state_clamps_into_the_contract_range() {
+        assert_eq!(parse_gripper_state(0.5).unwrap().fraction, 0.5);
+        assert_eq!(parse_gripper_state(-0.2).unwrap().fraction, 0.0);
+        assert_eq!(parse_gripper_state(1.7).unwrap().fraction, 1.0);
+        assert!(parse_gripper_state(f64::NAN).is_err());
     }
 }

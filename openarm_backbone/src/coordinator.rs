@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::collision_status;
@@ -26,6 +26,14 @@ use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
 use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+
+/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// clock), so consumers age samples on the same timeline they read. Errors
+/// until the clock delivers its first tick.
+fn pairing_stamp() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
 
 /// How long [`seed`] waits for an arm's first measured state before warning that
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an
@@ -349,12 +357,10 @@ pub async fn run(
             // position (`governed_q`) is untouched, so tracking is unaffected.
             let dq = filtered_velocity(filters, &governed_q, &prev_q, dt);
             planner.commit(governed_q);
-            match build(
-                std::time::SystemTime::now(),
-                governed_q.to_vec(),
-                dq.to_vec(),
-                Vec::new(),
-            ) {
+            match pairing_stamp().and_then(|stamp| {
+                build(stamp, governed_q.to_vec(), dq.to_vec(), Vec::new())
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(msg) => {
                     if let Err(e) = arm_pub.publish(msg).await {
                         warn!("joint_setpoints publish ({} arm): {e}", side.label());
@@ -388,13 +394,15 @@ pub async fn run(
             if !active {
                 continue;
             }
-            match build(std::time::SystemTime::now(), opening_frac) {
+            match pairing_stamp()
+                .and_then(|stamp| build(stamp, opening_frac).map_err(|e| e.to_string()))
+            {
                 Ok(msg) => {
                     if let Err(e) = gripper_pub.publish(msg).await {
-                        warn!("gripper_commands publish ({} gripper): {e}", side.label());
+                        warn!("gripper_setpoints publish ({} gripper): {e}", side.label());
                     }
                 }
-                Err(e) => error!("build gripper_commands ({} gripper): {e}", side.label()),
+                Err(e) => error!("build gripper_setpoints ({} gripper): {e}", side.label()),
             }
         }
 

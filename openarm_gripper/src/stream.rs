@@ -7,7 +7,7 @@
 // is always current.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openarm_can::GripperCan;
 use peppygen::NodeRunner;
@@ -17,6 +17,14 @@ use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
 use crate::geometry;
+
+/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// clock), so consumers age samples on the same timeline they read. Errors
+/// until the clock delivers its first tick.
+fn pairing_stamp() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
 
 pub async fn run(
     runner: Arc<NodeRunner>,
@@ -71,11 +79,13 @@ pub async fn run(
             }
             Err(_) => {}
         }
-        let peer_result =
-            match backbone::gripper_states::build_message(SystemTime::now(), opening, effort) {
-                Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
+        let peer_result = match pairing_stamp().and_then(|stamp| {
+            backbone::gripper_states::build_message(stamp, opening, effort)
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
         match peer_result {
             Ok(()) => peer_failing = false,
             Err(e) if !peer_failing => {

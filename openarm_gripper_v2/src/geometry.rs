@@ -34,9 +34,19 @@ impl Geometry {
         fraction * self.open_rad
     }
 
-    /// Inverse of [`Self::fraction_to_motor_rad`].
+    /// Signed motor radians to the wire's opening fraction, clamped to
+    /// 0..=1 so encoder readings past the calibrated travel cannot leave
+    /// the contract's range. Inverse of [`Self::fraction_to_motor_rad`]
+    /// within that travel.
     pub fn motor_rad_to_fraction(self, motor_rad: f64) -> f64 {
-        motor_rad / self.open_rad
+        (motor_rad / self.open_rad).clamp(0.0, 1.0)
+    }
+
+    /// Measured motor torque (N*m at the shaft) mapped into the opening
+    /// frame: positive drives toward open on either side, so the wire's
+    /// effort sign is side-consistent despite the mirrored motors.
+    pub fn motor_torque_to_effort(self, torque: f64) -> f64 {
+        torque * self.open_rad.signum()
     }
 }
 
@@ -65,6 +75,28 @@ mod tests {
                 assert!((back - fraction).abs() < 1e-12, "round trip {fraction}");
             }
         }
+    }
+
+    #[test]
+    fn measured_fraction_clamps_to_the_wire_range() {
+        for geometry in [0, 1].map(|id| Geometry::from_gripper_id(id).unwrap()) {
+            let open = geometry.fraction_to_motor_rad(1.0);
+            assert_eq!(geometry.motor_rad_to_fraction(open * 1.2), 1.0);
+            assert_eq!(geometry.motor_rad_to_fraction(open * -0.1), 0.0);
+        }
+    }
+
+    #[test]
+    fn effort_is_side_consistent_toward_open() {
+        let left = Geometry::from_gripper_id(0).unwrap();
+        let right = Geometry::from_gripper_id(1).unwrap();
+        // The same physical torque toward open is positive on the left motor
+        // and negative on the mirrored right motor; both wires report it
+        // positive, and toward closed negative.
+        assert_eq!(left.motor_torque_to_effort(0.5), 0.5);
+        assert_eq!(right.motor_torque_to_effort(-0.5), 0.5);
+        assert_eq!(left.motor_torque_to_effort(-0.25), -0.25);
+        assert_eq!(right.motor_torque_to_effort(0.25), -0.25);
     }
 
     #[test]

@@ -65,6 +65,10 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so state consumers age samples on one timeline.
+        peppygen::clock::init(&node_runner).await?;
+
         let arm_id = params.arm_id;
         let can_interface = params.can_interface.clone();
 

@@ -7,7 +7,7 @@
 //! the life of the node.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::states::arm_states;
@@ -18,6 +18,19 @@ use tracing::{error, warn};
 use control_core::Pacer;
 
 use crate::{ARM_DOF, JointVec};
+
+/// At most one reject warning in this window, so a persistently malformed
+/// setpoint stream is visible in the log without flooding it at the stream
+/// rate. Every bad message still clears the target; only the warn throttles.
+const REJECT_WARN_PERIOD: Duration = Duration::from_secs(1);
+
+/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// clock), so consumers age samples on the same timeline they read. Errors
+/// until the clock delivers its first tick.
+fn pairing_stamp() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
 
 /// The latest governed setpoint for this arm: the position/velocity the MIT loop
 /// tracks. Produced by the backbone, already collision-governed and rate-limited.
@@ -57,6 +70,7 @@ pub async fn run_governed_setpoint_listener(
         Ok(s) => s,
         Err(e) => return error!("joint_setpoints subscribe: {e}"),
     };
+    let mut last_warn: Option<Instant> = None;
     loop {
         let msg = match sub.next().await {
             Ok(Some((_, msg))) => msg,
@@ -66,7 +80,7 @@ pub async fn run_governed_setpoint_listener(
                 continue;
             }
         };
-        apply_setpoint(&latest, &msg);
+        apply_setpoint(&latest, &mut last_warn, &msg);
     }
 }
 
@@ -75,6 +89,7 @@ pub async fn run_governed_setpoint_listener(
 /// rather than tracking a stale target) and warn with the reason.
 fn apply_setpoint(
     latest: &watch::Sender<Option<GovernedSetpoint>>,
+    last_warn: &mut Option<Instant>,
     msg: &backbone::joint_setpoints::Message,
 ) {
     match parse_setpoint(msg) {
@@ -82,7 +97,11 @@ fn apply_setpoint(
             latest.send_replace(Some(setpoint));
         }
         Err(reason) => {
-            warn!("joint_setpoints: clearing target: {reason}");
+            let now = Instant::now();
+            if last_warn.is_none_or(|t| now.duration_since(t) >= REJECT_WARN_PERIOD) {
+                warn!("joint_setpoints: clearing target: {reason}");
+                *last_warn = Some(now);
+            }
             latest.send_replace(None);
         }
     }
@@ -167,7 +186,7 @@ pub async fn run_state_publisher(
         }
         let peer_result = async {
             let joints = backbone::joint_states::build_message(
-                SystemTime::now(),
+                pairing_stamp()?,
                 m.positions.to_vec(),
                 m.velocities.to_vec(),
                 m.torques.to_vec(),
@@ -213,7 +232,7 @@ mod tests {
     #[test]
     fn valid_setpoint_publishes_the_target() {
         let (tx, rx) = watch::channel::<Option<GovernedSetpoint>>(None);
-        apply_setpoint(&tx, &valid_msg());
+        apply_setpoint(&tx, &mut None, &valid_msg());
         let target = rx.borrow().expect("valid 7/7/empty setpoint is published");
         assert_eq!(target.q_des, [0.1; ARM_DOF]);
         assert_eq!(target.dq_des, [0.0; ARM_DOF]);
@@ -222,26 +241,34 @@ mod tests {
     #[test]
     fn non_finite_setpoint_clears_the_target() {
         let (tx, rx) = watch::channel::<Option<GovernedSetpoint>>(None);
-        apply_setpoint(&tx, &valid_msg());
+        apply_setpoint(&tx, &mut None, &valid_msg());
         assert!(rx.borrow().is_some(), "valid setpoint should be published");
         // A non-finite value in either positions or velocities clears the target so
         // the control loop holds; a valid setpoint after a clear republishes.
         let mut bad_pos = vec![0.0; ARM_DOF];
         bad_pos[0] = f64::NAN;
-        apply_setpoint(&tx, &setpoint_msg(bad_pos, vec![0.0; ARM_DOF], vec![]));
+        apply_setpoint(
+            &tx,
+            &mut None,
+            &setpoint_msg(bad_pos, vec![0.0; ARM_DOF], vec![]),
+        );
         assert!(
             rx.borrow().is_none(),
             "non-finite position must clear the target"
         );
 
-        apply_setpoint(&tx, &valid_msg());
+        apply_setpoint(&tx, &mut None, &valid_msg());
         assert!(
             rx.borrow().is_some(),
             "valid setpoint must republish after a clear"
         );
         let mut bad_vel = vec![0.0; ARM_DOF];
         bad_vel[3] = f64::INFINITY;
-        apply_setpoint(&tx, &setpoint_msg(vec![0.1; ARM_DOF], bad_vel, vec![]));
+        apply_setpoint(
+            &tx,
+            &mut None,
+            &setpoint_msg(vec![0.1; ARM_DOF], bad_vel, vec![]),
+        );
         assert!(
             rx.borrow().is_none(),
             "non-finite velocity must clear the target"
@@ -251,10 +278,11 @@ mod tests {
     #[test]
     fn dimension_mismatch_clears_the_target() {
         let (tx, rx) = watch::channel::<Option<GovernedSetpoint>>(None);
-        apply_setpoint(&tx, &valid_msg());
+        apply_setpoint(&tx, &mut None, &valid_msg());
         assert!(rx.borrow().is_some(), "valid setpoint should be published");
         apply_setpoint(
             &tx,
+            &mut None,
             &setpoint_msg(vec![0.1; ARM_DOF - 1], vec![0.0; ARM_DOF], vec![]),
         );
         assert!(
@@ -262,10 +290,11 @@ mod tests {
             "short positions must clear the target"
         );
 
-        apply_setpoint(&tx, &valid_msg());
+        apply_setpoint(&tx, &mut None, &valid_msg());
         assert!(rx.borrow().is_some());
         apply_setpoint(
             &tx,
+            &mut None,
             &setpoint_msg(vec![0.1; ARM_DOF], vec![0.0; ARM_DOF + 1], vec![]),
         );
         assert!(
@@ -277,12 +306,13 @@ mod tests {
     #[test]
     fn non_empty_efforts_clear_the_target() {
         let (tx, rx) = watch::channel::<Option<GovernedSetpoint>>(None);
-        apply_setpoint(&tx, &valid_msg());
+        apply_setpoint(&tx, &mut None, &valid_msg());
         assert!(rx.borrow().is_some(), "valid setpoint should be published");
         // Effort feedforward is ungoverned torque, so any efforts entry is
         // rejected even when positions and velocities are well-formed.
         apply_setpoint(
             &tx,
+            &mut None,
             &setpoint_msg(vec![0.1; ARM_DOF], vec![0.0; ARM_DOF], vec![0.5]),
         );
         assert!(

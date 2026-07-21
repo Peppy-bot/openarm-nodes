@@ -7,7 +7,7 @@
 //! every setpoint in order with no re-subscribe gap; a separate task publishes
 //! the latest, so neither arm is starved (the same shape the real arm uses).
 
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use peppygen::consumed_topics::engine_states::arm_states as engine_states_arm_states;
 use peppygen::emitted_topics::sim_passthrough::arm_sim_passthrough;
@@ -37,12 +37,29 @@ fn parse_setpoint(msg: &backbone::joint_setpoints::Message) -> Option<Setpoint> 
     (msg.efforts.is_empty() && finite).then_some((positions, velocities))
 }
 
+/// At most one reject warning in this window, so a persistently malformed
+/// setpoint stream is visible in the log without flooding it at the stream
+/// rate. Every bad message still clears the target; only the warn throttles.
+const REJECT_WARN_PERIOD: Duration = Duration::from_secs(1);
+
+/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// clock), so consumers age samples on the same timeline they read. Errors
+/// until the clock delivers its first tick.
+fn pairing_stamp() -> std::result::Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so state consumers age samples on one timeline.
+        peppygen::clock::init(&node_runner).await?;
+
         let arm_id = params.arm_id;
         assert!(
             arm_id == ARM_ID_LEFT || arm_id == ARM_ID_RIGHT,
@@ -65,6 +82,7 @@ fn main() -> Result<()> {
                 Ok(s) => s,
                 Err(e) => return error!("joint_setpoints subscribe: {e}"),
             };
+            let mut last_reject_warn: Option<Instant> = None;
             loop {
                 let msg = match sub.next().await {
                     Ok(Some((_, msg))) => msg,
@@ -78,10 +96,15 @@ fn main() -> Result<()> {
                 // real arm, so a bad value never reaches the sim engine and the sim
                 // holds its last commanded pose.
                 let Some(setpoint) = parse_setpoint(&msg) else {
-                    warn!(
-                        "joint_setpoints: clearing target on invalid setpoint \
-                         (want 7 finite positions and velocities, empty efforts)"
-                    );
+                    let now = Instant::now();
+                    if last_reject_warn.is_none_or(|t| now.duration_since(t) >= REJECT_WARN_PERIOD)
+                    {
+                        warn!(
+                            "joint_setpoints: clearing target on invalid setpoint \
+                             (want 7 finite positions and velocities, empty efforts)"
+                        );
+                        last_reject_warn = Some(now);
+                    }
                     let _ = latest_tx.send(None);
                     continue;
                 };
@@ -166,7 +189,7 @@ fn main() -> Result<()> {
                 // empty because the engine broadcast carries no measured torques.
                 let paired = async {
                     let msg = backbone::joint_states::build_message(
-                        SystemTime::now(),
+                        pairing_stamp()?,
                         msg.positions.to_vec(),
                         msg.velocities.to_vec(),
                         Vec::new(),

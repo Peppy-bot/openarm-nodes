@@ -56,7 +56,7 @@
         },
         // The exclusive command loop with each gripper: the backbone plays the
         // commander role, streams the governed opening down each slot's
-        // gripper_commands, and reads that gripper's measured aperture back on
+        // gripper_setpoints, and reads that gripper's measured aperture back on
         // the slot's gripper_states; the slot scopes both directions, so no
         // gripper_id demux and no other producer can pose as the fingers.
         // Optional: the backbone boots with either gripper unpaired (that side's
