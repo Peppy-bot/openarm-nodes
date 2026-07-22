@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::backbone_collision_status;
+use peppygen::consumed_topics::backbone::collision_status as backbone_collision_status;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::error;

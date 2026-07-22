@@ -5,7 +5,7 @@ mod stream;
 
 use follow::ControlConfig;
 use openarm_can::{CallbackMode, GripperCan, v20};
-use peppygen::exposed_services::openarm_hardware_ready::v1::is_ready;
+use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
 

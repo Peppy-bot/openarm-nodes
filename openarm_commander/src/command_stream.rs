@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_commands::v1::arm_joint_commands;
-use peppygen::emitted_topics::openarm_commands::v1::gripper_commands;
-use peppygen::emitted_topics::openarm_governor_control::v1::governor_control;
+use peppygen::emitted_topics::commands::arm_joint_commands;
+use peppygen::emitted_topics::commands::gripper_commands;
+use peppygen::emitted_topics::governor::governor_control;
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::sync::watch;

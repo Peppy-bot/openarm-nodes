@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::{left_arm_states_arm_states, right_arm_states_arm_states};
+use peppygen::consumed_topics::left_arm_states::arm_states as left_arm_states_arm_states;
+use peppygen::consumed_topics::right_arm_states::arm_states as right_arm_states_arm_states;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{error, warn};

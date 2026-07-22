@@ -198,6 +198,27 @@
     },
     topics: {
       emits: [
+        // The commander role's topic on each pairing slot: the governed
+        // setpoint this node streams down to the paired arm or gripper. The
+        // pairing document owns the shape and QoS, so these entries carry
+        // only the reference. Emit coverage is exact: every topic the
+        // commander role emits needs exactly one entry per slot.
+        {
+          name: "arm_setpoints",
+          link_id: "left_arm_link"
+        },
+        {
+          name: "arm_setpoints",
+          link_id: "right_arm_link"
+        },
+        {
+          name: "gripper_commands",
+          link_id: "left_gripper_link"
+        },
+        {
+          name: "gripper_commands",
+          link_id: "right_gripper_link"
+        },
         {
           // Nearest self-collision pair: the signed surface distance between the
           // two arms and the two links forming that pair.
@@ -219,6 +240,25 @@
         },
       ],
       consumes: [
+        // The counterpart-role topic of each pairing slot: the measured state
+        // each paired arm and gripper streams back. One entry per slot, so
+        // each stays addressable as peppygen.pairings.<slot>.<topic>.
+        {
+          name: "arm_states",
+          link_id: "left_arm_link"
+        },
+        {
+          name: "arm_states",
+          link_id: "right_arm_link"
+        },
+        {
+          name: "gripper_states",
+          link_id: "left_gripper_link"
+        },
+        {
+          name: "gripper_states",
+          link_id: "right_gripper_link"
+        },
         {
           name: "arm_joint_commands",
           link_id: "commander"

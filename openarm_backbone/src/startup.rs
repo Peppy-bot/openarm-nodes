@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_services::robot_init_is_ready;
+use peppygen::consumed_services::robot_init::is_ready as robot_init_is_ready;
 use peppylib::runtime::CancellationToken;
 use tracing::{info, warn};
 
