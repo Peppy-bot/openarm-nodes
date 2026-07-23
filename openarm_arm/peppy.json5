@@ -2,7 +2,7 @@
 // side, with a distinct `arm_id`. A follower of the bimanual backbone: it owns the
 // hardware control loop (gravity/Coriolis/friction feedforward from the
 // in-process srs_model, plus MIT control) and tracks the backbone's governed
-// setpoint, reporting measured state on the always-on `arm_states` stream. The
+// setpoint, reporting measured state on the pairing's always-on `joint_states` stream. The
 // backbone (openarm_backbone) owns all trajectory generation, stream following, and
 // self-collision governing, so the arm carries no motion logic of its own.
 {
@@ -66,7 +66,7 @@
       kd5: { $type: "f64", $default: 0.2 },
       kd6: { $type: "f64", $default: 0.2 },
       kd7: { $type: "f64", $default: 0.2 },
-      // Rate (Hz) of the always-on measured-state stream (`arm_states`), which the
+      // Rate (Hz) of the always-on measured-state stream (`joint_states`), which the
       // backbone consumes. Required: consumers' needs vary too much for a default.
       state_rate_hz: "u32",
     }
