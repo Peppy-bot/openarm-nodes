@@ -422,9 +422,8 @@ pub(crate) enum Command {
         duration_s: f64,
     },
     // Toggle the streaming deadman for one side. While enabled, the command stream
-    // emits that side's arm target on arm_joint_commands and gripper opening on
-    // gripper_commands; while disabled both track the measured pose and emit
-    // nothing.
+    // emits that side's arm target and gripper opening on its pairing slots;
+    // while disabled both track the measured pose and emit nothing.
     SetEnabled {
         side: SideWire,
         on: bool,
