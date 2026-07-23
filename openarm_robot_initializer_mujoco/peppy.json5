@@ -1,10 +1,9 @@
 // MuJoCo implementation of robot_initializer. Implements
-// openarm_robot_initializer:v1 (is_ready signal) and is the simulation's
-// state source: it emits the measured joint and gripper state for both arms /
-// both grippers (discriminated by arm_id / gripper_id) and consumes the
-// actuator-command streams the arm / gripper nodes resolve, driving the engine
-// directly. Sim peripherals attach to this node by node name for
-// engine-internal coupling.
+// openarm_robot_initializer:v1 (is_ready signal) and plays the follower role
+// of every limb's joint_link / gripper_link pairing: the backbone's governed
+// setpoints stream in per limb and the engine's measured state streams back on
+// the same pair, exactly like the real followers. Sim peripherals attach to
+// this node by node name for engine-internal coupling.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -12,33 +11,34 @@
     tag: "v1",
     implements: [
       { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_ready" },
-      // Measured state for both arms / both grippers; consumers tell sides apart
-      // by arm_id / gripper_id.
-      { name: "openarm_arm_sim_states", tag: "v1", link_id: "arm_states" },
-      { name: "openarm_gripper_sim_states", tag: "v1", link_id: "gripper_states" },
     ],
     depends_on: {
-      contracts: [
-        // Per-arm / per-gripper sim passthrough setpoints. Each side has its own
-        // launcher binding; the sim process still verifies arm_id / gripper_id.
-        { name: "openarm_arm_sim_passthrough", tag: "v1", link_id: "left_arm_cmd" },
-        { name: "openarm_arm_sim_passthrough", tag: "v1", link_id: "right_arm_cmd" },
-        { name: "openarm_gripper_sim_passthrough", tag: "v1", link_id: "left_gripper_cmd" },
-        { name: "openarm_gripper_sim_passthrough", tag: "v1", link_id: "right_gripper_cmd" },
+      pairings: [
+        // The engine plays the follower role of every limb's pairing directly,
+        // one slot per limb (the slot is the side, so no id demux): governed
+        // setpoints stream in, measured engine state streams back. Optional:
+        // the engine boots unpaired and each pair is established at the
+        // backbone's start (launcher `links:`).
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "left_arm", optional: true },
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "right_arm", optional: true },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "left_gripper", optional: true },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "right_gripper", optional: true },
       ],
     },
   },
   interfaces: {
     topics: {
       emits: [
-        { link_id: "arm_states", name: "arm_states" },
-        { link_id: "gripper_states", name: "gripper_states" },
+        { link_id: "left_arm", name: "joint_states" },
+        { link_id: "right_arm", name: "joint_states" },
+        { link_id: "left_gripper", name: "gripper_states" },
+        { link_id: "right_gripper", name: "gripper_states" },
       ],
       consumes: [
-        { name: "arm_sim_passthrough", link_id: "left_arm_cmd" },
-        { name: "arm_sim_passthrough", link_id: "right_arm_cmd" },
-        { name: "gripper_sim_passthrough", link_id: "left_gripper_cmd" },
-        { name: "gripper_sim_passthrough", link_id: "right_gripper_cmd" },
+        { name: "joint_setpoints", link_id: "left_arm" },
+        { name: "joint_setpoints", link_id: "right_arm" },
+        { name: "gripper_setpoints", link_id: "left_gripper" },
+        { name: "gripper_setpoints", link_id: "right_gripper" },
       ],
     },
     services: {

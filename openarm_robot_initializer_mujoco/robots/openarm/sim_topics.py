@@ -1,11 +1,13 @@
-"""Typed peppygen topic IO for the openarm sim.
+"""Typed peppygen pairing IO for the openarm sim.
 
-Bridges the physics thread (sync, runs mj_step in an executor) to the
-node_runner's asyncio loop, where peppygen topic pub/sub lives. Consume tasks on
-the loop each hold one generated `subscribe()` subscription (gap-free, in-order)
-and keep the latest actuator command per side in thread-safe slots; the physics
-thread reads those and publishes measured state back through the loop. Every
-hop is a generated peppygen topic: no JSON, no raw peppylib.
+Bridges the physics thread (sync, runs the engine step in an executor) to the
+node_runner's asyncio loop, where peppygen pairing pub/sub lives. The engine
+plays the follower role of every limb's joint_link / gripper_link pairing, one
+slot per limb, so there is no id demux: consume tasks on the loop each hold one
+generated `subscribe()` subscription (gap-free, in-order) and keep the latest
+governed setpoint per limb in thread-safe slots; the physics thread reads those
+and publishes stamped measured state back up the same pair. Every hop is a
+generated peppygen pairing topic: no JSON, no raw peppylib.
 """
 
 from __future__ import annotations
@@ -17,17 +19,25 @@ import threading
 from typing import Optional
 
 import peppylib
-from peppygen.emitted_topics.arm_states import arm_states
-from peppygen.emitted_topics.gripper_states import gripper_states
-from peppygen.consumed_topics.left_arm_cmd import arm_sim_passthrough as left_arm_cmd
-from peppygen.consumed_topics.left_gripper_cmd import gripper_sim_passthrough as left_gripper_cmd
-from peppygen.consumed_topics.right_arm_cmd import arm_sim_passthrough as right_arm_cmd
-from peppygen.consumed_topics.right_gripper_cmd import gripper_sim_passthrough as right_gripper_cmd
+from peppygen import clock
+from peppygen.paired_topics.left_arm import joint_setpoints as left_arm_setpoints
+from peppygen.paired_topics.left_arm import joint_states as left_arm_states
+from peppygen.paired_topics.left_gripper import gripper_setpoints as left_gripper_setpoints
+from peppygen.paired_topics.left_gripper import gripper_states as left_gripper_states
+from peppygen.paired_topics.right_arm import joint_setpoints as right_arm_setpoints
+from peppygen.paired_topics.right_arm import joint_states as right_arm_states
+from peppygen.paired_topics.right_gripper import gripper_setpoints as right_gripper_setpoints
+from peppygen.paired_topics.right_gripper import gripper_states as right_gripper_states
 
 logger = logging.getLogger(__name__)
 
-# Left = 0, right = 1, matching arm_id / gripper_id across the stack.
-_SIDES = (0, 1)
+# Left = 0, right = 1: the slot layout mirrors the arm_id / gripper_id
+# convention the rest of the stack uses for sides.
+_ARM_SLOTS = {0: (left_arm_setpoints, left_arm_states), 1: (right_arm_setpoints, right_arm_states)}
+_GRIPPER_SLOTS = {
+    0: (left_gripper_setpoints, left_gripper_states),
+    1: (right_gripper_setpoints, right_gripper_states),
+}
 
 
 class _LatestSlot:
@@ -48,28 +58,35 @@ class _LatestSlot:
 
 
 class SimTopicIO:
-    """Owns the typed publishers + command-consume tasks on the node loop, and
-    exposes thread-safe accessors the physics thread calls each step."""
+    """Owns the typed pairing publishers + setpoint-consume tasks on the node
+    loop, and exposes thread-safe accessors the physics thread calls each step."""
 
     def __init__(self, node_runner: peppylib.NodeRunner, loop: asyncio.AbstractEventLoop) -> None:
         self._node_runner = node_runner
         self._loop = loop
-        self._arm_pub: Optional[peppylib.TopicPublisher] = None
-        self._gripper_pub: Optional[peppylib.TopicPublisher] = None
-        self._arm_cmd = {side: _LatestSlot() for side in _SIDES}
-        self._gripper_cmd = {side: _LatestSlot() for side in _SIDES}
+        self._arm_pubs: dict[int, peppylib.TopicPublisher] = {}
+        self._gripper_pubs: dict[int, peppylib.TopicPublisher] = {}
+        self._arm_cmd = {side: _LatestSlot() for side in _ARM_SLOTS}
+        self._gripper_cmd = {side: _LatestSlot() for side in _GRIPPER_SLOTS}
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
-        """Declare publishers and spawn the command-consume loops. Runs on the
-        node loop before the sim thread starts."""
-        self._arm_pub = await arm_states.declare_publisher(self._node_runner)
-        self._gripper_pub = await gripper_states.declare_publisher(self._node_runner)
+        """Declare publishers and spawn the setpoint-consume loops. Runs on the
+        node loop before the sim thread starts. Publishing while a slot is
+        unpaired is a legal no-op, so bringup order never matters."""
+        # State stamps read the daemon-resolved clock, the same source every
+        # follower uses, so consumers age samples on one timeline.
+        await clock.init(self._node_runner)
+        for side, (_, states) in _ARM_SLOTS.items():
+            self._arm_pubs[side] = await states.declare_publisher(self._node_runner)
+        for side, (_, states) in _GRIPPER_SLOTS.items():
+            self._gripper_pubs[side] = await states.declare_publisher(self._node_runner)
         self._tasks = [
-            asyncio.create_task(self._consume_arm(left_arm_cmd, 0, "left_arm_cmd")),
-            asyncio.create_task(self._consume_arm(right_arm_cmd, 1, "right_arm_cmd")),
-            asyncio.create_task(self._consume_gripper(left_gripper_cmd, 0, "left_gripper_cmd")),
-            asyncio.create_task(self._consume_gripper(right_gripper_cmd, 1, "right_gripper_cmd")),
+            asyncio.create_task(self._consume_arm(mod, side))
+            for side, (mod, _) in _ARM_SLOTS.items()
+        ] + [
+            asyncio.create_task(self._consume_gripper(mod, side))
+            for side, (mod, _) in _GRIPPER_SLOTS.items()
         ]
 
     async def stop(self) -> None:
@@ -78,7 +95,7 @@ class SimTopicIO:
         # Let the cancellations land so the consume loops exit before teardown.
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    async def _consume_arm(self, topic, expected_arm_id: int, slot_name: str) -> None:
+    async def _consume_arm(self, topic, side: int) -> None:
         subscription = await topic.subscribe(self._node_runner)
         while True:
             try:
@@ -91,26 +108,19 @@ class SimTopicIO:
                 # A corrupt frame is dropped and logged rather than killing
                 # this consume task; the pause keeps a persistent fault from
                 # hot-spinning the loop.
-                logger.warning(f"{slot_name} command consume error: {exc}")
+                logger.warning(f"{topic.LINK_ID} setpoint consume error: {exc}")
                 await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
-            # The slot fixes the side; a command tagged for the other arm is a
-            # mis-binding, not a routing hint.
-            if msg.arm_id != expected_arm_id:
-                logger.warning(
-                    f"dropping arm command with arm_id={msg.arm_id} on {slot_name}"
-                )
-                continue
-            # Drop a poisoned command rather than writing NaN/Inf into the sim.
+            # Drop a poisoned setpoint rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
             ):
-                logger.warning(f"dropping non-finite arm command for arm_id={msg.arm_id}")
+                logger.warning(f"dropping non-finite arm setpoint on {topic.LINK_ID}")
                 continue
-            self._arm_cmd[expected_arm_id].set((msg.positions, msg.velocities))
+            self._arm_cmd[side].set((msg.positions, msg.velocities))
 
-    async def _consume_gripper(self, topic, expected_gripper_id: int, slot_name: str) -> None:
+    async def _consume_gripper(self, topic, side: int) -> None:
         subscription = await topic.subscribe(self._node_runner)
         while True:
             try:
@@ -123,21 +133,16 @@ class SimTopicIO:
                 # A corrupt frame is dropped and logged rather than killing
                 # this consume task; the pause keeps a persistent fault from
                 # hot-spinning the loop.
-                logger.warning(f"{slot_name} command consume error: {exc}")
+                logger.warning(f"{topic.LINK_ID} setpoint consume error: {exc}")
                 await asyncio.sleep(0.1)
                 continue
             _producer, msg = pair
-            if msg.gripper_id != expected_gripper_id:
-                logger.warning(
-                    f"dropping gripper command with gripper_id={msg.gripper_id} on {slot_name}"
-                )
-                continue
             if not math.isfinite(msg.opening):
-                logger.warning(
-                    f"dropping non-finite gripper command for gripper_id={msg.gripper_id}"
-                )
+                logger.warning(f"dropping non-finite gripper setpoint on {topic.LINK_ID}")
                 continue
-            self._gripper_cmd[expected_gripper_id].set(msg.opening)
+            # max_effort is ignored: the sim engine applies no grip-force cap
+            # and reports a 0 ceiling on its states.
+            self._gripper_cmd[side].set(msg.opening)
 
     # --- called from the physics thread ---
 
@@ -150,12 +155,23 @@ class SimTopicIO:
         return slot.get() if slot is not None else None
 
     def publish_arm_states(self, arm_id: int, positions: list[float], velocities: list[float]) -> None:
-        if self._arm_pub is not None:
-            self._schedule_publish(self._arm_pub, arm_states.build_message(arm_id, positions, velocities))
+        pub = self._arm_pubs.get(arm_id)
+        if pub is not None:
+            # Efforts are empty: the engine measures no joint torques.
+            payload = _ARM_SLOTS[arm_id][1].build_message(
+                clock.now_ns() / 1e9, positions, velocities, []
+            )
+            self._schedule_publish(pub, payload)
 
     def publish_gripper_states(self, gripper_id: int, opening: float, force: float = 0.0) -> None:
-        if self._gripper_pub is not None:
-            self._schedule_publish(self._gripper_pub, gripper_states.build_message(gripper_id, opening, force))
+        pub = self._gripper_pubs.get(gripper_id)
+        if pub is not None:
+            # The engine torque rides as the pairing effort; the ceiling is 0
+            # (no effort control).
+            payload = _GRIPPER_SLOTS[gripper_id][1].build_message(
+                clock.now_ns() / 1e9, opening, force, 0.0
+            )
+            self._schedule_publish(pub, payload)
 
     def _schedule_publish(self, publisher: peppylib.TopicPublisher, payload: bytes) -> None:
         # Hand the publish to the node loop and return immediately; the physics
