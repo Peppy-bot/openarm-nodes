@@ -475,7 +475,8 @@ function build_gripper(side, label) {
     </div>
     <div class="gripper" id="${side}_ge_row" style="display:none">
       <div class="srow">
-        <input type="range" id="${side}_ge" oninput="on_gripper_effort_input('${side}')" />
+        <input type="range" id="${side}_ge" aria-label="${label} max effort"
+               oninput="on_gripper_effort_input('${side}')" />
       </div>
       <span class="target" id="${side}_get">---</span>
       <span class="fb">max effort</span>
@@ -1053,11 +1054,12 @@ function apply_snapshot(snap) {
     if (g.effort_ceiling != null && g.effort_ceiling > 0) {
       geRow.style.display = '';
       const ge = $(`${side}_ge`);
-      if (ge.max != g.effort_ceiling) {
-        ge.min = g.effort_ceiling / 100;
-        ge.max = g.effort_ceiling;
-        ge.step = g.effort_ceiling / 100;
-      }
+      // Assigned independently every refresh: a guard on ge.max alone left
+      // min/step at browser defaults when the ceiling equaled the default
+      // max of 100, letting the slider submit 0.
+      ge.min = g.effort_ceiling / 100;
+      ge.max = g.effort_ceiling;
+      ge.step = g.effort_ceiling / 100;
       // No operator preference yet renders at the ceiling: that is what the
       // gripper applies. Never fight an in-progress drag.
       const cap = g.max_effort != null ? g.max_effort : g.effort_ceiling;
