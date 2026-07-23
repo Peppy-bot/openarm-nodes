@@ -1,6 +1,7 @@
 mod collision_status;
 mod command_stream;
 mod error;
+mod gestures;
 mod gripper_states;
 mod joint_states;
 mod move_arm;
@@ -48,6 +49,9 @@ fn main() -> Result<()> {
         // Arm models for the panel's Cartesian pose fields (pose <-> joints), built
         // from the same generation the ranges came from so FK/IK match the backbone's chain.
         let models = pose::ArmModels::from_version(version);
+        // Bake the gesture roster against those models: every gesture is resolved
+        // to a feasible joint trajectory here or the node aborts bringup.
+        let registry = gestures::Registry::bake(&models);
         // The operator streams the governor controls live; their launch defaults are
         // node parameters, kept in step with the backbone's, so the real arm starts
         // conservative (tight band, slow cap) and the sim launchers start fast.
@@ -121,6 +125,7 @@ fn main() -> Result<()> {
         tokio::spawn(owner::run(
             state,
             models,
+            registry,
             node_runner,
             params.command_rate_hz,
             token.clone(),

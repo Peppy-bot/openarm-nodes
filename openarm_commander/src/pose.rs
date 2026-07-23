@@ -222,11 +222,21 @@ impl ArmModels {
         }
     }
 
-    fn velocity_limits(&self, side: Side) -> &[f64; ARM_DOF] {
+    /// Per-joint URDF velocity limits (rad/s) for `side`: the budget the backbone's
+    /// chase enforces, shared by the jog step clamp and the gesture bake asserts.
+    pub(crate) fn velocity_limits(&self, side: Side) -> &[f64; ARM_DOF] {
         match side {
             Side::Left => &self.left_velocity_limits,
             Side::Right => &self.right_velocity_limits,
         }
+    }
+
+    /// Per-joint [lo, hi] position limits (rad) for `side`, from the same model the
+    /// IK solves against (elbow singularity floor included).
+    pub(crate) fn joint_ranges(&self, side: Side) -> [[f64; 2]; ARM_DOF] {
+        let model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+        let lims = model.limits();
+        std::array::from_fn(|i| [lims[i].lo, lims[i].hi])
     }
 
     /// World-frame x/y/z reachable bounds `[[min, max]; 3]` for `side`, so the panel

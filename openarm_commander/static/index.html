@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>openarm01 joint commander</title>
+<title>OpenArm Commander</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700&family=Inter+Tight:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -123,6 +123,8 @@
     font: 600 10px/1 'Inter Tight', sans-serif; letter-spacing: 0.06em;
     text-transform: uppercase; color: var(--ink-50);
   }
+  /* The arcball takes no input in gestures mode, so its drag hint hides too. */
+  body.gestures-mode .ab-hint { display: none; }
 
   /* Every track is full width on a shared axis; the ends outside the slider's
      reachable [lo, hi] are painted dead-gray. set_reachable drives the stops,
@@ -214,12 +216,23 @@
 </style>
 </head>
 <body>
-  <h1>openarm01 joint commander <span id="conn" class="conn closed">disconnected</span></h1>
+  <h1>OpenArm Commander <span id="conn" class="conn closed">disconnected</span></h1>
 
   <div class="row" style="justify-content:center; margin-bottom:20px;">
     <div class="modeseg">
       <button class="seg on" id="mode_streaming" onclick="set_ui_mode('streaming')">Streaming</button>
       <button class="seg" id="mode_actions" onclick="set_ui_mode('actions')">Actions</button>
+      <button class="seg" id="mode_gestures" onclick="set_ui_mode('gestures')">Gestures</button>
+    </div>
+  </div>
+
+  <div class="row" id="gesture_row" style="display:none; justify-content:center;">
+    <div class="panel" style="flex:0 1 720px;">
+      <div class="panel-head"><span>gesture library</span><span class="badge" id="gesture_badge">idle</span></div>
+      <div class="actions" id="gesture_buttons" style="justify-content:center; flex-wrap:wrap;"></div>
+      <div class="actions" style="justify-content:center;">
+        <button id="gesture_stop" onclick="stop_gesture()" disabled>Stop</button>
+      </div>
     </div>
   </div>
 
@@ -266,11 +279,6 @@ const JOINT_AXIS = 200 * PI / 180;
 // Home is all zeros except the elbow (j4), held at a small positive angle so it
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
-// A natural workspace pose (elbows bent, forearms angled toward each other),
-// denoised from the operator's by-eye pose and made left/right symmetric. The mirror
-// flips the shoulder / upper-arm joints (j1,j2,j3); the elbow (j4) and wrist keep sign.
-const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
-const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
 // World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
 // `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
 // arcball composes it on quaternions instead. Each slider's reachable band comes from
@@ -287,8 +295,14 @@ const POS_AXES = [
 const quatTargetCam = { left: [0, 0, 0, 1], right: [0, 0, 0, 1] };
 let arcballDrag = { side: null, p0: null, start: null, pid: null };
 // Interaction mode: 'streaming' follows controls live (deadman-gated); 'actions'
-// composes a target and fires it as a discrete backbone move on Execute.
+// composes a target and fires it as a discrete backbone move on Execute;
+// 'gestures' plays baked choreography from the server's library while the
+// per-arm controls become read-only viewers.
+const UI_MODES = ['streaming', 'actions', 'gestures'];
 let uiMode = 'streaming';
+// Which sides the playing gesture holds (from the snapshot); those sides'
+// Enable/Execute controls are disabled everywhere while it plays.
+const gestureHeld = { left: false, right: false };
 // Last control space the operator touched per side; picks what Execute fires.
 const touched = { left: 'joints', right: 'joints' };
 let ws = null;
@@ -631,6 +645,7 @@ function arcball_xy(side, e) {
   return [(e.clientX - (r.left + r.width/2)) / rim, -(e.clientY - (r.top + r.height/2)) / rim];
 }
 function arcball_down(side, e) {
+  if (uiMode === 'gestures') return;
   $(`${side}_ab`).setPointerCapture(e.pointerId);
   const [nx, ny] = arcball_xy(side, e);
   arcballDrag = { side, p0: arcball_point(nx, ny), start: quatTargetCam[side].slice(), pid: e.pointerId };
@@ -672,10 +687,12 @@ function render_arcball(side) {
 }
 
 function ready_arm(side) {
-  // Like Home, but to a natural workspace pose: disable so the stream stops, then
-  // drive to the symmetric Ready preset as a discrete, time-bounded move.
+  // Like Home, but to the Ready workspace pose: disable so the stream stops, then
+  // drive to the preset as a discrete, time-bounded move. The pose comes from the
+  // snapshot (its one definition lives server-side, shared with the gestures).
+  const preset = latestSnap && latestSnap[`${side}_arm`].ready;
+  if (!preset) return;
   if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
-  const preset = side === 'left' ? READY_LEFT : READY_RIGHT;
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = preset[i];
     $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(preset[i]);
@@ -792,16 +809,17 @@ function execute_gripper(side) {
   ws.send(JSON.stringify({cmd: 'fire_gripper', side, position}));
 }
 
-// Switch interaction mode. Actions fires discrete moves, which the server refuses
-// while a side streams, so entering actions drops both deadmen and seeds the controls
-// from the measured pose (a fresh canvas to compose from). The mode also gates whether
-// control input streams live (streaming) or is held for Execute (actions).
+// Switch interaction mode. Actions and Gestures both run discrete/served motion,
+// which the server refuses while a side streams, so entering either drops both
+// deadmen; actions additionally resets the composed spaces. The mode also gates
+// whether control input streams live (streaming) or is held for Execute (actions),
+// or is read-only (gestures).
 function set_ui_mode(mode) {
   if (mode === uiMode) return;
   uiMode = mode;
-  $('mode_streaming').classList.toggle('on', mode === 'streaming');
-  $('mode_actions').classList.toggle('on', mode === 'actions');
-  if (mode === 'actions') {
+  for (const m of UI_MODES) $(`mode_${m}`).classList.toggle('on', mode === m);
+  $('gesture_row').style.display = mode === 'gestures' ? '' : 'none';
+  if (mode !== 'streaming') {
     for (const side of ['left', 'right']) {
       if (enabled[side] && ws && ws.readyState === 1) {
         ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
@@ -812,6 +830,56 @@ function set_ui_mode(mode) {
     }
   }
   for (const side of ['left', 'right']) { refresh_primary(side); refresh_mode_buttons(side); }
+}
+
+function run_gesture(name) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({cmd: 'run_gesture', name}));
+}
+
+function stop_gesture() {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({cmd: 'stop_gesture'}));
+}
+
+// Reflect the gesture library and playback state: one button per gesture from
+// the server's roster (rebuilt only when the roster changes), a badge showing
+// lead-in / playing progress, and all buttons locked while one plays.
+function update_gesture_panel(snap) {
+  const box = $('gesture_buttons');
+  const roster = snap.gestures.map(g => g.name).join();
+  if (box.dataset.roster !== roster) {
+    box.dataset.roster = roster;
+    box.innerHTML = '';
+    for (const g of snap.gestures) {
+      const btn = document.createElement('button');
+      btn.id = `gesture_btn_${g.name}`;
+      btn.textContent = g.label;
+      btn.onclick = () => run_gesture(g.name);
+      box.appendChild(btn);
+    }
+  }
+  const active = snap.gesture;
+  const involved = active && snap.gestures.find(g => g.name === active.name);
+  gestureHeld.left = !!(involved && involved.left);
+  gestureHeld.right = !!(involved && involved.right);
+  const badge = $('gesture_badge');
+  if (active) {
+    const pct = Math.round(active.progress * 100);
+    badge.textContent = active.phase === 'lead_in' ? `lead-in ${pct}%` : `playing ${pct}%`;
+    badge.className = 'badge stream';
+  } else {
+    badge.textContent = 'idle';
+    badge.className = 'badge';
+  }
+  for (const g of snap.gestures) {
+    const btn = $(`gesture_btn_${g.name}`);
+    if (btn) {
+      btn.disabled = !!active;
+      btn.classList.toggle('primary', !!active && active.name === g.name);
+    }
+  }
+  $('gesture_stop').disabled = !active;
 }
 
 // Set the arm card's primary button to its role for the current mode: the streaming
@@ -829,13 +897,16 @@ function refresh_primary(side) {
   }
 }
 
-// Home / Ready are discrete joint-space actions, so they show only in actions mode.
+// Home / Ready are discrete joint-space actions, so they show only in actions
+// mode; the per-arm primary button hides in gestures mode, where the gesture
+// panel owns motion.
 function refresh_mode_buttons(side) {
   const on = uiMode === 'actions';
   $(`${side}_home_btn`).style.display = on ? '' : 'none';
   $(`${side}_ready_btn`).style.display = on ? '' : 'none';
   $(`${side}_dur_l`).style.display = on ? 'inline-flex' : 'none';
   $(`${side}_g_btn`).style.display = on ? '' : 'none';
+  $(`${side}_arm_btn`).style.display = uiMode === 'gestures' ? 'none' : '';
 }
 
 // Requested duration (s) for this arm's discrete moves; 0 = as fast as the EE-speed
@@ -847,6 +918,11 @@ function arm_duration(side) {
 
 function apply_snapshot(snap) {
   latestSnap = snap;
+  update_gesture_panel(snap);
+  // In gestures mode the per-arm controls are viewers: the sliders mirror the
+  // played setpoints but take no input.
+  const viewing = uiMode === 'gestures';
+  document.body.classList.toggle('gestures-mode', viewing);
   // Shared world-position axis across both arms: every x/y/z track spans it, so
   // the six rows align; each side's reachable band is grayed per axis below.
   const posBounds = ['left', 'right'].flatMap(s => snap[`${s}_arm`].pos_bounds);
@@ -855,14 +931,23 @@ function apply_snapshot(snap) {
   for (const side of ['left', 'right']) {
     const on = snap[`${side}_enabled`];
     enabled[side] = on;
+    const held = gestureHeld[side];
     const a = snap[`${side}_arm`];
     const b = $(`${side}_arm_badge`);
-    b.textContent = on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
-    b.className = 'badge' + (on ? ' stream' : (a.in_flight ? ' flight' : ''));
+    b.textContent = held ? 'gesture' : on ? 'streaming' : (a.in_flight ? 'in flight' : 'idle');
+    b.className = 'badge' + (held || on ? ' stream' : (a.in_flight ? ' flight' : ''));
     refresh_primary(side);
+    // A held side cannot be enabled or fired from any mode (the server refuses
+    // anyway; the disabled buttons say why without a round trip).
+    $(`${side}_arm_btn`).disabled = held;
+    $(`${side}_home_btn`).disabled = held;
+    $(`${side}_ready_btn`).disabled = held;
+    $(`${side}_g_btn`).disabled = held;
     for (let i = 0; i < ARM_DOF; i++) {
       $(`${side}_j${i}_f`).textContent = a.feedback ? fmtRadAsDeg(a.feedback[i]) : '---';
       const el = $(`${side}_j${i}`);
+      el.disabled = viewing;
+      el.classList.toggle('readonly-track', viewing);
       // The track spans the fixed +-JOINT_AXIS; joint_limits gray its dead ends,
       // bound the thumb, and place the min/max readout.
       if (a.limits) {
@@ -898,6 +983,8 @@ function apply_snapshot(snap) {
       // (pos_bounds, per generation) grays the dead ends and bounds the thumb.
       const [pmin, pmax] = a.pos_bounds[i];
       const el = $(`${side}_p${i}`);
+      el.disabled = viewing;
+      el.classList.toggle('readonly-track', viewing);
       if (el.min != posMin) el.min = posMin;
       if (el.max != posMax) el.max = posMax;
       set_reachable(`${side}_p${i}`, pmin, pmax, posMin, posMax, fmt);
@@ -936,14 +1023,20 @@ function apply_snapshot(snap) {
 
     const g = snap[`${side}_gripper`];
     const gb = $(`${side}_g_badge`);
-    gb.textContent = on ? 'streaming' : (g.in_flight ? 'in flight' : 'idle');
-    gb.className = 'badge' + (on ? ' stream' : (g.in_flight ? ' flight' : ''));
+    gb.textContent = held ? 'gesture' : on ? 'streaming' : (g.in_flight ? 'in flight' : 'idle');
+    gb.className = 'badge' + (held || on ? ' stream' : (g.in_flight ? ' flight' : ''));
     const gs = $(`${side}_g`);
+    gs.disabled = viewing;
+    gs.classList.toggle('readonly-track', viewing);
     if (gs.min != g.min) gs.min = g.min;
     if (gs.max != g.max) gs.max = g.max;
     // Streaming: while disabled the slider mirrors the measured opening so enabling
     // never jumps. Actions: the slider holds the composed value the Execute fires.
-    if (uiMode === 'streaming' && !on && g.feedback != null) {
+    // Gestures: it mirrors the played opening.
+    if (viewing) {
+      gs.value = g.position;
+      $(`${side}_gt`).textContent = g.position.toFixed(3);
+    } else if (uiMode === 'streaming' && !on && g.feedback != null) {
       gs.value = g.feedback;
       $(`${side}_gt`).textContent = g.feedback.toFixed(3);
     }
@@ -1035,6 +1128,13 @@ function connect() {
   ws.onopen = () => { conn.className = 'conn open'; conn.textContent = 'connected'; };
   ws.onclose = () => {
     conn.className = 'conn closed'; conn.textContent = 'disconnected';
+    // The server drops deadmen and kills any playing gesture on disconnect;
+    // clear the frozen panel state to match until the reconnect snapshot.
+    gestureHeld.left = gestureHeld.right = false;
+    const badge = $('gesture_badge');
+    badge.textContent = 'idle';
+    badge.className = 'badge';
+    $('gesture_stop').disabled = true;
     setTimeout(connect, 1000);
   };
   ws.onmessage = (e) => { try { apply_snapshot(JSON.parse(e.data)); } catch {} };
