@@ -47,13 +47,13 @@ const fn mirror(q: [f64; ARM_DOF]) -> [f64; ARM_DOF] {
     [-q[0], -q[1], -q[2], q[3], q[4], q[5], q[6]]
 }
 
-/// The right-arm Ready pose; the left is its mirror. Kept in step with
-/// READY_RIGHT in static/index.html.
+/// The right-arm Ready pose; the left is its mirror.
 const READY_R: [f64; ARM_DOF] = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
 
 /// The Ready workspace pose per side: the anchor every gesture starts from and
-/// returns to.
-const READY: BySide<[f64; ARM_DOF]> = BySide::new(mirror(READY_R), READY_R);
+/// returns to. The panel's Ready Pose button drives the same pose, served to it
+/// through the snapshot, so it has exactly one definition.
+pub(crate) const READY: BySide<[f64; ARM_DOF]> = BySide::new(mirror(READY_R), READY_R);
 
 // --------------------------- authoring types ---------------------------
 

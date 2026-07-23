@@ -279,11 +279,6 @@ const JOINT_AXIS = 200 * PI / 180;
 // Home is all zeros except the elbow (j4), held at a small positive angle so it
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
-// A natural workspace pose (elbows bent, forearms angled toward each other),
-// denoised from the operator's by-eye pose and made left/right symmetric. The mirror
-// flips the shoulder / upper-arm joints (j1,j2,j3); the elbow (j4) and wrist keep sign.
-const READY_LEFT = [-0.15, -0.40, 0.48, 0.95, 0.0, 0.0, 0.0];
-const READY_RIGHT = [0.15, 0.40, -0.48, 0.95, 0.0, 0.0, 0.0];
 // World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
 // `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
 // arcball composes it on quaternions instead. Each slider's reachable band comes from
@@ -685,10 +680,12 @@ function render_arcball(side) {
 }
 
 function ready_arm(side) {
-  // Like Home, but to a natural workspace pose: disable so the stream stops, then
-  // drive to the symmetric Ready preset as a discrete, time-bounded move.
+  // Like Home, but to the Ready workspace pose: disable so the stream stops, then
+  // drive to the preset as a discrete, time-bounded move. The pose comes from the
+  // snapshot (its one definition lives server-side, shared with the gestures).
+  const preset = latestSnap && latestSnap[`${side}_arm`].ready;
+  if (!preset) return;
   if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
-  const preset = side === 'left' ? READY_LEFT : READY_RIGHT;
   for (let i = 0; i < ARM_DOF; i++) {
     $(`${side}_j${i}`).value = preset[i];
     $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(preset[i]);
