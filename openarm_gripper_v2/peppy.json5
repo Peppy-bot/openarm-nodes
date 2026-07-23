@@ -22,6 +22,23 @@
       ],
     },
   },
+  interfaces: {
+    topics: {
+      emits: [
+        // The `backbone` pairing slot: the topic this role emits.
+        { link_id: "backbone", name: "gripper_states" },
+      ],
+      consumes: [
+        // The counterpart role's topic on the same slot.
+        { link_id: "backbone", name: "gripper_setpoints" },
+      ],
+    },
+    services: {
+      exposes: [
+        { link_id: "ready", name: "is_ready" },
+      ],
+    },
+  },
   execution: {
     language: "rust",
     container: {
@@ -47,22 +64,5 @@
       // consumers' needs vary too much for a default to be meaningful.
       state_rate_hz: "u32"
     }
-  },
-  interfaces: {
-    topics: {
-      emits: [
-        // The `backbone` pairing slot: the topic this role emits.
-        { link_id: "backbone", name: "gripper_states" },
-      ],
-      consumes: [
-        // The counterpart role's topic on the same slot.
-        { link_id: "backbone", name: "gripper_setpoints" },
-      ],
-    },
-    services: {
-      exposes: [
-        { link_id: "ready", name: "is_ready" },
-      ],
-    },
   },
 }
