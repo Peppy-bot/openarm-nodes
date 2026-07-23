@@ -23,11 +23,14 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken as GoalToken;
 
+use crate::gestures::{BakedGesture, Registry, advance_gesture_step, lead_in_duration};
 use crate::pose::{
     ArmModels, CartesianJog, Jog, JogCaps, JogMode, JogStep, JointJogStep, Pose, dist3, jog_tick,
     joint_jog_tick,
 };
-use crate::state::{ARM_DOF, ArmTarget, BySide, Proximity, Side, UiState};
+use crate::state::{
+    ARM_DOF, ArmTarget, BySide, GesturePhase, GesturePlayback, Proximity, SIDES, Side, UiState,
+};
 use crate::ui::{
     Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, sane_duration,
     valid_governor_band,
@@ -82,8 +85,8 @@ pub struct GovernorFrame {
 
 impl CommandFrame {
     pub(crate) fn from_state(s: &UiState) -> Self {
-        let arm = |side: Side| s.enabled[side].then_some(s.arms[side].joints);
-        let grip = |side: Side| s.enabled[side].then_some(s.grippers[side].position);
+        let arm = |side: Side| s.side_active(side).then_some(s.arms[side].joints);
+        let grip = |side: Side| s.side_active(side).then_some(s.grippers[side].position);
         Self {
             arms: BySide::new(arm(Side::Left), arm(Side::Right)),
             grippers: BySide::new(grip(Side::Left), grip(Side::Right)),
@@ -133,6 +136,7 @@ impl ArmGoal {
 struct Owner {
     state: UiState,
     models: ArmModels,
+    registry: Registry,
     runner: Arc<NodeRunner>,
     token: CancellationToken,
     // Cloned into each spawned goal task so it can report its outcome back.
@@ -158,6 +162,7 @@ pub struct Channels {
 pub async fn run(
     state: UiState,
     models: ArmModels,
+    registry: Registry,
     runner: Arc<NodeRunner>,
     command_rate_hz: u32,
     token: CancellationToken,
@@ -173,6 +178,7 @@ pub async fn run(
     let mut owner = Owner {
         state,
         models,
+        registry,
         runner,
         token: token.clone(),
         feedback_tx,
@@ -182,7 +188,9 @@ pub async fn run(
     // Publish the starting frame and snapshot before the first tick, so the publishers
     // and any already-connected browser see real state at once rather than after a tick.
     let _ = frame_tx.send(CommandFrame::from_state(&owner.state));
-    if let Ok(json) = build_snapshot_json(&owner.state, Instant::now(), &owner.models) {
+    if let Ok(json) =
+        build_snapshot_json(&owner.state, Instant::now(), &owner.models, &owner.registry)
+    {
         let _ = snapshot_tx.send(json);
     }
 
@@ -201,11 +209,15 @@ pub async fn run(
             },
             Some(fb) = feedback_rx.recv() => owner.reduce_feedback(fb),
             _ = command_tick.tick() => {
+                let gesture_finished = owner.advance_gesture(tick_dt_s);
                 owner.advance_jogs(tick_dt_s);
                 let _ = frame_tx.send(CommandFrame::from_state(&owner.state));
+                if gesture_finished {
+                    owner.finish_gesture();
+                }
             }
             _ = snapshot_tick.tick() => {
-                match build_snapshot_json(&owner.state, Instant::now(), &owner.models) {
+                match build_snapshot_json(&owner.state, Instant::now(), &owner.models, &owner.registry) {
                     Ok(json) => { let _ = snapshot_tx.send(json); }
                     Err(e) => tracing::warn!(error = %e, "serialize snapshot"),
                 }
@@ -215,6 +227,40 @@ pub async fn run(
 }
 
 impl Owner {
+    // Step the playing gesture one tick and write its samples into the involved
+    // sides' targets; the frame publisher then streams them because playback keeps
+    // those sides active. Runs before the jog advance, which skips gesture sides
+    // (their deadmen are off). Returns true on the completing tick; the caller
+    // clears playback only after the frame carrying the final samples is
+    // published, so the last sample reaches the wire.
+    fn advance_gesture(&mut self, tick_dt_s: f64) -> bool {
+        let Some(pb) = self.state.gesture.as_ref() else {
+            return false;
+        };
+        let (next, samples) = advance_gesture_step(pb, tick_dt_s);
+        let done = next.is_none();
+        if !done {
+            self.state.gesture = next;
+        }
+        for side in SIDES {
+            if let Some((joints, gripper)) = samples[side] {
+                self.state.arms[side].joints = joints;
+                if let Some(opening) = gripper {
+                    self.state.grippers[side].position = opening;
+                }
+            }
+        }
+        done
+    }
+
+    // Release the completed gesture: called after the final frame is published.
+    fn finish_gesture(&mut self) {
+        if let Some(pb) = self.state.gesture.take() {
+            self.state
+                .set_status(format!("gesture '{}' complete", pb.gesture.label));
+        }
+    }
+
     // Step each enabled side's jog one tick and apply it. Only enabled sides advance
     // (a disabled side streams nothing, so walking its target would just drift the panel
     // off the measured pose). The step is pure (see `advance_jog`); caps re-derive from
@@ -225,7 +271,7 @@ impl Owner {
             self.state.max_ee_velocity_m_s,
             self.state.joint_jog_acceleration_rad_s2,
         );
-        for side in [Side::Left, Side::Right] {
+        for side in SIDES {
             if !self.state.enabled[side] {
                 continue;
             }
@@ -258,6 +304,10 @@ impl Owner {
                     self.status(side, "disable before a discrete move");
                     return;
                 }
+                if self.state.gesture_holds(side) {
+                    self.status(side, "gesture playing, not firing");
+                    return;
+                }
                 clamp_to_limits(&mut joints, side);
                 let target_ee = self.ee_position(side, &joints);
                 let duration_s = self.floored_duration(side, target_ee, duration_s);
@@ -272,6 +322,10 @@ impl Owner {
                 let side: Side = side.into();
                 if self.state.enabled[side] {
                     self.status(side, "disable before a discrete move");
+                    return;
+                }
+                if self.state.gesture_holds(side) {
+                    self.status(side, "gesture playing, not firing");
                     return;
                 }
                 if !position.iter().all(|v| v.is_finite()) {
@@ -312,6 +366,10 @@ impl Owner {
                     // would fight it and snap back when it completes.
                     if self.state.arms[side].in_flight {
                         self.status(side, "move in flight, not enabling");
+                        return;
+                    }
+                    if self.state.gesture_holds(side) {
+                        self.status(side, "gesture playing, not enabling");
                         return;
                     }
                     // Refuse until measurements exist so the first emitted command holds
@@ -355,7 +413,10 @@ impl Owner {
                         Some(Jog::Joints { vel, .. }) => vel,
                         _ => [0.0; ARM_DOF],
                     };
-                    self.state.arms[side].jog = Some(Jog::Joints { target: joints, vel });
+                    self.state.arms[side].jog = Some(Jog::Joints {
+                        target: joints,
+                        vel,
+                    });
                     self.state.arms[side].jog_blocked = false;
                 }
             }
@@ -410,6 +471,10 @@ impl Owner {
                     self.status_gripper(side, "disable before a discrete move");
                     return;
                 }
+                if self.state.gesture_holds(side) {
+                    self.status_gripper(side, "gesture playing, not firing");
+                    return;
+                }
                 if self.state.grippers[side].in_flight {
                     self.status_gripper(side, "previous move still finishing");
                     return;
@@ -425,6 +490,25 @@ impl Owner {
                     position,
                 );
             }
+            Command::RunGesture { name } => {
+                let Some(gesture) = self.registry.find(&name) else {
+                    self.state.set_status(format!("unknown gesture '{name}'"));
+                    return;
+                };
+                let message = match start_gesture(&mut self.state, &self.models, gesture) {
+                    Ok(m) | Err(m) => m,
+                };
+                self.state.set_status(message);
+            }
+            Command::StopGesture => match self.state.gesture.take() {
+                Some(pb) => {
+                    // The involved sides go inactive next frame; the backbone holds
+                    // their last governed setpoint, the same release as a jog deadman.
+                    self.state
+                        .set_status(format!("gesture '{}' stopped", pb.gesture.label));
+                }
+                None => self.state.set_status("no gesture playing"),
+            },
             Command::SetCollision { enabled } => {
                 self.state.collision_enabled = enabled;
                 self.state
@@ -506,9 +590,14 @@ impl Owner {
     // Claim the side's move slot and spawn the goal task. `grace` makes the task wait
     // for the backbone to release its gate first (set when firing a queued preempt).
     fn fire_now(&mut self, side: Side, goal: ArmGoal, grace: bool) {
-        // A preempt wait could have raced an Enable; never fire under a live deadman.
+        // A preempt wait could have raced an Enable; never fire under a live deadman
+        // or into a side a gesture holds.
         if self.state.enabled[side] {
             self.status(side, "enabled during preempt, move dropped");
+            return;
+        }
+        if self.state.gesture_holds(side) {
+            self.status(side, "gesture playing, queued move dropped");
             return;
         }
         let preempt = GoalToken::new();
@@ -592,6 +681,83 @@ fn on_off(enabled: bool) -> &'static str {
     if enabled { "ON" } else { "OFF" }
 }
 
+/// Start a gesture: validate every involved side, then arm the lead-in blend
+/// from the retained target (the setpoint the backbone already holds, so the
+/// wire stays continuous). Validation runs over all sides before any mutation,
+/// so a refusal on the second side cannot leave the first half-started.
+fn start_gesture(
+    s: &mut UiState,
+    models: &ArmModels,
+    gesture: Arc<BakedGesture>,
+) -> Result<String, String> {
+    if let Some(playing) = &s.gesture {
+        return Err(format!(
+            "gesture '{}' still playing, stop it first",
+            playing.gesture.label
+        ));
+    }
+    let mut from: BySide<Option<[f64; ARM_DOF]>> = BySide::new(None, None);
+    let mut gripper_from: BySide<Option<f64>> = BySide::new(None, None);
+    for side in SIDES {
+        if !gesture.involves(side) {
+            continue;
+        }
+        if s.enabled[side] {
+            return Err(format!(
+                "{}: disable streaming before a gesture",
+                side.label()
+            ));
+        }
+        if s.arms[side].in_flight || s.grippers[side].in_flight {
+            return Err(format!(
+                "{}: move in flight, not starting gesture",
+                side.label()
+            ));
+        }
+        if s.arms[side].last_feedback.is_none() || s.grippers[side].last_feedback.is_none() {
+            return Err(format!(
+                "{}: no measured pose yet, not starting gesture",
+                side.label()
+            ));
+        }
+        // Lead in from the retained target, not the measured pose: the backbone
+        // holds the last commanded setpoint, so anchoring the blend there keeps
+        // the wire continuous (re-seeding from the gravity-sagged measured pose
+        // snapped the arm at gesture start). The gripper does not sag, so its
+        // blend starts from the measured opening.
+        from[side] = Some(s.arms[side].joints);
+        gripper_from[side] = s.grippers[side].last_feedback;
+    }
+    let mut lead_s = 0.0_f64;
+    for side in SIDES {
+        let (Some(held), Some(first)) = (from[side], gesture.first_joints(side)) else {
+            continue;
+        };
+        s.arms[side].jog = None;
+        s.arms[side].jog_blocked = false;
+        // Playback streams this side's gripper from its first frame; seed it from
+        // measured so a gesture without gripper keys holds the jaw where it is.
+        let gripper_measured = s.grippers[side].last_feedback.expect("validated above");
+        s.grippers[side].position = gripper_measured;
+        lead_s = lead_s.max(lead_in_duration(
+            &held,
+            &first,
+            models.velocity_limits(side),
+        ));
+    }
+    let label = gesture.label;
+    s.gesture = Some(GesturePlayback {
+        gesture,
+        phase: GesturePhase::LeadIn {
+            from,
+            gripper_from,
+            t: 0.0,
+            duration_s: lead_s,
+        },
+    });
+    Ok(format!("gesture '{label}': lead-in"))
+}
+
 /// A unit quaternion from the wire `[x, y, z, w]`, or `None` if it is non-finite or too
 /// near zero to normalize. A degenerate orientation would normalize to NaN and poison
 /// the IK solve, so both pose paths reject it here.
@@ -606,9 +772,11 @@ fn unit_quat_from_wire(q: [f64; 4]) -> Option<UnitQuaternion<f64>> {
 // off cannot latch the backbone ungoverned, while a launch-ungoverned deployment is not
 // force-armed either.
 fn reset_on_disconnect(s: &mut UiState) {
-    for side in [Side::Left, Side::Right] {
+    for side in SIDES {
         s.enabled[side] = false;
     }
+    // No operator, no show: a gesture must not keep dancing after the panel is gone.
+    s.gesture = None;
     s.collision_enabled = s.collision_enabled_default;
 }
 
@@ -760,8 +928,16 @@ mod tests {
         let adv = advance_jog(&a, Side::Left, &models(), caps());
         // The first tick moves only a capped increment, not the whole way (no snap), and
         // the jog stays armed to keep ramping.
-        assert_ne!(adv.joints, target, "the setpoint does not snap to the target");
-        assert!(adv.joints.iter().zip(target).all(|(j, t)| j.abs() <= t.abs() + 1e-12));
+        assert_ne!(
+            adv.joints, target,
+            "the setpoint does not snap to the target"
+        );
+        assert!(
+            adv.joints
+                .iter()
+                .zip(target)
+                .all(|(j, t)| j.abs() <= t.abs() + 1e-12)
+        );
         assert!(adv.jog.is_some(), "the jog stays armed while ramping");
         assert!(!adv.blocked);
         assert!(adv.event.is_none());
@@ -872,6 +1048,118 @@ mod tests {
             );
         }
         panic!("jog never reached the boundary within 5000 ticks");
+    }
+
+    // The baked roster, shared across tests (baking runs the IK rollouts once).
+    fn registry() -> &'static Registry {
+        static REG: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
+        REG.get_or_init(|| Registry::bake(&models()))
+    }
+
+    // A state with measurements on both sides, as RunGesture requires.
+    fn measured_state() -> UiState {
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 10.0);
+        for side in SIDES {
+            s.arms[side].last_feedback = Some([0.1, 0.2, -0.1, 0.8, 0.0, 0.1, 0.0]);
+            s.grippers[side].last_feedback = Some(0.3);
+        }
+        s
+    }
+
+    #[test]
+    fn start_gesture_leads_in_from_the_retained_target() {
+        let m = models();
+        let mut s = measured_state();
+        s.arms[Side::Right].joints = [0.2, 0.3, -0.2, 1.1, 0.0, 0.0, 0.1];
+        s.arms[Side::Right].jog = Some(joint_jog([0.2; ARM_DOF]));
+        start_gesture(&mut s, &m, registry().find("wave").unwrap()).expect("starts");
+        let pb = s.gesture.as_ref().expect("playback armed");
+        let GesturePhase::LeadIn {
+            from, duration_s, ..
+        } = pb.phase
+        else {
+            panic!("starts in lead-in");
+        };
+        // The blend anchors on the retained target (the backbone's held
+        // setpoint), never the sagged measured pose.
+        assert_eq!(from[Side::Right], Some(s.arms[Side::Right].joints));
+        assert_ne!(from[Side::Right], s.arms[Side::Right].last_feedback);
+        assert_eq!(from[Side::Left], None, "wave leaves the left arm alone");
+        assert!((0.8..=4.0).contains(&duration_s));
+        assert!(s.arms[Side::Right].jog.is_none(), "playback clears the jog");
+        assert_eq!(
+            s.grippers[Side::Right].position,
+            0.3,
+            "gripper seeds from measured"
+        );
+        assert!(s.gesture_holds(Side::Right) && !s.gesture_holds(Side::Left));
+    }
+
+    #[test]
+    fn start_gesture_refusals_leave_state_untouched() {
+        let m = models();
+        let wave = registry().find("wave").unwrap();
+
+        let mut enabled = measured_state();
+        enabled.enabled[Side::Right] = true;
+        assert!(start_gesture(&mut enabled, &m, wave.clone()).is_err());
+        assert!(enabled.gesture.is_none());
+
+        let mut in_flight = measured_state();
+        in_flight.arms[Side::Right].in_flight = true;
+        assert!(start_gesture(&mut in_flight, &m, wave.clone()).is_err());
+        assert!(in_flight.gesture.is_none());
+
+        let mut blind = measured_state();
+        blind.arms[Side::Right].last_feedback = None;
+        assert!(start_gesture(&mut blind, &m, wave.clone()).is_err());
+        assert!(blind.gesture.is_none());
+
+        let mut busy = measured_state();
+        start_gesture(&mut busy, &m, wave.clone()).expect("first start");
+        assert!(
+            start_gesture(&mut busy, &m, wave).is_err(),
+            "one gesture at a time"
+        );
+
+        // A dual-arm gesture validates the uninvolved-looking side too: a left
+        // refusal must not half-start the right.
+        let mut half = measured_state();
+        half.enabled[Side::Left] = true;
+        let shrug = registry().find("shrug").unwrap();
+        assert!(start_gesture(&mut half, &m, shrug).is_err());
+        assert!(half.gesture.is_none());
+        assert!(half.arms[Side::Right].jog.is_none());
+    }
+
+    #[test]
+    fn gesture_sides_stream_in_the_command_frame() {
+        let m = models();
+        let mut s = measured_state();
+        start_gesture(&mut s, &m, registry().find("wave").unwrap()).expect("starts");
+        assert!(!s.enabled[Side::Right], "deadman stays off under playback");
+        let frame = CommandFrame::from_state(&s);
+        assert!(frame.arms[Side::Right].is_some(), "gesture side streams");
+        assert!(frame.grippers[Side::Right].is_some());
+        assert!(
+            frame.arms[Side::Left].is_none(),
+            "uninvolved side stays quiet"
+        );
+        s.gesture = None;
+        let released = CommandFrame::from_state(&s);
+        assert!(
+            released.arms[Side::Right].is_none(),
+            "stop releases the side"
+        );
+    }
+
+    #[test]
+    fn disconnect_kills_gesture_playback() {
+        let m = models();
+        let mut s = measured_state();
+        start_gesture(&mut s, &m, registry().find("wave").unwrap()).expect("starts");
+        reset_on_disconnect(&mut s);
+        assert!(s.gesture.is_none(), "no operator, no show");
     }
 
     #[test]

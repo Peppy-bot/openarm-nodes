@@ -23,9 +23,12 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
 use crate::error::Result;
+use crate::gestures::Registry;
 use crate::owner::UiMsg;
 use crate::pose::{ArmModels, JogMode, Pose};
-use crate::state::{ARM_DOF, ArmTarget, Disposition, GripperTarget, Proximity, Side, UiState};
+use crate::state::{
+    ARM_DOF, ArmTarget, Disposition, GesturePhase, GripperTarget, Proximity, Side, UiState,
+};
 
 const DEFAULT_PORT: u16 = 8765;
 // The backbone publishes the proximity readout at ~20 Hz; treat it as stale after this
@@ -222,8 +225,9 @@ pub(crate) fn build_snapshot_json(
     s: &UiState,
     now: Instant,
     models: &ArmModels,
+    registry: &Registry,
 ) -> serde_json::Result<String> {
-    serde_json::to_string(&Snapshot::build(s, now, models))
+    serde_json::to_string(&Snapshot::build(s, now, models, registry))
 }
 
 // --------------------------- wire protocol ---------------------------
@@ -244,7 +248,29 @@ struct Snapshot {
     max_ee_velocity_m_s: f64,
     // Live nearest-pair proximity from the backbone (null until the first report).
     proximity: Option<ProximityView>,
+    // The baked gesture roster (name, label, involved sides); the browser builds
+    // its buttons from this, so gestures live in exactly one place.
+    gestures: Vec<GestureView>,
+    // The gesture in flight, if any.
+    gesture: Option<GestureStatusView>,
     status: String,
+}
+
+#[derive(Serialize)]
+struct GestureView {
+    name: &'static str,
+    label: &'static str,
+    left: bool,
+    right: bool,
+}
+
+#[derive(Serialize)]
+struct GestureStatusView {
+    name: &'static str,
+    // "lead_in" while blending from the held target, then "playing".
+    phase: &'static str,
+    // Fraction of the current phase completed, 0..1.
+    progress: f64,
 }
 
 #[derive(Serialize)]
@@ -295,8 +321,29 @@ struct GripperView {
 }
 
 impl Snapshot {
-    fn build(s: &UiState, now: Instant, models: &ArmModels) -> Self {
+    fn build(s: &UiState, now: Instant, models: &ArmModels, registry: &Registry) -> Self {
         Self {
+            gestures: registry
+                .iter()
+                .map(|g| GestureView {
+                    name: g.name,
+                    label: g.label,
+                    left: g.involves(Side::Left),
+                    right: g.involves(Side::Right),
+                })
+                .collect(),
+            gesture: s.gesture.as_ref().map(|pb| match pb.phase {
+                GesturePhase::LeadIn { t, duration_s, .. } => GestureStatusView {
+                    name: pb.gesture.name,
+                    phase: "lead_in",
+                    progress: (t / duration_s).clamp(0.0, 1.0),
+                },
+                GesturePhase::Playing { t } => GestureStatusView {
+                    name: pb.gesture.name,
+                    phase: "playing",
+                    progress: (t / pb.gesture.duration_s).clamp(0.0, 1.0),
+                },
+            }),
             left_arm: arm_view(&s.arms[Side::Left], Side::Left, models),
             right_arm: arm_view(&s.arms[Side::Right], Side::Right, models),
             left_gripper: gripper_view(&s.grippers[Side::Left]),
@@ -420,6 +467,13 @@ pub(crate) enum Command {
         d_safe: f64,
         max_ee_velocity_m_s: f64,
     },
+    // Play a named gesture from the baked library. Refused while its sides
+    // stream, a move is in flight, or another gesture is playing.
+    RunGesture {
+        name: String,
+    },
+    // Stop the playing gesture; the involved sides hold where they are.
+    StopGesture,
 }
 
 #[derive(Deserialize, Copy, Clone)]

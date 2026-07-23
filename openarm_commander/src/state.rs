@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::time::Instant;
 
+use crate::gestures::BakedGesture;
 use crate::pose::Jog;
 
 pub const ARM_DOF: usize = openarm_description::ARM_DOF;
@@ -43,6 +45,9 @@ impl Side {
     }
 }
 
+/// Both sides in a fixed iteration order, for per-side loops.
+pub const SIDES: [Side; 2] = [Side::Left, Side::Right];
+
 /// A value stored per side, indexed by [`Side`]: `things[side]` reads or writes the
 /// right one, with no left/right accessor split. `Copy` when `T` is, so the small
 /// per-tick frames pass by value.
@@ -50,7 +55,7 @@ impl Side {
 pub struct BySide<T>([T; 2]);
 
 impl<T> BySide<T> {
-    pub fn new(left: T, right: T) -> Self {
+    pub const fn new(left: T, right: T) -> Self {
         Self([left, right])
     }
 }
@@ -133,10 +138,41 @@ impl GripperTarget {
     }
 }
 
+/// A gesture in flight: the baked trajectory plus where playback is. `Arc`
+/// keeps the per-tick playback advance cheap (each step re-clones the handle,
+/// never the trajectory).
+#[derive(Clone, Debug)]
+pub struct GesturePlayback {
+    pub gesture: Arc<BakedGesture>,
+    pub phase: GesturePhase,
+}
+
+/// Playback phase: a quintic blend from the pose held at start (the retained
+/// target, which the backbone is already holding) to each involved track's
+/// first sample, then the baked trajectory on a shared clock. `gripper_from`
+/// carries the opening measured at start, so a gesture that drives the jaw
+/// eases it in over the same blend.
+#[derive(Clone, Copy, Debug)]
+pub enum GesturePhase {
+    LeadIn {
+        from: BySide<Option<[f64; ARM_DOF]>>,
+        gripper_from: BySide<Option<f64>>,
+        t: f64,
+        duration_s: f64,
+    },
+    Playing {
+        t: f64,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct UiState {
     pub arms: BySide<ArmTarget>,
     pub grippers: BySide<GripperTarget>,
+    // The gesture being played, if any. Playback owns its involved sides: their
+    // deadmen stay off, discrete fires are refused, and the player writes their
+    // arm/gripper targets each tick.
+    pub gesture: Option<GesturePlayback>,
     // Streaming deadman, one per side: while false the commander emits no
     // commands for that side's arm or gripper and both targets track the measured
     // pose, so enabling never steps the robot. The arm and gripper share the
@@ -209,6 +245,7 @@ impl UiState {
         Self {
             arms: BySide::splat(ArmTarget::home()),
             grippers: BySide::splat(GripperTarget::closed()),
+            gesture: None,
             enabled: BySide::splat(false),
             collision_enabled,
             collision_enabled_default: collision_enabled,
@@ -223,5 +260,18 @@ impl UiState {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = message.into();
+    }
+
+    /// Whether a playing gesture owns this side's targets.
+    pub fn gesture_holds(&self, side: Side) -> bool {
+        self.gesture
+            .as_ref()
+            .is_some_and(|p| p.gesture.involves(side))
+    }
+
+    /// Whether this side's setpoints should stream: the operator's deadman is on,
+    /// or a gesture is driving it.
+    pub fn side_active(&self, side: Side) -> bool {
+        self.enabled[side] || self.gesture_holds(side)
     }
 }
