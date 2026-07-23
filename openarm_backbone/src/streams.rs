@@ -12,7 +12,9 @@ use peppygen::NodeRunner;
 use peppygen::consumed_topics::collision_ctrl::governor_control as collision_ctrl_governor_control;
 use peppygen::consumed_topics::commander::arm_joint_commands as commander_arm_joint_commands;
 use peppygen::consumed_topics::commander::gripper_commands as commander_gripper_commands;
-use peppygen::paired_topics::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
+use peppygen::paired_topics::{
+    left_arm_link, left_gripper_link, right_arm_link, right_gripper_link,
+};
 use tokio::sync::watch;
 use tracing::{error, warn};
 

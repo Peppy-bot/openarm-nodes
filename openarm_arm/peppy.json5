@@ -77,12 +77,12 @@
     topics: {
       emits: [
         // The `backbone` pairing slot: the topic this role emits.
-        { link_id: "backbone", name: "arm_states" },
+        { link_id: "backbone", name: "joint_states" },
         { link_id: "states", name: "arm_states" },
       ],
       consumes: [
         // The counterpart role's topic on the same slot.
-        { link_id: "backbone", name: "arm_setpoints" },
+        { link_id: "backbone", name: "joint_setpoints" },
       ],
     },
     services: {

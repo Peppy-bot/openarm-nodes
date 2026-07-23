@@ -56,7 +56,7 @@
       ],
       consumes: [
         // The counterpart role's topic on the same slot.
-        { link_id: "backbone", name: "gripper_commands" },
+        { link_id: "backbone", name: "gripper_setpoints" },
       ],
     },
     services: {

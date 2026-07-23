@@ -204,19 +204,19 @@
         // only the reference. Emit coverage is exact: every topic the
         // commander role emits needs exactly one entry per slot.
         {
-          name: "arm_setpoints",
+          name: "joint_setpoints",
           link_id: "left_arm_link"
         },
         {
-          name: "arm_setpoints",
+          name: "joint_setpoints",
           link_id: "right_arm_link"
         },
         {
-          name: "gripper_commands",
+          name: "gripper_setpoints",
           link_id: "left_gripper_link"
         },
         {
-          name: "gripper_commands",
+          name: "gripper_setpoints",
           link_id: "right_gripper_link"
         },
         {
@@ -242,13 +242,13 @@
       consumes: [
         // The counterpart-role topic of each pairing slot: the measured state
         // each paired arm and gripper streams back. One entry per slot, so
-        // each stays addressable as peppygen.pairings.<slot>.<topic>.
+        // each stays addressable as peppygen.paired_topics.<slot>.<topic>.
         {
-          name: "arm_states",
+          name: "joint_states",
           link_id: "left_arm_link"
         },
         {
-          name: "arm_states",
+          name: "joint_states",
           link_id: "right_arm_link"
         },
         {
