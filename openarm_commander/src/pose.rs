@@ -222,11 +222,21 @@ impl ArmModels {
         }
     }
 
-    fn velocity_limits(&self, side: Side) -> &[f64; ARM_DOF] {
+    /// Per-joint URDF velocity limits (rad/s) for `side`: the budget the backbone's
+    /// chase enforces, shared by the jog step clamp and the gesture bake asserts.
+    pub(crate) fn velocity_limits(&self, side: Side) -> &[f64; ARM_DOF] {
         match side {
             Side::Left => &self.left_velocity_limits,
             Side::Right => &self.right_velocity_limits,
         }
+    }
+
+    /// Per-joint [lo, hi] position limits (rad) for `side`, from the same model the
+    /// IK solves against (elbow singularity floor included).
+    pub(crate) fn joint_ranges(&self, side: Side) -> [[f64; 2]; ARM_DOF] {
+        let model = self.get(side).lock().unwrap_or_else(|p| p.into_inner());
+        let lims = model.limits();
+        std::array::from_fn(|i| [lims[i].lo, lims[i].hi])
     }
 
     /// World-frame x/y/z reachable bounds `[[min, max]; 3]` for `side`, so the panel
@@ -314,7 +324,10 @@ pub enum Jog {
     /// step per tick (carrying `vel`, the per-joint jog velocity, across ticks), so the
     /// arm ramps smoothly instead of snapping. `target` refreshes as the operator drags;
     /// `vel` is preserved across those refreshes so a continuous drag keeps its momentum.
-    Joints { target: [f64; ARM_DOF], vel: [f64; ARM_DOF] },
+    Joints {
+        target: [f64; ARM_DOF],
+        vel: [f64; ARM_DOF],
+    },
     /// World-frame controls: step the joints one resolved-rate increment per tick
     /// toward the target, since the command wire carries only joints and a pose jump
     /// would teleport or branch-flip the arm.
@@ -397,7 +410,8 @@ pub fn joint_jog_tick(
     let vel: [f64; ARM_DOF] = std::array::from_fn(|i| next[i].1);
 
     let settled = (0..ARM_DOF).all(|i| {
-        (target[i] - joints[i]).abs() < JOINT_JOG_CONVERGED_RAD && vel[i].abs() < JOINT_JOG_STOP_RAD_S
+        (target[i] - joints[i]).abs() < JOINT_JOG_CONVERGED_RAD
+            && vel[i].abs() < JOINT_JOG_STOP_RAD_S
     });
     if settled {
         JointJogStep::Converged(*target)
@@ -657,13 +671,20 @@ mod tests {
         let target = [3.0; ARM_DOF];
         // From rest, one tick may add at most a_max*dt to the velocity, so the position
         // step is bounded by that: a small ramp, not a snap.
-        let JointJogStep::Stepped { joints, vel } = joint_jog_tick(&current, &target, &current, caps)
+        let JointJogStep::Stepped { joints, vel } =
+            joint_jog_tick(&current, &target, &current, caps)
         else {
             panic!("a far target does not converge in one tick");
         };
         for i in 0..ARM_DOF {
-            assert!(vel[i] <= caps.joint_accel_rad_s2 * caps.dt_s + 1e-12, "accel-capped");
-            assert!(joints[i] > 0.0 && joints[i] < 0.05, "a small first step, not a snap");
+            assert!(
+                vel[i] <= caps.joint_accel_rad_s2 * caps.dt_s + 1e-12,
+                "accel-capped"
+            );
+            assert!(
+                joints[i] > 0.0 && joints[i] < 0.05,
+                "a small first step, not a snap"
+            );
         }
     }
 
@@ -693,8 +714,14 @@ mod tests {
                 }
             }
         }
-        assert!(converged, "the jog converges within a bounded number of ticks");
-        assert!(max_overshoot < 1e-6, "the ramp does not overshoot the target");
+        assert!(
+            converged,
+            "the jog converges within a bounded number of ticks"
+        );
+        assert!(
+            max_overshoot < 1e-6,
+            "the ramp does not overshoot the target"
+        );
     }
 
     #[test]
@@ -743,7 +770,10 @@ mod tests {
             worst_accel <= dv_max + 1e-12,
             "velocity change per tick stays within the accel cap through the reversal ({worst_accel} > {dv_max})"
         );
-        assert!(max_overshoot < 1e-6, "the reversal does not overshoot the target");
+        assert!(
+            max_overshoot < 1e-6,
+            "the reversal does not overshoot the target"
+        );
     }
 
     #[test]
