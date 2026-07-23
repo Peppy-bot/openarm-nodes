@@ -19,11 +19,7 @@
         // The backbone: the move actions the panel fires (move_arm_joints is the
         // "Send" button) and the collision_status feed behind the proximity
         // readout. Bound to the backbone instance in the launcher.
-        {
-          name: "openarm_backbone",
-          tag: "v1",
-          link_id: "backbone"
-        }
+        { name: "openarm_backbone", tag: "v1", link_id: "backbone" }
       ],
       pairings: [
         // The exclusive command loop with the backbone, one slot per driven
@@ -56,22 +52,13 @@
       // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.
       consumes: [
-        {
-          link_id: "backbone",
-          name: "move_arm_joints"
-        },
+        { link_id: "backbone", name: "move_arm_joints" },
         // Cartesian point-to-point: Execute-pose in the panel's Actions mode fires
         // the backbone's planned straight-line move rather than jogging there.
-        {
-          link_id: "backbone",
-          name: "move_arm"
-        },
+        { link_id: "backbone", name: "move_arm" },
         // Gripper open/close as a discrete governed action (Actions mode), rather
         // than the streamed opening used in Streaming mode.
-        {
-          link_id: "backbone",
-          name: "move_gripper"
-        }
+        { link_id: "backbone", name: "move_gripper" }
       ]
     },
     topics: {
@@ -85,15 +72,12 @@
         { link_id: "governor", name: "governor_control" },
       ],
       consumes: [
-        {
-          name: "collision_status",
-          link_id: "backbone"
-        },
+        { link_id: "backbone", name: "collision_status" },
         // The observed pairings' state back-channels.
-        { name: "joint_states", link_id: "observed_left_arm" },
-        { name: "joint_states", link_id: "observed_right_arm" },
-        { name: "gripper_states", link_id: "observed_left_gripper" },
-        { name: "gripper_states", link_id: "observed_right_gripper" },
+        { link_id: "observed_left_arm", name: "joint_states" },
+        { link_id: "observed_right_arm", name: "joint_states" },
+        { link_id: "observed_left_gripper", name: "gripper_states" },
+        { link_id: "observed_right_gripper", name: "gripper_states" },
       ]
     }
   },

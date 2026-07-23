@@ -118,6 +118,8 @@ class SimTopicIO:
             ):
                 logger.warning(f"dropping non-finite arm setpoint on {topic.LINK_ID}")
                 continue
+            if self._arm_cmd[side].get() is None:
+                logger.info(f"first arm setpoint on {topic.LINK_ID}")
             self._arm_cmd[side].set((msg.positions, msg.velocities))
 
     async def _consume_gripper(self, topic, side: int) -> None:
@@ -142,6 +144,8 @@ class SimTopicIO:
                 continue
             # max_effort is ignored: the sim engine applies no grip-force cap
             # and reports a 0 ceiling on its states.
+            if self._gripper_cmd[side].get() is None:
+                logger.info(f"first gripper setpoint on {topic.LINK_ID}")
             self._gripper_cmd[side].set(msg.opening)
 
     # --- called from the physics thread ---

@@ -12,18 +12,10 @@
     tag: "v1",
     depends_on: {
       contracts: [
-        {
-          name: "openarm_robot_initializer",
-          tag: "v1",
-          link_id: "robot_init"
-        },
+        { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_init" },
         // Runtime governor controls, bound to the commander; the backbone
         // holds its launch-time defaults until the first message.
-        {
-          name: "openarm_governor_control",
-          tag: "v1",
-          link_id: "collision_ctrl"
-        }
+        { name: "openarm_governor_control", tag: "v1", link_id: "collision_ctrl" }
       ],
       pairings: [
         // The exclusive command loop with the one leading node (panel or
@@ -31,34 +23,10 @@
         // role, consumes the raw setpoint stream each slot carries, governs it,
         // and relays that limb's measured state back up the same slot. Optional:
         // ungoverned deployments and monitors boot with these unbound.
-        {
-          name: "joint_link",
-          tag: "v1",
-          role: "follower",
-          link_id: "leader_left_arm",
-          optional: true
-        },
-        {
-          name: "joint_link",
-          tag: "v1",
-          role: "follower",
-          link_id: "leader_right_arm",
-          optional: true
-        },
-        {
-          name: "gripper_link",
-          tag: "v1",
-          role: "follower",
-          link_id: "leader_left_gripper",
-          optional: true
-        },
-        {
-          name: "gripper_link",
-          tag: "v1",
-          role: "follower",
-          link_id: "leader_right_gripper",
-          optional: true
-        },
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "leader_left_arm", optional: true },
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "leader_right_arm", optional: true },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "leader_left_gripper", optional: true },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "leader_right_gripper", optional: true },
         // The exclusive command loop with each arm: the backbone plays the leader
         // role, streams the governed joint setpoint down each slot's
         // joint_setpoints, and reads that arm's measured state back on the slot's
@@ -66,20 +34,8 @@
         // scopes both directions, so no arm_id demux and no other producer can
         // drive an arm or pose as its state. Optional like the gripper slots
         // below, established at this instance's start (launcher `links:`).
-        {
-          name: "joint_link",
-          tag: "v1",
-          role: "leader",
-          link_id: "left_arm_link",
-          optional: true
-        },
-        {
-          name: "joint_link",
-          tag: "v1",
-          role: "leader",
-          link_id: "right_arm_link",
-          optional: true
-        },
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "left_arm_link", optional: true },
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "right_arm_link", optional: true },
         // The exclusive command loop with each gripper: the backbone plays the
         // leader role, streams the governed opening down each slot's
         // gripper_setpoints, and reads that gripper's measured aperture back on
@@ -89,20 +45,8 @@
         // governed openings go nowhere and no aperture arrives, so streaming
         // stays gated) and each pair is established at this instance's start
         // (launcher `links:`).
-        {
-          name: "gripper_link",
-          tag: "v1",
-          role: "leader",
-          link_id: "left_gripper_link",
-          optional: true
-        },
-        {
-          name: "gripper_link",
-          tag: "v1",
-          role: "leader",
-          link_id: "right_gripper_link",
-          optional: true
-        }
+        { name: "gripper_link", tag: "v1", role: "leader", link_id: "left_gripper_link", optional: true },
+        { name: "gripper_link", tag: "v1", role: "leader", link_id: "right_gripper_link", optional: true }
       ]
     }
   },
@@ -233,40 +177,16 @@
         // pairing document owns the shape and QoS, so these entries carry
         // only the reference. Emit coverage is exact: every topic the
         // leader role emits needs exactly one entry per slot.
-        {
-          name: "joint_setpoints",
-          link_id: "left_arm_link"
-        },
-        {
-          name: "joint_setpoints",
-          link_id: "right_arm_link"
-        },
-        {
-          name: "gripper_setpoints",
-          link_id: "left_gripper_link"
-        },
-        {
-          name: "gripper_setpoints",
-          link_id: "right_gripper_link"
-        },
+        { link_id: "left_arm_link", name: "joint_setpoints" },
+        { link_id: "right_arm_link", name: "joint_setpoints" },
+        { link_id: "left_gripper_link", name: "gripper_setpoints" },
+        { link_id: "right_gripper_link", name: "gripper_setpoints" },
         // The follower role's state back-channel on each upstream slot: the
         // measured state relayed from the matching downstream pair.
-        {
-          name: "joint_states",
-          link_id: "leader_left_arm"
-        },
-        {
-          name: "joint_states",
-          link_id: "leader_right_arm"
-        },
-        {
-          name: "gripper_states",
-          link_id: "leader_left_gripper"
-        },
-        {
-          name: "gripper_states",
-          link_id: "leader_right_gripper"
-        },
+        { link_id: "leader_left_arm", name: "joint_states" },
+        { link_id: "leader_right_arm", name: "joint_states" },
+        { link_id: "leader_left_gripper", name: "gripper_states" },
+        { link_id: "leader_right_gripper", name: "gripper_states" },
         {
           // Nearest self-collision pair: the signed surface distance between the
           // two arms and the two links forming that pair.
@@ -291,52 +211,22 @@
         // The counterpart-role topic of each pairing slot: the measured state
         // each paired arm and gripper streams back. One entry per slot, so
         // each stays addressable as peppygen.paired_topics.<slot>.<topic>.
-        {
-          name: "joint_states",
-          link_id: "left_arm_link"
-        },
-        {
-          name: "joint_states",
-          link_id: "right_arm_link"
-        },
-        {
-          name: "gripper_states",
-          link_id: "left_gripper_link"
-        },
-        {
-          name: "gripper_states",
-          link_id: "right_gripper_link"
-        },
+        { link_id: "left_arm_link", name: "joint_states" },
+        { link_id: "right_arm_link", name: "joint_states" },
+        { link_id: "left_gripper_link", name: "gripper_states" },
+        { link_id: "right_gripper_link", name: "gripper_states" },
         // The leading node's raw setpoints, one slot per limb (the slot is
         // the side, so no id demux).
-        {
-          name: "joint_setpoints",
-          link_id: "leader_left_arm"
-        },
-        {
-          name: "joint_setpoints",
-          link_id: "leader_right_arm"
-        },
-        {
-          name: "gripper_setpoints",
-          link_id: "leader_left_gripper"
-        },
-        {
-          name: "gripper_setpoints",
-          link_id: "leader_right_gripper"
-        },
-        {
-          name: "governor_control",
-          link_id: "collision_ctrl"
-        }
+        { link_id: "leader_left_arm", name: "joint_setpoints" },
+        { link_id: "leader_right_arm", name: "joint_setpoints" },
+        { link_id: "leader_left_gripper", name: "gripper_setpoints" },
+        { link_id: "leader_right_gripper", name: "gripper_setpoints" },
+        { link_id: "collision_ctrl", name: "governor_control" }
       ]
     },
     services: {
       consumes: [
-        {
-          link_id: "robot_init",
-          name: "is_ready"
-        }
+        { link_id: "robot_init", name: "is_ready" }
       ]
     }
   },

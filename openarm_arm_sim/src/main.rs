@@ -12,7 +12,7 @@ use peppygen::exposed_services::ready::is_ready;
 use peppygen::paired_topics::{backbone, engine};
 use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
 use peppylib::runtime::CancellationToken;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 fn all_finite(vecs: &[&[f64]]) -> bool {
     vecs.iter().all(|v| v.iter().all(|x| x.is_finite()))
@@ -29,6 +29,7 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
         Err(e) => return error!("declare engine joint_setpoints publisher: {e}"),
     };
     let mut failing = false;
+    let mut first = true;
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
@@ -56,7 +57,13 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
             Err(e) => Err(e.to_string()),
         };
         match result {
-            Ok(()) => failing = false,
+            Ok(()) => {
+                failing = false;
+                if first {
+                    first = false;
+                    info!("first setpoint relayed to the engine");
+                }
+            }
             Err(e) if !failing => {
                 failing = true;
                 warn!("engine joint_setpoints publish failing, suppressing repeats: {e}");
@@ -78,6 +85,7 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
         Err(e) => return error!("declare joint_states publisher: {e}"),
     };
     let mut failing = false;
+    let mut first = true;
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
@@ -107,6 +115,10 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
         match result {
             Ok(()) => {
                 failing = false;
+                if first {
+                    first = false;
+                    info!("first state relayed to the backbone");
+                }
                 ready.store(true, Ordering::SeqCst);
             }
             Err(e) if !failing => {

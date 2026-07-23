@@ -16,26 +16,10 @@
       // Per-side link_ids mirror backbone: the launcher pins each to the concrete
       // arm/gripper instance whose readiness this node aggregates.
       contracts: [
-        {
-          name: "openarm_hardware_ready",
-          tag: "v1",
-          link_id: "left_arm"
-        },
-        {
-          name: "openarm_hardware_ready",
-          tag: "v1",
-          link_id: "right_arm"
-        },
-        {
-          name: "openarm_hardware_ready",
-          tag: "v1",
-          link_id: "left_gripper"
-        },
-        {
-          name: "openarm_hardware_ready",
-          tag: "v1",
-          link_id: "right_gripper"
-        }
+        { name: "openarm_hardware_ready", tag: "v1", link_id: "left_arm" },
+        { name: "openarm_hardware_ready", tag: "v1", link_id: "right_arm" },
+        { name: "openarm_hardware_ready", tag: "v1", link_id: "left_gripper" },
+        { name: "openarm_hardware_ready", tag: "v1", link_id: "right_gripper" }
       ]
     }
   },

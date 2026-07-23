@@ -21,23 +21,11 @@
       pairings: [
         // The exclusive command loop with the backbone, identical to the real
         // arm's slot: optional, established at the backbone's start.
-        {
-          name: "joint_link",
-          tag: "v1",
-          role: "follower",
-          link_id: "backbone",
-          optional: true
-        },
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "backbone", optional: true },
         // The same pairing toward the sim engine's matching limb slot: this
         // relay leads, the engine follows. Optional so the relay boots before
         // the engine is up.
-        {
-          name: "joint_link",
-          tag: "v1",
-          role: "leader",
-          link_id: "engine",
-          optional: true
-        }
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "engine", optional: true }
       ]
     }
   },

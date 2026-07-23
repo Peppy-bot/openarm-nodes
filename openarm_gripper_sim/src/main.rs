@@ -13,7 +13,7 @@ use peppygen::exposed_services::ready::is_ready;
 use peppygen::paired_topics::{backbone, engine};
 use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
 use peppylib::runtime::CancellationToken;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// Forward the backbone's governed gripper_setpoints to the engine.
 async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
@@ -26,6 +26,7 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
         Err(e) => return error!("declare engine gripper_setpoints publisher: {e}"),
     };
     let mut failing = false;
+    let mut first = true;
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
@@ -39,6 +40,7 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
                 continue;
             }
         };
+
         if !msg.opening.is_finite() || !msg.max_effort.is_finite() {
             warn!("dropping non-finite gripper_setpoints");
             continue;
@@ -52,7 +54,13 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
             Err(e) => Err(e.to_string()),
         };
         match result {
-            Ok(()) => failing = false,
+            Ok(()) => {
+                failing = false;
+                if first {
+                    first = false;
+                    info!("first setpoint relayed to the engine");
+                }
+            }
             Err(e) if !failing => {
                 failing = true;
                 warn!("engine gripper_setpoints publish failing, suppressing repeats: {e}");
@@ -74,6 +82,7 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
         Err(e) => return error!("declare gripper_states publisher: {e}"),
     };
     let mut failing = false;
+    let mut first = true;
     loop {
         let received = tokio::select! {
             _ = token.cancelled() => return,
@@ -103,6 +112,10 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
         match result {
             Ok(()) => {
                 failing = false;
+                if first {
+                    first = false;
+                    info!("first state relayed to the backbone");
+                }
                 ready.store(true, Ordering::SeqCst);
             }
             Err(e) if !failing => {
