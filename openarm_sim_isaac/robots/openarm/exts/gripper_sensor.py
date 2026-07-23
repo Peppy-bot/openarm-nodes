@@ -49,9 +49,7 @@ class IsaacGripperSensor:
             self._ready = True
             self._force_warning_logged = False
         except Exception as exc:
-            logger.error(
-                f"Failed to setup IsaacGripperSensor at '{self._prim_path}': {exc}"
-            )
+            logger.exception(f"Failed to setup IsaacGripperSensor at '{self._prim_path}'")
             self._articulation = None
             self._ready = False
             return False
@@ -69,6 +67,7 @@ class IsaacGripperSensor:
         self._resolved_names = []
         self._ready = False
         self._force_warning_logged = False
+        self._force_layout_logged = False
 
     def get_gripper_state(self) -> Optional[dict]:
         """Return finger joint names, positions, and applied forces."""
@@ -80,12 +79,22 @@ class IsaacGripperSensor:
             positions = [float(all_positions[i]) for i in self._finger_indices]
 
             try:
-                # Shape: (1, num_dof, 6) — [fx, fy, fz, tx, ty, tz]
+                # Rows are [fx, fy, fz, tx, ty, tz]. Depending on the Isaac
+                # binding the array is per-dof (num_dof rows) or per-link with
+                # the root wrench at row 0 (num_dof + 1 rows); detect which so
+                # a finger never reads its parent joint's wrench.
                 all_forces = self._articulation.get_measured_joint_forces()[0]
                 import numpy as np  # pylint: disable=E0401
 
+                offset = 1 if len(all_forces) == len(all_positions) + 1 else 0
+                if not self._force_layout_logged:
+                    logger.info(
+                        f"measured joint forces: {len(all_forces)} rows for "
+                        f"{len(all_positions)} dofs (row offset {offset})"
+                    )
+                    self._force_layout_logged = True
                 applied_forces = [
-                    float(np.linalg.norm(all_forces[i][:3]))
+                    float(np.linalg.norm(all_forces[i + offset][:3]))
                     for i in self._finger_indices
                 ]
             except Exception as exc:

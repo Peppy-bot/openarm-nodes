@@ -92,10 +92,6 @@ class IsaacArticulation:
             logger.warning(f"Could not read joint states: {exc}")
             return None
 
-    def apply_command(self, positions: list[float]) -> bool:
-        """Set joint position targets; drops commands with wrong DOF count."""
-        if self._view is None:
-            return False
         if len(positions) != self._num_dof:
             logger.warning(
                 f"Command length {len(positions)} does not match "

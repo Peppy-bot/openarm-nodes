@@ -7,12 +7,17 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::paired_topics::{backbone, engine};
 use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
 use peppylib::runtime::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Pause after a receive error before retrying, so a persistently broken
+/// subscription cannot hot-spin the relay or flood the log.
+const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 fn all_finite(vecs: &[&[f64]]) -> bool {
     vecs.iter().all(|v| v.iter().all(|x| x.is_finite()))
@@ -40,6 +45,7 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
             Ok(None) => return,
             Err(e) => {
                 error!("joint_setpoints receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
@@ -96,6 +102,7 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
             Ok(None) => return,
             Err(e) => {
                 error!("engine joint_states receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };

@@ -50,7 +50,7 @@ class MujocoArticulation:
             self._num_dof = len(actuator_indices)
             self._ready = True
         except Exception as exc:
-            logger.error(f"Failed to setup MujocoArticulation: {exc}")
+            logger.exception(f"Failed to setup MujocoArticulation")
             return False
 
         logger.info(f"MujocoArticulation ready — dof={self._num_dof}")
@@ -98,10 +98,6 @@ class MujocoArticulation:
             logger.warning(f"Could not read joint states: {exc}")
             return None
 
-    def apply_command(self, positions: list[float]) -> bool:
-        """Set actuator control targets; drops commands with wrong DOF count."""
-        if not self._ready:
-            return False
 
         if len(positions) != self._num_dof:
             logger.warning(

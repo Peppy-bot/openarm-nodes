@@ -60,7 +60,7 @@ class MujocoActuatorCtrl:
             self._apply_gravity_compensation()
             self._ready = True
         except Exception as exc:
-            logger.error(f"Failed to setup MujocoActuatorCtrl: {exc}")
+            logger.exception(f"Failed to setup MujocoActuatorCtrl")
             return False
 
         logger.info(
@@ -82,8 +82,13 @@ class MujocoActuatorCtrl:
         joint_names = self._params.get("joint_names") or []
         kps = self._params.get("kp") or []
         kds = self._params.get("kd") or []
-        if not (len(joint_names) == len(kps) == len(kds)) or not joint_names:
-            return
+        if not joint_names and not kps and not kds:
+            return  # no gains configured
+        if not (len(joint_names) == len(kps) == len(kds)):
+            raise ValueError(
+                f"gain config mismatch: {len(joint_names)} joint_names, "
+                f"{len(kps)} kp, {len(kds)} kd"
+            )
         # Per-dof inertia from the sim's own mass matrix (home config). The
         # real gearbox/motor adds damping the sim plant lacks; without it the
         # real driver's gains ring badly (~0.14 damping ratio). Raise the

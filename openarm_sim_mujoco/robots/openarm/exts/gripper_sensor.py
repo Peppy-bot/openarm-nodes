@@ -63,7 +63,7 @@ class MujocoGripperSensor:
             self._ready = True
             self._read_warning_logged = False
         except Exception as exc:
-            logger.error(f"Failed to setup MujocoGripperSensor: {exc}")
+            logger.exception(f"Failed to setup MujocoGripperSensor")
             return False
 
         logger.info(

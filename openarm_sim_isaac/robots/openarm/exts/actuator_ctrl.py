@@ -83,8 +83,13 @@ class IsaacActuatorCtrl:
         kps = self._params.get("kp") or []
         kds = self._params.get("kd") or []
         efforts = self._params.get("max_efforts") or []
-        if not (len(joint_names) == len(kps) == len(kds)) or not kps:
-            return
+        if not joint_names and not kps and not kds:
+            return  # no gains configured
+        if not (len(joint_names) == len(kps) == len(kds)):
+            raise ValueError(
+                f"gain config mismatch: {len(joint_names)} joint_names, "
+                f"{len(kps)} kp, {len(kds)} kd"
+            )
         # Per-dof inertia from the articulation mass matrix (home config). The
         # real gearbox/motor adds damping the sim plant lacks; raise the drive
         # damping to critical. PhysX damping acts on (dq_target - dq) and we

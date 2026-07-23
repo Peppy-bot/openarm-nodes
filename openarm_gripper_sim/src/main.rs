@@ -8,12 +8,17 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::paired_topics::{backbone, engine};
 use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
 use peppylib::runtime::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Pause after a receive error before retrying, so a persistently broken
+/// subscription cannot hot-spin the relay or flood the log.
+const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Forward the backbone's governed gripper_setpoints to the engine.
 async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
@@ -37,6 +42,7 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
             Ok(None) => return,
             Err(e) => {
                 error!("gripper_setpoints receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
@@ -93,6 +99,7 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
             Ok(None) => return,
             Err(e) => {
                 error!("engine gripper_states receive: {e}");
+                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
                 continue;
             }
         };
