@@ -14,8 +14,8 @@
       { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_ready" },
       // Measured state for both arms / both grippers; consumers tell sides apart
       // by arm_id / gripper_id.
-      { name: "openarm_arm_states", tag: "v1", link_id: "arm_states" },
-      { name: "openarm_gripper_states", tag: "v1", link_id: "gripper_states" },
+      { name: "openarm_arm_sim_states", tag: "v1", link_id: "arm_states" },
+      { name: "openarm_gripper_sim_states", tag: "v1", link_id: "gripper_states" },
     ],
     depends_on: {
       contracts: [

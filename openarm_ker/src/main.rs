@@ -41,6 +41,9 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so the backbone ages setpoints on one timeline.
+        peppygen::clock::init(&node_runner).await?;
         let token = node_runner.cancellation_token().clone();
 
         // Parse every parameter up front (parse, don't validate): a bad launch

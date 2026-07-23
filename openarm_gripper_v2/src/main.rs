@@ -138,7 +138,6 @@ fn main() -> Result<()> {
         // own, so it never contends with the follow loop for the bus.
         tokio::spawn(stream::run(
             node_runner.clone(),
-            gripper_id,
             params.state_rate_hz,
             motor_geometry,
             geometry::effort_ceiling_nm(params.force_limit_pu),

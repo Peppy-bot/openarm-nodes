@@ -1,11 +1,12 @@
 // Always-on command publisher. Reads the owner's per-tick `CommandFrame` and streams
-// each enabled side's arm setpoint on `arm_joint_commands` and gripper opening on
-// `gripper_commands`, plus the operator's governor controls on `governor_control`. Both
-// are tagged with their id (arm_id / gripper_id) and go to the backbone, which governs each
-// and re-streams the governed value the followers track. A side with `None` in the
-// frame has its deadman off, so nothing is published and the backbone holds that side
-// at its last governed setpoint. Re-publishing every tick (even an unchanged frame)
-// keeps the stream trivially fresh for a backbone that starts or re-pairs mid-session.
+// each enabled side's arm setpoint and gripper opening on that limb's pairing
+// slot toward the backbone (the slot is the side, so no id demux), plus the
+// operator's governor controls on `governor_control`. The backbone governs each
+// stream and re-streams the governed value the followers track. A side with
+// `None` in the frame has its deadman off, so nothing is published and the
+// backbone holds that side at its last governed setpoint. Re-publishing every
+// tick (even an unchanged frame) keeps the stream trivially fresh for a
+// backbone that starts or re-pairs mid-session.
 //
 // The owner is the sole writer of state and the sole jog integrator; these tasks only
 // forward the latest frame. Each side+stream runs its own publish task on its own
@@ -14,12 +15,11 @@
 // publish resolves synchronously), so independent tasks avoid that bias.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::commands::arm_joint_commands;
-use peppygen::emitted_topics::commands::gripper_commands;
 use peppygen::emitted_topics::governor::governor_control;
+use peppygen::paired_topics::{left_arm, left_gripper, right_arm, right_gripper};
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::sync::watch;
@@ -29,6 +29,17 @@ use tracing::{error, warn};
 use crate::owner::CommandFrame;
 use crate::state::Side;
 
+/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// clock), so the backbone ages setpoints on the same timeline it reads.
+/// Errors until the clock delivers its first tick.
+fn pairing_stamp() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
+
+type BuildJointSetpoint = fn(SystemTime, Vec<f64>, Vec<f64>, Vec<f64>) -> peppygen::Result<Payload>;
+type BuildGripperSetpoint = fn(SystemTime, f64, f64) -> peppygen::Result<Payload>;
+
 pub async fn run(
     runner: Arc<NodeRunner>,
     command_rate_hz: u32,
@@ -37,19 +48,17 @@ pub async fn run(
 ) {
     // A failed publisher declaration leaves the node serving UI/health but unable to
     // command anything, so cancel the node to restart it rather than returning quietly.
-    let arm_pub = match arm_joint_commands::declare_publisher(&runner).await {
-        Ok(p) => p,
+    // One publisher per pairing slot; publishing while unbound is a legal no-op,
+    // so a monitor-only deployment simply streams nothing.
+    let (left_arm_pub, right_arm_pub, left_gripper_pub, right_gripper_pub) = match tokio::try_join!(
+        left_arm::joint_setpoints::declare_publisher(&runner),
+        right_arm::joint_setpoints::declare_publisher(&runner),
+        left_gripper::gripper_setpoints::declare_publisher(&runner),
+        right_gripper::gripper_setpoints::declare_publisher(&runner),
+    ) {
+        Ok(pubs) => pubs,
         Err(e) => {
-            error!("declare arm_joint_commands publisher: {e}");
-            return token.cancel();
-        }
-    };
-    // One shared gripper publisher, cloned per side like the arm publisher; each side's
-    // stream tags its own gripper_id, so the backbone tells them apart.
-    let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
-        Ok(p) => p,
-        Err(e) => {
-            error!("declare gripper_commands publisher: {e}");
+            error!("declare pairing setpoint publishers: {e}");
             return token.cancel();
         }
     };
@@ -83,41 +92,52 @@ pub async fn run(
             )
         },
     ));
-    for side in [Side::Left, Side::Right] {
-        // Arm: stream the 7-joint setpoint while enabled (None in the frame = disabled).
+    for (side, arm_pub, build_arm, gripper_pub, build_gripper) in [
+        (
+            Side::Left,
+            left_arm_pub,
+            left_arm::joint_setpoints::build_message as BuildJointSetpoint,
+            left_gripper_pub,
+            left_gripper::gripper_setpoints::build_message as BuildGripperSetpoint,
+        ),
+        (
+            Side::Right,
+            right_arm_pub,
+            right_arm::joint_setpoints::build_message as BuildJointSetpoint,
+            right_gripper_pub,
+            right_gripper::gripper_setpoints::build_message as BuildGripperSetpoint,
+        ),
+    ] {
+        // Arm: stream the 7-joint setpoint while enabled (None in the frame =
+        // disabled). Velocities and efforts stay empty: the backbone shapes its
+        // own velocity feedforward over the governed stream.
         let arm_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
-            arm_pub.clone(),
+            arm_pub,
             command_rate_hz,
             token.clone(),
             format!("{} arm", side.label()),
             move || {
                 let joints = arm_rx.borrow().arms[side]?;
-                Some(
-                    arm_joint_commands::build_message(side.arm_id(), joints)
-                        .map_err(|e| e.to_string()),
-                )
+                Some(pairing_stamp().and_then(|stamp| {
+                    build_arm(stamp, joints.to_vec(), Vec::new(), Vec::new())
+                        .map_err(|e| e.to_string())
+                }))
             },
         ));
         // Gripper: stream the opening fraction and the operator's effort cap
-        // while enabled, tagged with gripper_id for the backbone to demux
-        // (mirror of the arm stream above).
+        // while enabled (mirror of the arm stream above).
         let gripper_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
-            gripper_pub.clone(),
+            gripper_pub,
             command_rate_hz,
             token.clone(),
             format!("{} gripper", side.label()),
             move || {
                 let frame = gripper_rx.borrow().grippers[side]?;
-                Some(
-                    gripper_commands::build_message(
-                        side.gripper_id(),
-                        frame.opening,
-                        frame.max_effort,
-                    )
-                    .map_err(|e| e.to_string()),
-                )
+                Some(pairing_stamp().and_then(|stamp| {
+                    build_gripper(stamp, frame.opening, frame.max_effort).map_err(|e| e.to_string())
+                }))
             },
         ));
     }

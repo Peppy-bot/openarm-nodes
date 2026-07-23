@@ -7,8 +7,6 @@
     name: "openarm_gripper",
     tag: "v1",
     implements: [
-      // Always-on measured opening for teleop and monitoring.
-      { name: "openarm_gripper_states", tag: "v1", link_id: "states" },
       // Per-component readiness for the real robot_initializer.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
     ],
@@ -52,7 +50,6 @@
       emits: [
         // The `backbone` pairing slot: the topic this role emits.
         { link_id: "backbone", name: "gripper_states" },
-        { link_id: "states", name: "gripper_states" },
       ],
       consumes: [
         // The counterpart role's topic on the same slot.

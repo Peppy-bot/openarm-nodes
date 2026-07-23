@@ -1,15 +1,16 @@
 // openarm_commander: the browser-based commander. Serves a
 // control panel (HTTP + WebSocket on PEPPY_JC_PORT, default 8765) that streams
-// commander arm and gripper setpoints to the backbone (which governs and re-streams
-// them), jogs the arm in joint or Cartesian (world-frame IK) space, and fires
-// move_arm_joints / move_arm / move_gripper goals at openarm_backbone.
+// arm and gripper setpoints to the backbone over the joint_link / gripper_link
+// pairings (the backbone governs and re-streams them), reads live state by
+// observing the backbone's downstream pairings, jogs the arm in joint or
+// Cartesian (world-frame IK) space, and fires move_arm_joints / move_arm /
+// move_gripper goals at openarm_backbone.
 {
   peppy_schema: "node/v1",
   manifest: {
     name: "openarm_commander",
     tag: "v1",
     implements: [
-      { name: "openarm_commands", tag: "v1", link_id: "commands" },
       // Runtime on/off for the backbone's self-collision governor, driven by the UI.
       { name: "openarm_governor_control", tag: "v1", link_id: "governor" },
     ],
@@ -24,27 +25,33 @@
           link_id: "backbone"
         }
       ],
-      contracts: [
-        // Measured joint state of both arms, for live UI progress. The launcher
-        // binds one slot per state producer and the panel tells arms apart by
-        // `arm_id`; a bound producer that isn't streaming yet just means no
-        // readout. This replaces reading move progress off the action feedback.
-        { name: "openarm_arm_states", tag: "v1", link_id: "left_arm_states" },
-        { name: "openarm_arm_states", tag: "v1", link_id: "right_arm_states" },
-        // Measured gripper opening of both grippers, for the live aperture
-        // readout. Bound like arm_states and told apart by gripper_id; the
-        // grippers stream this to the backbone and the panel alike.
-        { name: "openarm_gripper_states", tag: "v1", link_id: "left_gripper_states" },
-        { name: "openarm_gripper_states", tag: "v1", link_id: "right_gripper_states" },
+      pairings: [
+        // The exclusive command loop with the backbone, one slot per driven
+        // limb: this panel plays the commander role and streams the operator's
+        // raw setpoints; the backbone governs them before anything reaches a
+        // follower. Optional: a monitor-only deployment (the leader owns the
+        // command loop) boots with these unbound and the panel is read-only.
+        { name: "joint_link", tag: "v1", role: "commander", link_id: "left_arm", optional: true },
+        { name: "joint_link", tag: "v1", role: "commander", link_id: "right_arm", optional: true },
+        { name: "gripper_link", tag: "v1", role: "commander", link_id: "left_gripper", optional: true },
+        { name: "gripper_link", tag: "v1", role: "commander", link_id: "right_gripper", optional: true },
+        // Live readouts: observe each backbone<->follower pairing's state
+        // back-channel (positions for the sliders, gripper opening and effort
+        // ceiling for the aperture and effort controls). Observing works in
+        // every deployment, including ones where another node commands.
+        { name: "joint_link", tag: "v1", observes_role: "follower", link_id: "observed_left_arm" },
+        { name: "joint_link", tag: "v1", observes_role: "follower", link_id: "observed_right_arm" },
+        { name: "gripper_link", tag: "v1", observes_role: "follower", link_id: "observed_left_gripper" },
+        { name: "gripper_link", tag: "v1", observes_role: "follower", link_id: "observed_right_gripper" },
       ]
     }
   },
   interfaces: {
-    // Streams commander setpoints to the backbone: arm targets on arm_joint_commands and
-    // gripper openings on gripper_commands, both told apart by id. Producing these
-    // is what lets the panel drive an enabled arm/gripper continuously instead of
-    // one move at a time; the backbone governs each and re-streams the governed value,
-    // so a follower clamps and rate-limits on its side.
+    // Streams operator setpoints to the backbone on the per-limb pairing slots.
+    // Producing these is what lets the panel drive an enabled arm/gripper
+    // continuously instead of one move at a time; the backbone governs each and
+    // re-streams the governed value, so a follower clamps and rate-limits on
+    // its side.
     actions: {
       // Goals fired by the operator land on the backbone, which runs the move itself
       // for the arm whose id matches arm_id.
@@ -71,19 +78,22 @@
       // The UI's producer streams. The governor control is re-published
       // periodically (lossy QoS) so a dropped toggle cannot strand the backbone.
       emits: [
-        { link_id: "commands", name: "arm_joint_commands" },
-        { link_id: "commands", name: "gripper_commands" },
+        { link_id: "left_arm", name: "joint_setpoints" },
+        { link_id: "right_arm", name: "joint_setpoints" },
+        { link_id: "left_gripper", name: "gripper_setpoints" },
+        { link_id: "right_gripper", name: "gripper_setpoints" },
         { link_id: "governor", name: "governor_control" },
       ],
       consumes: [
-        { name: "arm_states", link_id: "left_arm_states" },
-        { name: "arm_states", link_id: "right_arm_states" },
         {
           name: "collision_status",
           link_id: "backbone"
         },
-        { name: "gripper_states", link_id: "left_gripper_states" },
-        { name: "gripper_states", link_id: "right_gripper_states" },
+        // The observed pairings' state back-channels.
+        { name: "joint_states", link_id: "observed_left_arm" },
+        { name: "joint_states", link_id: "observed_right_arm" },
+        { name: "gripper_states", link_id: "observed_left_gripper" },
+        { name: "gripper_states", link_id: "observed_right_gripper" },
       ]
     }
   },

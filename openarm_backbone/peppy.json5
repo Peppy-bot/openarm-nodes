@@ -1,9 +1,10 @@
-// openarm_backbone: the bimanual coordination node. Consumes the commander's
-// arm_joint_commands and gripper_commands streams; exposes the joint /
-// Cartesian / gripper move actions and executes them itself; emits
-// collision_status; and drives each arm and each gripper over its own pairing
-// (arm_link / gripper_link): governed setpoints stream down each pair and the
-// measured state streams back on it. See src/main.rs for the architecture.
+// openarm_backbone: the bimanual coordination node. Plays the follower role of
+// joint_link / gripper_link toward the one commanding node (panel or leader):
+// raw setpoints stream in on those pairs and the measured state relays back up
+// them. Exposes the joint / Cartesian / gripper move actions and executes them
+// itself; emits collision_status; and drives each arm and each gripper over its
+// own downstream pairing (commander role): governed setpoints stream down each
+// pair and the measured state streams back on it. See src/main.rs.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -16,14 +17,6 @@
           tag: "v1",
           link_id: "robot_init"
         },
-        // The commander's streamed setpoints, arm and gripper, bound to the one
-        // commanding instance; sides told apart by arm_id / gripper_id. The
-        // backbone governs both streams before anything reaches a follower.
-        {
-          name: "openarm_commands",
-          tag: "v1",
-          link_id: "commander"
-        },
         // Runtime governor controls, bound to the commander; the backbone
         // holds its launch-time defaults until the first message.
         {
@@ -33,6 +26,39 @@
         }
       ],
       pairings: [
+        // The exclusive command loop with the one commanding node (panel or
+        // leader), one slot per driven limb: the backbone plays the follower
+        // role, consumes the raw setpoint stream each slot carries, governs it,
+        // and relays that limb's measured state back up the same slot. Optional:
+        // ungoverned deployments and monitors boot with these unbound.
+        {
+          name: "joint_link",
+          tag: "v1",
+          role: "follower",
+          link_id: "commander_left_arm",
+          optional: true
+        },
+        {
+          name: "joint_link",
+          tag: "v1",
+          role: "follower",
+          link_id: "commander_right_arm",
+          optional: true
+        },
+        {
+          name: "gripper_link",
+          tag: "v1",
+          role: "follower",
+          link_id: "commander_left_gripper",
+          optional: true
+        },
+        {
+          name: "gripper_link",
+          tag: "v1",
+          role: "follower",
+          link_id: "commander_right_gripper",
+          optional: true
+        },
         // The exclusive command loop with each arm: the backbone plays the commander
         // role, streams the governed joint setpoint down each slot's
         // joint_setpoints, and reads that arm's measured state back on the slot's
@@ -85,7 +111,7 @@
       // The backbone's move actions, addressed by side id. The backbone runs each move
       // itself (trajectory + governor + governed stream); progress is observed
       // on the state streams. Discrete goals that return a result, distinct
-      // from the arm_joint_commands / gripper_commands streams.
+      // from the streamed setpoints on the upstream pairing slots.
       exposes: [
         {
           name: "move_arm_joints",
@@ -223,6 +249,24 @@
           name: "gripper_setpoints",
           link_id: "right_gripper_link"
         },
+        // The follower role's state back-channel on each upstream slot: the
+        // measured state relayed from the matching downstream pair.
+        {
+          name: "joint_states",
+          link_id: "commander_left_arm"
+        },
+        {
+          name: "joint_states",
+          link_id: "commander_right_arm"
+        },
+        {
+          name: "gripper_states",
+          link_id: "commander_left_gripper"
+        },
+        {
+          name: "gripper_states",
+          link_id: "commander_right_gripper"
+        },
         {
           // Nearest self-collision pair: the signed surface distance between the
           // two arms and the two links forming that pair.
@@ -263,13 +307,23 @@
           name: "gripper_states",
           link_id: "right_gripper_link"
         },
+        // The commanding node's raw setpoints, one slot per limb (the slot is
+        // the side, so no id demux).
         {
-          name: "arm_joint_commands",
-          link_id: "commander"
+          name: "joint_setpoints",
+          link_id: "commander_left_arm"
         },
         {
-          name: "gripper_commands",
-          link_id: "commander"
+          name: "joint_setpoints",
+          link_id: "commander_right_arm"
+        },
+        {
+          name: "gripper_setpoints",
+          link_id: "commander_left_gripper"
+        },
+        {
+          name: "gripper_setpoints",
+          link_id: "commander_right_gripper"
         },
         {
           name: "governor_control",

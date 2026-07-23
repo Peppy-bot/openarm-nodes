@@ -11,8 +11,6 @@
     name: "openarm_arm",
     tag: "v1",
     implements: [
-      // Measured state for the backbone (governor + trajectory anchor) and any monitor.
-      { name: "openarm_arm_states", tag: "v1", link_id: "states" },
       // Per-component readiness the real robot_initializer aggregates: ready once
       // motors are enabled and the control loop is serving.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
@@ -78,7 +76,6 @@
       emits: [
         // The `backbone` pairing slot: the topic this role emits.
         { link_id: "backbone", name: "joint_states" },
-        { link_id: "states", name: "arm_states" },
       ],
       consumes: [
         // The counterpart role's topic on the same slot.

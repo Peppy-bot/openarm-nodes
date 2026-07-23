@@ -1,16 +1,14 @@
 //! Stream plumbing for the real-arm follower: a listener that keeps the latest
 //! governed setpoint from the paired backbone (the `backbone` slot of joint_link)
 //! in a watch channel for the control loop, and a publisher that emits the
-//! measured joint state at a fixed rate, both to the paired backbone on the
-//! pairing's `joint_states` (the exclusive command loop the governor anchors on)
-//! and to observers on the broadcast stream (tagged with `arm_id`). All run for
-//! the life of the node.
+//! measured joint state at a fixed rate to the paired backbone on the pairing's
+//! `joint_states` (the exclusive command loop the governor anchors on; any
+//! monitor observes the pairing). All run for the life of the node.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::states::arm_states;
 use peppygen::paired_topics::backbone;
 use tokio::sync::watch;
 use tracing::{error, warn};
@@ -41,8 +39,7 @@ pub struct GovernedSetpoint {
 }
 
 /// Measured joint state the control loop publishes each tick, as wire arrays.
-/// Torques feed the pairing's `joint_states` efforts; the broadcast
-/// `arm_states` stream carries positions and velocities only.
+/// Torques feed the pairing's `joint_states` efforts.
 #[derive(Clone, Copy)]
 pub struct MeasuredState {
     pub positions: JointVec,
@@ -137,22 +134,16 @@ fn parse_setpoint(msg: &backbone::joint_setpoints::Message) -> Result<GovernedSe
 
 /// Emit the measured joint state at a fixed rate, forever: to the paired backbone on
 /// the pairing's `joint_states` (the command loop's state input) and to observers
-/// on the broadcast stream (tagged with `arm_id`). The two publishes serve
-/// unrelated consumers, so each reports failures independently. The watch starts
+/// The watch starts
 /// empty and is first filled by the control loop's first tick, so nothing is
 /// published before a real measurement exists. The loop exits if the control
 /// task drops the sender, so the stream goes silent rather than republishing a
 /// frozen final measurement.
 pub async fn run_state_publisher(
     runner: Arc<NodeRunner>,
-    arm_id: u8,
     period: Duration,
     mut measured: watch::Receiver<Option<MeasuredState>>,
 ) {
-    let joint_pub = match arm_states::declare_publisher(&runner).await {
-        Ok(p) => p,
-        Err(e) => return error!("declare arm_states publisher: {e}"),
-    };
     let peer_pub = match backbone::joint_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => return error!("declare paired joint_states publisher: {e}"),
@@ -162,28 +153,12 @@ pub async fn run_state_publisher(
     }
     let mut pacer =
         Pacer::new(period).expect("state publish period is non-zero (derives from state_rate_hz)");
-    let mut broadcast_failing = false;
     let mut peer_failing = false;
     loop {
         if measured.has_changed().is_err() {
             return;
         }
         let m = (*measured.borrow()).expect("gated on first measurement");
-        let broadcast_result = async {
-            let joints = arm_states::build_message(arm_id, m.positions, m.velocities)
-                .map_err(|e| e.to_string())?;
-            joint_pub.publish(joints).await.map_err(|e| e.to_string())?;
-            Ok::<(), String>(())
-        }
-        .await;
-        match broadcast_result {
-            Ok(()) => broadcast_failing = false,
-            Err(e) if !broadcast_failing => {
-                broadcast_failing = true;
-                warn!("state publish failing, suppressing repeats: {e}");
-            }
-            Err(_) => {}
-        }
         let peer_result = async {
             let joints = backbone::joint_states::build_message(
                 pairing_stamp()?,

@@ -16,6 +16,7 @@ use peppygen::NodeRunner;
 use peppygen::emitted_topics::collision_status;
 use peppygen::exposed_actions::move_gripper;
 use peppygen::paired_topics::{
+    commander_left_arm, commander_left_gripper, commander_right_arm, commander_right_gripper,
     left_arm_link, left_gripper_link, right_arm_link, right_gripper_link,
 };
 use peppylib::runtime::CancellationToken;
@@ -152,6 +153,41 @@ pub async fn run(
             Ok(p) => p,
             Err(e) => {
                 error!("declare right gripper_setpoints publisher: {e}");
+                return Err(e);
+            }
+        };
+    // Upstream state relay publishers, one per commander pairing slot: the
+    // measured state each downstream pair reports is relayed up so the
+    // commanding node sees the same back-channel a follower gives the
+    // backbone. Publishing while unpaired is a legal no-op.
+    let up_left_arm_pub = match commander_left_arm::joint_states::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare upstream left joint_states publisher: {e}");
+            return Err(e);
+        }
+    };
+    let up_right_arm_pub = match commander_right_arm::joint_states::declare_publisher(&runner).await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare upstream right joint_states publisher: {e}");
+            return Err(e);
+        }
+    };
+    let up_left_gripper_pub =
+        match commander_left_gripper::gripper_states::declare_publisher(&runner).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("declare upstream left gripper_states publisher: {e}");
+                return Err(e);
+            }
+        };
+    let up_right_gripper_pub =
+        match commander_right_gripper::gripper_states::declare_publisher(&runner).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("declare upstream right gripper_states publisher: {e}");
                 return Err(e);
             }
         };
@@ -412,6 +448,91 @@ pub async fn run(
                     }
                 }
                 Err(e) => error!("build gripper_setpoints ({} gripper): {e}", side.label()),
+            }
+        }
+
+        // Relay each limb's measured state up its commander pairing slot (a
+        // legal no-op while unpaired): positions and velocities as the
+        // followers report them, efforts unmeasured (empty per the contract).
+        type BuildUpJoint = fn(
+            std::time::SystemTime,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        ) -> peppygen::Result<peppylib::Payload>;
+        // Copied out before the loop so no watch guard is held across an await.
+        let relayed_arms = (
+            *channels.left.measured.borrow(),
+            *channels.right.measured.borrow(),
+        );
+        for (side, up_pub, build, measured) in [
+            (
+                Side::Left,
+                &up_left_arm_pub,
+                commander_left_arm::joint_states::build_message as BuildUpJoint,
+                relayed_arms.0,
+            ),
+            (
+                Side::Right,
+                &up_right_arm_pub,
+                commander_right_arm::joint_states::build_message as BuildUpJoint,
+                relayed_arms.1,
+            ),
+        ] {
+            let Some(m) = measured else { continue };
+            match pairing_stamp().and_then(|stamp| {
+                build(
+                    stamp,
+                    m.positions.to_vec(),
+                    m.velocities.to_vec(),
+                    Vec::new(),
+                )
+                .map_err(|e| e.to_string())
+            }) {
+                Ok(msg) => {
+                    if let Err(e) = up_pub.publish(msg).await {
+                        warn!("upstream joint_states publish ({} arm): {e}", side.label());
+                    }
+                }
+                Err(e) => error!("build upstream joint_states ({} arm): {e}", side.label()),
+            }
+        }
+        type BuildUpGripper =
+            fn(std::time::SystemTime, f64, f64, f64) -> peppygen::Result<peppylib::Payload>;
+        let relayed_grippers = (
+            *channels.left.gripper.borrow(),
+            *channels.right.gripper.borrow(),
+        );
+        for (side, up_pub, build, measured) in [
+            (
+                Side::Left,
+                &up_left_gripper_pub,
+                commander_left_gripper::gripper_states::build_message as BuildUpGripper,
+                relayed_grippers.0,
+            ),
+            (
+                Side::Right,
+                &up_right_gripper_pub,
+                commander_right_gripper::gripper_states::build_message as BuildUpGripper,
+                relayed_grippers.1,
+            ),
+        ] {
+            let Some(g) = measured else { continue };
+            match pairing_stamp().and_then(|stamp| {
+                build(stamp, g.fraction, g.effort, g.max_effort).map_err(|e| e.to_string())
+            }) {
+                Ok(msg) => {
+                    if let Err(e) = up_pub.publish(msg).await {
+                        warn!(
+                            "upstream gripper_states publish ({} gripper): {e}",
+                            side.label()
+                        );
+                    }
+                }
+                Err(e) => error!(
+                    "build upstream gripper_states ({} gripper): {e}",
+                    side.label()
+                ),
             }
         }
 

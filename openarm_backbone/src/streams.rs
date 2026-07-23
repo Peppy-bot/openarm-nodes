@@ -1,6 +1,7 @@
-//! Inbound stream plumbing for the backbone: the commander's arm and gripper command
-//! streams, both paired arms' measured joint state, both paired grippers'
-//! measured aperture, and the runtime governor controls. Each listener holds
+//! Inbound stream plumbing for the backbone: the commanding node's per-limb
+//! setpoint streams (the upstream pairings' command direction), both paired
+//! arms' measured joint state, both paired grippers' measured aperture, and
+//! the runtime governor controls. Each listener holds
 //! one subscription and keeps the latest well-formed message in a watch channel
 //! the coordinator reads every tick. One held subscription per stream means no
 //! re-subscribe gap, so a message is never dropped between receives.
@@ -10,9 +11,8 @@ use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::collision_ctrl::governor_control as collision_ctrl_governor_control;
-use peppygen::consumed_topics::commander::arm_joint_commands as commander_arm_joint_commands;
-use peppygen::consumed_topics::commander::gripper_commands as commander_gripper_commands;
 use peppygen::paired_topics::{
+    commander_left_arm, commander_left_gripper, commander_right_arm, commander_right_gripper,
     left_arm_link, left_gripper_link, right_arm_link, right_gripper_link,
 };
 use tokio::sync::watch;
@@ -30,16 +30,17 @@ const THROTTLED_WARN_PERIOD: Duration = Duration::from_secs(1);
 /// rate. Transient errors still recover; a genuinely dead stream just idles.
 const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
-/// The latest commander joint setpoint for one arm, kept by the arm command
+/// The latest commanded joint setpoint for one arm, kept by the arm command
 /// listener and read each tick by the planner's Follow. The command stream is
-/// paired to one producer, so the latest message is simply the one to chase.
-#[derive(Clone)]
+/// paired to one producer, so the latest message is simply the one to chase;
+/// the wire's velocities/efforts are ignored (the backbone shapes its own).
+#[derive(Clone, Debug, PartialEq)]
 pub struct JointCommand {
     pub positions: JointVec,
 }
 
-/// The latest commander opening command for one gripper, fed by the
-/// `gripper_commands` stream: the raw wire opening fraction, clamped into
+/// The latest commanded opening for one gripper, fed by the upstream
+/// pairing's `gripper_setpoints`: the raw wire opening fraction, clamped into
 /// `[0, 1]` by the coordinator as it applies it, plus the commanded effort
 /// cap (`None` when the wire carried no preference).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,22 +49,25 @@ pub struct GripperCommand {
     pub max_effort: Option<f64>,
 }
 
-/// The latest measured joint position for one arm, fed by the joint_link
+/// The latest measured joint state for one arm, fed by the joint_link
 /// pairing's `joint_states` back-channel. The backbone anchors trajectories and
-/// governor queries on position; the governed velocity feedforward is the
-/// commanded step, not a measurement, so the stream's velocities are validated
-/// but not retained.
+/// governor queries on position; the velocities ride along for the upstream
+/// state relay only.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeasuredState {
     pub positions: JointVec,
+    pub velocities: JointVec,
 }
 
-/// The latest measured opening of one gripper, clamped at ingestion into
-/// `[0, 1]` (0 = closed, 1 = fully open), so downstream consumers never see an
-/// out-of-range placement. Consumed every tick like the measured arm state.
+/// The latest measured state of one gripper: the opening clamped at ingestion
+/// into `[0, 1]` (0 = closed, 1 = fully open), so downstream consumers never
+/// see an out-of-range placement, plus the measured effort and the follower's
+/// effort ceiling, which ride along for the upstream state relay only.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GripperOpening {
     pub fraction: f64,
+    pub effort: f64,
+    pub max_effort: f64,
 }
 
 /// Run `emit` at most once per [`THROTTLED_WARN_PERIOD`] per `last` state.
@@ -73,14 +77,6 @@ fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
         emit();
         *last = Some(now);
     }
-}
-
-/// Warn that a message carried an out-of-range id (`field` names it: `arm_id`
-/// or `gripper_id`), throttled to at most once per [`THROTTLED_WARN_PERIOD`].
-fn warn_unknown_id(stream: &str, field: &str, id: u8, last: &mut Option<Instant>) {
-    warn_throttled(last, || {
-        warn!("{stream}: dropping message for unknown {field} {id}");
-    });
 }
 
 /// Parses one paired arm's inbound joint_states payload. This backbone drives
@@ -96,20 +92,36 @@ fn parse_joint_state(
         .iter()
         .chain(velocities.iter())
         .all(|v| v.is_finite());
-    let velocity_count = velocities.len();
     let Ok(positions) = JointVec::try_from(positions) else {
         return Err("a non-arm joint count");
     };
-    if velocity_count != positions.len() {
+    let Ok(velocities) = JointVec::try_from(velocities) else {
         return Err("a velocity count that does not match its joints");
-    }
+    };
     if !finite {
         return Err("non-finite values");
     }
-    Ok(MeasuredState { positions })
+    Ok(MeasuredState {
+        positions,
+        velocities,
+    })
 }
 
-/// Parses one commander gripper command: finite fields, a non-negative effort
+/// Parses one commanded arm setpoint: exactly [`crate::ARM_DOF`] finite
+/// positions. The wire's velocities and efforts are not parsed: the backbone
+/// plans its own velocity shaping over the governed position stream.
+fn parse_joint_command(positions: Vec<f64>) -> Result<JointCommand, &'static str> {
+    let finite = positions.iter().all(|v| v.is_finite());
+    let Ok(positions) = JointVec::try_from(positions) else {
+        return Err("a non-arm joint count");
+    };
+    if !finite {
+        return Err("non-finite values");
+    }
+    Ok(JointCommand { positions })
+}
+
+/// Parses one commanded gripper setpoint: finite fields, a non-negative effort
 /// cap, with the wire's 0 (no preference) parsed to `None`. The opening is
 /// clamped later by the coordinator, matching the arm command path.
 fn parse_gripper_command(opening: f64, max_effort: f64) -> Result<GripperCommand, &'static str> {
@@ -125,103 +137,120 @@ fn parse_gripper_command(opening: f64, max_effort: f64) -> Result<GripperCommand
     })
 }
 
-/// Parses one paired gripper's inbound measured opening: finite, clamped
-/// into the contract's `[0, 1]`.
-fn parse_gripper_state(opening: f64) -> Result<GripperOpening, &'static str> {
-    if !opening.is_finite() {
-        return Err("a non-finite opening");
+/// Parses one paired gripper's inbound measured state: finite fields, the
+/// fraction clamped into the contract's `[0, 1]`, the ceiling non-negative.
+fn parse_gripper_state(
+    opening: f64,
+    effort: f64,
+    max_effort: f64,
+) -> Result<GripperOpening, &'static str> {
+    if !opening.is_finite() || !effort.is_finite() || !max_effort.is_finite() {
+        return Err("non-finite values");
+    }
+    if max_effort < 0.0 {
+        return Err("a negative effort ceiling");
     }
     Ok(GripperOpening {
         fraction: opening.clamp(0.0, 1.0),
+        effort,
+        max_effort,
     })
 }
 
-/// Receive `arm_joint_commands` forever, keeping the latest well-formed message
-/// per arm in `latest[id]`. Holds one subscription (no re-subscribe gap), backs
-/// off on a receive error, and drops an out-of-range or non-finite message rather
-/// than driving an arm.
+/// Receive both upstream arm setpoint streams forever (the commanding node's
+/// joint_link command direction), keeping the latest well-formed message per
+/// side. The slot IS the side (a pairing delivers only its one peer), so there
+/// is no id demux; a malformed message is dropped rather than driving an arm.
 pub async fn run_joint_command_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<JointCommand>>; 2],
 ) {
-    let mut sub = match commander_arm_joint_commands::subscribe(&runner).await {
-        Ok(s) => s,
-        Err(e) => return error!("arm_joint_commands: subscribe: {e}"),
+    let (left, right) = tokio::join!(
+        commander_left_arm::joint_setpoints::subscribe(&runner),
+        commander_right_arm::joint_setpoints::subscribe(&runner),
+    );
+    let (mut left, mut right) = match (left, right) {
+        (Ok(l), Ok(r)) => (l, r),
+        (l, r) => {
+            return error!(
+                "upstream joint_setpoints subscribe: left {:?}, right {:?}",
+                l.err(),
+                r.err()
+            );
+        }
     };
-    let mut last_unknown_warn: Option<Instant> = None;
+    let mut last_reject_warn: Option<Instant> = None;
     loop {
-        let msg = match sub.next().await {
-            Ok(Some((_producer, msg))) => msg,
+        let (side, received) = tokio::select! {
+            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| msg.positions))),
+            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.positions))),
+        };
+        match received {
+            Ok(Some(positions)) => match parse_joint_command(positions) {
+                Ok(command) => {
+                    latest[side.index()].send_replace(Some(command));
+                }
+                Err(reason) => warn_throttled(&mut last_reject_warn, || {
+                    warn!(
+                        "upstream joint_setpoints: dropping {} message with {reason}",
+                        side.label()
+                    );
+                }),
+            },
             Ok(None) => return, // subscription closed: node shutting down
             Err(e) => {
-                error!("arm_joint_commands: receive: {e}");
+                error!("upstream joint_setpoints receive ({}): {e}", side.label());
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-                continue;
             }
-        };
-        let Some(idx) = Side::from_arm_id(msg.arm_id).map(Side::index) else {
-            warn_unknown_id(
-                "arm_joint_commands",
-                "arm_id",
-                msg.arm_id,
-                &mut last_unknown_warn,
-            );
-            continue;
-        };
-        if !msg.positions.iter().all(|v| v.is_finite()) {
-            warn!(
-                "arm_joint_commands: dropping arm {} message with non-finite positions",
-                msg.arm_id
-            );
-            continue;
         }
-        latest[idx].send_replace(Some(JointCommand {
-            positions: msg.positions,
-        }));
     }
 }
 
-/// Receive `gripper_commands` forever, keeping the latest well-formed opening per
-/// gripper in `latest[id]`. The 1-DOF mirror of [`run_joint_command_listener`]: an
-/// out-of-range or non-finite message is dropped rather than driving the fingers.
+/// Receive both upstream gripper setpoint streams forever, keeping the latest
+/// well-formed command per side. The 1-DOF mirror of
+/// [`run_joint_command_listener`].
 pub async fn run_gripper_command_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<GripperCommand>>; 2],
 ) {
-    let mut sub = match commander_gripper_commands::subscribe(&runner).await {
-        Ok(s) => s,
-        Err(e) => return error!("gripper_commands: subscribe: {e}"),
+    let (left, right) = tokio::join!(
+        commander_left_gripper::gripper_setpoints::subscribe(&runner),
+        commander_right_gripper::gripper_setpoints::subscribe(&runner),
+    );
+    let (mut left, mut right) = match (left, right) {
+        (Ok(l), Ok(r)) => (l, r),
+        (l, r) => {
+            return error!(
+                "upstream gripper_setpoints subscribe: left {:?}, right {:?}",
+                l.err(),
+                r.err()
+            );
+        }
     };
-    let mut last_unknown_warn: Option<Instant> = None;
+    let mut last_reject_warn: Option<Instant> = None;
     loop {
-        let msg = match sub.next().await {
-            Ok(Some((_producer, msg))) => msg,
+        let (side, received) = tokio::select! {
+            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.max_effort)))),
+            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.max_effort)))),
+        };
+        match received {
+            Ok(Some((opening, max_effort))) => match parse_gripper_command(opening, max_effort) {
+                Ok(command) => {
+                    latest[side.index()].send_replace(Some(command));
+                }
+                Err(reason) => warn_throttled(&mut last_reject_warn, || {
+                    warn!(
+                        "upstream gripper_setpoints: dropping {} message with {reason}",
+                        side.label()
+                    );
+                }),
+            },
             Ok(None) => return,
             Err(e) => {
-                error!("gripper_commands: receive: {e}");
+                error!("upstream gripper_setpoints receive ({}): {e}", side.label());
                 tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-                continue;
             }
-        };
-        let Some(idx) = Side::from_gripper_id(msg.gripper_id).map(Side::index) else {
-            warn_unknown_id(
-                "gripper_commands",
-                "gripper_id",
-                msg.gripper_id,
-                &mut last_unknown_warn,
-            );
-            continue;
-        };
-        match parse_gripper_command(msg.opening, msg.max_effort) {
-            Ok(command) => latest[idx].send_replace(Some(command)),
-            Err(reason) => {
-                warn!(
-                    "gripper_commands: dropping gripper {} message with {reason}",
-                    msg.gripper_id
-                );
-                continue;
-            }
-        };
+        }
     }
 }
 
@@ -308,21 +337,23 @@ pub async fn run_gripper_state_listener(
         // Whichever slot delivers next wins the select; the other stays queued in
         // its own subscription, so neither side can starve the other.
         let (side, received) = tokio::select! {
-            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| msg.opening))),
-            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.opening))),
+            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.effort, msg.max_effort)))),
+            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.effort, msg.max_effort)))),
         };
         match received {
-            Ok(Some(wire_opening)) => match parse_gripper_state(wire_opening) {
-                Ok(opening) => {
-                    latest[side.index()].send_replace(Some(opening));
+            Ok(Some((opening, effort, max_effort))) => {
+                match parse_gripper_state(opening, effort, max_effort) {
+                    Ok(opening) => {
+                        latest[side.index()].send_replace(Some(opening));
+                    }
+                    Err(reason) => warn_throttled(&mut last_reject_warn, || {
+                        warn!(
+                            "gripper_states: dropping {} message with {reason}",
+                            side.label()
+                        );
+                    }),
                 }
-                Err(reason) => warn_throttled(&mut last_reject_warn, || {
-                    warn!(
-                        "gripper_states: dropping {} message with {reason}",
-                        side.label()
-                    );
-                }),
-            },
+            }
             Ok(None) => return, // subscription closed: node shutting down
             Err(e) => {
                 error!("gripper_states receive ({}): {e}", side.label());
@@ -419,10 +450,32 @@ mod tests {
 
     #[test]
     fn gripper_state_clamps_into_the_contract_range() {
-        assert_eq!(parse_gripper_state(0.5).unwrap().fraction, 0.5);
-        assert_eq!(parse_gripper_state(-0.2).unwrap().fraction, 0.0);
-        assert_eq!(parse_gripper_state(1.7).unwrap().fraction, 1.0);
-        assert!(parse_gripper_state(f64::NAN).is_err());
+        assert_eq!(parse_gripper_state(0.5, 0.0, 0.0).unwrap().fraction, 0.5);
+        assert_eq!(parse_gripper_state(-0.2, 0.0, 0.0).unwrap().fraction, 0.0);
+        assert_eq!(parse_gripper_state(1.7, 0.0, 0.0).unwrap().fraction, 1.0);
+        assert!(parse_gripper_state(f64::NAN, 0.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn gripper_state_retains_effort_and_ceiling() {
+        let state = parse_gripper_state(0.5, -0.4, 1.5).unwrap();
+        assert_eq!(state.effort, -0.4);
+        assert_eq!(state.max_effort, 1.5);
+        assert!(parse_gripper_state(0.5, f64::NAN, 1.5).is_err());
+        assert_eq!(
+            parse_gripper_state(0.5, 0.0, -1.0),
+            Err("a negative effort ceiling")
+        );
+    }
+
+    #[test]
+    fn joint_command_requires_arm_dof_finite_positions() {
+        let command = parse_joint_command(vec![0.2; ARM_DOF]).unwrap();
+        assert_eq!(command.positions, [0.2; ARM_DOF]);
+        assert!(parse_joint_command(vec![0.2; ARM_DOF - 1]).is_err());
+        let mut positions = vec![0.2; ARM_DOF];
+        positions[0] = f64::NAN;
+        assert_eq!(parse_joint_command(positions), Err("non-finite values"));
     }
 
     #[test]
