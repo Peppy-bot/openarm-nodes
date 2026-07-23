@@ -103,8 +103,8 @@
       def_file: "apptainer.def"
     },
     parameters: {
-      // Rate (Hz) at which enabled commander arm targets are re-published on
-      // arm_joint_commands, which the backbone consumes.
+      // Rate (Hz) at which enabled targets are re-published on the arm and
+      // gripper pairing slots, which the backbone consumes.
       command_rate_hz: "u32",
       // Robot generation ("v1" or "v2"): picks the panel's arm joint ranges
       // (URDF limits), so the launcher must be explicit. The gripper axis is

@@ -4,7 +4,8 @@ The browser control panel for the OpenArm (either hardware generation). It serve
 a page on port 8765 with three interaction modes:
 
 - **Streaming**: deadman-gated live control. Enabling a side streams its arm and
-  gripper setpoints continuously on `arm_joint_commands` / `gripper_commands`.
+  gripper setpoints continuously on that side's joint_link / gripper_link
+  pairing slots.
   Per-arm controls: seven joint sliders, world-frame x/y/z sliders, an
   orientation arcball, and an elbow-swivel (psi) slider that moves the elbow
   through the null space while the hand holds still. The touched control leads;
