@@ -11,7 +11,7 @@ import sys
 import threading
 from pathlib import Path
 
-from peppygen.exposed_services.openarm_robot_initializer.v1 import is_ready
+from peppygen.exposed_services.robot_ready import is_ready
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(

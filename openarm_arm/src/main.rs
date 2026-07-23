@@ -15,7 +15,7 @@ mod stream;
 use control::ControlConfig;
 use openarm_can::{ARM_MOTOR_TYPES, ARM_RECV_IDS, ARM_SEND_IDS, ArmCan, CallbackMode};
 use openarm_description::{HardwareVersion, Side};
-use peppygen::exposed_services::openarm_hardware_ready::v1::is_ready;
+use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
 use srs_model::nalgebra::Isometry3;

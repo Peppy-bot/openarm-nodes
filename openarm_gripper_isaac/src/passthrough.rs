@@ -3,7 +3,7 @@
 // finger joints' own travel.
 
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::openarm_gripper_sim_passthrough::v1::gripper_sim_passthrough;
+use peppygen::emitted_topics::sim_passthrough::gripper_sim_passthrough;
 use peppylib::TopicPublisher;
 
 pub async fn declare_publisher(runner: &NodeRunner) -> Result<TopicPublisher, String> {

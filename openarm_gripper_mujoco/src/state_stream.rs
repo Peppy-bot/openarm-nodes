@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_topics::engine_states_gripper_states;
-use peppygen::emitted_topics::openarm_gripper_states::v1::gripper_states;
-use peppygen::pairings::backbone;
+use peppygen::consumed_topics::engine_states::gripper_states as engine_states_gripper_states;
+use peppygen::emitted_topics::states::gripper_states;
+use peppygen::paired_topics::backbone;
 use peppylib::runtime::CancellationToken;
 use tracing::error;
 

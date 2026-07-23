@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use peppygen::NodeRunner;
-use peppygen::consumed_services::{
-    left_arm_is_ready, left_gripper_is_ready, right_arm_is_ready, right_gripper_is_ready,
-};
-use peppygen::exposed_services::openarm_robot_initializer::v1::is_ready;
+use peppygen::consumed_services::left_arm::is_ready as left_arm_is_ready;
+use peppygen::consumed_services::left_gripper::is_ready as left_gripper_is_ready;
+use peppygen::consumed_services::right_arm::is_ready as right_arm_is_ready;
+use peppygen::consumed_services::right_gripper::is_ready as right_gripper_is_ready;
+use peppygen::exposed_services::robot_ready::is_ready;
 use peppylib::runtime::CancellationToken;
 
 // How often the poller re-checks every component, and how long each component

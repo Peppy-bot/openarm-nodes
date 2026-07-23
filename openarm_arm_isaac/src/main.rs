@@ -7,10 +7,10 @@
 //! every setpoint in order with no re-subscribe gap; a separate task publishes
 //! the latest, so neither arm is starved (the same shape the real arm uses).
 
-use peppygen::consumed_topics::engine_states_arm_states;
-use peppygen::emitted_topics::openarm_arm_sim_passthrough::v1::arm_sim_passthrough;
-use peppygen::emitted_topics::openarm_arm_states::v1::arm_states;
-use peppygen::pairings::backbone;
+use peppygen::consumed_topics::engine_states::arm_states as engine_states_arm_states;
+use peppygen::emitted_topics::sim_passthrough::arm_sim_passthrough;
+use peppygen::emitted_topics::states::arm_states;
+use peppygen::paired_topics::backbone;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::watch;
 use tracing::{error, info, warn};

@@ -17,12 +17,12 @@ import threading
 from typing import Optional
 
 import peppylib
-from peppygen.emitted_topics.openarm_arm_states.v1 import arm_states
-from peppygen.emitted_topics.openarm_gripper_states.v1 import gripper_states
-from peppygen.consumed_topics import left_arm_cmd_arm_sim_passthrough as left_arm_cmd
-from peppygen.consumed_topics import left_gripper_cmd_gripper_sim_passthrough as left_gripper_cmd
-from peppygen.consumed_topics import right_arm_cmd_arm_sim_passthrough as right_arm_cmd
-from peppygen.consumed_topics import right_gripper_cmd_gripper_sim_passthrough as right_gripper_cmd
+from peppygen.emitted_topics.arm_states import arm_states
+from peppygen.emitted_topics.gripper_states import gripper_states
+from peppygen.consumed_topics.left_arm_cmd import arm_sim_passthrough as left_arm_cmd
+from peppygen.consumed_topics.left_gripper_cmd import gripper_sim_passthrough as left_gripper_cmd
+from peppygen.consumed_topics.right_arm_cmd import arm_sim_passthrough as right_arm_cmd
+from peppygen.consumed_topics.right_gripper_cmd import gripper_sim_passthrough as right_gripper_cmd
 
 logger = logging.getLogger(__name__)
 
