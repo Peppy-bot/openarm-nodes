@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MuJoCo launch script for openarm_robot_initializer."""
+"""MuJoCo launch script for the openarm sim engine node."""
 
 # pylint: disable=C0413
 from __future__ import annotations
@@ -11,7 +11,6 @@ import sys
 import threading
 from pathlib import Path
 
-from peppygen.exposed_services.robot_ready import is_ready
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(
@@ -53,13 +52,6 @@ async def _run_sim(params, node_runner) -> list:
     io = SimTopicIO(node_runner, loop)
     await io.start()
 
-    async def _is_ready_loop() -> None:
-        while True:
-            await is_ready.handle_next_request(
-                node_runner,
-                lambda _req: is_ready.Response(ready=_ready.is_set()),
-            )
-
     async def _run_sim_task() -> None:
         try:
             await loop.run_in_executor(
@@ -91,7 +83,6 @@ async def _run_sim(params, node_runner) -> list:
 
     return [
         asyncio.create_task(_run_sim_task()),
-        asyncio.create_task(_is_ready_loop()),
     ]
 
 

@@ -1,0 +1,67 @@
+// openarm_gripper_sim: the sim gripper follower, an engine-agnostic relay
+// between two gripper_link pairings. Toward the backbone it plays the follower
+// role exactly like the real gripper (opening setpoints and effort cap in,
+// measured opening/effort/ceiling back); toward the sim engine it plays the
+// leader role of the same pairing. Stamps pass through unchanged. One instance
+// per side; the slots carry the side, so there is no id anywhere.
+{
+  peppy_schema: "node/v1",
+  manifest: {
+    name: "openarm_gripper_sim",
+    tag: "v1",
+    implements: [
+      // Per-component readiness the robot_initializer aggregates, exactly like
+      // the real follower: ready once the engine's first state has been
+      // relayed (this limb's physics is live and serving).
+      { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
+    ],
+    depends_on: {
+      pairings: [
+        // The exclusive control conversation with the backbone, identical to
+        // the real gripper's slot: optional, established at the backbone's
+        // start.
+        {
+          name: "gripper_link",
+          tag: "v1",
+          role: "follower",
+          link_id: "backbone",
+          optional: true
+        },
+        // The same pairing toward the sim engine's matching limb slot: this
+        // relay leads, the engine follows. Optional so the relay boots before
+        // the engine is up.
+        {
+          name: "gripper_link",
+          tag: "v1",
+          role: "leader",
+          link_id: "engine",
+          optional: true
+        }
+      ]
+    }
+  },
+  interfaces: {
+    topics: {
+      emits: [
+        { link_id: "backbone", name: "gripper_states" },
+        { link_id: "engine", name: "gripper_setpoints" },
+      ],
+      consumes: [
+        { link_id: "backbone", name: "gripper_setpoints" },
+        { link_id: "engine", name: "gripper_states" },
+      ],
+    },
+    services: {
+      exposes: [
+        { link_id: "ready", name: "is_ready" },
+      ],
+    },
+  },
+  execution: {
+    language: "rust",
+    container: {
+      def_file: "apptainer.def"
+    },
+    parameters: {}
+  }
+}

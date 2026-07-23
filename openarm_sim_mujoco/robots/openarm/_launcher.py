@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MuJoCo SimLauncher for openarm_robot_initializer."""
+"""MuJoCo SimLauncher for the openarm sim engine node."""
 
 # pylint: disable=R0903
 from __future__ import annotations
@@ -57,7 +57,7 @@ class SimLauncher:
         try:
             extension.startup()
             self._ready.set()
-            logger.info("Scene loaded — is_ready: true")
+            logger.info("Scene loaded; states will flow")
 
             if self._headless:
                 self._run_streamed(model, data, extension)

@@ -103,7 +103,7 @@ class SimLauncher:
                     # the articulation is still initialising.
                     if self._extension.is_ready and not self._ready.is_set():
                         self._ready.set()
-                        logger.info("Scene loaded — is_ready: true")
+                        logger.info("Scene loaded; states will flow")
         except KeyboardInterrupt:
             logger.info("Shutting down.")
         finally:

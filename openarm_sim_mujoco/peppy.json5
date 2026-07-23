@@ -1,17 +1,13 @@
-// Isaac Sim implementation of robot_initializer. Implements
-// openarm_robot_initializer:v1 (is_ready signal) and plays the follower role
-// of every limb's joint_link / gripper_link pairing: the backbone's governed
-// setpoints stream in per limb and the engine's measured state streams back on
-// the same pair, exactly like the real followers. Sim peripherals attach to
-// this node by node name for engine-internal coupling.
+// The MuJoCo engine node. It
+// plays the follower role of every limb's joint_link / gripper_link
+// pairing: the sim relays lead each pair and the engine's measured state
+// streams back on it. Sim peripherals attach to this node by node name for
+// engine-internal coupling.
 {
   peppy_schema: "node/v1",
   manifest: {
-    name: "openarm_robot_initializer_isaac",
+    name: "openarm_sim_mujoco",
     tag: "v1",
-    implements: [
-      { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_ready" },
-    ],
     depends_on: {
       pairings: [
         // The engine plays the follower role of every limb's pairing directly,
@@ -41,34 +37,28 @@
         { name: "gripper_setpoints", link_id: "right_gripper" },
       ],
     },
-    services: {
-      exposes: [
-        { link_id: "robot_ready", name: "is_ready" },
-      ],
-    },
   },
   execution: {
     language: "python",
     container: {
       def_file: "apptainer.def",
       apptainer_run_extra_args: ["--nv"],
-      mount_paths: [
-        "/run/user",
-        "~/.cache/isaac-sim/kit/cache:/isaac-sim/kit/cache:rw",
-        "~/.cache/isaac-sim/kit/data:/isaac-sim/kit/data:rw",
-      ],
+      mount_paths: ["/run/user"],
     },
     parameters: {
       // Which OpenArm generation to simulate: "v1" or "v2". Selects the scene file
-      // (openarm_bimanual_{v1,v2}.usd) and the meshes materialized into the asset dir.
+      // (openarm_bimanual_{v1,v2}.xml) and the meshes materialized into the asset dir.
       // Required so the sim matches the real deployment it stands in for.
       hardware_version: "string",
       // Rate (Hz) of the measured-state streams (joint_states / gripper_states).
       state_rate_hz: "u32",
-      // Run headless (the deployment default); set false to open the Isaac
-      // viewer. Isaac's livestream host/port are handled by the streaming kit,
-      // so there are no viewer_host/viewer_port params here (unlike mujoco).
+      // Run without the viewer window (the deployment default); set false for a
+      // local debugging session that opens the viser viewer.
       headless: { $type: "bool", $default: true },
+      // Viewer bind address + port, used only when headless is false. All
+      // interfaces by default so the viewer is reachable from other machines.
+      viewer_host: { $type: "string", $default: "0.0.0.0" },
+      viewer_port: { $type: "u32", $default: 8080 },
     },
   },
 }

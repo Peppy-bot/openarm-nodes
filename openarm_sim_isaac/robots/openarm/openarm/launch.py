@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isaac Sim launch script for openarm_robot_initializer."""
+"""Isaac Sim launch script for the openarm sim engine node."""
 
 # pylint: disable=C0413
 from __future__ import annotations
@@ -12,7 +12,6 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from peppygen.exposed_services.robot_ready import is_ready
 from peppylib.runtime import NodeBuilder
 
 logging.basicConfig(
@@ -81,13 +80,6 @@ async def setup(params, node_runner) -> list:
     )
     _handoff_ready.set()
 
-    async def _is_ready_loop() -> None:
-        while True:
-            await is_ready.handle_next_request(
-                node_runner,
-                lambda _req: is_ready.Response(ready=_ready.is_set()),
-            )
-
     async def _shutdown_hook() -> None:
         # Drive the Isaac main-thread sim loop to exit inside the runtime grace
         # window; SimLauncher's finally bounds extension.shutdown(), then cancel
@@ -97,7 +89,7 @@ async def setup(params, node_runner) -> list:
 
     node_runner.on_shutdown(_shutdown_hook)
 
-    return [asyncio.create_task(_is_ready_loop())]
+    return []
 
 
 def _run_node_builder() -> None:
