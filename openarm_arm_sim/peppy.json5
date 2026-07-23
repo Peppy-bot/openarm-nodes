@@ -23,9 +23,9 @@
         // arm's slot: optional, established at the backbone's start.
         { name: "joint_link", tag: "v1", role: "follower", link_id: "backbone", optional: true },
         // The same pairing toward the sim engine's matching limb slot: this
-        // relay leads, the engine follows. Optional so the relay boots before
-        // the engine is up.
-        { name: "joint_link", tag: "v1", role: "leader", link_id: "engine", optional: true }
+        // relay leads, the engine follows. Required: a relay without an engine
+        // is a misconfiguration, so the launch fails loudly instead.
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "engine" }
       ]
     }
   },
