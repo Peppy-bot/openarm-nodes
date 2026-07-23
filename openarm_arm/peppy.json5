@@ -22,7 +22,7 @@
         // The exclusive command loop with the backbone: governed setpoints stream in
         // and the measured state streams back, both scoped to the pair (no
         // arm_id demux). Optional: the arm boots and holds with no backbone paired,
-        // and the pair is established at the backbone's start (launcher `pairings:`).
+        // and the pair is established at the backbone's start (launcher `links:`).
         {
           name: "openarm_arm_link",
           tag: "v1",

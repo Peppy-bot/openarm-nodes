@@ -39,7 +39,7 @@
         // arm_states (the governor's d_now and the trajectory anchor); the slot
         // scopes both directions, so no arm_id demux and no other producer can
         // drive an arm or pose as its state. Optional like the gripper slots
-        // below, established at this instance's start (launcher `pairings:`).
+        // below, established at this instance's start (launcher `links:`).
         {
           name: "openarm_arm_link",
           tag: "v1",
@@ -62,7 +62,7 @@
         // Optional: the backbone boots with either gripper unpaired (that side's
         // governed openings go nowhere and no aperture arrives, so streaming
         // stays gated) and each pair is established at this instance's start
-        // (launcher `pairings:`).
+        // (launcher `links:`).
         {
           name: "openarm_gripper_link",
           tag: "v1",
