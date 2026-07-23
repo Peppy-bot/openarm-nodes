@@ -40,10 +40,12 @@ pub struct JointCommand {
 
 /// The latest commander opening command for one gripper, fed by the
 /// `gripper_commands` stream: the raw wire opening fraction, clamped into
-/// `[0, 1]` by the coordinator as it applies it.
-#[derive(Clone)]
+/// `[0, 1]` by the coordinator as it applies it, plus the commanded effort
+/// cap (`None` when the wire carried no preference).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GripperCommand {
     pub opening: f64,
+    pub max_effort: Option<f64>,
 }
 
 /// The latest measured joint position for one arm, fed by the joint_link
@@ -105,6 +107,22 @@ fn parse_joint_state(
         return Err("non-finite values");
     }
     Ok(MeasuredState { positions })
+}
+
+/// Parses one commander gripper command: finite fields, a non-negative effort
+/// cap, with the wire's 0 (no preference) parsed to `None`. The opening is
+/// clamped later by the coordinator, matching the arm command path.
+fn parse_gripper_command(opening: f64, max_effort: f64) -> Result<GripperCommand, &'static str> {
+    if !opening.is_finite() || !max_effort.is_finite() {
+        return Err("non-finite values");
+    }
+    if max_effort < 0.0 {
+        return Err("a negative max_effort");
+    }
+    Ok(GripperCommand {
+        opening,
+        max_effort: (max_effort > 0.0).then_some(max_effort),
+    })
 }
 
 /// Parses one paired gripper's inbound measured opening: finite, clamped
@@ -194,16 +212,16 @@ pub async fn run_gripper_command_listener(
             );
             continue;
         };
-        if !msg.opening.is_finite() {
-            warn!(
-                "gripper_commands: dropping gripper {} message with non-finite opening",
-                msg.gripper_id
-            );
-            continue;
-        }
-        latest[idx].send_replace(Some(GripperCommand {
-            opening: msg.opening,
-        }));
+        match parse_gripper_command(msg.opening, msg.max_effort) {
+            Ok(command) => latest[idx].send_replace(Some(command)),
+            Err(reason) => {
+                warn!(
+                    "gripper_commands: dropping gripper {} message with {reason}",
+                    msg.gripper_id
+                );
+                continue;
+            }
+        };
     }
 }
 
@@ -405,5 +423,30 @@ mod tests {
         assert_eq!(parse_gripper_state(-0.2).unwrap().fraction, 0.0);
         assert_eq!(parse_gripper_state(1.7).unwrap().fraction, 1.0);
         assert!(parse_gripper_state(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn gripper_command_parses_the_effort_cap() {
+        let command = parse_gripper_command(0.5, 1.5).unwrap();
+        assert_eq!(command.opening, 0.5);
+        assert_eq!(command.max_effort, Some(1.5));
+        // The wire's 0 means no preference, not a zero-force cap.
+        assert_eq!(parse_gripper_command(0.5, 0.0).unwrap().max_effort, None);
+    }
+
+    #[test]
+    fn gripper_command_rejects_malformed_fields() {
+        assert_eq!(
+            parse_gripper_command(f64::NAN, 0.0),
+            Err("non-finite values")
+        );
+        assert_eq!(
+            parse_gripper_command(0.5, f64::INFINITY),
+            Err("non-finite values")
+        );
+        assert_eq!(
+            parse_gripper_command(0.5, -1.0),
+            Err("a negative max_effort")
+        );
     }
 }

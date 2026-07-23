@@ -77,9 +77,12 @@ pub struct RunConfig {
 
 /// An accepted `move_gripper` goal handed to the coordinator, which executes it
 /// through the same per-tick governing as everything else (the gripper analog of
-/// [`Goal`] for the arms). The opening is the validated goal fraction.
+/// [`Goal`] for the arms). The opening is the validated goal fraction; the
+/// effort cap is validated non-negative, `None` when the goal carried no
+/// preference.
 pub struct GripperGoal {
     pub opening: f64,
+    pub max_effort: Option<f64>,
     pub ctx: move_gripper::GoalContext,
 }
 
@@ -92,6 +95,7 @@ pub struct GripperGoal {
 /// single-flight slot on any exit.
 struct GripperMove {
     target_frac: f64,
+    max_effort: Option<f64>,
     ctx: move_gripper::GoalContext,
     started: Instant,
     /// Nominal chase duration; the runtime aborts once the move runs past
@@ -312,8 +316,8 @@ pub async fn run(
             ),
             measured_openings,
         );
-        let chase_opening = |prev_frac: f64, target: Option<f64>| -> f64 {
-            let t = target.unwrap_or(prev_frac);
+        let chase_opening = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
+            let t = target.map_or(prev_frac, |t| t.frac);
             prev_frac + (t - prev_frac).clamp(-opening_rate * dt, opening_rate * dt)
         };
         let cand = GovState::new(
@@ -374,31 +378,34 @@ pub async fn run(
 
         // Publish each active side's governed opening fraction on its pairing
         // slot (the slot scopes the stream to its paired gripper, so the message
-        // carries only the opening); an idle side stays silent and its gripper
-        // holds the jaws.
-        type BuildOpening = fn(std::time::SystemTime, f64) -> peppygen::Result<peppylib::Payload>;
-        for (side, gripper_pub, build, opening_frac, active) in [
+        // carries no gripper_id), relaying the target's effort cap unchanged
+        // (`None` rides as the wire's 0: no preference); an idle side stays
+        // silent and its gripper holds the jaws.
+        type BuildOpening =
+            fn(std::time::SystemTime, f64, f64) -> peppygen::Result<peppylib::Payload>;
+        for (side, gripper_pub, build, opening_frac, target) in [
             (
                 Side::Left,
                 &left_gripper_pub,
                 left_gripper_link::gripper_setpoints::build_message as BuildOpening,
                 governed_openings.left,
-                targets.left.is_some(),
+                targets.left,
             ),
             (
                 Side::Right,
                 &right_gripper_pub,
                 right_gripper_link::gripper_setpoints::build_message as BuildOpening,
                 governed_openings.right,
-                targets.right.is_some(),
+                targets.right,
             ),
         ] {
-            if !active {
+            let Some(target) = target else {
                 continue;
-            }
-            match pairing_stamp()
-                .and_then(|stamp| build(stamp, opening_frac).map_err(|e| e.to_string()))
-            {
+            };
+            match pairing_stamp().and_then(|stamp| {
+                build(stamp, opening_frac, target.max_effort.unwrap_or(0.0))
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(msg) => {
                     if let Err(e) = gripper_pub.publish(msg).await {
                         warn!("gripper_setpoints publish ({} gripper): {e}", side.label());
@@ -549,6 +556,7 @@ async fn service_gripper_move(
     {
         *mv = Some(GripperMove {
             target_frac: goal.opening,
+            max_effort: goal.max_effort,
             ctx: goal.ctx,
             started: now,
             budget_s: gripper_move_budget_s(governed_frac, goal.opening, opening_rate_frac_s),
@@ -589,22 +597,37 @@ async fn service_gripper_move(
     }
 }
 
-/// The side's target opening fraction for this tick: an in-flight backbone-executed
+/// One side's resolved tick command: the opening fraction to chase and the
+/// effort cap to relay on the pairing setpoint (`None` = no preference, sent
+/// as the wire's 0, leaving the follower's configured ceiling in charge).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GripperTarget {
+    frac: f64,
+    max_effort: Option<f64>,
+}
+
+/// The side's target for this tick: an in-flight backbone-executed
 /// move owns it; otherwise the commander's streamed command drives it;
 /// otherwise `None` (idle: before any command, or on an unpaired side).
-fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<f64> {
+fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<GripperTarget> {
     if let Some(m) = mv {
-        return Some(m.target_frac);
+        return Some(GripperTarget {
+            frac: m.target_frac,
+            max_effort: m.max_effort,
+        });
     }
     follow_gripper_target(&channels.gripper_command.borrow().clone())
 }
 
-/// Resolve the streamed opening target: the latest commander command clamped
-/// into `[0, 1]`, or `None` when none has arrived. The stream is paired to one
-/// producer, so there is nothing to arbitrate; a stopped producer just leaves
-/// the last opening in place, held by the gripper.
-fn follow_gripper_target(command: &Option<GripperCommand>) -> Option<f64> {
-    command.as_ref().map(|c| c.opening.clamp(0.0, 1.0))
+/// Resolve the streamed target: the latest commander command with its opening
+/// clamped into `[0, 1]`, or `None` when none has arrived. The stream is
+/// paired to one producer, so there is nothing to arbitrate; a stopped
+/// producer just leaves the last opening in place, held by the gripper.
+fn follow_gripper_target(command: &Option<GripperCommand>) -> Option<GripperTarget> {
+    command.as_ref().map(|c| GripperTarget {
+        frac: c.opening.clamp(0.0, 1.0),
+        max_effort: c.max_effort,
+    })
 }
 
 /// The published desired velocity: per joint, the tick's position delta scaled to a rate
@@ -625,7 +648,17 @@ mod tests {
     use super::*;
 
     fn cmd(opening: f64) -> Option<GripperCommand> {
-        Some(GripperCommand { opening })
+        Some(GripperCommand {
+            opening,
+            max_effort: None,
+        })
+    }
+
+    fn target(frac: f64) -> Option<GripperTarget> {
+        Some(GripperTarget {
+            frac,
+            max_effort: None,
+        })
     }
 
     const DT: f64 = 0.01;
@@ -679,9 +712,24 @@ mod tests {
     fn follow_clamps_the_wire_fraction() {
         // In-range passes through; past-open and negative commands clamp into
         // [0, 1] at this boundary.
-        assert_eq!(follow_gripper_target(&cmd(0.5)), Some(0.5));
-        assert_eq!(follow_gripper_target(&cmd(1.5)), Some(1.0));
-        assert_eq!(follow_gripper_target(&cmd(-0.5)), Some(0.0));
+        assert_eq!(follow_gripper_target(&cmd(0.5)), target(0.5));
+        assert_eq!(follow_gripper_target(&cmd(1.5)), target(1.0));
+        assert_eq!(follow_gripper_target(&cmd(-0.5)), target(0.0));
+    }
+
+    #[test]
+    fn follow_relays_the_effort_cap_unchanged() {
+        let command = Some(GripperCommand {
+            opening: 0.5,
+            max_effort: Some(1.5),
+        });
+        assert_eq!(
+            follow_gripper_target(&command),
+            Some(GripperTarget {
+                frac: 0.5,
+                max_effort: Some(1.5),
+            })
+        );
     }
 
     #[test]
@@ -701,7 +749,7 @@ mod tests {
         tx.send_replace(cmd(0.6));
         assert_eq!(
             follow_gripper_target(&rx.borrow()),
-            Some(0.6),
+            target(0.6),
             "a live streamed opening is followed"
         );
 
@@ -715,7 +763,7 @@ mod tests {
         tx.send_replace(cmd(0.3));
         assert_eq!(
             follow_gripper_target(&rx.borrow()),
-            Some(0.3),
+            target(0.3),
             "an opening after the move resumes following"
         );
     }

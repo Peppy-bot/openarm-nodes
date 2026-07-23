@@ -99,8 +99,9 @@ pub async fn run(
                 )
             },
         ));
-        // Gripper: stream the opening fraction while enabled, tagged with
-        // gripper_id for the backbone to demux (mirror of the arm stream above).
+        // Gripper: stream the opening fraction and the operator's effort cap
+        // while enabled, tagged with gripper_id for the backbone to demux
+        // (mirror of the arm stream above).
         let gripper_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub.clone(),
@@ -108,10 +109,14 @@ pub async fn run(
             token.clone(),
             format!("{} gripper", side.label()),
             move || {
-                let opening = gripper_rx.borrow().grippers[side]?;
+                let frame = gripper_rx.borrow().grippers[side]?;
                 Some(
-                    gripper_commands::build_message(side.gripper_id(), opening)
-                        .map_err(|e| e.to_string()),
+                    gripper_commands::build_message(
+                        side.gripper_id(),
+                        frame.opening,
+                        frame.max_effort,
+                    )
+                    .map_err(|e| e.to_string()),
                 )
             },
         ));

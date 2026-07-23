@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
 use crate::command_stream::GripperCommand;
-use crate::geometry::Geometry;
+use crate::geometry::{self, Geometry};
 
 #[derive(Clone)]
 pub struct ControlConfig {
@@ -25,7 +25,8 @@ pub struct ControlConfig {
     pub geometry: Geometry,
     /// POS_FORCE absolute speed limit (rad/s at the motor).
     pub speed_rad_s: f64,
-    /// POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap.
+    /// POS_FORCE torque-current ceiling (per-unit, 0..1): the largest grip-force
+    /// cap; a streamed max_effort can only lower a tick's cap beneath it.
     pub force_limit_pu: f64,
 }
 
@@ -44,15 +45,18 @@ pub async fn run(
             _ = ticker.tick() => {}
         }
 
-        let opening = cmd.borrow().as_ref().map(|c| c.opening);
+        let command = *cmd.borrow();
 
         // unwrap_or_else: drive even if the mutex was poisoned by a panic
         // elsewhere, so a transient fault doesn't strand the follow loop.
         let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
         // Command only when there is a target; refresh state every tick either way.
-        if let Some(opening) = opening {
-            let target_motor_rad = cfg.geometry.fraction_to_motor_rad(opening.clamp(0.0, 1.0));
-            g.set_position(target_motor_rad, cfg.speed_rad_s, cfg.force_limit_pu);
+        if let Some(command) = command {
+            let target_motor_rad = cfg
+                .geometry
+                .fraction_to_motor_rad(command.opening.clamp(0.0, 1.0));
+            let torque_pu = geometry::effort_to_torque_pu(command.max_effort, cfg.force_limit_pu);
+            g.set_position(target_motor_rad, cfg.speed_rad_s, torque_pu);
         }
         g.refresh_all();
         g.recv_all(cfg.recv_timeout_us);

@@ -98,8 +98,10 @@ pub async fn run(
             format!("{} gripper", label(side)),
             move || {
                 let opening = streamable(&sample_rx, stale_timeout)?.opening(side);
+                // The leader trigger carries no effort source: max_effort 0
+                // (no preference) leaves the follower's ceiling in charge.
                 Some(
-                    gripper_commands::build_message(wire_id(side), opening)
+                    gripper_commands::build_message(wire_id(side), opening, 0.0)
                         .map_err(|e| e.to_string()),
                 )
             },

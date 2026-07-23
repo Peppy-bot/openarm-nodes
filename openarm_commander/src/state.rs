@@ -118,6 +118,14 @@ pub struct GripperTarget {
     pub position: f64,
     // Measured gripper opening fraction from the gripper_states stream.
     pub last_feedback: Option<f64>,
+    // The operator's effort cap (the gripper's effort unit), sent with both the
+    // streamed opening and discrete moves. `None` = no preference (the wire's 0):
+    // the gripper's configured ceiling stays in charge.
+    pub max_effort: Option<f64>,
+    // The gripper's reported effort ceiling from gripper_states: `None` until
+    // the first report, 0 = the gripper has no effort control (hides the
+    // panel's effort slider).
+    pub effort_ceiling: Option<f64>,
     // A discrete move_gripper (Actions mode) is in flight: refuses a second Execute
     // and drives the gripper card's in-flight badge. Streaming mode never sets it.
     pub in_flight: bool,
@@ -128,6 +136,8 @@ impl GripperTarget {
         Self {
             position: GRIPPER_CLOSED,
             last_feedback: None,
+            max_effort: None,
+            effort_ceiling: None,
             in_flight: false,
         }
     }

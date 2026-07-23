@@ -141,6 +141,7 @@ fn main() -> Result<()> {
             gripper_id,
             params.state_rate_hz,
             motor_geometry,
+            geometry::effort_ceiling_nm(params.force_limit_pu),
             gripper.clone(),
             node_runner.cancellation_token().clone(),
         ));

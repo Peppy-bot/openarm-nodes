@@ -46,8 +46,10 @@
       // POS_FORCE absolute speed limit (rad/s at the motor). Default matches enactic's
       // reference (test_gripper_posforce).
       speed_rad_s: { $type: "f64", $default: 25.0 },
-      // POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap the gripper
-      // may apply. Default matches enactic's reference; raise for a firmer grip.
+      // POS_FORCE torque-current ceiling (per-unit, 0..1): the largest grip-force cap
+      // the gripper applies; a commanded max_effort only lowers a tick's cap beneath
+      // it. Reported on gripper_states in N*m as the effort ceiling. Default matches
+      // enactic's reference; raise for a firmer grip.
       force_limit_pu: { $type: "f64", $default: 0.15 },
       // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
       // consumers' needs vary too much for a default to be meaningful.

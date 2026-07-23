@@ -1,6 +1,7 @@
 //! Gripper move-action admission: the `move_gripper` handler the backbone exposes.
 //! Mirrors the arm move admission exactly: validate the goal (gripper_id,
-//! finiteness, the [0, 1] opening range), claim the side's single-flight slot, and
+//! finiteness, the [0, 1] opening range, a non-negative effort cap), claim
+//! the side's single-flight slot, and
 //! hand the accepted goal to the coordinator over its gripper goal channel. The
 //! coordinator runs the motion through the same per-tick governing as every
 //! other DOF, completes the goal on measured convergence, and releases the busy
@@ -42,6 +43,12 @@ pub async fn run_move_gripper(
                         d.opening
                     )));
                 }
+                if !d.max_effort.is_finite() || d.max_effort < 0.0 {
+                    return Ok(GoalResponse::reject(format!(
+                        "max_effort {} is not a non-negative finite value",
+                        d.max_effort
+                    )));
+                }
                 if !claim(&busy[idx]) {
                     return Ok(GoalResponse::reject("gripper is already executing a move"));
                 }
@@ -53,8 +60,15 @@ pub async fn run_move_gripper(
             .map(Side::index)
             .expect("validated on accept");
         let opening = ctx.request().data.opening;
+        // The wire's 0 means no preference: the follower's ceiling stays in charge.
+        let max_effort = ctx.request().data.max_effort;
+        let max_effort = (max_effort > 0.0).then_some(max_effort);
         if goal_txs[idx]
-            .send(GripperGoal { opening, ctx })
+            .send(GripperGoal {
+                opening,
+                max_effort,
+                ctx,
+            })
             .await
             .is_err()
         {

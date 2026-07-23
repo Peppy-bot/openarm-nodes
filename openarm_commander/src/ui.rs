@@ -290,6 +290,11 @@ struct GripperView {
     feedback: Option<f64>,
     min: f64,
     max: f64,
+    // The operator's effort cap (null = no preference: the ceiling applies).
+    max_effort: Option<f64>,
+    // The gripper's reported effort ceiling: null until the first state
+    // report, 0 = no effort control (the panel hides the effort slider).
+    effort_ceiling: Option<f64>,
     // A discrete move_gripper is in flight (drives the gripper card's badge).
     in_flight: bool,
 }
@@ -350,6 +355,8 @@ fn gripper_view(g: &GripperTarget) -> GripperView {
         feedback: g.last_feedback,
         min,
         max,
+        max_effort: g.max_effort,
+        effort_ceiling: g.effort_ceiling,
         in_flight: g.in_flight,
     }
 }
@@ -402,6 +409,12 @@ pub(crate) enum Command {
     SetGripperTarget {
         side: SideWire,
         position: f64,
+    },
+    // Set the gripper's effort cap, applied to both the streamed opening and
+    // discrete moves. Not deadman-gated: Actions mode fires while disabled.
+    SetGripperEffort {
+        side: SideWire,
+        max_effort: f64,
     },
     // Fire the backbone's discrete move_gripper (Actions-mode gripper Execute): a governed
     // open/close to `position` (m), not the streamed opening. Refused while the side

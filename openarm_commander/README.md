@@ -33,7 +33,7 @@ peppy node run openarm_commander:v1 \
     --link right_gripper_states@right_grip_inst
 ```
 
-Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs from closed (0.0) to the generation's full jaw width (0.044 m on v1, 0.0697 m on v2), with **Open** and **Close** shortcuts. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.
+Then open **http://localhost:8765**. Each arm panel has 7 sliders: **Send** fires the goal and **Home** resets the sliders to zero. The gripper slider runs the opening fraction from closed (0) to fully open (1), whichever generation is behind it. A gripper that reports effort control (v2's POS_FORCE force cap) adds a **max effort** slider beneath it, bounded by the gripper's reported ceiling and applied to both streamed openings and discrete moves; grippers without effort control (v1, the sims) hide it. The page reconnects automatically if the node restarts, and the port can be changed with `PEPPY_JC_PORT`.
 
 ## Troubleshooting
 

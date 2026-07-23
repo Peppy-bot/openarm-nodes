@@ -31,6 +31,7 @@ pub async fn run(
     gripper_id: u8,
     state_rate_hz: u32,
     geometry: Geometry,
+    effort_ceiling_nm: f64,
     gripper: Arc<Mutex<GripperCan>>,
     token: CancellationToken,
 ) {
@@ -68,10 +69,11 @@ pub async fn run(
         // The broadcast and paired publishes serve unrelated consumers, so
         // each runs and reports independently: one failing must not starve
         // the other.
-        let broadcast_result = match gripper_states::build_message(gripper_id, opening, effort) {
-            Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
+        let broadcast_result =
+            match gripper_states::build_message(gripper_id, opening, effort, effort_ceiling_nm) {
+                Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
         match broadcast_result {
             Ok(()) => broadcast_failing = false,
             Err(e) if !broadcast_failing => {
@@ -81,7 +83,7 @@ pub async fn run(
             Err(_) => {}
         }
         let peer_result = match pairing_stamp().and_then(|stamp| {
-            backbone::gripper_states::build_message(stamp, opening, effort)
+            backbone::gripper_states::build_message(stamp, opening, effort, effort_ceiling_nm)
                 .map_err(|e| e.to_string())
         }) {
             Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),

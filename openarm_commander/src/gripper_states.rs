@@ -43,15 +43,19 @@ pub async fn run(
             received = left_subscription.next() => (
                 "left_gripper_states",
                 Side::Left,
-                received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.opening))),
+                received.map(|pair| {
+                    pair.map(|(_producer, msg)| (msg.gripper_id, msg.opening, msg.max_effort))
+                }),
             ),
             received = right_subscription.next() => (
                 "right_gripper_states",
                 Side::Right,
-                received.map(|pair| pair.map(|(_producer, msg)| (msg.gripper_id, msg.opening))),
+                received.map(|pair| {
+                    pair.map(|(_producer, msg)| (msg.gripper_id, msg.opening, msg.max_effort))
+                }),
             ),
         };
-        let (gripper_id, opening) = match received {
+        let (gripper_id, opening, max_effort) = match received {
             Ok(Some(pair)) => pair,
             Ok(None) => {
                 error!(
@@ -74,7 +78,11 @@ pub async fn run(
             continue;
         }
         if feedback
-            .send(Feedback::GripperMeasured { side, opening })
+            .send(Feedback::GripperMeasured {
+                side,
+                opening,
+                max_effort,
+            })
             .await
             .is_err()
         {

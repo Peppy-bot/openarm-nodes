@@ -61,16 +61,19 @@ pub async fn run(
             warn!("gripper_states: skipping non-finite motor sample");
             continue;
         }
-        // The v1.0 prismatic gripper does not sense grip force; report 0 on
-        // both the broadcast force and the pairing effort.
+        // The v1.0 prismatic gripper neither senses grip force nor caps it
+        // (MIT mode has no per-command force limit): report 0 on the broadcast
+        // force and the pairing effort, and a 0 ceiling (no effort control).
         let effort = 0.0;
+        let max_effort = 0.0;
         // The broadcast and paired publishes serve unrelated consumers, so
         // each runs and reports independently: one failing must not starve
         // the other.
-        let broadcast_result = match gripper_states::build_message(gripper_id, opening, effort) {
-            Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        };
+        let broadcast_result =
+            match gripper_states::build_message(gripper_id, opening, effort, max_effort) {
+                Ok(msg) => publisher.publish(msg).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
         match broadcast_result {
             Ok(()) => broadcast_failing = false,
             Err(e) if !broadcast_failing => {
@@ -80,7 +83,7 @@ pub async fn run(
             Err(_) => {}
         }
         let peer_result = match pairing_stamp().and_then(|stamp| {
-            backbone::gripper_states::build_message(stamp, opening, effort)
+            backbone::gripper_states::build_message(stamp, opening, effort, max_effort)
                 .map_err(|e| e.to_string())
         }) {
             Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),

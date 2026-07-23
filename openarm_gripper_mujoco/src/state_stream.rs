@@ -66,8 +66,9 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
         {
             continue;
         }
-        // Re-emit on the per-side broadcast for launch-bound monitors.
-        match gripper_states::build_message(msg.gripper_id, msg.opening, msg.force) {
+        // Re-emit on the per-side broadcast for launch-bound monitors. The sim
+        // gripper applies no effort cap, so the ceiling is 0 (no effort control).
+        match gripper_states::build_message(msg.gripper_id, msg.opening, msg.force, 0.0) {
             Ok(payload) => {
                 if let Err(e) = states_pub.publish(payload).await {
                     error!(error = %e, "gripper_states publish");
@@ -78,7 +79,7 @@ pub async fn run(runner: Arc<NodeRunner>, gripper_id: GripperId, token: Cancella
         // Relay to the paired backbone; silently dropped while unpaired. The
         // engine's sim torque rides along as the pairing effort.
         match pairing_stamp().and_then(|stamp| {
-            backbone::gripper_states::build_message(stamp, msg.opening, msg.force)
+            backbone::gripper_states::build_message(stamp, msg.opening, msg.force, 0.0)
                 .map_err(|e| e.to_string())
         }) {
             Ok(payload) => {

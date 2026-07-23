@@ -17,6 +17,9 @@ use tracing::{error, warn};
 #[derive(Clone, Copy)]
 pub struct GripperCommand {
     pub opening: f64,
+    /// Commanded effort cap (N*m at the shaft); `None` when the wire carried
+    /// no preference (0), so the configured ceiling applies.
+    pub max_effort: Option<f64>,
 }
 
 pub async fn run(
@@ -44,12 +47,17 @@ pub async fn run(
                 continue;
             }
         };
-        if !msg.opening.is_finite() {
-            warn!("gripper_setpoints: dropping message with non-finite opening");
+        if !msg.opening.is_finite() || !msg.max_effort.is_finite() {
+            warn!("gripper_setpoints: dropping message with non-finite fields");
+            continue;
+        }
+        if msg.max_effort < 0.0 {
+            warn!("gripper_setpoints: dropping message with negative max_effort");
             continue;
         }
         latest.send_replace(Some(GripperCommand {
             opening: msg.opening,
+            max_effort: (msg.max_effort > 0.0).then_some(msg.max_effort),
         }));
     }
 }
