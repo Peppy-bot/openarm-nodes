@@ -1,4 +1,4 @@
-//! Inbound stream plumbing for the backbone: the commanding node's per-limb
+//! Inbound stream plumbing for the backbone: the leading node's per-limb
 //! setpoint streams (the upstream pairings' command direction), both paired
 //! arms' measured joint state, both paired grippers' measured aperture, and
 //! the runtime governor controls. Each listener holds
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::collision_ctrl::governor_control as collision_ctrl_governor_control;
 use peppygen::paired_topics::{
-    commander_left_arm, commander_left_gripper, commander_right_arm, commander_right_gripper,
-    left_arm_link, left_gripper_link, right_arm_link, right_gripper_link,
+    leader_left_arm, leader_left_gripper, leader_right_arm, leader_right_gripper, left_arm_link,
+    left_gripper_link, right_arm_link, right_gripper_link,
 };
 use tokio::sync::watch;
 use tracing::{error, warn};
@@ -157,7 +157,7 @@ fn parse_gripper_state(
     })
 }
 
-/// Receive both upstream arm setpoint streams forever (the commanding node's
+/// Receive both upstream arm setpoint streams forever (the leading node's
 /// joint_link command direction), keeping the latest well-formed message per
 /// side. The slot IS the side (a pairing delivers only its one peer), so there
 /// is no id demux; a malformed message is dropped rather than driving an arm.
@@ -166,8 +166,8 @@ pub async fn run_joint_command_listener(
     latest: [watch::Sender<Option<JointCommand>>; 2],
 ) {
     let (left, right) = tokio::join!(
-        commander_left_arm::joint_setpoints::subscribe(&runner),
-        commander_right_arm::joint_setpoints::subscribe(&runner),
+        leader_left_arm::joint_setpoints::subscribe(&runner),
+        leader_right_arm::joint_setpoints::subscribe(&runner),
     );
     let (mut left, mut right) = match (left, right) {
         (Ok(l), Ok(r)) => (l, r),
@@ -214,8 +214,8 @@ pub async fn run_gripper_command_listener(
     latest: [watch::Sender<Option<GripperCommand>>; 2],
 ) {
     let (left, right) = tokio::join!(
-        commander_left_gripper::gripper_setpoints::subscribe(&runner),
-        commander_right_gripper::gripper_setpoints::subscribe(&runner),
+        leader_left_gripper::gripper_setpoints::subscribe(&runner),
+        leader_right_gripper::gripper_setpoints::subscribe(&runner),
     );
     let (mut left, mut right) = match (left, right) {
         (Ok(l), Ok(r)) => (l, r),

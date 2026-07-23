@@ -27,14 +27,14 @@
       ],
       pairings: [
         // The exclusive command loop with the backbone, one slot per driven
-        // limb: this panel plays the commander role and streams the operator's
+        // limb: this panel plays the leader role and streams the operator's
         // raw setpoints; the backbone governs them before anything reaches a
         // follower. Optional: a monitor-only deployment (the leader owns the
         // command loop) boots with these unbound and the panel is read-only.
-        { name: "joint_link", tag: "v1", role: "commander", link_id: "left_arm", optional: true },
-        { name: "joint_link", tag: "v1", role: "commander", link_id: "right_arm", optional: true },
-        { name: "gripper_link", tag: "v1", role: "commander", link_id: "left_gripper", optional: true },
-        { name: "gripper_link", tag: "v1", role: "commander", link_id: "right_gripper", optional: true },
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "left_arm", optional: true },
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "right_arm", optional: true },
+        { name: "gripper_link", tag: "v1", role: "leader", link_id: "left_gripper", optional: true },
+        { name: "gripper_link", tag: "v1", role: "leader", link_id: "right_gripper", optional: true },
         // Live readouts: observe each backbone<->follower pairing's state
         // back-channel (positions for the sliders, gripper opening and effort
         // ceiling for the aperture and effort controls). Observing works in

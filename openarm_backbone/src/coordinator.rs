@@ -16,8 +16,8 @@ use peppygen::NodeRunner;
 use peppygen::emitted_topics::collision_status;
 use peppygen::exposed_actions::move_gripper;
 use peppygen::paired_topics::{
-    commander_left_arm, commander_left_gripper, commander_right_arm, commander_right_gripper,
-    left_arm_link, left_gripper_link, right_arm_link, right_gripper_link,
+    leader_left_arm, leader_left_gripper, leader_right_arm, leader_right_gripper, left_arm_link,
+    left_gripper_link, right_arm_link, right_gripper_link,
 };
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
@@ -156,19 +156,18 @@ pub async fn run(
                 return Err(e);
             }
         };
-    // Upstream state relay publishers, one per commander pairing slot: the
+    // Upstream state relay publishers, one per leader pairing slot: the
     // measured state each downstream pair reports is relayed up so the
-    // commanding node sees the same back-channel a follower gives the
+    // leading node sees the same back-channel a follower gives the
     // backbone. Publishing while unpaired is a legal no-op.
-    let up_left_arm_pub = match commander_left_arm::joint_states::declare_publisher(&runner).await {
+    let up_left_arm_pub = match leader_left_arm::joint_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
             error!("declare upstream left joint_states publisher: {e}");
             return Err(e);
         }
     };
-    let up_right_arm_pub = match commander_right_arm::joint_states::declare_publisher(&runner).await
-    {
+    let up_right_arm_pub = match leader_right_arm::joint_states::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
             error!("declare upstream right joint_states publisher: {e}");
@@ -176,7 +175,7 @@ pub async fn run(
         }
     };
     let up_left_gripper_pub =
-        match commander_left_gripper::gripper_states::declare_publisher(&runner).await {
+        match leader_left_gripper::gripper_states::declare_publisher(&runner).await {
             Ok(p) => p,
             Err(e) => {
                 error!("declare upstream left gripper_states publisher: {e}");
@@ -184,7 +183,7 @@ pub async fn run(
             }
         };
     let up_right_gripper_pub =
-        match commander_right_gripper::gripper_states::declare_publisher(&runner).await {
+        match leader_right_gripper::gripper_states::declare_publisher(&runner).await {
             Ok(p) => p,
             Err(e) => {
                 error!("declare upstream right gripper_states publisher: {e}");
@@ -451,7 +450,7 @@ pub async fn run(
             }
         }
 
-        // Relay each limb's measured state up its commander pairing slot (a
+        // Relay each limb's measured state up its leader pairing slot (a
         // legal no-op while unpaired): positions and velocities as the
         // followers report them, efforts unmeasured (empty per the contract).
         type BuildUpJoint = fn(
@@ -469,13 +468,13 @@ pub async fn run(
             (
                 Side::Left,
                 &up_left_arm_pub,
-                commander_left_arm::joint_states::build_message as BuildUpJoint,
+                leader_left_arm::joint_states::build_message as BuildUpJoint,
                 relayed_arms.0,
             ),
             (
                 Side::Right,
                 &up_right_arm_pub,
-                commander_right_arm::joint_states::build_message as BuildUpJoint,
+                leader_right_arm::joint_states::build_message as BuildUpJoint,
                 relayed_arms.1,
             ),
         ] {
@@ -507,13 +506,13 @@ pub async fn run(
             (
                 Side::Left,
                 &up_left_gripper_pub,
-                commander_left_gripper::gripper_states::build_message as BuildUpGripper,
+                leader_left_gripper::gripper_states::build_message as BuildUpGripper,
                 relayed_grippers.0,
             ),
             (
                 Side::Right,
                 &up_right_gripper_pub,
-                commander_right_gripper::gripper_states::build_message as BuildUpGripper,
+                leader_right_gripper::gripper_states::build_message as BuildUpGripper,
                 relayed_grippers.1,
             ),
         ] {

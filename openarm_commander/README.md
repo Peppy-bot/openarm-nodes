@@ -61,10 +61,10 @@ peppy node run openarm_commander:v1 \
     joint_jog_acceleration_rad_s2=10.0 \
     collision_governor_enabled=true d_stop=0.005 d_safe=0.02 \
     --link backbone@backbone_inst \
-    --link left_arm@backbone_inst/commander_left_arm \
-    --link right_arm@backbone_inst/commander_right_arm \
-    --link left_gripper@backbone_inst/commander_left_gripper \
-    --link right_gripper@backbone_inst/commander_right_gripper \
+    --link left_arm@backbone_inst/leader_left_arm \
+    --link right_arm@backbone_inst/leader_right_arm \
+    --link left_gripper@backbone_inst/leader_left_gripper \
+    --link right_gripper@backbone_inst/leader_right_gripper \
     --link observed_left_arm@left_arm_inst \
     --link observed_right_arm@right_arm_inst \
     --link observed_left_gripper@left_grip_inst \
