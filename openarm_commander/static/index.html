@@ -465,21 +465,27 @@ function build_gripper(side, label) {
   root.innerHTML = `
     <div class="panel-head"><span>${label}</span><span class="badge" id="${side}_g_badge">idle</span></div>
     <div class="gripper">
-      <div class="srow">
-        <input type="range" min="0" max="${GRIPPER_MAX}" step="0.005" value="0" id="${side}_g"
-               oninput="on_gripper_input('${side}')" />
-        <div class="ghost off" id="${side}_g_ghost"></div>
+      <div class="scol">
+        <div class="srow">
+          <input type="range" min="0" max="${GRIPPER_MAX}" step="0.005" value="0" id="${side}_g"
+                 oninput="on_gripper_input('${side}')" />
+          <div class="ghost off" id="${side}_g_ghost"></div>
+        </div>
+        <div class="lim"><span id="${side}_g_lo"></span><span id="${side}_g_hi"></span></div>
       </div>
       <span class="target" id="${side}_gt">0.000</span>
       <span class="fb" id="${side}_gf">---</span>
     </div>
     <div class="gripper" id="${side}_ge_row" style="display:none">
-      <div class="srow">
-        <input type="range" id="${side}_ge" aria-label="${label} max effort"
-               oninput="on_gripper_effort_input('${side}')" />
+      <div class="scol">
+        <div class="srow">
+          <input type="range" id="${side}_ge" aria-label="${label} max effort"
+                 oninput="on_gripper_effort_input('${side}')" />
+        </div>
+        <div class="lim"><span id="${side}_ge_lo"></span><span id="${side}_ge_hi"></span></div>
       </div>
       <span class="target" id="${side}_get">---</span>
-      <span class="fb">max effort</span>
+      <span class="fb">max effort (shaft N&middot;m)</span>
     </div>
     <div class="actions">
       <button class="primary" id="${side}_g_btn" style="display:none" onclick="execute_gripper('${side}')">Execute · gripper</button>
@@ -1060,6 +1066,7 @@ function apply_snapshot(snap) {
       ge.min = g.effort_ceiling / 100;
       ge.max = g.effort_ceiling;
       ge.step = g.effort_ceiling / 100;
+      set_reachable(`${side}_ge`, ge.min, ge.max, ge.min, ge.max, v => (+v).toFixed(2));
       // No operator preference yet renders at the ceiling: that is what the
       // gripper applies. Never fight an in-progress drag.
       const cap = g.max_effort != null ? g.max_effort : g.effort_ceiling;
