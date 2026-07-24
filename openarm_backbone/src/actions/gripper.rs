@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalResponse};
+use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalDecision};
 use peppygen::{NodeRunner, Result};
 use tokio::sync::mpsc;
 use tracing::error;
@@ -31,21 +31,21 @@ pub async fn run_move_gripper(
             .handle_goal_next_request(|req| {
                 let d = &req.data;
                 let Some(idx) = Side::from_gripper_id(d.gripper_id).map(Side::index) else {
-                    return Ok(GoalResponse::reject("gripper_id out of range"));
+                    return Ok(GoalDecision::reject("gripper_id out of range"));
                 };
                 if !d.opening.is_finite() {
-                    return Ok(GoalResponse::reject("non-finite gripper opening"));
+                    return Ok(GoalDecision::reject("non-finite gripper opening"));
                 }
                 if !(0.0..=1.0).contains(&d.opening) {
-                    return Ok(GoalResponse::reject(format!(
+                    return Ok(GoalDecision::reject(format!(
                         "opening {} outside [0, 1]",
                         d.opening
                     )));
                 }
                 if !claim(&busy[idx]) {
-                    return Ok(GoalResponse::reject("gripper is already executing a move"));
+                    return Ok(GoalDecision::reject("gripper is already executing a move"));
                 }
-                Ok(GoalResponse::accept())
+                Ok(GoalDecision::accept())
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
