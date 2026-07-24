@@ -5,7 +5,9 @@
 # The MuJoCo image is published as a multi-arch manifest (linux/amd64 +
 # linux/arm64) so the node runs on both x86_64 and aarch64 hosts. Isaac Sim is
 # x86_64 only upstream (nvcr.io/nvidia/isaac-sim ships no arm64 image), so it
-# stays amd64.
+# stays amd64. Two of MuJoCo's transitive deps are x86_64 only and are dropped
+# on arm64 — both are optional accelerators; see requirements.mujoco.txt
+# (PyOpenGL-accelerate) and overrides.mujoco.txt (embreex).
 #
 # To bump a sim version: update the version variable below and rerun. This
 # manifest is the single source of truth for the base image tags; the script
@@ -78,15 +80,20 @@ else
         --bootstrap
 fi
 
-# Fail fast if the active builder cannot actually emulate arm64, rather than
-# silently publishing an amd64-only "multi-arch" manifest.
-echo "==> Verifying builder '${BUILDX_BUILDER}' offers linux/arm64..."
+# Fail fast if the active builder cannot actually build every target platform,
+# rather than silently publishing a manifest that is missing an arch.
+echo "==> Verifying builder '${BUILDX_BUILDER}' offers the target platforms..."
 BUILDER_PLATFORMS="$(docker buildx inspect --bootstrap "${BUILDX_BUILDER}" || true)"
-if [[ "${BUILDER_PLATFORMS}" != *linux/arm64* ]]; then
-    echo "ERROR: builder '${BUILDX_BUILDER}' does not report linux/arm64 support;" >&2
-    echo "       arm64 emulation is unavailable. Aborting before publish." >&2
-    exit 1
-fi
+for platform in ${ISAAC_PLATFORMS//,/ } ${MUJOCO_PLATFORMS//,/ }; do
+    if [[ "${BUILDER_PLATFORMS}" != *"${platform}"* ]]; then
+        echo "ERROR: builder '${BUILDX_BUILDER}' does not report ${platform} support," >&2
+        echo "       so emulation for it is unavailable. buildkit samples the binfmt" >&2
+        echo "       handlers once at daemon start, so a builder that outlived the" >&2
+        echo "       registration above reports stale platforms: 'docker buildx rm" >&2
+        echo "       ${BUILDX_BUILDER}' and rerun. Aborting before publish." >&2
+        exit 1
+    fi
+done
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "==> Building + pushing Isaac base image (${ISAAC_IMAGE}) [${ISAAC_PLATFORMS}]..."
@@ -123,8 +130,21 @@ docker buildx build \
 # be templated at build time and is stamped into the def files instead.
 NODES_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 sync_def_from() {
-    local def_file="$1" image="$2"
+    local def_file="$1" image="$2" actual
+    if [[ ! -f "${def_file}" ]]; then
+        echo "ERROR: ${def_file} not found; cannot sync its From: tag." >&2
+        exit 1
+    fi
     sed -i -E "s|^(From:[[:space:]]+).*|\1${image}|" "${def_file}"
+    # A def file that lost its From: line (or grew a second one) would leave the
+    # sed a silent no-op and ship a stale tag against a freshly pushed image, so
+    # read the line back rather than trusting sed's exit status.
+    actual="$(sed -nE 's|^From:[[:space:]]+(.*)$|\1|p' "${def_file}")"
+    if [[ "${actual}" != "${image}" ]]; then
+        echo "ERROR: ${def_file} has no single 'From:' line to sync" >&2
+        echo "       (wanted '${image}', found '${actual}')." >&2
+        exit 1
+    fi
     echo "    $(basename "$(dirname "${def_file}")")/apptainer.def -> ${image}"
 }
 echo "==> Syncing sim node apptainer.def From: tags..."
