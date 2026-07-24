@@ -41,8 +41,13 @@
   execution: {
     language: "python",
     container: {
+      // No --nv (unlike the Isaac node): nothing here touches a GPU. The engine
+      // is MuJoCo's C solver, and the viser viewer renders in the browser, so
+      // the node never creates a GL context — there are no camera sensors and
+      // no offscreen rendering. Passing --nv on a host without the NVIDIA
+      // libraries (a Mac, where peppy runs apptainer inside a Lima VM) only
+      // yields a "could not find any nv files" warning on every run.
       def_file: "apptainer.def",
-      apptainer_run_extra_args: ["--nv"],
     },
     parameters: {
       // Which OpenArm generation to simulate: "v1" or "v2". Selects the scene file
@@ -51,10 +56,20 @@
       hardware_version: "string",
       // Rate (Hz) of the measured-state streams (joint_states / gripper_states).
       state_rate_hz: "u32",
-      // Run without the viewer window (the deployment default); set false for a
-      // local debugging session that opens the viser viewer.
+      // Run without a native viewer window (the deployment default). "Headless"
+      // here means no local GUI window, not no viewer: this mode serves the
+      // viser viewer to a browser on viewer_host:viewer_port, which is how the
+      // sim is watched in a deployment and the only viewer that works inside a
+      // container.
+      //
+      // Set false to open a native MuJoCo GLFW window instead — and note that
+      // mode serves no viser viewer, so nothing is reachable over the network.
+      // It also needs a display socket bound into the container (see
+      // mount_paths) and MUJOCO_GL overridden off the apptainer.def default of
+      // egl. Neither applies on macOS, where peppy runs apptainer inside a Lima
+      // VM with no display: keep headless true there and use the browser.
       headless: { $type: "bool", $default: true },
-      // Viewer bind address + port, used only when headless is false. All
+      // Viser viewer bind address + port, used when headless is true. All
       // interfaces by default so the viewer is reachable from other machines.
       viewer_host: { $type: "string", $default: "0.0.0.0" },
       viewer_port: { $type: "u32", $default: 8080 },
