@@ -7,8 +7,10 @@
 # x86_64 only upstream (nvcr.io/nvidia/isaac-sim ships no arm64 image), so it
 # stays amd64.
 #
-# To bump a sim version: update the version variable below, rebuild, and push.
-# apptainer.def From: tags must be updated to match after pushing.
+# To bump a sim version: update the version variable below and rerun. This
+# manifest is the single source of truth for the base image tags; the script
+# rebuilds, pushes, and rewrites the sibling sim nodes' apptainer.def From:
+# tags to match, so the tag is never edited by hand in two places.
 #
 # Requires a Docker Hub login (docker login) and a Docker daemon with buildx.
 # The script provisions QEMU binfmt handlers and a docker-container buildx
@@ -84,9 +86,24 @@ docker buildx build \
     --push \
     "${REPO_ROOT}"
 
+# ── Sync sim node apptainer.def From: tags ────────────────────────────────────
+# This manifest owns the base image tags; the sibling sim nodes track it here
+# rather than being hand-edited. peppy's `node build` invokes a bare
+# `apptainer build <sif> <def>` with no --build-arg support, so the tag cannot
+# be templated at build time and is stamped into the def files instead.
+NODES_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
+sync_def_from() {
+    local def_file="$1" image="$2"
+    sed -i -E "s|^(From:[[:space:]]+).*|\1${image}|" "${def_file}"
+    echo "    $(basename "$(dirname "${def_file}")")/apptainer.def -> ${image}"
+}
+echo "==> Syncing sim node apptainer.def From: tags..."
+sync_def_from "${NODES_DIR}/openarm_sim_isaac/apptainer.def" "${ISAAC_IMAGE}"
+sync_def_from "${NODES_DIR}/openarm_sim_mujoco/apptainer.def" "${MUJOCO_IMAGE}"
+
 echo "==> Done."
-echo "    Pushed:"
+echo "    Pushed and synced:"
 echo "      ${ISAAC_IMAGE}   (${ISAAC_PLATFORMS})"
 echo "      ${MUJOCO_IMAGE}   (${MUJOCO_PLATFORMS})"
-echo "    Update apptainer.def From: tags to match, then run:"
+echo "    Commit the updated apptainer.def files, then run:"
 echo "    peppy node build openarm_robot_initializer_mujoco:v1 (and _isaac)"
