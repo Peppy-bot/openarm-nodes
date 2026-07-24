@@ -34,6 +34,9 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so the backbone ages setpoints on one timeline.
+        peppygen::clock::init(&node_runner).await?;
         let token = node_runner.cancellation_token().clone();
         // The generation picks the panel's arm joint ranges (URDF limits); the
         // gripper axis is the unitless opening fraction and everything else in

@@ -56,11 +56,25 @@ pub enum UiMsg {
 /// tasks. The owner is the only writer, so these are the sole way measured state and
 /// goal outcomes reach `UiState`.
 pub enum Feedback {
-    ArmMeasured { side: Side, joints: [f64; ARM_DOF] },
-    GripperMeasured { side: Side, opening: f64 },
+    ArmMeasured {
+        side: Side,
+        joints: [f64; ARM_DOF],
+    },
+    GripperMeasured {
+        side: Side,
+        opening: f64,
+        // The gripper's reported effort ceiling (0 = no effort control).
+        max_effort: f64,
+    },
     Proximity(Proximity),
-    ArmGoalDone { side: Side, summary: String },
-    GripperGoalDone { side: Side, summary: String },
+    ArmGoalDone {
+        side: Side,
+        summary: String,
+    },
+    GripperGoalDone {
+        side: Side,
+        summary: String,
+    },
 }
 
 /// The setpoints to stream this tick. `None` for a side means its deadman is off, so
@@ -69,8 +83,16 @@ pub enum Feedback {
 #[derive(Clone, Copy, Debug)]
 pub struct CommandFrame {
     pub arms: BySide<Option<[f64; ARM_DOF]>>,
-    pub grippers: BySide<Option<f64>>,
+    pub grippers: BySide<Option<GripperFrame>>,
     pub governor: GovernorFrame,
+}
+
+/// One gripper's streamed setpoint: the opening fraction and the operator's
+/// effort cap in its wire encoding (0 = no preference).
+#[derive(Clone, Copy, Debug)]
+pub struct GripperFrame {
+    pub opening: f64,
+    pub max_effort: f64,
 }
 
 /// The operator's self-collision governor controls, streamed continuously (no deadman:
@@ -86,7 +108,12 @@ pub struct GovernorFrame {
 impl CommandFrame {
     pub(crate) fn from_state(s: &UiState) -> Self {
         let arm = |side: Side| s.side_active(side).then_some(s.arms[side].joints);
-        let grip = |side: Side| s.side_active(side).then_some(s.grippers[side].position);
+        let grip = |side: Side| {
+            s.side_active(side).then_some(GripperFrame {
+                opening: s.grippers[side].position,
+                max_effort: s.grippers[side].max_effort.unwrap_or(0.0),
+            })
+        };
         Self {
             arms: BySide::new(arm(Side::Left), arm(Side::Right)),
             grippers: BySide::new(grip(Side::Left), grip(Side::Right)),
@@ -458,6 +485,21 @@ impl Owner {
                     self.state.grippers[side].position = position;
                 }
             }
+            Command::SetGripperEffort { side, max_effort } => {
+                let side: Side = side.into();
+                if !max_effort.is_finite() || max_effort <= 0.0 {
+                    return;
+                }
+                // Applies in both modes (streamed setpoints and discrete moves), so
+                // it is not gated on the deadman the way the opening target is.
+                // Clamped to the reported ceiling; without one the gripper's own
+                // min() against its ceiling still bounds it.
+                let ceiling = self.state.grippers[side].effort_ceiling;
+                let capped = ceiling
+                    .filter(|c| *c > 0.0)
+                    .map_or(max_effort, |c| max_effort.min(c));
+                self.state.grippers[side].max_effort = Some(capped);
+            }
             Command::FireGripper { side, position } => {
                 let side: Side = side.into();
                 if !position.is_finite() {
@@ -488,6 +530,7 @@ impl Owner {
                     self.token.clone(),
                     side,
                     position,
+                    self.state.grippers[side].max_effort.unwrap_or(0.0),
                 );
             }
             Command::RunGesture { name } => {
@@ -549,8 +592,13 @@ impl Owner {
                     self.state.arms[side].established = true;
                 }
             }
-            Feedback::GripperMeasured { side, opening } => {
+            Feedback::GripperMeasured {
+                side,
+                opening,
+                max_effort,
+            } => {
                 self.state.grippers[side].last_feedback = Some(opening);
+                self.state.grippers[side].effort_ceiling = Some(max_effort);
             }
             Feedback::Proximity(proximity) => {
                 self.state.proximity = Some(proximity);

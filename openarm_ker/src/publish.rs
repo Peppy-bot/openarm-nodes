@@ -1,11 +1,12 @@
-// Always-on command publisher, the same shape as the commander's: for
-// each side, one task streams the arm setpoint at command_rate_hz on
-// `arm_joint_commands` and one streams the trigger opening on
-// `gripper_commands`, both tagged with their id and governed by the backbone before
-// anything reaches a follower. A tick publishes nothing when the newest sample
-// is missing, stale, or disengaged, so the robot holds at its last governed
-// setpoints: skipping is the deadman. Re-publishing an unchanged sample every
-// tick keeps the stream trivially fresh for a backbone that starts mid-session.
+// Always-on command publisher, the same shape as the commander's: for each
+// side, one task streams the arm setpoint at command_rate_hz on that limb's
+// joint_link pairing slot and one streams the trigger opening on its
+// gripper_link slot (the slot is the side, so no id demux); the backbone
+// governs everything before it reaches a follower. A tick publishes nothing
+// when the newest sample is missing, stale, or disengaged, so the robot holds
+// at its last governed setpoints: skipping is the deadman. Re-publishing an
+// unchanged sample every tick keeps the stream trivially fresh for a backbone
+// that starts mid-session.
 //
 // Each side+stream runs its own publish task on its own interval, cloning the
 // shared per-topic publisher. A single shared loop publishing Left then Right
@@ -13,12 +14,11 @@
 // so independent tasks avoid that bias.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openarm_description::Side;
 use peppygen::NodeRunner;
-use peppygen::emitted_topics::commands::arm_joint_commands;
-use peppygen::emitted_topics::commands::gripper_commands;
+use peppygen::paired_topics::{left_arm, left_gripper, right_arm, right_gripper};
 use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::sync::watch;
@@ -27,14 +27,16 @@ use tracing::{error, warn};
 
 use crate::reader::KerSample;
 
-/// The wire id for a side, the same 0 = left / 1 = right encoding every openarm
-/// stream uses (`arm_id` and `gripper_id` alike).
-fn wire_id(side: Side) -> u8 {
-    match side {
-        Side::Left => 0,
-        Side::Right => 1,
-    }
+/// Pairing stamp from the daemon-resolved clock, so the backbone ages
+/// setpoints on the same timeline it reads. Errors until the clock delivers
+/// its first tick.
+fn pairing_stamp() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
 }
+
+type BuildJointSetpoint = fn(SystemTime, Vec<f64>, Vec<f64>, Vec<f64>) -> peppygen::Result<Payload>;
+type BuildGripperSetpoint = fn(SystemTime, f64, f64) -> peppygen::Result<Payload>;
 
 fn label(side: Side) -> &'static str {
     match side {
@@ -52,56 +54,70 @@ pub async fn run(
 ) {
     // A failed publisher declaration leaves the node connected to the device
     // but unable to command anything, so cancel the node to restart it rather
-    // than returning quietly.
-    let arm_pub = match arm_joint_commands::declare_publisher(&runner).await {
-        Ok(p) => p,
+    // than returning quietly. One publisher per pairing slot; publishing while
+    // unbound is a legal no-op.
+    let (left_arm_pub, right_arm_pub, left_gripper_pub, right_gripper_pub) = match tokio::try_join!(
+        left_arm::joint_setpoints::declare_publisher(&runner),
+        right_arm::joint_setpoints::declare_publisher(&runner),
+        left_gripper::gripper_setpoints::declare_publisher(&runner),
+        right_gripper::gripper_setpoints::declare_publisher(&runner),
+    ) {
+        Ok(pubs) => pubs,
         Err(e) => {
-            error!("declare arm_joint_commands publisher: {e}");
-            return token.cancel();
-        }
-    };
-    // One shared gripper publisher, cloned per side like the arm publisher;
-    // each side's stream tags its own gripper_id, so the backbone tells them apart.
-    let gripper_pub = match gripper_commands::declare_publisher(&runner).await {
-        Ok(p) => p,
-        Err(e) => {
-            error!("declare gripper_commands publisher: {e}");
+            error!("declare pairing setpoint publishers: {e}");
             return token.cancel();
         }
     };
 
     let mut tasks = tokio::task::JoinSet::new();
 
-    for side in [Side::Left, Side::Right] {
+    for (side, arm_pub, build_arm, gripper_pub, build_gripper) in [
+        (
+            Side::Left,
+            left_arm_pub,
+            left_arm::joint_setpoints::build_message as BuildJointSetpoint,
+            left_gripper_pub,
+            left_gripper::gripper_setpoints::build_message as BuildGripperSetpoint,
+        ),
+        (
+            Side::Right,
+            right_arm_pub,
+            right_arm::joint_setpoints::build_message as BuildJointSetpoint,
+            right_gripper_pub,
+            right_gripper::gripper_setpoints::build_message as BuildGripperSetpoint,
+        ),
+    ] {
+        // Arm: velocities and efforts stay empty; the backbone shapes its own
+        // velocity feedforward over the governed stream.
         let sample_rx = rx.clone();
         tasks.spawn(stream_setpoints(
-            arm_pub.clone(),
+            arm_pub,
             command_rate_hz,
             token.clone(),
             format!("{} arm", label(side)),
             move || {
                 let target = streamable(&sample_rx, stale_timeout)?.joints(side);
-                Some(
-                    arm_joint_commands::build_message(wire_id(side), target)
-                        .map_err(|e| e.to_string()),
-                )
+                Some(pairing_stamp().and_then(|stamp| {
+                    build_arm(stamp, target.to_vec(), Vec::new(), Vec::new())
+                        .map_err(|e| e.to_string())
+                }))
             },
         ));
-        // Gripper: stream the trigger opening fraction while streamable, tagged
-        // with the side's id for the backbone to demux (mirror of the arm stream
-        // above).
+        // Gripper: stream the trigger opening fraction while streamable (mirror
+        // of the arm stream above). The leader trigger carries no effort
+        // source: max_effort 0 (no preference) leaves the follower's ceiling
+        // in charge.
         let sample_rx = rx.clone();
         tasks.spawn(stream_setpoints(
-            gripper_pub.clone(),
+            gripper_pub,
             command_rate_hz,
             token.clone(),
             format!("{} gripper", label(side)),
             move || {
                 let opening = streamable(&sample_rx, stale_timeout)?.opening(side);
-                Some(
-                    gripper_commands::build_message(wire_id(side), opening)
-                        .map_err(|e| e.to_string()),
-                )
+                Some(pairing_stamp().and_then(|stamp| {
+                    build_gripper(stamp, opening, 0.0).map_err(|e| e.to_string())
+                }))
             },
         ));
     }

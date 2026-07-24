@@ -2,8 +2,8 @@
 //! side, with a distinct `arm_id`. A follower of the bimanual backbone: it owns the
 //! hardware control loop (gravity/Coriolis/friction feedforward from the
 //! in-process srs_model, plus MIT control) and tracks the backbone's governed
-//! setpoint over the arm_link pairing, reporting measured state back on the
-//! same pairing and on the always-on broadcast `arm_states` stream. The
+//! setpoint over the joint_link pairing, reporting measured state back on the
+//! same pairing (any monitor observes it). The
 //! backbone (openarm_backbone) owns all trajectory generation, stream following, and
 //! self-collision governing, so this node carries no motion logic of its own; on
 //! shutdown it disables the motors and lets the arm go limp.
@@ -32,9 +32,8 @@ pub const ARM_DOF: usize = 7;
 pub type JointVec = [f64; ARM_DOF];
 
 /// `arm_id` values (0 = left, 1 = right). The chain base link and joint limits come
-/// from the embedded description keyed by [`Side`]; `arm_id` also tags the broadcast
-/// measured state (the command loop itself is scoped by the arm_link pairing, no id
-/// needed).
+/// from the embedded description keyed by [`Side`] (the command loop itself is
+/// scoped by the joint_link pairing, no id needed).
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
@@ -65,6 +64,10 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so state consumers age samples on one timeline.
+        peppygen::clock::init(&node_runner).await?;
+
         let arm_id = params.arm_id;
         let can_interface = params.can_interface.clone();
 
@@ -227,7 +230,6 @@ fn main() -> Result<()> {
         ));
         let publisher = tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
-            arm_id,
             Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
             measured_rx,
         ));

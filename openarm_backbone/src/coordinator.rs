@@ -10,12 +10,15 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::collision_status;
 use peppygen::exposed_actions::move_gripper;
-use peppygen::paired_topics::{left_arm_link, left_gripper_link, right_arm_link, right_gripper_link};
+use peppygen::paired_topics::{
+    leader_left_arm, leader_left_gripper, leader_right_arm, leader_right_gripper, left_arm_link,
+    left_gripper_link, right_arm_link, right_gripper_link,
+};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
@@ -26,6 +29,14 @@ use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
 use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+
+/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// clock), so consumers age samples on the same timeline they read. Errors
+/// until the clock delivers its first tick.
+fn pairing_stamp() -> Result<SystemTime, String> {
+    let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+    Ok(UNIX_EPOCH + Duration::from_nanos(ns))
+}
 
 /// How long [`seed`] waits for an arm's first measured state before warning that
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an
@@ -67,9 +78,12 @@ pub struct RunConfig {
 
 /// An accepted `move_gripper` goal handed to the coordinator, which executes it
 /// through the same per-tick governing as everything else (the gripper analog of
-/// [`Goal`] for the arms). The opening is the validated goal fraction.
+/// [`Goal`] for the arms). The opening is the validated goal fraction; the
+/// effort cap is validated non-negative, `None` when the goal carried no
+/// preference.
 pub struct GripperGoal {
     pub opening: f64,
+    pub max_effort: Option<f64>,
     pub ctx: move_gripper::GoalContext,
 }
 
@@ -82,6 +96,7 @@ pub struct GripperGoal {
 /// single-flight slot on any exit.
 struct GripperMove {
     target_frac: f64,
+    max_effort: Option<f64>,
     ctx: move_gripper::GoalContext,
     started: Instant,
     /// Nominal chase duration; the runtime aborts once the move runs past
@@ -111,33 +126,67 @@ pub async fn run(
     // a slot is unpaired is a legal no-op, so the backbone streams governed setpoints
     // regardless and a follower simply starts tracking once its pair is
     // established.
-    let left_arm_pub = match left_arm_link::arm_setpoints::declare_publisher(&runner).await {
+    let left_arm_pub = match left_arm_link::joint_setpoints::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare left arm_setpoints publisher: {e}");
+            error!("declare left joint_setpoints publisher: {e}");
             return Err(e);
         }
     };
-    let right_arm_pub = match right_arm_link::arm_setpoints::declare_publisher(&runner).await {
+    let right_arm_pub = match right_arm_link::joint_setpoints::declare_publisher(&runner).await {
         Ok(p) => p,
         Err(e) => {
-            error!("declare right arm_setpoints publisher: {e}");
+            error!("declare right joint_setpoints publisher: {e}");
             return Err(e);
         }
     };
     let left_gripper_pub =
-        match left_gripper_link::gripper_commands::declare_publisher(&runner).await {
+        match left_gripper_link::gripper_setpoints::declare_publisher(&runner).await {
             Ok(p) => p,
             Err(e) => {
-                error!("declare left gripper_commands publisher: {e}");
+                error!("declare left gripper_setpoints publisher: {e}");
                 return Err(e);
             }
         };
     let right_gripper_pub =
-        match right_gripper_link::gripper_commands::declare_publisher(&runner).await {
+        match right_gripper_link::gripper_setpoints::declare_publisher(&runner).await {
             Ok(p) => p,
             Err(e) => {
-                error!("declare right gripper_commands publisher: {e}");
+                error!("declare right gripper_setpoints publisher: {e}");
+                return Err(e);
+            }
+        };
+    // Upstream state relay publishers, one per leader pairing slot: the
+    // measured state each downstream pair reports is relayed up so the
+    // leading node sees the same back-channel a follower gives the
+    // backbone. Publishing while unpaired is a legal no-op.
+    let up_left_arm_pub = match leader_left_arm::joint_states::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare upstream left joint_states publisher: {e}");
+            return Err(e);
+        }
+    };
+    let up_right_arm_pub = match leader_right_arm::joint_states::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("declare upstream right joint_states publisher: {e}");
+            return Err(e);
+        }
+    };
+    let up_left_gripper_pub =
+        match leader_left_gripper::gripper_states::declare_publisher(&runner).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("declare upstream left gripper_states publisher: {e}");
+                return Err(e);
+            }
+        };
+    let up_right_gripper_pub =
+        match leader_right_gripper::gripper_states::declare_publisher(&runner).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("declare upstream right gripper_states publisher: {e}");
                 return Err(e);
             }
         };
@@ -302,8 +351,8 @@ pub async fn run(
             ),
             measured_openings,
         );
-        let chase_opening = |prev_frac: f64, target: Option<f64>| -> f64 {
-            let t = target.unwrap_or(prev_frac);
+        let chase_opening = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
+            let t = target.map_or(prev_frac, |t| t.frac);
             prev_frac + (t - prev_frac).clamp(-opening_rate * dt, opening_rate * dt)
         };
         let cand = GovState::new(
@@ -318,14 +367,19 @@ pub async fn run(
 
         // Publish one governed setpoint per arm on its pairing slot; the slot
         // scopes the stream to its paired arm, so the message carries no arm_id.
-        type BuildSetpoint = fn(JointVec, JointVec) -> peppygen::Result<peppylib::Payload>;
+        type BuildSetpoint = fn(
+            std::time::SystemTime,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        ) -> peppygen::Result<peppylib::Payload>;
         for (side, planner, filters, arm_pub, build, prev_q, governed_q) in [
             (
                 Side::Left,
                 &mut planners.left,
                 &mut dq_filters.left,
                 &left_arm_pub,
-                left_arm_link::arm_setpoints::build_message as BuildSetpoint,
+                left_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.left,
                 governed.arms.left,
             ),
@@ -334,7 +388,7 @@ pub async fn run(
                 &mut planners.right,
                 &mut dq_filters.right,
                 &right_arm_pub,
-                right_arm_link::arm_setpoints::build_message as BuildSetpoint,
+                right_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.right,
                 governed.arms.right,
             ),
@@ -344,47 +398,140 @@ pub async fn run(
             // position (`governed_q`) is untouched, so tracking is unaffected.
             let dq = filtered_velocity(filters, &governed_q, &prev_q, dt);
             planner.commit(governed_q);
-            match build(governed_q, dq) {
+            match pairing_stamp().and_then(|stamp| {
+                build(stamp, governed_q.to_vec(), dq.to_vec(), Vec::new())
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(msg) => {
                     if let Err(e) = arm_pub.publish(msg).await {
-                        warn!("arm_setpoints publish ({} arm): {e}", side.label());
+                        warn!("joint_setpoints publish ({} arm): {e}", side.label());
                     }
                 }
-                Err(e) => error!("build arm_setpoints ({} arm): {e}", side.label()),
+                Err(e) => error!("build joint_setpoints ({} arm): {e}", side.label()),
             }
         }
 
         // Publish each active side's governed opening fraction on its pairing
         // slot (the slot scopes the stream to its paired gripper, so the message
-        // carries only the opening); an idle side stays silent and its gripper
-        // holds the jaws.
-        type BuildOpening = fn(f64) -> peppygen::Result<peppylib::Payload>;
-        for (side, gripper_pub, build, opening_frac, active) in [
+        // carries no gripper_id), relaying the target's effort cap unchanged
+        // (`None` rides as the wire's 0: no preference); an idle side stays
+        // silent and its gripper holds the jaws.
+        type BuildOpening =
+            fn(std::time::SystemTime, f64, f64) -> peppygen::Result<peppylib::Payload>;
+        for (side, gripper_pub, build, opening_frac, target) in [
             (
                 Side::Left,
                 &left_gripper_pub,
-                left_gripper_link::gripper_commands::build_message as BuildOpening,
+                left_gripper_link::gripper_setpoints::build_message as BuildOpening,
                 governed_openings.left,
-                targets.left.is_some(),
+                targets.left,
             ),
             (
                 Side::Right,
                 &right_gripper_pub,
-                right_gripper_link::gripper_commands::build_message as BuildOpening,
+                right_gripper_link::gripper_setpoints::build_message as BuildOpening,
                 governed_openings.right,
-                targets.right.is_some(),
+                targets.right,
             ),
         ] {
-            if !active {
+            let Some(target) = target else {
                 continue;
-            }
-            match build(opening_frac) {
+            };
+            match pairing_stamp().and_then(|stamp| {
+                build(stamp, opening_frac, target.max_effort.unwrap_or(0.0))
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(msg) => {
                     if let Err(e) = gripper_pub.publish(msg).await {
-                        warn!("gripper_commands publish ({} gripper): {e}", side.label());
+                        warn!("gripper_setpoints publish ({} gripper): {e}", side.label());
                     }
                 }
-                Err(e) => error!("build gripper_commands ({} gripper): {e}", side.label()),
+                Err(e) => error!("build gripper_setpoints ({} gripper): {e}", side.label()),
+            }
+        }
+
+        // Relay each limb's measured state up its leader pairing slot (a
+        // legal no-op while unpaired): positions and velocities as the
+        // followers report them, efforts unmeasured (empty per the contract).
+        type BuildUpJoint = fn(
+            std::time::SystemTime,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<f64>,
+        ) -> peppygen::Result<peppylib::Payload>;
+        // Copied out before the loop so no watch guard is held across an await.
+        let relayed_arms = (
+            *channels.left.measured.borrow(),
+            *channels.right.measured.borrow(),
+        );
+        for (side, up_pub, build, measured) in [
+            (
+                Side::Left,
+                &up_left_arm_pub,
+                leader_left_arm::joint_states::build_message as BuildUpJoint,
+                relayed_arms.0,
+            ),
+            (
+                Side::Right,
+                &up_right_arm_pub,
+                leader_right_arm::joint_states::build_message as BuildUpJoint,
+                relayed_arms.1,
+            ),
+        ] {
+            let Some(m) = measured else { continue };
+            match pairing_stamp().and_then(|stamp| {
+                build(
+                    stamp,
+                    m.positions.to_vec(),
+                    m.velocities.to_vec(),
+                    Vec::new(),
+                )
+                .map_err(|e| e.to_string())
+            }) {
+                Ok(msg) => {
+                    if let Err(e) = up_pub.publish(msg).await {
+                        warn!("upstream joint_states publish ({} arm): {e}", side.label());
+                    }
+                }
+                Err(e) => error!("build upstream joint_states ({} arm): {e}", side.label()),
+            }
+        }
+        type BuildUpGripper =
+            fn(std::time::SystemTime, f64, f64, f64) -> peppygen::Result<peppylib::Payload>;
+        let relayed_grippers = (
+            *channels.left.gripper.borrow(),
+            *channels.right.gripper.borrow(),
+        );
+        for (side, up_pub, build, measured) in [
+            (
+                Side::Left,
+                &up_left_gripper_pub,
+                leader_left_gripper::gripper_states::build_message as BuildUpGripper,
+                relayed_grippers.0,
+            ),
+            (
+                Side::Right,
+                &up_right_gripper_pub,
+                leader_right_gripper::gripper_states::build_message as BuildUpGripper,
+                relayed_grippers.1,
+            ),
+        ] {
+            let Some(g) = measured else { continue };
+            match pairing_stamp().and_then(|stamp| {
+                build(stamp, g.fraction, g.effort, g.max_effort).map_err(|e| e.to_string())
+            }) {
+                Ok(msg) => {
+                    if let Err(e) = up_pub.publish(msg).await {
+                        warn!(
+                            "upstream gripper_states publish ({} gripper): {e}",
+                            side.label()
+                        );
+                    }
+                }
+                Err(e) => error!(
+                    "build upstream gripper_states ({} gripper): {e}",
+                    side.label()
+                ),
             }
         }
 
@@ -529,6 +676,7 @@ async fn service_gripper_move(
     {
         *mv = Some(GripperMove {
             target_frac: goal.opening,
+            max_effort: goal.max_effort,
             ctx: goal.ctx,
             started: now,
             budget_s: gripper_move_budget_s(governed_frac, goal.opening, opening_rate_frac_s),
@@ -569,22 +717,37 @@ async fn service_gripper_move(
     }
 }
 
-/// The side's target opening fraction for this tick: an in-flight backbone-executed
+/// One side's resolved tick command: the opening fraction to chase and the
+/// effort cap to relay on the pairing setpoint (`None` = no preference, sent
+/// as the wire's 0, leaving the follower's configured ceiling in charge).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GripperTarget {
+    frac: f64,
+    max_effort: Option<f64>,
+}
+
+/// The side's target for this tick: an in-flight backbone-executed
 /// move owns it; otherwise the commander's streamed command drives it;
 /// otherwise `None` (idle: before any command, or on an unpaired side).
-fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<f64> {
+fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<GripperTarget> {
     if let Some(m) = mv {
-        return Some(m.target_frac);
+        return Some(GripperTarget {
+            frac: m.target_frac,
+            max_effort: m.max_effort,
+        });
     }
     follow_gripper_target(&channels.gripper_command.borrow().clone())
 }
 
-/// Resolve the streamed opening target: the latest commander command clamped
-/// into `[0, 1]`, or `None` when none has arrived. The stream is paired to one
-/// producer, so there is nothing to arbitrate; a stopped producer just leaves
-/// the last opening in place, held by the gripper.
-fn follow_gripper_target(command: &Option<GripperCommand>) -> Option<f64> {
-    command.as_ref().map(|c| c.opening.clamp(0.0, 1.0))
+/// Resolve the streamed target: the latest commander command with its opening
+/// clamped into `[0, 1]`, or `None` when none has arrived. The stream is
+/// paired to one producer, so there is nothing to arbitrate; a stopped
+/// producer just leaves the last opening in place, held by the gripper.
+fn follow_gripper_target(command: &Option<GripperCommand>) -> Option<GripperTarget> {
+    command.as_ref().map(|c| GripperTarget {
+        frac: c.opening.clamp(0.0, 1.0),
+        max_effort: c.max_effort,
+    })
 }
 
 /// The published desired velocity: per joint, the tick's position delta scaled to a rate
@@ -605,7 +768,17 @@ mod tests {
     use super::*;
 
     fn cmd(opening: f64) -> Option<GripperCommand> {
-        Some(GripperCommand { opening })
+        Some(GripperCommand {
+            opening,
+            max_effort: None,
+        })
+    }
+
+    fn target(frac: f64) -> Option<GripperTarget> {
+        Some(GripperTarget {
+            frac,
+            max_effort: None,
+        })
     }
 
     const DT: f64 = 0.01;
@@ -659,9 +832,24 @@ mod tests {
     fn follow_clamps_the_wire_fraction() {
         // In-range passes through; past-open and negative commands clamp into
         // [0, 1] at this boundary.
-        assert_eq!(follow_gripper_target(&cmd(0.5)), Some(0.5));
-        assert_eq!(follow_gripper_target(&cmd(1.5)), Some(1.0));
-        assert_eq!(follow_gripper_target(&cmd(-0.5)), Some(0.0));
+        assert_eq!(follow_gripper_target(&cmd(0.5)), target(0.5));
+        assert_eq!(follow_gripper_target(&cmd(1.5)), target(1.0));
+        assert_eq!(follow_gripper_target(&cmd(-0.5)), target(0.0));
+    }
+
+    #[test]
+    fn follow_relays_the_effort_cap_unchanged() {
+        let command = Some(GripperCommand {
+            opening: 0.5,
+            max_effort: Some(1.5),
+        });
+        assert_eq!(
+            follow_gripper_target(&command),
+            Some(GripperTarget {
+                frac: 0.5,
+                max_effort: Some(1.5),
+            })
+        );
     }
 
     #[test]
@@ -681,7 +869,7 @@ mod tests {
         tx.send_replace(cmd(0.6));
         assert_eq!(
             follow_gripper_target(&rx.borrow()),
-            Some(0.6),
+            target(0.6),
             "a live streamed opening is followed"
         );
 
@@ -695,7 +883,7 @@ mod tests {
         tx.send_replace(cmd(0.3));
         assert_eq!(
             follow_gripper_target(&rx.borrow()),
-            Some(0.3),
+            target(0.3),
             "an opening after the move resumes following"
         );
     }
