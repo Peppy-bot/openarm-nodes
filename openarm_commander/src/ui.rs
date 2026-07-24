@@ -253,7 +253,20 @@ struct Snapshot {
     gestures: Vec<GestureView>,
     // The gesture in flight, if any.
     gesture: Option<GestureStatusView>,
+    // The dataset recorder panel; null when the deployment binds no recorder
+    // (the browser hides the panel entirely).
+    recorder: Option<RecorderView>,
     status: String,
+}
+
+#[derive(Serialize)]
+struct RecorderView {
+    recording: bool,
+    // Stop was requested and the episode is encoding its videos; the goal
+    // stays in flight (and `recording` true) until the save lands.
+    saving: bool,
+    // Frames written to the in-flight episode; 0 between episodes.
+    frames: u64,
 }
 
 #[derive(Serialize)]
@@ -362,6 +375,15 @@ impl Snapshot {
             d_stop: s.d_stop,
             d_safe: s.d_safe,
             max_ee_velocity_m_s: s.max_ee_velocity_m_s,
+            recorder: s.recorder.available.then(|| RecorderView {
+                recording: s.recorder.episode.is_some(),
+                saving: s
+                    .recorder
+                    .episode
+                    .as_ref()
+                    .is_some_and(|e| e.stop.is_cancelled()),
+                frames: s.recorder.episode.as_ref().map_or(0, |e| e.frames),
+            }),
             proximity: live_proximity(s, now).map(|p| ProximityView {
                 distance: p.distance,
                 link_a: p.link_a.clone(),
@@ -490,6 +512,13 @@ pub(crate) enum Command {
     },
     // Stop the playing gesture; the involved sides hold where they are.
     StopGesture,
+    // Start recording a dataset episode labeled with the operator's task text.
+    // Refused when no recorder is bound or an episode is already recording.
+    StartRecording {
+        task: String,
+    },
+    // End the in-flight episode with a save (the recorder's cancel semantics).
+    StopRecording,
 }
 
 #[derive(Deserialize, Copy, Clone)]
