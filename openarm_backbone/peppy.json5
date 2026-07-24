@@ -102,9 +102,6 @@
               // Requested trajectory duration (s); floored at the per-joint
               // velocity-limit duration. 0 = fastest.
               duration_s: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
             }
           },
           result_service: {
@@ -143,9 +140,6 @@
               // Requested trajectory duration (s); floored at the velocity-limit
               // duration. 0 = fastest.
               duration_s: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
             }
           },
           result_service: {
@@ -178,9 +172,6 @@
               // Target opening as a fraction of full jaw travel: 0 = closed,
               // 1 = fully open.
               opening: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
             }
           },
           result_service: {

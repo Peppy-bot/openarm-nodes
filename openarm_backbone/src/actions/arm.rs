@@ -38,27 +38,27 @@ pub async fn run_move_arm_joints(
             .handle_goal_next_request(|req| {
                 let d = &req.data;
                 let Some(idx) = Side::from_arm_id(d.arm_id).map(Side::index) else {
-                    return Ok(move_arm_joints::GoalResponse::reject("arm_id out of range"));
+                    return Ok(move_arm_joints::GoalDecision::reject("arm_id out of range"));
                 };
                 if !d.joint_positions.iter().all(|v| v.is_finite()) {
-                    return Ok(move_arm_joints::GoalResponse::reject(
+                    return Ok(move_arm_joints::GoalDecision::reject(
                         "non-finite joint target",
                     ));
                 }
                 if !(d.duration_s.is_finite() && d.duration_s >= 0.0) {
-                    return Ok(move_arm_joints::GoalResponse::reject("invalid duration"));
+                    return Ok(move_arm_joints::GoalDecision::reject("invalid duration"));
                 }
                 if !target_in_limits(&d.joint_positions, &limits[idx]) {
-                    return Ok(move_arm_joints::GoalResponse::reject(
+                    return Ok(move_arm_joints::GoalDecision::reject(
                         "target out of joint limits",
                     ));
                 }
                 if !claim(&busy[idx]) {
-                    return Ok(move_arm_joints::GoalResponse::reject(
+                    return Ok(move_arm_joints::GoalDecision::reject(
                         "arm is already executing a motion",
                     ));
                 }
-                Ok(move_arm_joints::GoalResponse::accept())
+                Ok(move_arm_joints::GoalDecision::accept())
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
@@ -96,7 +96,7 @@ pub async fn run_move_arm(
             .handle_goal_next_request(|req| {
                 let d = &req.data;
                 let Some(idx) = Side::from_arm_id(d.arm_id).map(Side::index) else {
-                    return Ok(move_arm::GoalResponse::reject("arm_id out of range"));
+                    return Ok(move_arm::GoalDecision::reject("arm_id out of range"));
                 };
                 let finite = d
                     .position
@@ -104,23 +104,23 @@ pub async fn run_move_arm(
                     .chain(d.orientation.iter())
                     .all(|v| v.is_finite());
                 if !finite {
-                    return Ok(move_arm::GoalResponse::reject("non-finite pose"));
+                    return Ok(move_arm::GoalDecision::reject("non-finite pose"));
                 }
                 let quat_norm = d.orientation.iter().map(|v| v * v).sum::<f64>().sqrt();
                 if quat_norm < 1e-6 {
-                    return Ok(move_arm::GoalResponse::reject(
+                    return Ok(move_arm::GoalDecision::reject(
                         "degenerate orientation quaternion",
                     ));
                 }
                 if !(d.duration_s.is_finite() && d.duration_s >= 0.0) {
-                    return Ok(move_arm::GoalResponse::reject("invalid duration"));
+                    return Ok(move_arm::GoalDecision::reject("invalid duration"));
                 }
                 if !claim(&busy[idx]) {
-                    return Ok(move_arm::GoalResponse::reject(
+                    return Ok(move_arm::GoalDecision::reject(
                         "arm is already executing a motion",
                     ));
                 }
-                Ok(move_arm::GoalResponse::accept())
+                Ok(move_arm::GoalDecision::accept())
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };
