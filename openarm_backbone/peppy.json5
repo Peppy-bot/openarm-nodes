@@ -72,9 +72,6 @@
               // Requested trajectory duration (s); floored at the per-joint
               // velocity-limit duration. 0 = fastest.
               duration_s: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
             }
           },
           result_service: {
@@ -113,9 +110,6 @@
               // Requested trajectory duration (s); floored at the velocity-limit
               // duration. 0 = fastest.
               duration_s: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
             }
           },
           result_service: {
@@ -152,9 +146,6 @@
               // (magnitude, in the gripper's effort unit). 0 = no preference;
               // the gripper applies its configured ceiling.
               max_effort: "f64"
-            },
-            response_message_format: {
-              accepted: "bool"
             }
           },
           result_service: {
