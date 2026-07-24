@@ -4,6 +4,8 @@
 
 # Rust
 **/target/
+**/*.rs.bk
+*.pdb
 *.swp
 *.bak
 *.orig
