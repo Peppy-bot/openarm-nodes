@@ -12,6 +12,7 @@ use peppygen::NodeRunner;
 use peppygen::QoSProfile;
 use peppygen::consumed_actions::recorder::record_episode;
 use peppygen::consumed_actions::recorder::record_episode::ResultOutcome;
+use peppygen::consumed_services::recorder::finish_session;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -22,6 +23,9 @@ use crate::result_wait::{RESULT_POLL, RESULT_RETRY_DELAY, result_poll_retryable}
 // Goal-accept round-trip to a pinned producer; answered directly, so this only
 // needs to cover the decider, not a discovery probe.
 const GOAL_TIMEOUT: Duration = Duration::from_secs(2);
+// finish_session finalizes the dataset and completes the mirror before
+// answering, which can carry a large upload on a long session.
+const FINISH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Whether this deployment binds a recorder instance (the slot is
 /// zero_or_more); resolved once at startup to gate the panel.
@@ -157,6 +161,33 @@ async fn run(
         Err(e) => (false, format!("episode result error: {e}")),
     };
     finalize(&feedback, success, summary).await;
+}
+
+/// Call the recorder's finish_session (finalize + mirror + fresh session in
+/// place) and report the outcome to the owner.
+pub fn spawn_finish(runner: Arc<NodeRunner>, feedback: mpsc::Sender<Feedback>) {
+    tokio::spawn(async move {
+        let Some(target) = finish_session::bound_producers(&runner).first() else {
+            finish_done(&feedback, "no recorder bound".to_string()).await;
+            return;
+        };
+        let summary = match finish_session::poll(&runner, target, FINISH_TIMEOUT).await {
+            Ok(reply) => match reply.data.error {
+                Some(reason) => format!("session not finished: {reason}"),
+                None => format!(
+                    "session {} finished and ready for replay",
+                    reply.data.session
+                ),
+            },
+            Err(e) => format!("finish_session failed: {e}"),
+        };
+        finish_done(&feedback, summary).await;
+    });
+}
+
+async fn finish_done(feedback: &mpsc::Sender<Feedback>, summary: String) {
+    info!(%summary, "finish_session done");
+    let _ = feedback.send(Feedback::SessionFinished { summary }).await;
 }
 
 // The one-line outcome for the status bar, from the recorder's result fields.

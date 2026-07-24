@@ -156,6 +156,9 @@ impl GripperTarget {
 pub struct RecorderState {
     pub available: bool,
     pub episode: Option<RecordingEpisode>,
+    // A finish_session call is in flight (finalize + mirror of the current
+    // dataset); gates the panel's Finish button.
+    pub finishing: bool,
 }
 
 /// One in-flight record_episode goal: the live frame count from its feedback
@@ -171,6 +174,7 @@ impl RecorderState {
         Self {
             available: false,
             episode: None,
+            finishing: false,
         }
     }
 }

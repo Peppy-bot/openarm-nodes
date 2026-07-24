@@ -85,6 +85,11 @@ pub enum Feedback {
     RecordDone {
         summary: String,
     },
+    // finish_session answered; the summary names the finished session or the
+    // refusal reason.
+    SessionFinished {
+        summary: String,
+    },
 }
 
 /// The setpoints to stream this tick. `None` for a side means its deadman is off, so
@@ -596,6 +601,25 @@ impl Owner {
                     task,
                 );
             }
+            Command::FinishSession => {
+                if !self.state.recorder.available {
+                    self.state.set_status("no recorder in this deployment");
+                    return;
+                }
+                if self.state.recorder.episode.is_some() {
+                    self.state
+                        .set_status("stop recording before finishing the session");
+                    return;
+                }
+                if self.state.recorder.finishing {
+                    self.state.set_status("already finishing");
+                    return;
+                }
+                self.state.recorder.finishing = true;
+                self.state
+                    .set_status("finishing session (finalize + mirror)");
+                record::spawn_finish(self.runner.clone(), self.feedback_tx.clone());
+            }
             Command::StopRecording => match &self.state.recorder.episode {
                 Some(episode) if episode.stop.is_cancelled() => {
                     self.state.set_status("still saving the episode");
@@ -673,6 +697,10 @@ impl Owner {
             }
             Feedback::RecordDone { summary } => {
                 self.state.recorder.episode = None;
+                self.state.set_status(summary);
+            }
+            Feedback::SessionFinished { summary } => {
+                self.state.recorder.finishing = false;
                 self.state.set_status(summary);
             }
         }

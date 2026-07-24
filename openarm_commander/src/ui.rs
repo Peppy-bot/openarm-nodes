@@ -262,6 +262,8 @@ struct Snapshot {
 #[derive(Serialize)]
 struct RecorderView {
     recording: bool,
+    // finish_session in flight (finalize + mirror); gates the Finish button.
+    finishing: bool,
     // Stop was requested and the episode is encoding its videos; the goal
     // stays in flight (and `recording` true) until the save lands.
     saving: bool,
@@ -377,6 +379,7 @@ impl Snapshot {
             max_ee_velocity_m_s: s.max_ee_velocity_m_s,
             recorder: s.recorder.available.then(|| RecorderView {
                 recording: s.recorder.episode.is_some(),
+                finishing: s.recorder.finishing,
                 saving: s
                     .recorder
                     .episode
@@ -519,6 +522,9 @@ pub(crate) enum Command {
     },
     // End the in-flight episode with a save (the recorder's cancel semantics).
     StopRecording,
+    // Finalize and mirror the current session's dataset and open a fresh one;
+    // the finished directory becomes replayable. Refused while recording.
+    FinishSession,
 }
 
 #[derive(Deserialize, Copy, Clone)]
