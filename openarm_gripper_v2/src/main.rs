@@ -31,6 +31,10 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so state consumers age samples on one timeline.
+        peppygen::clock::init(&node_runner).await?;
+
         let gripper_id = params.gripper_id;
         // Resolves this side's signed opening direction (the two v2 grippers are
         // mechanically mirrored) and rejects an out-of-range id at bringup.
@@ -134,9 +138,9 @@ fn main() -> Result<()> {
         // own, so it never contends with the follow loop for the bus.
         tokio::spawn(stream::run(
             node_runner.clone(),
-            gripper_id,
             params.state_rate_hz,
             motor_geometry,
+            geometry::effort_ceiling_nm(params.force_limit_pu),
             gripper.clone(),
             node_runner.cancellation_token().clone(),
         ));

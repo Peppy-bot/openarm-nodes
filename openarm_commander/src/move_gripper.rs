@@ -29,9 +29,10 @@ pub fn spawn(
     token: CancellationToken,
     side: Side,
     opening: f64,
+    max_effort: f64,
 ) {
     tokio::spawn(async move {
-        run(runner, feedback, token, side, opening).await;
+        run(runner, feedback, token, side, opening, max_effort).await;
     });
 }
 
@@ -41,13 +42,15 @@ async fn run(
     token: CancellationToken,
     side: Side,
     opening: f64,
+    max_effort: f64,
 ) {
     let label = side.label();
-    info!(side = label, opening, "fire move_gripper");
+    info!(side = label, opening, max_effort, "fire move_gripper");
 
     let goal = backbone_move_gripper::GoalRequest {
         gripper_id: side.gripper_id(),
         opening,
+        max_effort,
     };
 
     let downstream = match backbone_move_gripper::ActionHandle::fire_goal(

@@ -8,8 +8,6 @@
     name: "openarm_gripper_v2",
     tag: "v1",
     implements: [
-      // Always-on measured opening for teleop and monitoring.
-      { name: "openarm_gripper_states", tag: "v1", link_id: "states" },
       // Per-component readiness for the real robot_initializer.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
     ],
@@ -20,13 +18,24 @@
         // to the pair (no gripper_id demux). Optional: the gripper boots
         // unpaired (moves still work via backbone goals) and is paired at
         // the backbone's start.
-        {
-          name: "openarm_gripper_link",
-          tag: "v1",
-          role: "gripper",
-          link_id: "backbone",
-          optional: true,
-        },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "backbone", optional: true },
+      ],
+    },
+  },
+  interfaces: {
+    topics: {
+      emits: [
+        // The `backbone` pairing slot: the topic this role emits.
+        { link_id: "backbone", name: "gripper_states" },
+      ],
+      consumes: [
+        // The counterpart role's topic on the same slot.
+        { link_id: "backbone", name: "gripper_setpoints" },
+      ],
+    },
+    services: {
+      exposes: [
+        { link_id: "ready", name: "is_ready" },
       ],
     },
   },
@@ -46,30 +55,14 @@
       // POS_FORCE absolute speed limit (rad/s at the motor). Default matches enactic's
       // reference (test_gripper_posforce).
       speed_rad_s: { $type: "f64", $default: 25.0 },
-      // POS_FORCE torque-current limit (per-unit, 0..1): the grip-force cap the gripper
-      // may apply. Default matches enactic's reference; raise for a firmer grip.
+      // POS_FORCE torque-current ceiling (per-unit, 0..1): the largest grip-force cap
+      // the gripper applies; a commanded max_effort only lowers a tick's cap beneath
+      // it. Reported on gripper_states in N*m as the effort ceiling. Default matches
+      // enactic's reference; raise for a firmer grip.
       force_limit_pu: { $type: "f64", $default: 0.15 },
       // Rate (Hz) of the always-on measured-opening stream (`gripper_states`);
       // consumers' needs vary too much for a default to be meaningful.
       state_rate_hz: "u32"
     }
-  },
-  interfaces: {
-    topics: {
-      emits: [
-        // The `backbone` pairing slot: the topic this role emits.
-        { link_id: "backbone", name: "gripper_states" },
-        { link_id: "states", name: "gripper_states" },
-      ],
-      consumes: [
-        // The counterpart role's topic on the same slot.
-        { link_id: "backbone", name: "gripper_commands" },
-      ],
-    },
-    services: {
-      exposes: [
-        { link_id: "ready", name: "is_ready" },
-      ],
-    },
   },
 }

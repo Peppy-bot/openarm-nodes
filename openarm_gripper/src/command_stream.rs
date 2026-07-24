@@ -1,5 +1,5 @@
 // Listens for streamed opening setpoints from the paired backbone (the
-// `backbone` pairing slot of openarm_gripper_link) and keeps the latest one
+// `backbone` pairing slot of gripper_link) and keeps the latest one
 // in a watch channel for the follow loop. Subscribing while unpaired is legal:
 // the subscription stays silent until a backbone pairs, and only the paired
 // peer's messages surface, so there is no gripper_id filter. A non-finite
@@ -24,10 +24,10 @@ pub async fn run(
     latest: watch::Sender<Option<GripperCommand>>,
     token: CancellationToken,
 ) {
-    let mut subscription = match backbone::gripper_commands::subscribe(&runner).await {
+    let mut subscription = match backbone::gripper_setpoints::subscribe(&runner).await {
         Ok(subscription) => subscription,
         Err(e) => {
-            error!(error = %e, "gripper_commands subscribe");
+            error!(error = %e, "gripper_setpoints subscribe");
             return;
         }
     };
@@ -40,12 +40,12 @@ pub async fn run(
             Ok(Some(pair)) => pair,
             Ok(None) => return,
             Err(e) => {
-                error!(error = %e, "gripper_commands receive");
+                error!(error = %e, "gripper_setpoints receive");
                 continue;
             }
         };
         if !msg.opening.is_finite() {
-            warn!("gripper_commands: dropping message with non-finite opening");
+            warn!("gripper_setpoints: dropping message with non-finite opening");
             continue;
         }
         latest.send_replace(Some(GripperCommand {

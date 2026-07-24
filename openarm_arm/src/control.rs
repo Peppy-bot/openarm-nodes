@@ -106,13 +106,15 @@ async fn run_control(
         Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
     loop {
-        let (q, qdot) = read_state(&arm, cfg.recv_timeout_us);
+        let state = read_state(&arm, cfg.recv_timeout_us);
+        let (q, qdot) = (state.positions, state.velocities);
         let ff_tau = feedforward(&mut model, &q, &qdot);
         wiring
             .measured
             .send_replace(Some(crate::stream::MeasuredState {
                 positions: q,
                 velocities: qdot,
+                torques: state.torques,
             }));
 
         // Follow the latest governed setpoint; hold the measured pose (zero
@@ -208,13 +210,12 @@ fn disable_motors(arm: &Mutex<ArmCan>) {
     a.disable_all();
 }
 
-/// Read the measured joint state (positions + velocities) one time.
-fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> (JointVec, JointVec) {
+/// Read the measured joint state (positions, velocities, torques) one time.
+fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> openarm_can::ArmState {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
     a.refresh_all();
     a.recv_all(recv_timeout_us);
-    let state = a.get_state();
-    (state.positions, state.velocities)
+    a.get_state()
 }
 
 #[cfg(test)]

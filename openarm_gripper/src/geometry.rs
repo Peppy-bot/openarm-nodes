@@ -13,9 +13,11 @@ pub fn fraction_to_motor_rad(fraction: f64) -> f64 {
     fraction * OPEN_RAD
 }
 
-/// Inverse of [`fraction_to_motor_rad`].
+/// Motor radians to the wire's opening fraction, clamped to 0..=1 so
+/// encoder readings past the calibrated travel cannot leave the contract's
+/// range. Inverse of [`fraction_to_motor_rad`] within that travel.
 pub fn motor_rad_to_fraction(motor_rad: f64) -> f64 {
-    motor_rad / OPEN_RAD
+    (motor_rad / OPEN_RAD).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -27,6 +29,12 @@ mod tests {
         assert_eq!(fraction_to_motor_rad(0.0), 0.0);
         assert_eq!(fraction_to_motor_rad(1.0), OPEN_RAD);
         const { assert!(OPEN_RAD < 0.0) };
+    }
+
+    #[test]
+    fn measured_fraction_clamps_to_the_wire_range() {
+        assert_eq!(motor_rad_to_fraction(OPEN_RAD * 1.2), 1.0);
+        assert_eq!(motor_rad_to_fraction(OPEN_RAD * -0.1), 0.0);
     }
 
     #[test]

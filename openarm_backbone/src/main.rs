@@ -73,6 +73,10 @@ fn main() -> Result<()> {
         .init();
 
     NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Pairing stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), so setpoint consumers age samples on one timeline.
+        peppygen::clock::init(&node_runner).await?;
+
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         let max_joint_velocity_rad_s: JointVec = [
             params.max_joint_velocity_rad_s_1,

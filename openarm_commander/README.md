@@ -4,7 +4,8 @@ The browser control panel for the OpenArm (either hardware generation). It serve
 a page on port 8765 with three interaction modes:
 
 - **Streaming**: deadman-gated live control. Enabling a side streams its arm and
-  gripper setpoints continuously on `arm_joint_commands` / `gripper_commands`.
+  gripper setpoints continuously on that side's joint_link / gripper_link
+  pairing slots.
   Per-arm controls: seven joint sliders, world-frame x/y/z sliders, an
   orientation arcball, and an elbow-swivel (psi) slider that moves the elbow
   through the null space while the hand holds still. The touched control leads;
@@ -61,15 +62,23 @@ peppy node run openarm_commander:v1 \
     joint_jog_acceleration_rad_s2=10.0 \
     collision_governor_enabled=true d_stop=0.005 d_safe=0.02 \
     --link backbone@backbone_inst \
-    --link left_arm_states@left_arm_inst \
-    --link right_arm_states@right_arm_inst \
-    --link left_gripper_states@left_grip_inst \
-    --link right_gripper_states@right_grip_inst
+    --link left_arm@backbone_inst/leader_left_arm \
+    --link right_arm@backbone_inst/leader_right_arm \
+    --link left_gripper@backbone_inst/leader_left_gripper \
+    --link right_gripper@backbone_inst/leader_right_gripper \
+    --link observed_left_arm@left_arm_inst \
+    --link observed_right_arm@right_arm_inst \
+    --link observed_left_gripper@left_grip_inst \
+    --link observed_right_gripper@right_grip_inst
 ```
 
 Then open **http://localhost:8765**. The page reconnects automatically if the
 node restarts; the port can be changed with `PEPPY_JC_PORT` and the bind address
-restricted with `PEPPY_JC_BIND_IP`.
+restricted with `PEPPY_JC_BIND_IP`. A gripper that reports effort control
+(v2's POS_FORCE force cap) adds a **max effort** slider under its opening
+slider, bounded by the gripper's reported ceiling and applied to both streamed
+openings and discrete moves; grippers without effort control (v1, the sims)
+hide it.
 
 ## Troubleshooting
 
