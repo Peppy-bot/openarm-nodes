@@ -44,18 +44,48 @@ MUJOCO_IMAGE="${IMAGE_NAMESPACE}/openarm-mujoco-sim:${MUJOCO_VERSION}-${IMAGE_RE
 # Multi-arch builds need a docker-container driver builder; the default "docker"
 # driver can neither build multiple platforms nor push a manifest list. QEMU
 # binfmt handlers let the host emulate arm64 while building the arm64 layers.
-echo "==> Ensuring QEMU binfmt handlers are registered (arm64 emulation)..."
-if [[ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]]; then
-    docker run --privileged --rm tonistiigi/binfmt --install arm64
-fi
+#
+# Bootstrap images are pinned by digest (multi-arch OCI indexes) so the
+# emulation and BuildKit versions are reproducible and tamper-evident. Refresh
+# with `docker buildx imagetools inspect <ref>` when intentionally upgrading.
+BINFMT_IMAGE="tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0"
+BUILDKIT_IMAGE="moby/buildkit@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec"
+# BuildKit denies host-network RUN steps unless its daemon starts with the
+# network.host entitlement (a buildkitd flag, settable only at creation). The
+# per-build --allow network.host requests it; this grants it.
+BUILDKITD_FLAGS="--allow-insecure-entitlement network.host"
 
-echo "==> Ensuring buildx builder '${BUILDX_BUILDER}' exists..."
-if ! docker buildx inspect "${BUILDX_BUILDER}" >/dev/null 2>&1; then
-    # network=host preserves the host networking the apt/pip steps rely on.
+echo "==> Registering QEMU binfmt handlers (arm64 emulation)..."
+docker run --privileged --rm "${BINFMT_IMAGE}" --install arm64
+
+echo "==> Ensuring buildx builder '${BUILDX_BUILDER}' has the host-network entitlement..."
+# Reuse the builder only if its buildkit daemon already carries the entitlement;
+# otherwise replace it, since the flag cannot be added to a running builder. The
+# underlying buildkit container's config is the reliable source of truth (a
+# substring test on captured output avoids a grep -q/pipefail SIGPIPE race).
+if docker buildx inspect "${BUILDX_BUILDER}" >/dev/null 2>&1 \
+    && [[ "$(docker inspect "buildx_buildkit_${BUILDX_BUILDER}0" 2>/dev/null || true)" == *network.host* ]]; then
+    echo "    reusing existing builder"
+else
+    docker buildx rm "${BUILDX_BUILDER}" >/dev/null 2>&1 || true
+    # network=host puts the buildkit daemon on the host network; the buildkitd
+    # flag additionally permits host-network RUN steps in the build.
     docker buildx create --name "${BUILDX_BUILDER}" \
         --driver docker-container \
         --driver-opt network=host \
+        --driver-opt "image=${BUILDKIT_IMAGE}" \
+        --buildkitd-flags "${BUILDKITD_FLAGS}" \
         --bootstrap
+fi
+
+# Fail fast if the active builder cannot actually emulate arm64, rather than
+# silently publishing an amd64-only "multi-arch" manifest.
+echo "==> Verifying builder '${BUILDX_BUILDER}' offers linux/arm64..."
+BUILDER_PLATFORMS="$(docker buildx inspect --bootstrap "${BUILDX_BUILDER}" || true)"
+if [[ "${BUILDER_PLATFORMS}" != *linux/arm64* ]]; then
+    echo "ERROR: builder '${BUILDX_BUILDER}' does not report linux/arm64 support;" >&2
+    echo "       arm64 emulation is unavailable. Aborting before publish." >&2
+    exit 1
 fi
 # ─────────────────────────────────────────────────────────────────────────────
 
