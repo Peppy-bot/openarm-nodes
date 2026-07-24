@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalResponse};
+use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalDecision, GoalResponse};
 use peppygen::{NodeRunner, Result};
 use tokio::sync::mpsc;
 use tracing::error;
@@ -17,6 +17,14 @@ use tracing::error;
 use crate::Side;
 use crate::actions::claim;
 use crate::coordinator::GripperGoal;
+
+fn accept_goal() -> GoalDecision {
+    GoalDecision::Accept(GoalResponse::new(true, None))
+}
+
+fn reject_goal(reason: impl Into<String>) -> GoalDecision {
+    GoalDecision::Reject(GoalResponse::new(false, Some(reason.into())))
+}
 
 /// Expose `move_gripper`: validate + claim, then hand the goal to the
 /// coordinator. The coordinator releases the busy slot when the move ends.
@@ -31,21 +39,18 @@ pub async fn run_move_gripper(
             .handle_goal_next_request(|req| {
                 let d = &req.data;
                 let Some(idx) = Side::from_gripper_id(d.gripper_id).map(Side::index) else {
-                    return Ok(GoalResponse::reject("gripper_id out of range"));
+                    return Ok(reject_goal("gripper_id out of range"));
                 };
                 if !d.opening.is_finite() {
-                    return Ok(GoalResponse::reject("non-finite gripper opening"));
+                    return Ok(reject_goal("non-finite gripper opening"));
                 }
                 if !(0.0..=1.0).contains(&d.opening) {
-                    return Ok(GoalResponse::reject(format!(
-                        "opening {} outside [0, 1]",
-                        d.opening
-                    )));
+                    return Ok(reject_goal(format!("opening {} outside [0, 1]", d.opening)));
                 }
                 if !claim(&busy[idx]) {
-                    return Ok(GoalResponse::reject("gripper is already executing a move"));
+                    return Ok(reject_goal("gripper is already executing a move"));
                 }
-                Ok(GoalResponse::accept())
+                Ok(accept_goal())
             })
             .await?;
         let Some(ctx) = accepted else { return Ok(()) };

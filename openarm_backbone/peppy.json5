@@ -104,7 +104,11 @@
               duration_s: "f64"
             },
             response_message_format: {
-              accepted: "bool"
+              accepted: "bool",
+              error_message: {
+                $type: "string",
+                $optional: true
+              }
             }
           },
           result_service: {
@@ -145,7 +149,11 @@
               duration_s: "f64"
             },
             response_message_format: {
-              accepted: "bool"
+              accepted: "bool",
+              error_message: {
+                $type: "string",
+                $optional: true
+              }
             }
           },
           result_service: {
@@ -180,7 +188,11 @@
               opening: "f64"
             },
             response_message_format: {
-              accepted: "bool"
+              accepted: "bool",
+              error_message: {
+                $type: "string",
+                $optional: true
+              }
             }
           },
           result_service: {
