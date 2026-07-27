@@ -9,11 +9,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use openarm_can::{GripperCan, Mit};
+use openarm_can::{CanErrorThrottle, GripperCan, Mit};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
-use tracing::{error, info};
+use tracing::error;
 
 use crate::command_stream::GripperCommand;
 use crate::geometry;
@@ -22,6 +22,13 @@ use crate::geometry;
 // gripper entry). Hardcoded, not configurable in the ROS2 reference either.
 pub const KP: f64 = 16.0;
 pub const KD: f64 = 0.2;
+
+const CONTEXT: &str = "gripper follow";
+
+/// Consecutive failed ticks before the loop declares a hard fault and stops
+/// the node: ~2 s at the configured 100 Hz, long enough to ride out bus-off
+/// recovery, short enough that a dead bus cannot masquerade as healthy.
+const FAULT_TICKS: u64 = 200;
 
 #[derive(Clone)]
 pub struct ControlConfig {
@@ -60,43 +67,16 @@ pub async fn run(
             g.recv_all(cfg.recv_timeout_us)
         })();
         match tick {
-            Ok(()) => throttle.success(),
-            Err(e) => throttle.failure(&e),
+            Ok(()) => throttle.success(CONTEXT),
+            Err(e) => throttle.failure(CONTEXT, &e),
         }
-    }
-}
-
-/// One log line per failure burst instead of several per tick at the loop
-/// rate: the first failure logs, a long outage re-logs every 100th tick, and
-/// recovery logs once.
-struct CanErrorThrottle {
-    consecutive: u64,
-}
-
-impl CanErrorThrottle {
-    const REPEAT_EVERY: u64 = 100;
-
-    fn new() -> Self {
-        Self { consecutive: 0 }
-    }
-
-    fn failure(&mut self, e: &openarm_can::CanError) {
-        if self.consecutive.is_multiple_of(Self::REPEAT_EVERY) {
-            error!(
-                "gripper CAN tick failed ({} consecutive): {e}",
-                self.consecutive + 1
-            );
+        // A burst this long is a hard fault, not a hiccup: stop the node so
+        // the shutdown hooks disable the motor and the stack shows a dead
+        // instance instead of a ready node publishing a frozen state.
+        if throttle.consecutive() >= FAULT_TICKS {
+            error!("persistent CAN fault ({FAULT_TICKS} consecutive failed ticks): stopping node");
+            token.cancel();
+            return;
         }
-        self.consecutive += 1;
-    }
-
-    fn success(&mut self) {
-        if self.consecutive > 0 {
-            info!(
-                "gripper CAN recovered after {} failed ticks",
-                self.consecutive
-            );
-        }
-        self.consecutive = 0;
     }
 }

@@ -28,7 +28,8 @@ const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Adapts a CAN failure into the runtime error type so bring-up failures
 /// return through the runtime's error path, which runs the shutdown hooks.
 /// A panic would skip them, leaving the motor energised and the instance
-/// lock held.
+/// lock held. Repeated per node because peppygen is generated per node; no
+/// shared crate can name its Error type.
 fn can_err(e: openarm_can::CanError) -> peppygen::Error {
     peppygen::Error::Io(std::io::Error::other(e))
 }
