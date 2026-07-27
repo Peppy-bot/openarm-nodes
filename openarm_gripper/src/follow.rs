@@ -9,10 +9,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use openarm_can::GripperCan;
+use openarm_can::{GripperCan, Mit};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
+use tracing::error;
 
 use crate::command_stream::GripperCommand;
 use crate::geometry;
@@ -25,11 +26,11 @@ pub const KD: f64 = 0.2;
 #[derive(Clone)]
 pub struct ControlConfig {
     pub cycle_period: Duration,
-    pub recv_timeout_us: i32,
+    pub recv_timeout_us: u32,
 }
 
 pub async fn run(
-    gripper: Arc<Mutex<GripperCan>>,
+    gripper: Arc<Mutex<GripperCan<Mit>>>,
     cmd: watch::Receiver<Option<GripperCommand>>,
     cfg: ControlConfig,
     token: CancellationToken,
@@ -51,9 +52,15 @@ pub async fn run(
         // Command only when there is a target; refresh state every tick either way.
         if let Some(opening) = opening {
             let target_motor_rad = geometry::fraction_to_motor_rad(opening.clamp(0.0, 1.0));
-            g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0);
+            if let Err(e) = g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0) {
+                error!("gripper command: {e}");
+            }
         }
-        g.refresh_all();
-        g.recv_all(cfg.recv_timeout_us);
+        if let Err(e) = g.refresh_all() {
+            error!("request state frame: {e}");
+        }
+        if let Err(e) = g.recv_all(cfg.recv_timeout_us) {
+            error!("receive state frames: {e}");
+        }
     }
 }

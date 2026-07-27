@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use openarm_can::GripperCan;
+use openarm_can::{GripperCan, PosForce};
 use peppygen::NodeRunner;
 use peppygen::paired_topics::backbone;
 use peppylib::runtime::CancellationToken;
@@ -30,7 +30,7 @@ pub async fn run(
     state_rate_hz: u32,
     geometry: Geometry,
     effort_ceiling_nm: f64,
-    gripper: Arc<Mutex<GripperCan>>,
+    gripper: Arc<Mutex<GripperCan<PosForce>>>,
     token: CancellationToken,
 ) {
     let peer_pub = match backbone::gripper_states::declare_publisher(&runner).await {

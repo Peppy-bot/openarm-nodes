@@ -9,10 +9,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use openarm_can::GripperCan;
+use openarm_can::{GripperCan, PosForce};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
+use tracing::error;
 
 use crate::command_stream::GripperCommand;
 use crate::geometry::{self, Geometry};
@@ -20,7 +21,7 @@ use crate::geometry::{self, Geometry};
 #[derive(Clone)]
 pub struct ControlConfig {
     pub cycle_period: Duration,
-    pub recv_timeout_us: i32,
+    pub recv_timeout_us: u32,
     /// This instance's signed opening-fraction to motor-radian mapping.
     pub geometry: Geometry,
     /// POS_FORCE absolute speed limit (rad/s at the motor).
@@ -31,7 +32,7 @@ pub struct ControlConfig {
 }
 
 pub async fn run(
-    gripper: Arc<Mutex<GripperCan>>,
+    gripper: Arc<Mutex<GripperCan<PosForce>>>,
     cmd: watch::Receiver<Option<GripperCommand>>,
     cfg: ControlConfig,
     token: CancellationToken,
@@ -56,9 +57,15 @@ pub async fn run(
                 .geometry
                 .fraction_to_motor_rad(command.opening.clamp(0.0, 1.0));
             let torque_pu = geometry::effort_to_torque_pu(command.max_effort, cfg.force_limit_pu);
-            g.set_position(target_motor_rad, cfg.speed_rad_s, torque_pu);
+            if let Err(e) = g.set_position(target_motor_rad, cfg.speed_rad_s, torque_pu) {
+                error!("gripper command: {e}");
+            }
         }
-        g.refresh_all();
-        g.recv_all(cfg.recv_timeout_us);
+        if let Err(e) = g.refresh_all() {
+            error!("request state frame: {e}");
+        }
+        if let Err(e) = g.recv_all(cfg.recv_timeout_us) {
+            error!("receive state frames: {e}");
+        }
     }
 }

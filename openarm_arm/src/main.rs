@@ -13,7 +13,7 @@ mod friction;
 mod stream;
 
 use control::ControlConfig;
-use openarm_can::{ARM_MOTOR_TYPES, ARM_RECV_IDS, ARM_SEND_IDS, ArmCan, CallbackMode};
+use openarm_can::ArmCan;
 use openarm_description::{HardwareVersion, Side};
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
@@ -51,7 +51,7 @@ fn side_for(arm_id: u8) -> Side {
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
 const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
-const BRINGUP_RECV_US: i32 = 500;
+const BRINGUP_RECV_US: u32 = 500;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Tighter bound for shutdown lock removal so motor disable + lock removal stays
@@ -127,12 +127,7 @@ fn main() -> Result<()> {
                 params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7,
             ],
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
-            recv_timeout_us: i32::try_from(params.recv_timeout_us).unwrap_or_else(|_| {
-                panic!(
-                    "recv_timeout_us ({}) exceeds i32::MAX",
-                    params.recv_timeout_us
-                )
-            }),
+            recv_timeout_us: params.recv_timeout_us,
             limits: model.limits(),
         };
 
@@ -184,17 +179,16 @@ fn main() -> Result<()> {
         }
 
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
+        // Arm motor lineup + CAN addressing are identical across generations; open()
+        // registers them.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-        // Arm motor lineup + CAN addressing are identical across generations.
-        let mut arm = ArmCan::new(&can_interface, ENABLE_FD).expect("ArmCan::new");
-        arm.init_motors(&ARM_MOTOR_TYPES, &ARM_SEND_IDS, &ARM_RECV_IDS);
-        arm.set_callback_mode(CallbackMode::Ignore);
-        arm.enable_all();
+        let mut arm = ArmCan::open(&can_interface, ENABLE_FD).expect("ArmCan::open");
+        arm.enable_all().expect("enable arm motors");
         tokio::time::sleep(POST_ENABLE_SLEEP).await;
-        arm.recv_all(BRINGUP_RECV_US);
-        arm.set_callback_mode(CallbackMode::State);
-        // recv_all in State mode populates initial joint state; without it get_state() returns zeros.
-        arm.recv_all(BRINGUP_RECV_US);
+        arm.drain(BRINGUP_RECV_US).expect("drain enable replies");
+        // recv_all populates initial joint state; without it get_state() returns zeros.
+        arm.recv_all(BRINGUP_RECV_US)
+            .expect("receive initial joint state");
         info!("arm ready");
 
         let arm = Arc::new(Mutex::new(arm));

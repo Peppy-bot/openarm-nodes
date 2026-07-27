@@ -39,7 +39,7 @@ pub struct ControlConfig {
     pub kp: JointVec,
     pub kd: JointVec,
     pub cycle_period: Duration,
-    pub recv_timeout_us: i32,
+    pub recv_timeout_us: u32,
     /// Joint position limits, parsed from the URDF, the final guard clamp applied
     /// to every governed setpoint before it reaches the motors.
     pub limits: [Limit; ARM_DOF],
@@ -147,7 +147,9 @@ async fn run_control(
     tokio::time::sleep(POST_DISABLE_SLEEP).await;
     {
         let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-        a.recv_all(cfg.recv_timeout_us);
+        if let Err(e) = a.recv_all(cfg.recv_timeout_us) {
+            error!("drain disable replies: {e}");
+        }
     }
     // A dropped receiver (main.rs already exited) is fine; nothing to do.
     let _ = shutdown_tx.send(());
@@ -175,7 +177,8 @@ fn command(
     dq_des: &JointVec,
 ) {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-    a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau);
+    a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau)
+        .expect("MIT command");
 }
 
 /// Clamp a governed setpoint into the joint position limits, the final guard
@@ -207,14 +210,16 @@ fn clamp_setpoint_to_limits(
 /// it, since going limp is the safe failure state.
 fn disable_motors(arm: &Mutex<ArmCan>) {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-    a.disable_all();
+    if let Err(e) = a.disable_all() {
+        error!("disable motors: {e}");
+    }
 }
 
 /// Read the measured joint state (positions, velocities, torques) one time.
-fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: i32) -> openarm_can::ArmState {
+fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: u32) -> openarm_can::ArmState {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-    a.refresh_all();
-    a.recv_all(recv_timeout_us);
+    a.refresh_all().expect("request state frames");
+    a.recv_all(recv_timeout_us).expect("receive state frames");
     a.get_state()
 }
 
