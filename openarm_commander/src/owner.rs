@@ -582,6 +582,11 @@ impl Owner {
                     self.state.set_status("already recording");
                     return;
                 }
+                if self.state.recorder.finishing {
+                    self.state
+                        .set_status("finishing the session; wait for it to complete");
+                    return;
+                }
                 let task = task.trim().to_string();
                 if task.is_empty() {
                     self.state.set_status("name the task before recording");

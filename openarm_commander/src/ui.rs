@@ -174,7 +174,9 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<Command>(text.as_str()) {
                     Ok(cmd) => { let _ = app.command_tx.send(UiMsg::Command(cmd)).await; }
-                    Err(e) => warn!(error = %e, payload = %text, "ws: bad command"),
+                    // Payload withheld: it carries operator free text (task
+                    // names) and arbitrary bytes from the wire.
+                    Err(e) => warn!(error = %e, payload_bytes = text.len(), "ws: bad command"),
                 },
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Err(e)) => { warn!(error = %e, "ws: recv"); break; }

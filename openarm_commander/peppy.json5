@@ -47,11 +47,6 @@
     }
   },
   interfaces: {
-    // Streams operator setpoints to the backbone on the per-limb pairing slots.
-    // Producing these is what lets the panel drive an enabled arm/gripper
-    // continuously instead of one move at a time; the backbone governs each and
-    // re-streams the governed value, so a follower clamps and rate-limits on
-    // its side.
     services: {
       consumes: [
         // The panel's Finish-session button: the recorder finalizes and
@@ -76,7 +71,11 @@
       ]
     },
     topics: {
-      // The UI's producer streams. The governor control is re-published
+      // Streams operator setpoints to the backbone on the per-limb pairing
+      // slots. Producing these is what lets the panel drive an enabled
+      // arm/gripper continuously instead of one move at a time; the backbone
+      // governs each and re-streams the governed value, so a follower clamps
+      // and rate-limits on its side. The governor control is re-published
       // periodically (lossy QoS) so a dropped toggle cannot strand the backbone.
       emits: [
         { link_id: "left_arm", name: "joint_setpoints" },
