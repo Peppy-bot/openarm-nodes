@@ -13,7 +13,7 @@ use openarm_can::{GripperCan, PosForce};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::command_stream::GripperCommand;
 use crate::geometry::{self, Geometry};
@@ -39,6 +39,7 @@ pub async fn run(
 ) {
     let mut ticker = tokio::time::interval(cfg.cycle_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut throttle = CanErrorThrottle::new();
 
     loop {
         tokio::select! {
@@ -52,20 +53,56 @@ pub async fn run(
         // elsewhere, so a transient fault doesn't strand the follow loop.
         let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
         // Command only when there is a target; refresh state every tick either way.
-        if let Some(command) = command {
-            let target_motor_rad = cfg
-                .geometry
-                .fraction_to_motor_rad(command.opening.clamp(0.0, 1.0));
-            let torque_pu = geometry::effort_to_torque_pu(command.max_effort, cfg.force_limit_pu);
-            if let Err(e) = g.set_position(target_motor_rad, cfg.speed_rad_s, torque_pu) {
-                error!("gripper command: {e}");
+        let tick = (|| {
+            if let Some(command) = command {
+                let target_motor_rad = cfg
+                    .geometry
+                    .fraction_to_motor_rad(command.opening.clamp(0.0, 1.0));
+                let torque_pu =
+                    geometry::effort_to_torque_pu(command.max_effort, cfg.force_limit_pu);
+                g.set_position(target_motor_rad, cfg.speed_rad_s, torque_pu)?;
             }
+            g.refresh_all()?;
+            g.recv_all(cfg.recv_timeout_us)
+        })();
+        match tick {
+            Ok(()) => throttle.success(),
+            Err(e) => throttle.failure(&e),
         }
-        if let Err(e) = g.refresh_all() {
-            error!("request state frame: {e}");
+    }
+}
+
+/// One log line per failure burst instead of several per tick at the loop
+/// rate: the first failure logs, a long outage re-logs every 100th tick, and
+/// recovery logs once.
+struct CanErrorThrottle {
+    consecutive: u64,
+}
+
+impl CanErrorThrottle {
+    const REPEAT_EVERY: u64 = 100;
+
+    fn new() -> Self {
+        Self { consecutive: 0 }
+    }
+
+    fn failure(&mut self, e: &openarm_can::CanError) {
+        if self.consecutive.is_multiple_of(Self::REPEAT_EVERY) {
+            error!(
+                "gripper CAN tick failed ({} consecutive): {e}",
+                self.consecutive + 1
+            );
         }
-        if let Err(e) = g.recv_all(cfg.recv_timeout_us) {
-            error!("receive state frames: {e}");
+        self.consecutive += 1;
+    }
+
+    fn success(&mut self) {
+        if self.consecutive > 0 {
+            info!(
+                "gripper CAN recovered after {} failed ticks",
+                self.consecutive
+            );
         }
+        self.consecutive = 0;
     }
 }

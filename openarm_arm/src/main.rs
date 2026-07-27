@@ -58,6 +58,14 @@ const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Adapts a CAN failure into the runtime error type so bring-up failures
+/// return through the runtime's error path, which runs the shutdown hooks.
+/// A panic would skip them, leaving the motor energised and the instance
+/// lock held.
+fn can_err(e: openarm_can::CanError) -> peppygen::Error {
+    peppygen::Error::Io(std::io::Error::other(e))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -76,6 +84,14 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        // Bounded so a config typo cannot park recv_all in a near-eternal
+        // ppoll while it holds the CAN mutex the shutdown path needs.
+        assert!(
+            params.recv_timeout_us <= 1_000_000,
+            "recv_timeout_us must be at most 1_000_000 (1s), got {}",
+            params.recv_timeout_us
+        );
+
         let side = side_for(arm_id);
 
         // Which OpenArm generation this arm drives; selects the embedded description.
@@ -182,13 +198,15 @@ fn main() -> Result<()> {
         // Arm motor lineup + CAN addressing are identical across generations; open()
         // registers them.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-        let mut arm = ArmCan::open(&can_interface, ENABLE_FD).expect("ArmCan::open");
-        arm.enable_all().expect("enable arm motors");
-        tokio::time::sleep(POST_ENABLE_SLEEP).await;
-        arm.drain(BRINGUP_RECV_US).expect("drain enable replies");
-        // recv_all populates initial joint state; without it get_state() returns zeros.
-        arm.recv_all(BRINGUP_RECV_US)
-            .expect("receive initial joint state");
+        let mut arm = ArmCan::open(&can_interface, ENABLE_FD).map_err(can_err)?;
+        // On failure past enable, best-effort disable before returning
+        // through the runtime's error path, which releases the instance lock.
+        if let Err(e) = bring_up(&mut arm).await {
+            if let Err(disable_err) = arm.disable_all() {
+                error!("disable after failed bringup: {disable_err}");
+            }
+            return Err(can_err(e));
+        }
         info!("arm ready");
 
         let arm = Arc::new(Mutex::new(arm));
@@ -256,4 +274,14 @@ fn main() -> Result<()> {
 
         Ok(())
     })
+}
+
+/// Enable the motors, drain the enable replies, then solicit and decode one
+/// state pass so `get_state()` is real before the control loop's first tick.
+async fn bring_up(arm: &mut ArmCan) -> openarm_can::Result<()> {
+    arm.enable_all()?;
+    tokio::time::sleep(POST_ENABLE_SLEEP).await;
+    arm.drain(BRINGUP_RECV_US)?;
+    arm.refresh_all()?;
+    arm.recv_all(BRINGUP_RECV_US)
 }

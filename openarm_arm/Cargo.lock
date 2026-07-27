@@ -2250,7 +2250,7 @@ dependencies = [
 [[package]]
 name = "openarm_can"
 version = "0.2.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fnative-can#4afccd3ab2e1ad0d079ddaaa7444f2af679431cc"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fnative-can#a1ae006c5ce7300472b70e24d5607f3537c1b5cf"
 dependencies = [
  "nix",
  "socketcan",

@@ -25,6 +25,14 @@ const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Adapts a CAN failure into the runtime error type so bring-up failures
+/// return through the runtime's error path, which runs the shutdown hooks.
+/// A panic would skip them, leaving the motor energised and the instance
+/// lock held.
+fn can_err(e: openarm_can::CanError) -> peppygen::Error {
+    peppygen::Error::Io(std::io::Error::other(e))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -43,6 +51,13 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        // Bounded so a config typo cannot park recv_all in a near-eternal
+        // ppoll while it holds the CAN mutex the shutdown hook needs.
+        assert!(
+            params.recv_timeout_us <= 1_000_000,
+            "recv_timeout_us must be at most 1_000_000 (1s), got {}",
+            params.recv_timeout_us
+        );
 
         let cfg = ControlConfig {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
@@ -87,48 +102,20 @@ fn main() -> Result<()> {
 
         // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-        let mut gripper: GripperCan<Mit> = GripperCan::open_mit(
+        let gripper: GripperCan<Mit> = GripperCan::open_mit(
             &can_interface,
             ENABLE_FD,
             v10::GRIPPER_MOTOR_TYPE,
             v10::GRIPPER_SEND_ID,
             v10::GRIPPER_RECV_ID,
         )
-        .expect("GripperCan::open_mit");
-
-        // Drain enable replies so bring-up ACK frames aren't decoded as state.
-        gripper.enable_all().expect("enable gripper motor");
-        tokio::time::sleep(POST_ENABLE_SLEEP).await;
-        gripper
-            .drain(BRINGUP_RECV_US)
-            .expect("drain enable replies");
-
-        // Return to closed (motor angle = 0.0 rad) before serving requests.
-        info!("returning to zero");
-        gripper
-            .mit_control(follow::KP, follow::KD, 0.0, 0.0, 0.0)
-            .expect("return to zero");
-        gripper
-            .recv_all(BRINGUP_RECV_US)
-            .expect("receive initial state");
-        info!("gripper ready");
-
+        .map_err(can_err)?;
         let gripper = Arc::new(Mutex::new(gripper));
 
-        // Always-on gripper_states publisher: reads the motor's cached state at
-        // state_rate_hz and emits the opening. It issues no CAN traffic of its
-        // own, so it never contends with the follow loop for the bus.
-        tokio::spawn(stream::run(
-            node_runner.clone(),
-            params.state_rate_hz,
-            gripper.clone(),
-            node_runner.cancellation_token().clone(),
-        ));
-
-        // Motor-disable hook, registered second so it runs first at shutdown
-        // (before the lock-release hook above). The runtime fires it on every stop
-        // path (signals, `peppy node stop`, daemon loss) and awaits it before
-        // exiting, so the motor never stays energised.
+        // Motor-disable hook, registered before the motor is ever enabled and
+        // second overall so it runs first at shutdown (before the lock-release
+        // hook above). The runtime fires it on every stop path and on a
+        // bring-up error return, so the motor never stays energised.
         {
             let gripper = gripper.clone();
             node_runner.on_shutdown(async move {
@@ -149,6 +136,36 @@ fn main() -> Result<()> {
                 }
             });
         }
+
+        // Enable, settle, drain the enable replies so bring-up ACK frames
+        // aren't decoded as state, then return to closed (motor angle =
+        // 0.0 rad) before serving requests. Errors return through the
+        // runtime so the hooks above disable the motor and release the lock.
+        gripper
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .enable_all()
+            .map_err(can_err)?;
+        tokio::time::sleep(POST_ENABLE_SLEEP).await;
+        {
+            let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
+            g.drain(BRINGUP_RECV_US).map_err(can_err)?;
+            info!("returning to zero");
+            g.mit_control(follow::KP, follow::KD, 0.0, 0.0, 0.0)
+                .map_err(can_err)?;
+            g.recv_all(BRINGUP_RECV_US).map_err(can_err)?;
+        }
+        info!("gripper ready");
+
+        // Always-on gripper_states publisher: reads the motor's cached state at
+        // state_rate_hz and emits the opening. It issues no CAN traffic of its
+        // own, so it never contends with the follow loop for the bus.
+        tokio::spawn(stream::run(
+            node_runner.clone(),
+            params.state_rate_hz,
+            gripper.clone(),
+            node_runner.cancellation_token().clone(),
+        ));
 
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm_hardware_ready) to
