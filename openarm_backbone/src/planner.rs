@@ -61,6 +61,29 @@ pub enum Goal {
     },
 }
 
+impl Goal {
+    /// Complete unstarted, `success: false`, reporting the planner's held
+    /// setpoint. The busy flag is the caller's concern.
+    pub async fn refuse(self, reason: &str, planner: &mut Planner) {
+        match self {
+            Goal::Joint { ctx, .. } => {
+                if let Err(e) = ctx
+                    .complete(false, reason.into(), planner.setpoint, 0.0)
+                    .await
+                {
+                    error!("{}: move_arm_joints refuse: {e}", planner.side.label());
+                }
+            }
+            Goal::Cartesian { ctx, .. } => {
+                let held = planner.setpoint;
+                planner
+                    .finish_cartesian(&ctx, held, false, reason, 0.0, false)
+                    .await;
+            }
+        }
+    }
+}
+
 /// Releases a single-flight busy flag on drop. Held for the lifetime of a move
 /// (an arm's mode here, a gripper move in the coordinator), so a move can never
 /// end (success, failure, cancel, or an unreachable plan) without freeing the
@@ -207,12 +230,13 @@ impl Planner {
         now: Instant,
     ) -> JointVec {
         let mut mode = std::mem::replace(&mut self.mode, Mode::Follow);
-        // A move preempts Follow; while a move runs the action handler rejects new
-        // goals as busy, so the channel only delivers a goal in Follow.
-        if matches!(mode, Mode::Follow)
-            && let Ok(goal) = goals.try_recv()
-        {
-            mode = self.start_goal(goal, busy.clone(), now).await;
+        // Drain fully: every queued goal is answered, never left parked.
+        while let Ok(goal) = goals.try_recv() {
+            if matches!(mode, Mode::Follow) {
+                mode = self.start_goal(goal, busy.clone(), now).await;
+            } else {
+                goal.refuse("another move is in flight", self).await;
+            }
         }
 
         let Advance {
