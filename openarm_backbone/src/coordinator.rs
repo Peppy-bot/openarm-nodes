@@ -87,6 +87,20 @@ pub struct GripperGoal {
     pub ctx: move_gripper::GoalContext,
 }
 
+impl GripperGoal {
+    /// Complete unstarted, `success: false`. The busy flag is the caller's
+    /// concern.
+    pub async fn refuse(self, reason: &str, reported_frac: f64) {
+        if let Err(e) = self
+            .ctx
+            .complete(false, reason.to_string(), reported_frac, 0.0)
+            .await
+        {
+            error!("move_gripper refuse: {e}");
+        }
+    }
+}
+
 /// A backbone-executed gripper move in flight: the opening chases `target_frac`
 /// through the governor until the governed chase lands on the target, the goal
 /// is cancelled, or the move overruns its budget (a governed clamp short of the
@@ -569,22 +583,39 @@ pub async fn run(
 /// state listener task), so no measurement will ever arrive: seeding is abandoned.
 struct Shutdown;
 
-/// Wait for the arm's first measured state and first gripper opening, then seed
-/// the planner's held setpoint from the measured pose (clamped into the joint
-/// limits, so a power-up pose past a soft limit does not anchor the backbone
-/// off-limit). Gating on both means the backbone never publishes a setpoint before a
-/// real arm measurement exists, and never governs on the fully-open finger
-/// default while the real jaws might be closed (open placement vacates the
-/// between-jaws space a closed finger occupies).
-/// Warns periodically while either stays silent so the wait is visible in the
-/// log; `Err(Shutdown)` if a channel closes first.
+/// Reason completing every goal refused while the followers are still silent.
+const SEED_REFUSAL: &str = "the follower has not reported its first state yet";
+
+/// Wait for the arm's first measured state and first gripper opening, then
+/// seed the planner's held setpoint from the measured pose (clamped into the
+/// joint limits). Goals accepted before the wait resolves are refused and
+/// their busy claims released; left queued they would strand unanswered.
+/// Warns periodically while a stream stays silent; `Err(Shutdown)` if a
+/// channel closes first.
 async fn seed(
     channels: &mut ArmChannels,
     planner: &mut Planner,
     side: Side,
 ) -> Result<(), Shutdown> {
-    wait_for_first(&mut channels.measured, side, "arm measured state").await?;
-    wait_for_first(&mut channels.gripper, side, "gripper opening").await?;
+    loop {
+        tokio::select! {
+            firsts = async {
+                wait_for_first(&mut channels.measured, side, "arm measured state").await?;
+                wait_for_first(&mut channels.gripper, side, "gripper opening").await
+            } => {
+                firsts?;
+                break;
+            }
+            Some(goal) = channels.goals.recv() => {
+                let _release = BusyGuard(channels.busy.clone());
+                goal.refuse(SEED_REFUSAL, planner).await;
+            }
+            Some(goal) = channels.gripper_goals.recv() => {
+                let _release = BusyGuard(channels.gripper_busy.clone());
+                goal.refuse(SEED_REFUSAL, 0.0).await;
+            }
+        }
+    }
     let q0 = channels
         .measured
         .borrow()
@@ -671,17 +702,24 @@ async fn service_gripper_move(
     opening_rate_frac_s: f64,
     now: Instant,
 ) {
-    if mv.is_none()
-        && let Ok(goal) = channels.gripper_goals.try_recv()
-    {
-        *mv = Some(GripperMove {
-            target_frac: goal.opening,
-            max_effort: goal.max_effort,
-            ctx: goal.ctx,
-            started: now,
-            budget_s: gripper_move_budget_s(governed_frac, goal.opening, opening_rate_frac_s),
-            _busy: BusyGuard(channels.gripper_busy.clone()),
-        });
+    // Drain every queued goal: the first becomes the move when none is in
+    // flight; anything else is completed as refused rather than left queued,
+    // where it would strand unanswered (a queued goal's context is never
+    // polled, so not even cancellation can reach it).
+    while let Ok(goal) = channels.gripper_goals.try_recv() {
+        if mv.is_none() {
+            *mv = Some(GripperMove {
+                target_frac: goal.opening,
+                max_effort: goal.max_effort,
+                ctx: goal.ctx,
+                started: now,
+                budget_s: gripper_move_budget_s(governed_frac, goal.opening, opening_rate_frac_s),
+                _busy: BusyGuard(channels.gripper_busy.clone()),
+            });
+        } else {
+            goal.refuse("another gripper move is in flight", measured_frac)
+                .await;
+        }
     }
     let Some(m) = mv.as_ref() else { return };
     let elapsed_s = now.duration_since(m.started).as_secs_f64();
