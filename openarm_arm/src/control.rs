@@ -11,6 +11,7 @@
 //! arms), and a local straight-line joint path would be collision-blind and could
 //! command the two arms into each other.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,11 @@ use crate::friction;
 use crate::stream::{GovernedSetpoint, StreamWiring};
 use crate::{ARM_DOF, JointVec};
 use openarm_can::ArmCan;
+
+/// Set when the loop stops on a hard fault, so main can exit non-zero after
+/// the shutdown hooks have run and the daemon records the instance as failed
+/// rather than finished.
+pub static HARD_FAULT: AtomicBool = AtomicBool::new(false);
 
 /// All-zero joint vector: the desired velocity sent while holding a pose.
 const ZERO: JointVec = [0.0; ARM_DOF];
@@ -85,6 +91,7 @@ async fn supervise(
     if let Err(join_error) = control.await {
         error!(%join_error, "control loop terminated unexpectedly; disabling motors");
         disable_motors(&arm);
+        HARD_FAULT.store(true, Ordering::SeqCst);
     }
     token.cancel();
 }

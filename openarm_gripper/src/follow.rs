@@ -6,6 +6,7 @@
 // control loop reads state every tick the same way). The opening is commanded
 // directly; the motor's PD eases to it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +23,11 @@ use crate::geometry;
 // gripper entry). Hardcoded, not configurable in the ROS2 reference either.
 pub const KP: f64 = 16.0;
 pub const KD: f64 = 0.2;
+
+/// Set when the loop stops on a hard fault, so main can exit non-zero after
+/// the shutdown hooks have run and the daemon records the instance as failed
+/// rather than finished.
+pub static HARD_FAULT: AtomicBool = AtomicBool::new(false);
 
 const CONTEXT: &str = "gripper follow";
 
@@ -75,6 +81,7 @@ pub async fn run(
         // instance instead of a ready node publishing a frozen state.
         if throttle.consecutive() >= FAULT_TICKS {
             error!("persistent CAN fault ({FAULT_TICKS} consecutive failed ticks): stopping node");
+            HARD_FAULT.store(true, Ordering::SeqCst);
             token.cancel();
             return;
         }

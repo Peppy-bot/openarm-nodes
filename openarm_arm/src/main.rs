@@ -274,7 +274,17 @@ fn main() -> Result<()> {
         ready.store(true, Ordering::SeqCst);
 
         Ok(())
-    })
+    })?;
+
+    // The runtime has returned, so the shutdown hooks (motor disable via the
+    // control loop, lock release) have already run; exiting non-zero here
+    // makes the daemon record a hard CAN fault as failed instead of finished.
+    if control::HARD_FAULT.load(Ordering::SeqCst) {
+        return Err(peppygen::Error::Io(std::io::Error::other(
+            "CAN fault killed the control loop",
+        )));
+    }
+    Ok(())
 }
 
 /// Enable the motors, drain the enable replies, then solicit and decode one

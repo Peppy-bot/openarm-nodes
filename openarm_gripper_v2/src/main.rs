@@ -235,5 +235,15 @@ fn main() -> Result<()> {
         ready.store(true, Ordering::SeqCst);
 
         Ok(())
-    })
+    })?;
+
+    // The runtime has returned, so the shutdown hooks (motor disable, lock
+    // release) have already run; exiting non-zero here makes the daemon
+    // record a hard CAN fault as failed instead of finished.
+    if follow::HARD_FAULT.load(Ordering::SeqCst) {
+        return Err(peppygen::Error::Io(std::io::Error::other(
+            "persistent CAN fault stopped the follow loop",
+        )));
+    }
+    Ok(())
 }
