@@ -2154,7 +2154,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openarm_can"
 version = "0.2.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fmotor-torque-accessor#73172e22e24a770a60e8251a3e0acff5849055b7"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#d9b40711043986d5cb8bfb66dcfe1bb11252a7f2"
 dependencies = [
  "nix",
  "socketcan",

@@ -26,7 +26,7 @@ use control_core::Pacer;
 use crate::friction;
 use crate::stream::{GovernedSetpoint, StreamWiring};
 use crate::{ARM_DOF, JointVec};
-use openarm_can::{ARM_MOTOR_TYPES, ArmCan};
+use openarm_can::{ARM_MOTOR_TYPES, ArmCan, ArmState, BusHealth};
 
 /// Set when the loop stops on a hard fault, so main can exit non-zero after
 /// the shutdown hooks have run and the daemon records the instance as failed
@@ -139,9 +139,29 @@ async fn run_control(
     let mut pacer =
         Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
     let mut last_jump_warn: Option<Instant> = None;
+    let mut health = BusHealth::new("arm", cfg.cycle_period);
+    // The last state the motors actually reported. Commands are computed from
+    // it, so a loop that has never read one commands nothing rather than
+    // steering the arm from a default pose.
+    let mut measured: Option<ArmState> = None;
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
     loop {
-        let state = read_state(&arm, cfg.recv_timeout_us);
+        let read = read_state(&arm, cfg.recv_timeout_us);
+        if let Ok(state) = read {
+            measured = Some(state);
+        }
+        // A bus failure costs this tick's frames, not the loop: the motors hold
+        // their last commanded pose and the next tick carries a fresh absolute
+        // command. Stopping here would disable them and drop the arm.
+        let Some(state) = measured else {
+            health.failed(&read.expect_err("measured is set on every Ok read"));
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => break,
+                _ = pacer.pace() => {}
+            }
+            continue;
+        };
         let (q, qdot) = (state.positions, state.velocities);
         let ff_tau = feedforward(&mut model, &q, &qdot);
         wiring
@@ -172,7 +192,11 @@ async fn run_control(
             }
         };
 
-        command(&arm, &cfg, &ff_tau, &q_des, &dq_des);
+        let commanded = command(&arm, &cfg, &ff_tau, &q_des, &dq_des);
+        match read.and(commanded) {
+            Ok(_) => health.succeeded(),
+            Err(e) => health.failed(&e),
+        }
         // Biased so a cancelled token always wins over an already-due (overrun)
         // tick: on shutdown break out and disable the motors below.
         tokio::select! {
@@ -220,10 +244,9 @@ fn command(
     ff_tau: &JointVec,
     q_des: &JointVec,
     dq_des: &JointVec,
-) {
+) -> openarm_can::Result<()> {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
     a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau)
-        .expect("MIT command");
 }
 
 /// Clamp a governed setpoint into the joint position limits, the final guard
@@ -260,12 +283,14 @@ fn disable_motors(arm: &Mutex<ArmCan>) {
     }
 }
 
-/// Read the measured joint state (positions, velocities, torques) one time.
-fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: u32) -> openarm_can::ArmState {
+/// Solicit and read the measured joint state once. The cache behind
+/// `get_state` is only refreshed by a successful pass, so a failure leaves the
+/// caller's previous reading untouched rather than inventing one.
+fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: u32) -> openarm_can::Result<ArmState> {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-    a.refresh_all().expect("request state frames");
-    a.recv_all(recv_timeout_us).expect("receive state frames");
-    a.get_state()
+    a.refresh_all()?;
+    a.recv_all(recv_timeout_us)?;
+    Ok(a.get_state())
 }
 
 /// The first joint whose setpoint sits beyond its jump bound from the
