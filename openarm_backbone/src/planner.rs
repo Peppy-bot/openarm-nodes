@@ -230,8 +230,7 @@ impl Planner {
         now: Instant,
     ) -> JointVec {
         let mut mode = std::mem::replace(&mut self.mode, Mode::Follow);
-        // Drain everything: a goal left queued strands unanswered (its
-        // context is never polled, so not even cancellation reaches it).
+        // Drain fully: every queued goal is answered, never left parked.
         while let Ok(goal) = goals.try_recv() {
             if matches!(mode, Mode::Follow) {
                 mode = self.start_goal(goal, busy.clone(), now).await;

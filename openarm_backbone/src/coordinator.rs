@@ -588,10 +588,9 @@ const SEED_REFUSAL: &str = "the follower has not reported its first state yet";
 
 /// Wait for the arm's first measured state and first gripper opening, then
 /// seed the planner's held setpoint from the measured pose (clamped into the
-/// joint limits). Goals accepted before the wait resolves are refused and
-/// their busy claims released; left queued they would strand unanswered.
-/// Warns periodically while a stream stays silent; `Err(Shutdown)` if a
-/// channel closes first.
+/// joint limits). Goals accepted before the wait resolves are refused with
+/// their busy claims released. Warns periodically while a stream stays
+/// silent; `Err(Shutdown)` if a channel closes first.
 async fn seed(
     channels: &mut ArmChannels,
     planner: &mut Planner,
@@ -607,12 +606,17 @@ async fn seed(
                 break;
             }
             Some(goal) = channels.goals.recv() => {
+                // Report the measured pose when one already arrived.
+                if let Some(m) = *channels.measured.borrow() {
+                    planner.seed_from_measured(m.positions);
+                }
                 let _release = BusyGuard(channels.busy.clone());
                 goal.refuse(SEED_REFUSAL, planner).await;
             }
             Some(goal) = channels.gripper_goals.recv() => {
                 let _release = BusyGuard(channels.gripper_busy.clone());
-                goal.refuse(SEED_REFUSAL, 0.0).await;
+                let opening = (*channels.gripper.borrow()).map_or(0.0, |g| g.fraction);
+                goal.refuse(SEED_REFUSAL, opening).await;
             }
         }
     }
@@ -702,10 +706,7 @@ async fn service_gripper_move(
     opening_rate_frac_s: f64,
     now: Instant,
 ) {
-    // Drain every queued goal: the first becomes the move when none is in
-    // flight; anything else is completed as refused rather than left queued,
-    // where it would strand unanswered (a queued goal's context is never
-    // polled, so not even cancellation can reach it).
+    // Drain fully: every queued goal is answered, never left parked.
     while let Ok(goal) = channels.gripper_goals.try_recv() {
         if mv.is_none() {
             *mv = Some(GripperMove {
