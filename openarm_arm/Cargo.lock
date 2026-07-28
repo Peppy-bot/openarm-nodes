@@ -540,7 +540,7 @@ dependencies = [
 [[package]]
 name = "control_core"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#15d17a2a81c4356ee3ac47fd656308b79cd2aab9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#7718cd71106bcca85bf5b50f09f950aa57fa0294"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",
@@ -2263,7 +2263,7 @@ dependencies = [
 [[package]]
 name = "openarm_can"
 version = "0.2.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#15d17a2a81c4356ee3ac47fd656308b79cd2aab9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#7718cd71106bcca85bf5b50f09f950aa57fa0294"
 dependencies = [
  "nix",
  "socketcan",
@@ -2274,7 +2274,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#15d17a2a81c4356ee3ac47fd656308b79cd2aab9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#7718cd71106bcca85bf5b50f09f950aa57fa0294"
 dependencies = [
  "urdf-rs",
 ]
@@ -3572,7 +3572,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#15d17a2a81c4356ee3ac47fd656308b79cd2aab9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#7718cd71106bcca85bf5b50f09f950aa57fa0294"
 dependencies = [
  "k",
  "thiserror 2.0.18",
