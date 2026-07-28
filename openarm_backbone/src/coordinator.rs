@@ -213,14 +213,8 @@ pub async fn run(
     };
 
     // Hold each arm's real pose, not a neutral zero: wait for the first measured
-    // state from both arms and seed the held setpoint there before publishing.
-    if seed(&mut channels.left, &mut planners.left, Side::Left)
-        .await
-        .is_err()
-        || seed(&mut channels.right, &mut planners.right, Side::Right)
-            .await
-            .is_err()
-    {
+    // state from both arms and seed the held setpoints there before publishing.
+    if seed_all(&mut channels, &mut planners).await.is_err() {
         return Ok(());
     }
     info!("bimanual backbone: both arms reporting; governed streaming begins");
@@ -586,47 +580,74 @@ struct Shutdown;
 /// Reason completing every goal refused while the followers are still silent.
 const SEED_REFUSAL: &str = "the follower has not reported its first state yet";
 
-/// Wait for the arm's first measured state and first gripper opening, then
-/// seed the planner's held setpoint from the measured pose (clamped into the
-/// joint limits). Goals accepted before the wait resolves are refused with
-/// their busy claims released. Warns periodically while a stream stays
-/// silent; `Err(Shutdown)` if a channel closes first.
-async fn seed(
-    channels: &mut ArmChannels,
-    planner: &mut Planner,
-    side: Side,
+/// Wait for both arms' first measured states and both grippers' first
+/// openings, then seed each planner's held setpoint from its measured pose
+/// (clamped into the joint limits). One wait over all four goal queues: a
+/// goal accepted for EITHER side before its follower reports is refused with
+/// its busy claim released, so a silent side cannot strand the other side's
+/// goals. Warns periodically while a stream stays silent; `Err(Shutdown)` if
+/// a channel closes first.
+async fn seed_all(
+    channels: &mut ArmPair<ArmChannels>,
+    planners: &mut ArmPair<Planner>,
 ) -> Result<(), Shutdown> {
     loop {
         tokio::select! {
             firsts = async {
-                wait_for_first(&mut channels.measured, side, "arm measured state").await?;
-                wait_for_first(&mut channels.gripper, side, "gripper opening").await
+                wait_for_first(&mut channels.left.measured, Side::Left, "arm measured state")
+                    .await?;
+                wait_for_first(&mut channels.left.gripper, Side::Left, "gripper opening").await?;
+                wait_for_first(&mut channels.right.measured, Side::Right, "arm measured state")
+                    .await?;
+                wait_for_first(&mut channels.right.gripper, Side::Right, "gripper opening").await
             } => {
                 firsts?;
                 break;
             }
-            Some(goal) = channels.goals.recv() => {
-                // Report the measured pose when one already arrived.
-                if let Some(m) = *channels.measured.borrow() {
-                    planner.seed_from_measured(m.positions);
-                }
-                let _release = BusyGuard(channels.busy.clone());
-                goal.refuse(SEED_REFUSAL, planner).await;
+            Some(goal) = channels.left.goals.recv() => {
+                refuse_seed_arm_goal(goal, &channels.left, &mut planners.left).await;
             }
-            Some(goal) = channels.gripper_goals.recv() => {
-                let _release = BusyGuard(channels.gripper_busy.clone());
-                let opening = (*channels.gripper.borrow()).map_or(0.0, |g| g.fraction);
-                goal.refuse(SEED_REFUSAL, opening).await;
+            Some(goal) = channels.right.goals.recv() => {
+                refuse_seed_arm_goal(goal, &channels.right, &mut planners.right).await;
+            }
+            Some(goal) = channels.left.gripper_goals.recv() => {
+                refuse_seed_gripper_goal(goal, &channels.left).await;
+            }
+            Some(goal) = channels.right.gripper_goals.recv() => {
+                refuse_seed_gripper_goal(goal, &channels.right).await;
             }
         }
     }
-    let q0 = channels
-        .measured
-        .borrow()
-        .expect("gated on first state")
-        .positions;
-    planner.seed_from_measured(q0);
+    for (channels, planner) in [
+        (&channels.left, &mut planners.left),
+        (&channels.right, &mut planners.right),
+    ] {
+        let q0 = channels
+            .measured
+            .borrow()
+            .expect("gated on first state")
+            .positions;
+        planner.seed_from_measured(q0);
+    }
     Ok(())
+}
+
+/// Refuse one arm goal during the seed wait, reporting the measured pose when
+/// one already arrived and releasing the goal's busy claim.
+async fn refuse_seed_arm_goal(goal: Goal, channels: &ArmChannels, planner: &mut Planner) {
+    if let Some(m) = *channels.measured.borrow() {
+        planner.seed_from_measured(m.positions);
+    }
+    let _release = BusyGuard(channels.busy.clone());
+    goal.refuse(SEED_REFUSAL, planner).await;
+}
+
+/// Refuse one gripper goal during the seed wait, reporting the measured
+/// opening when one already arrived and releasing the goal's busy claim.
+async fn refuse_seed_gripper_goal(goal: GripperGoal, channels: &ArmChannels) {
+    let _release = BusyGuard(channels.gripper_busy.clone());
+    let opening = (*channels.gripper.borrow()).map_or(0.0, |g| g.fraction);
+    goal.refuse(SEED_REFUSAL, opening).await;
 }
 
 /// Block until `latest` holds its first value, warning every
