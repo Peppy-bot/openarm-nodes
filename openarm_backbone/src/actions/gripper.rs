@@ -18,6 +18,8 @@ use tracing::error;
 use crate::Side;
 use crate::actions::claim;
 use crate::coordinator::GripperGoal;
+use crate::freshness::FreshnessProbe;
+use crate::streams::GripperOpening;
 
 /// Expose `move_gripper`: validate + claim, then hand the goal to the
 /// coordinator. The coordinator releases the busy slot when the move ends.
@@ -25,6 +27,7 @@ pub async fn run_move_gripper(
     runner: Arc<NodeRunner>,
     goal_txs: [mpsc::Sender<GripperGoal>; 2],
     busy: [Arc<AtomicBool>; 2],
+    fresh: [FreshnessProbe<GripperOpening>; 2],
 ) -> Result<()> {
     let mut handle = ActionHandle::expose(&runner).await?;
     loop {
@@ -48,6 +51,11 @@ pub async fn run_move_gripper(
                         "max_effort {} is not a non-negative finite value",
                         d.max_effort
                     )));
+                }
+                if !fresh[idx].is_fresh() {
+                    return Ok(GoalDecision::reject(
+                        "gripper state stale or absent; the follower is not reporting",
+                    ));
                 }
                 if !claim(&busy[idx]) {
                     return Ok(GoalDecision::reject("gripper is already executing a move"));

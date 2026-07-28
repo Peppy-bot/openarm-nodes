@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use openarm_can::{CanErrorThrottle, GripperCan, Mit};
+use openarm_can::{CanErrorThrottle, GripperCan, Mit, v10};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -23,6 +23,12 @@ use crate::geometry;
 // gripper entry). Hardcoded, not configurable in the ROS2 reference either.
 pub const KP: f64 = 16.0;
 pub const KD: f64 = 0.2;
+
+/// Bound on how far a commanded motor angle may sit from the measured one
+/// before the loop refuses to chase it: the PD saturation gap tau_max / kp,
+/// past which a larger error adds no torque and can only mean a target that
+/// never walked from here (stale upstream command state). Rate-independent.
+const JUMP_LIMIT_RAD: f64 = v10::GRIPPER_MOTOR_TYPE.torque_limit_nm() / KP;
 
 /// Set when the loop stops on a hard fault, so main can exit non-zero after
 /// the shutdown hooks have run and the daemon records the instance as failed
@@ -51,6 +57,7 @@ pub async fn run(
     let mut ticker = tokio::time::interval(cfg.cycle_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut throttle = CanErrorThrottle::new();
+    let mut last_jump_warn: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -67,7 +74,13 @@ pub async fn run(
         let tick = (|| {
             if let Some(opening) = opening {
                 let target_motor_rad = geometry::fraction_to_motor_rad(opening.clamp(0.0, 1.0));
-                g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0)?;
+                // Last line of defense: hold rather than chase a target
+                // implausibly far from the measured angle (see JUMP_LIMIT_RAD).
+                if (target_motor_rad - g.get_state().position).abs() <= JUMP_LIMIT_RAD {
+                    g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0)?;
+                } else {
+                    warn_jump_throttled(&mut last_jump_warn, target_motor_rad);
+                }
             }
             g.refresh_all()?;
             g.recv_all(cfg.recv_timeout_us)
@@ -85,5 +98,29 @@ pub async fn run(
             token.cancel();
             return;
         }
+    }
+}
+
+/// One guard line per second, not one per tick.
+fn warn_jump_throttled(last: &mut Option<std::time::Instant>, target_rad: f64) {
+    let now = std::time::Instant::now();
+    if last.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+        *last = Some(now);
+        error!(
+            "setpoint jump guard: commanded {target_rad:.3} rad is beyond the saturation gap \
+             from the measured angle; holding"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jump_limit_is_the_saturation_gap() {
+        // DM4310 tau_max 10 Nm at kp 16 -> 0.625 rad, well over half the
+        // 1.05 rad travel: normal tracking never trips it.
+        assert!((JUMP_LIMIT_RAD - 10.0 / 16.0).abs() < 1e-12);
     }
 }

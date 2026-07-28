@@ -15,7 +15,9 @@ use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use tokio::sync::mpsc;
 use tracing::error;
 
+use crate::freshness::FreshnessProbe;
 use crate::planner::Goal;
+use crate::streams::MeasuredState;
 use crate::{ARM_DOF, JointVec, Side};
 
 use crate::actions::claim;
@@ -31,6 +33,7 @@ pub async fn run_move_arm_joints(
     goal_txs: [mpsc::Sender<Goal>; 2],
     busy: [Arc<AtomicBool>; 2],
     limits: [[Limit; ARM_DOF]; 2],
+    fresh: [FreshnessProbe<MeasuredState>; 2],
 ) -> Result<()> {
     let mut handle = move_arm_joints::ActionHandle::expose(&runner).await?;
     loop {
@@ -51,6 +54,11 @@ pub async fn run_move_arm_joints(
                 if !target_in_limits(&d.joint_positions, &limits[idx]) {
                     return Ok(move_arm_joints::GoalDecision::reject(
                         "target out of joint limits",
+                    ));
+                }
+                if !fresh[idx].is_fresh() {
+                    return Ok(move_arm_joints::GoalDecision::reject(
+                        "arm state stale or absent; the follower is not reporting",
                     ));
                 }
                 if !claim(&busy[idx]) {
@@ -89,6 +97,7 @@ pub async fn run_move_arm(
     runner: Arc<NodeRunner>,
     goal_txs: [mpsc::Sender<Goal>; 2],
     busy: [Arc<AtomicBool>; 2],
+    fresh: [FreshnessProbe<MeasuredState>; 2],
 ) -> Result<()> {
     let mut handle = move_arm::ActionHandle::expose(&runner).await?;
     loop {
@@ -114,6 +123,11 @@ pub async fn run_move_arm(
                 }
                 if !(d.duration_s.is_finite() && d.duration_s >= 0.0) {
                     return Ok(move_arm::GoalDecision::reject("invalid duration"));
+                }
+                if !fresh[idx].is_fresh() {
+                    return Ok(move_arm::GoalDecision::reject(
+                        "arm state stale or absent; the follower is not reporting",
+                    ));
                 }
                 if !claim(&busy[idx]) {
                     return Ok(move_arm::GoalDecision::reject(

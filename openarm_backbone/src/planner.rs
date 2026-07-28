@@ -21,7 +21,7 @@ use peppygen::exposed_actions::{move_arm, move_arm_joints};
 use srs_model::nalgebra::{Isometry3, SVector};
 use srs_model::{Arm, ArmAnglePolicy, Jacobian, Limit};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::chase::{chase_step, clamp_to_limits};
 use crate::servo::{ServoState, ServoStep};
@@ -589,6 +589,31 @@ impl Planner {
                     prev_q_des: self.setpoint,
                     _busy: busy,
                 })
+            }
+        }
+    }
+
+    /// Abort any in-flight move, reporting failure with `reason` on its goal,
+    /// and fall back to Follow with the setpoint held where it is. A no-op in
+    /// Follow.
+    pub async fn abort_move(&mut self, reason: &str, measured_q: JointVec, now: Instant) {
+        match std::mem::replace(&mut self.mode, Mode::Follow) {
+            Mode::Follow => {}
+            Mode::JointMove(JointMove { traj, ctx, _busy }) => {
+                let elapsed = now.duration_since(traj.motion_start).as_secs_f64();
+                warn!("{}: aborting move_arm_joints: {reason}", self.side.label());
+                if let Err(e) = ctx
+                    .complete(false, reason.into(), measured_q, elapsed)
+                    .await
+                {
+                    error!("{}: move_arm_joints abort: {e}", self.side.label());
+                }
+            }
+            Mode::CartesianMove(m) => {
+                let elapsed = now.duration_since(m.path.motion_start()).as_secs_f64();
+                warn!("{}: aborting move_arm: {reason}", self.side.label());
+                self.finish_cartesian(&m.ctx, measured_q, false, reason, elapsed, false)
+                    .await;
             }
         }
     }

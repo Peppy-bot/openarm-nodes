@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use peppygen::{NodeRunner, Result};
 use peppylib::runtime::CancellationToken;
@@ -26,7 +26,7 @@ use control_core::Pacer;
 use crate::friction;
 use crate::stream::{GovernedSetpoint, StreamWiring};
 use crate::{ARM_DOF, JointVec};
-use openarm_can::ArmCan;
+use openarm_can::{ARM_MOTOR_TYPES, ArmCan};
 
 /// Set when the loop stops on a hard fault, so main can exit non-zero after
 /// the shutdown hooks have run and the daemon records the instance as failed
@@ -40,6 +40,31 @@ const ZERO: JointVec = [0.0; ARM_DOF];
 /// frames. Mirrors the ROS2 v10_simple_hardware on_deactivate sleep.
 const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 
+/// Per-joint bound on how far a streamed setpoint may sit from the measured
+/// pose before the loop refuses to chase it. The bound is each joint's PD
+/// saturation gap, tau_max / kp: past it a larger error adds no torque, and a
+/// healthy backbone stream can never legitimately reach it (targets walk in
+/// velocity-limited steps from a setpoint seeded at the measured pose). A
+/// setpoint beyond it can only be a target that never walked from here, the
+/// signature of stale command state, so the arm holds instead of lunging.
+/// Rate-independent: pure statics of the gains and motor torque ceilings.
+pub fn jump_limits(kp: &JointVec) -> JointVec {
+    std::array::from_fn(|i| {
+        let tau_max = ARM_MOTOR_TYPES[i].torque_limit_nm();
+        if kp[i] > 0.0 {
+            tau_max / kp[i]
+        } else {
+            // With no position gain a far target cannot yank the joint; the
+            // guard has nothing to protect against.
+            f64::INFINITY
+        }
+    })
+}
+
+/// Clamp of the guard's log rate; one line per second names the offending
+/// joint without flooding at the control rate.
+const JUMP_WARN_PERIOD: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct ControlConfig {
     pub kp: JointVec,
@@ -49,6 +74,8 @@ pub struct ControlConfig {
     /// Joint position limits, parsed from the URDF, the final guard clamp applied
     /// to every governed setpoint before it reaches the motors.
     pub limits: [Limit; ARM_DOF],
+    /// Per-joint setpoint-jump bound; see [`jump_limits`].
+    pub jump_limit_rad: JointVec,
 }
 
 /// Spawn the arm's control and supervise it. `run_control` is the sole motor
@@ -111,6 +138,7 @@ async fn run_control(
 ) {
     let mut pacer =
         Pacer::new(cfg.cycle_period).expect("control_rate_hz is non-zero (period derives from it)");
+    let mut last_jump_warn: Option<Instant> = None;
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
     loop {
         let state = read_state(&arm, cfg.recv_timeout_us);
@@ -132,6 +160,16 @@ async fn run_control(
                 clamp_setpoint_to_limits(&q_des, &dq_des, &cfg.limits)
             }
             None => (q, ZERO),
+        };
+        // Last line of defense: refuse a target implausibly far from the
+        // measured pose (hold instead), so upstream state bugs cannot yank
+        // the arm; see `jump_limits`.
+        let (q_des, dq_des) = match setpoint_jump(&q_des, &q, &cfg.jump_limit_rad) {
+            None => (q_des, dq_des),
+            Some(joint) => {
+                warn_jump_throttled(&mut last_jump_warn, joint, q_des[joint] - q[joint]);
+                (q, ZERO)
+            }
         };
 
         command(&arm, &cfg, &ff_tau, &q_des, &dq_des);
@@ -230,12 +268,54 @@ fn read_state(arm: &Mutex<ArmCan>, recv_timeout_us: u32) -> openarm_can::ArmStat
     a.get_state()
 }
 
+/// The first joint whose setpoint sits beyond its jump bound from the
+/// measured pose, or `None` when the whole target is plausible.
+fn setpoint_jump(q_des: &JointVec, q: &JointVec, limit: &JointVec) -> Option<usize> {
+    (0..ARM_DOF).find(|&i| (q_des[i] - q[i]).abs() > limit[i])
+}
+
+fn warn_jump_throttled(last: &mut Option<Instant>, joint: usize, gap: f64) {
+    let now = Instant::now();
+    if last.is_none_or(|t| now.duration_since(t) >= JUMP_WARN_PERIOD) {
+        *last = Some(now);
+        error!(
+            "setpoint jump guard: joint {} target {:.3} rad from measured (beyond its \
+             saturation gap); holding the measured pose",
+            joint + 1,
+            gap
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn unit_limits() -> [Limit; ARM_DOF] {
         std::array::from_fn(|_| Limit { lo: -1.0, hi: 1.0 })
+    }
+
+    #[test]
+    fn jump_limits_are_the_saturation_gaps() {
+        // DM8009 (54 Nm) at kp 240 -> 0.225 rad; DM4310 (10 Nm) at kp 24 ->
+        // ~0.417 rad; kp 0 disables the guard for that joint.
+        let limits = jump_limits(&[240.0, 240.0, 240.0, 240.0, 24.0, 31.0, 0.0]);
+        assert!((limits[0] - 54.0 / 240.0).abs() < 1e-12);
+        assert!((limits[4] - 10.0 / 24.0).abs() < 1e-12);
+        assert!(limits[6].is_infinite());
+    }
+
+    #[test]
+    fn setpoint_jump_flags_only_beyond_the_bound() {
+        let limit = [0.2; ARM_DOF];
+        let q = [0.0; ARM_DOF];
+        let mut q_des = [0.1; ARM_DOF];
+        assert_eq!(setpoint_jump(&q_des, &q, &limit), None);
+        q_des[3] = 0.25;
+        assert_eq!(setpoint_jump(&q_des, &q, &limit), Some(3));
+        // Exactly at the bound is plausible, not a jump.
+        q_des[3] = 0.2;
+        assert_eq!(setpoint_jump(&q_des, &q, &limit), None);
     }
 
     #[test]

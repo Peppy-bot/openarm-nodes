@@ -13,6 +13,7 @@ mod actions;
 mod arm_pair;
 mod chase;
 mod coordinator;
+mod freshness;
 mod governor;
 mod planner;
 mod servo;
@@ -231,6 +232,22 @@ fn main() -> Result<()> {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         ];
+        let shared_stale = freshness::SharedStaleLimit::new(freshness::stale_limit(
+            params.d_stop,
+            params.d_safe,
+            params.max_ee_velocity_m_s,
+            cycle_period,
+        ));
+        let arm_probe = |rx: &watch::Receiver<Option<streams::MeasuredState>>| {
+            freshness::FreshnessProbe::new(rx.clone(), shared_stale.clone(), |m| m.received_at)
+        };
+        let grip_probe = |rx: &watch::Receiver<Option<streams::GripperOpening>>| {
+            freshness::FreshnessProbe::new(rx.clone(), shared_stale.clone(), |g| g.received_at)
+        };
+        let arm_probes = [arm_probe(&meas_rx0), arm_probe(&meas_rx1)];
+        let arm_probes_cartesian = [arm_probe(&meas_rx0), arm_probe(&meas_rx1)];
+        let grip_probes = [grip_probe(&grip_rx0), grip_probe(&grip_rx1)];
+
         let (config_tx, config_rx) = watch::channel(streams::GovernorConfig {
             enabled: params.collision_governor_enabled,
             d_stop: params.d_stop,
@@ -281,6 +298,7 @@ fn main() -> Result<()> {
                 config_rx,
                 coordinator::RunConfig {
                     cycle_period,
+                    shared_stale: shared_stale.clone(),
                     velocity_filter_cutoff_hz: params.velocity_filter_cutoff_hz,
                 },
                 token.clone(),
@@ -290,16 +308,19 @@ fn main() -> Result<()> {
                 [goal_tx0.clone(), goal_tx1.clone()],
                 [goal_busy[0].clone(), goal_busy[1].clone()],
                 [left_limits, right_limits],
+                arm_probes,
             ));
             set.spawn(actions::arm::run_move_arm(
                 runner.clone(),
                 [goal_tx0, goal_tx1],
                 [goal_busy[0].clone(), goal_busy[1].clone()],
+                arm_probes_cartesian,
             ));
             set.spawn(actions::gripper::run_move_gripper(
                 runner.clone(),
                 [grip_goal_tx0, grip_goal_tx1],
                 [gripper_busy[0].clone(), gripper_busy[1].clone()],
+                grip_probes,
             ));
 
             // Inbound listeners buffer the latest message into the watch slots. They

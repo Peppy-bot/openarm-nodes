@@ -2263,7 +2263,7 @@ dependencies = [
 [[package]]
 name = "openarm_can"
 version = "0.2.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#15d17a2a81c4356ee3ac47fd656308b79cd2aab9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fmotor-torque-accessor#73172e22e24a770a60e8251a3e0acff5849055b7"
 dependencies = [
  "nix",
  "socketcan",

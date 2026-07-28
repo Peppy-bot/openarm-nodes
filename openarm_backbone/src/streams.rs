@@ -57,6 +57,10 @@ pub struct GripperCommand {
 pub struct MeasuredState {
     pub positions: JointVec,
     pub velocities: JointVec,
+    /// Local ingestion instant, the coordinator's freshness anchor (the wire
+    /// stamp lives in the daemon's clock domain; arrival time is what
+    /// staleness is about).
+    pub received_at: Instant,
 }
 
 /// The latest measured state of one gripper: the opening clamped at ingestion
@@ -68,6 +72,8 @@ pub struct GripperOpening {
     pub fraction: f64,
     pub effort: f64,
     pub max_effort: f64,
+    /// Local ingestion instant, the coordinator's freshness anchor.
+    pub received_at: Instant,
 }
 
 /// Run `emit` at most once per [`THROTTLED_WARN_PERIOD`] per `last` state.
@@ -104,6 +110,7 @@ fn parse_joint_state(
     Ok(MeasuredState {
         positions,
         velocities,
+        received_at: Instant::now(),
     })
 }
 
@@ -154,6 +161,7 @@ fn parse_gripper_state(
         fraction: opening.clamp(0.0, 1.0),
         effort,
         max_effort,
+        received_at: Instant::now(),
     })
 }
 

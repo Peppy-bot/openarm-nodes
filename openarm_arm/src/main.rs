@@ -146,6 +146,9 @@ fn main() -> Result<()> {
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
             recv_timeout_us: params.recv_timeout_us,
             limits: model.limits(),
+            jump_limit_rad: control::jump_limits(&[
+                params.kp1, params.kp2, params.kp3, params.kp4, params.kp5, params.kp6, params.kp7,
+            ]),
         };
 
         info!(

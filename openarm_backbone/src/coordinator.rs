@@ -19,12 +19,14 @@ use peppygen::paired_topics::{
     leader_left_arm, leader_left_gripper, leader_right_arm, leader_right_gripper, left_arm_link,
     left_gripper_link, right_arm_link, right_gripper_link,
 };
+use peppylib::messaging::PeerInfo;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use control_core::{Pacer, filters::LowPassFilter};
 
+use crate::freshness::{SharedStaleLimit, stale_limit};
 use crate::governor::{GovState, Governor, Guard};
 use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
@@ -42,6 +44,49 @@ fn pairing_stamp() -> Result<SystemTime, String> {
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an
 /// indefinite quiet stall.
 const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
+
+/// One pairing slot's re-seed gate. Any peer identity change (pair, unpair,
+/// re-pair) arms it; while armed, the side's stream stays silent and its held
+/// state re-anchors on the first fresh measurement before streaming resumes.
+/// Without this, a follower that restarts against a live backbone would be
+/// handed the old parked setpoint as an instantaneous target.
+#[derive(Default)]
+struct PairingGate {
+    prev_peer: Option<PeerInfo>,
+    awaiting_seed: bool,
+}
+
+impl PairingGate {
+    /// Record the slot's starting peer without arming the gate (startup runs
+    /// its own seed).
+    fn prime(&mut self, peer: Option<PeerInfo>) {
+        self.prev_peer = peer;
+    }
+
+    fn observe(&mut self, peer: Option<PeerInfo>, side: Side, what: &str) {
+        if peer != self.prev_peer {
+            info!(
+                "{} {what} pairing changed; holding its stream until fresh state re-seeds",
+                side.label()
+            );
+            self.awaiting_seed = true;
+            self.prev_peer = peer;
+        }
+    }
+}
+
+/// Whether a limb's stored state is fresh enough to act on.
+fn fresh_arm(rx: &watch::Receiver<Option<MeasuredState>>, limit: Duration) -> bool {
+    rx.borrow()
+        .as_ref()
+        .is_some_and(|m| m.received_at.elapsed() <= limit)
+}
+
+fn fresh_gripper(rx: &watch::Receiver<Option<GripperOpening>>, limit: Duration) -> bool {
+    rx.borrow()
+        .as_ref()
+        .is_some_and(|g| g.received_at.elapsed() <= limit)
+}
 
 /// One arm's inbound channels into the coordinator: the commander's arm command
 /// stream, the commander's gripper opening command stream, the measured arm state,
@@ -65,10 +110,15 @@ pub struct ArmChannels {
 }
 
 /// The coordinator's run parameters. A commander that stops streaming simply
-/// leaves its last governed setpoint in place (the follower holds it), so
-/// there is no freshness deadman to configure.
+/// leaves its last governed setpoint in place (the follower holds it); the
+/// freshness deadman below guards the other direction, the followers' measured
+/// state, which everything here anchors on.
 pub struct RunConfig {
     pub cycle_period: Duration,
+    /// The live staleness limit for follower state, shared with the
+    /// goal-acceptance handlers; the coordinator recomputes it from the live
+    /// governor parameters every tick.
+    pub shared_stale: SharedStaleLimit,
     /// Cutoff (Hz) for the low-pass on each published desired velocity. `dq` is a
     /// per-tick position difference scaled by `1/dt`, so it amplifies any setpoint noise
     /// by the control rate; filtering it keeps the arm's Kd term from buzzing on a noisy
@@ -120,6 +170,7 @@ pub async fn run(
 ) -> peppygen::Result<()> {
     let RunConfig {
         cycle_period,
+        shared_stale,
         velocity_filter_cutoff_hz,
     } = config;
     // One publisher per pairing slot (arms and grippers alike). Publishing while
@@ -244,6 +295,27 @@ pub async fn run(
     // The proximity readout is for human eyes, so publish it at ~20 Hz rather than
     // the control rate: one extra distance query every `readout_every` ticks.
     let readout_every = (0.05 / dt).round().max(1.0) as u64;
+    // Re-seed gates, one per follower pairing slot, primed so the pairs
+    // established at launch (which startup's seed already anchored) do not arm
+    // them on the first tick.
+    let mut arm_gates = ArmPair::new(PairingGate::default(), PairingGate::default());
+    let mut grip_gates = ArmPair::new(PairingGate::default(), PairingGate::default());
+    arm_gates
+        .left
+        .prime(left_arm_link::joint_states::paired(&runner).ok().flatten());
+    arm_gates
+        .right
+        .prime(right_arm_link::joint_states::paired(&runner).ok().flatten());
+    grip_gates.left.prime(
+        left_gripper_link::gripper_states::paired(&runner)
+            .ok()
+            .flatten(),
+    );
+    grip_gates.right.prime(
+        right_gripper_link::gripper_states::paired(&runner)
+            .ok()
+            .flatten(),
+    );
     let mut tick: u64 = 0;
     let mut pacer = Pacer::new(cycle_period).expect("control_rate_hz is asserted > 0 at startup");
     loop {
@@ -271,15 +343,146 @@ pub async fn run(
         governor.set_band(cfg.d_stop, cfg.d_safe);
         planners.left.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
         planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
+        shared_stale.set(stale_limit(
+            cfg.d_stop,
+            cfg.d_safe,
+            cfg.max_ee_velocity_m_s,
+            cycle_period,
+        ));
+        let stale = shared_stale.get();
         let now = Instant::now();
 
+        // Follower freshness and pairing gates: a side streams only while its
+        // follower's state is fresh and any pairing change has been re-seeded.
+        // An in-flight move on a gated side aborts (its trajectory would
+        // otherwise keep walking a target no follower is tracking, parking a
+        // lie the next pairing would snap to).
+        arm_gates.left.observe(
+            left_arm_link::joint_states::paired(&runner).ok().flatten(),
+            Side::Left,
+            "arm",
+        );
+        arm_gates.right.observe(
+            right_arm_link::joint_states::paired(&runner).ok().flatten(),
+            Side::Right,
+            "arm",
+        );
+        let arm_fresh = ArmPair::new(
+            fresh_arm(&channels.left.measured, stale),
+            fresh_arm(&channels.right.measured, stale),
+        );
+        for (side, gate, planner, ch, fresh) in [
+            (
+                Side::Left,
+                &mut arm_gates.left,
+                &mut planners.left,
+                &channels.left,
+                arm_fresh.left,
+            ),
+            (
+                Side::Right,
+                &mut arm_gates.right,
+                &mut planners.right,
+                &channels.right,
+                arm_fresh.right,
+            ),
+        ] {
+            if gate.awaiting_seed || !fresh {
+                let measured_q = ch
+                    .measured
+                    .borrow()
+                    .map_or(planner.setpoint(), |m| m.positions);
+                let reason = if fresh {
+                    "follower re-paired mid-move"
+                } else {
+                    "follower state stale or absent"
+                };
+                planner.abort_move(reason, measured_q, now).await;
+            }
+            if gate.awaiting_seed && fresh {
+                let q = ch
+                    .measured
+                    .borrow()
+                    .expect("fresh implies a stored measurement")
+                    .positions;
+                planner.seed_from_measured(q);
+                gate.awaiting_seed = false;
+                info!(
+                    "{} arm: setpoint re-seeded from the measured pose; streaming resumes",
+                    side.label()
+                );
+            }
+        }
+        let arm_stream_ok = ArmPair::new(
+            !arm_gates.left.awaiting_seed && arm_fresh.left,
+            !arm_gates.right.awaiting_seed && arm_fresh.right,
+        );
+
         let arm_candidate = ArmPair::new(
-            tick_arm(&mut channels.left, &mut planners.left, now).await,
-            tick_arm(&mut channels.right, &mut planners.right, now).await,
+            if arm_stream_ok.left {
+                tick_arm(&mut channels.left, &mut planners.left, now).await
+            } else {
+                planners.left.setpoint()
+            },
+            if arm_stream_ok.right {
+                tick_arm(&mut channels.right, &mut planners.right, now).await
+            } else {
+                planners.right.setpoint()
+            },
         );
         let measured_openings = ArmPair::new(
             opening(&channels.left.gripper),
             opening(&channels.right.gripper),
+        );
+
+        // Gripper gates, mirroring the arms: the re-anchor on fresh state is
+        // the gripper's re-seed (the openings chase has no trajectory modes).
+        grip_gates.left.observe(
+            left_gripper_link::gripper_states::paired(&runner)
+                .ok()
+                .flatten(),
+            Side::Left,
+            "gripper",
+        );
+        grip_gates.right.observe(
+            right_gripper_link::gripper_states::paired(&runner)
+                .ok()
+                .flatten(),
+            Side::Right,
+            "gripper",
+        );
+        let grip_fresh = ArmPair::new(
+            fresh_gripper(&channels.left.gripper, stale),
+            fresh_gripper(&channels.right.gripper, stale),
+        );
+        for (side, gate, governed, measured, fresh) in [
+            (
+                Side::Left,
+                &mut grip_gates.left,
+                &mut governed_openings.left,
+                measured_openings.left,
+                grip_fresh.left,
+            ),
+            (
+                Side::Right,
+                &mut grip_gates.right,
+                &mut governed_openings.right,
+                measured_openings.right,
+                grip_fresh.right,
+            ),
+        ] {
+            if gate.awaiting_seed && fresh {
+                *governed = measured;
+                gate.awaiting_seed = false;
+                info!(
+                    "{} gripper: opening re-anchored on the measured jaws; streaming resumes",
+                    side.label()
+                );
+            }
+        }
+        let grip_stream_ok = ArmPair::new(
+            !grip_gates.left.awaiting_seed && grip_fresh.left,
+            !grip_gates.right.awaiting_seed && grip_fresh.right,
         );
 
         // Service the backbone-executed gripper moves: admit a queued goal into a free
@@ -293,6 +496,7 @@ pub async fn run(
             governed_openings.left,
             measured_openings.left,
             opening_rate,
+            grip_stream_ok.left,
             now,
         )
         .await;
@@ -302,6 +506,7 @@ pub async fn run(
             governed_openings.right,
             measured_openings.right,
             opening_rate,
+            grip_stream_ok.right,
             now,
         )
         .await;
@@ -311,13 +516,21 @@ pub async fn run(
         // side idles (never commanded, or unpaired), silent on the wire with the
         // governed opening anchored to the measured jaws.
         let targets = ArmPair::new(
-            gripper_target(&gripper_moves.left, &channels.left),
-            gripper_target(&gripper_moves.right, &channels.right),
+            grip_stream_ok
+                .left
+                .then(|| gripper_target(&gripper_moves.left, &channels.left))
+                .flatten(),
+            grip_stream_ok
+                .right
+                .then(|| gripper_target(&gripper_moves.right, &channels.right))
+                .flatten(),
         );
-        if targets.left.is_none() {
+        // Idle sides re-anchor on the measured jaws only while that reading is
+        // fresh; a frozen reading must not become the next chase base.
+        if targets.left.is_none() && grip_fresh.left {
             governed_openings.left = measured_openings.left;
         }
-        if targets.right.is_none() {
+        if targets.right.is_none() && grip_fresh.right {
             governed_openings.right = measured_openings.right;
         }
 
@@ -373,7 +586,7 @@ pub async fn run(
             Vec<f64>,
             Vec<f64>,
         ) -> peppygen::Result<peppylib::Payload>;
-        for (side, planner, filters, arm_pub, build, prev_q, governed_q) in [
+        for (side, planner, filters, arm_pub, build, prev_q, governed_q, stream_ok) in [
             (
                 Side::Left,
                 &mut planners.left,
@@ -382,6 +595,7 @@ pub async fn run(
                 left_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.left,
                 governed.arms.left,
+                arm_stream_ok.left,
             ),
             (
                 Side::Right,
@@ -391,8 +605,15 @@ pub async fn run(
                 right_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.right,
                 governed.arms.right,
+                arm_stream_ok.right,
             ),
         ] {
+            // A gated side goes silent: no commit (the setpoint stays where it
+            // was) and nothing on the wire, so the follower holds its own
+            // measured pose instead of tracking a parked target.
+            if !stream_ok {
+                continue;
+            }
             // Desired velocity is the per-tick position delta; low-pass it per joint so a
             // noisy stream does not drive the arm's Kd term into buzz. The published
             // position (`governed_q`) is untouched, so tracking is unaffected.
@@ -669,9 +890,11 @@ async fn service_gripper_move(
     governed_frac: f64,
     measured_frac: f64,
     opening_rate_frac_s: f64,
+    fresh: bool,
     now: Instant,
 ) {
     if mv.is_none()
+        && fresh
         && let Ok(goal) = channels.gripper_goals.try_recv()
     {
         *mv = Some(GripperMove {
@@ -688,6 +911,12 @@ async fn service_gripper_move(
     let landed = (governed_frac - m.target_frac).abs() <= OPENING_LANDED_FRAC;
     let (success, message, cancelled) = if m.ctx.is_cancelled() {
         (false, "goal cancelled".to_string(), true)
+    } else if !fresh {
+        (
+            false,
+            "gripper state stale or absent; move aborted".to_string(),
+            false,
+        )
     } else if landed {
         (true, "move complete".to_string(), false)
     } else if motion_timed_out(elapsed_s, m.budget_s) {
