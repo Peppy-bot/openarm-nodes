@@ -2154,7 +2154,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openarm_can"
 version = "0.2.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fnative-can#195ddaf70a934e768246c6b40a2aa07c14bcaf74"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#15d17a2a81c4356ee3ac47fd656308b79cd2aab9"
 dependencies = [
  "nix",
  "socketcan",
