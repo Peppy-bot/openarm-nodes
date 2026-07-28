@@ -179,7 +179,7 @@ fn main() -> Result<()> {
         // Always-on gripper_states publisher: reads the motor's cached state at
         // state_rate_hz and emits the opening. It issues no CAN traffic of its
         // own, so it never contends with the follow loop for the bus.
-        tokio::spawn(stream::run(
+        let publisher = tokio::spawn(stream::run(
             node_runner.clone(),
             params.state_rate_hz,
             motor_geometry,
@@ -187,6 +187,17 @@ fn main() -> Result<()> {
             gripper.clone(),
             node_runner.cancellation_token().clone(),
         ));
+        {
+            let token = node_runner.cancellation_token().clone();
+            tokio::spawn(async move {
+                let _ = publisher.await;
+                if !token.is_cancelled() {
+                    error!("state publisher exited unexpectedly");
+                    follow::HARD_FAULT.store(true, Ordering::SeqCst);
+                }
+                token.cancel();
+            });
+        }
 
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm_hardware_ready) to
@@ -252,7 +263,7 @@ fn main() -> Result<()> {
     // record a hard CAN fault as failed instead of finished.
     if follow::HARD_FAULT.load(Ordering::SeqCst) {
         return Err(peppygen::Error::Io(std::io::Error::other(
-            "persistent CAN fault stopped the follow loop",
+            "hard fault stopped this node; the log names the failing component",
         )));
     }
     Ok(())

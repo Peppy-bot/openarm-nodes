@@ -293,7 +293,7 @@ fn main() -> Result<()> {
     // makes the daemon record a hard CAN fault as failed instead of finished.
     if control::HARD_FAULT.load(Ordering::SeqCst) {
         return Err(peppygen::Error::Io(std::io::Error::other(
-            "CAN fault killed the control loop",
+            "hard fault stopped this node; the log names the failing component",
         )));
     }
     Ok(())
