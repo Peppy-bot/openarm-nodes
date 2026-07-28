@@ -222,7 +222,13 @@ fn main() -> Result<()> {
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
-                        Ok(is_ready::Response::new(ready.load(Ordering::SeqCst)))
+                        // A latched fault revokes readiness immediately:
+                        // services stay reachable while shutdown hooks run,
+                        // and the gate must not see ready during a disable.
+                        Ok(is_ready::Response::new(
+                            ready.load(Ordering::SeqCst)
+                                && !control::HARD_FAULT.load(Ordering::SeqCst),
+                        ))
                     })
                     .await
                     {
@@ -248,13 +254,19 @@ fn main() -> Result<()> {
         ));
         // Cancel the node the moment either stream task stops: a dead listener
         // or publisher would otherwise hold the arm silently while is_ready
-        // stays true (same supervision as the sim followers).
+        // stays true (same supervision as the sim followers). A stop before
+        // the token was cancelled is the fault, not a reaction to shutdown,
+        // so record it and exit as failed.
         {
             let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 tokio::select! {
                     _ = listener => {}
                     _ = publisher => {}
+                }
+                if !token.is_cancelled() {
+                    error!("stream task exited unexpectedly");
+                    control::HARD_FAULT.store(true, Ordering::SeqCst);
                 }
                 token.cancel();
             });

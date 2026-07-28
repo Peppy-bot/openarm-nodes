@@ -198,7 +198,13 @@ fn main() -> Result<()> {
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
-                        Ok(is_ready::Response::new(ready.load(Ordering::SeqCst)))
+                        // A latched fault revokes readiness immediately:
+                        // services stay reachable while shutdown hooks run,
+                        // and the gate must not see ready during a disable.
+                        Ok(is_ready::Response::new(
+                            ready.load(Ordering::SeqCst)
+                                && !follow::HARD_FAULT.load(Ordering::SeqCst),
+                        ))
                     })
                     .await
                     {
@@ -220,6 +226,10 @@ fn main() -> Result<()> {
             let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 command_stream::run(runner, cmd_tx, token.clone()).await;
+                if !token.is_cancelled() {
+                    error!("command stream exited unexpectedly");
+                    follow::HARD_FAULT.store(true, Ordering::SeqCst);
+                }
                 token.cancel();
             });
         }
