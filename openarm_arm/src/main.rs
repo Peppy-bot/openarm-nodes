@@ -13,7 +13,7 @@ mod friction;
 mod stream;
 
 use control::ControlConfig;
-use openarm_can::{ARM_MOTOR_TYPES, ARM_RECV_IDS, ARM_SEND_IDS, ArmCan, CallbackMode};
+use openarm_can::ArmCan;
 use openarm_description::{HardwareVersion, Side};
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
@@ -51,12 +51,21 @@ fn side_for(arm_id: u8) -> Side {
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
 const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
-const BRINGUP_RECV_US: i32 = 500;
+const BRINGUP_RECV_US: u32 = 500;
 const ENABLE_FD: bool = true;
 const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Tighter bound for shutdown lock removal so motor disable + lock removal stays
 /// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Adapts a CAN failure into the runtime error type so bring-up failures
+/// return through the runtime's error path, which runs the shutdown hooks.
+/// A panic would skip them, leaving the motor energised and the instance
+/// lock held. Repeated per node because peppygen is generated per node; no
+/// shared crate can name its Error type.
+fn can_err(e: openarm_can::CanError) -> peppygen::Error {
+    peppygen::Error::Io(std::io::Error::other(e))
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -76,6 +85,14 @@ fn main() -> Result<()> {
         // so just guard against zero.
         assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
         assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        // Bounded so a config typo cannot park recv_all in a near-eternal
+        // ppoll while it holds the CAN mutex the shutdown path needs.
+        assert!(
+            params.recv_timeout_us <= 1_000_000,
+            "recv_timeout_us must be at most 1_000_000 (1s), got {}",
+            params.recv_timeout_us
+        );
+
         let side = side_for(arm_id);
 
         // Which OpenArm generation this arm drives; selects the embedded description.
@@ -127,12 +144,7 @@ fn main() -> Result<()> {
                 params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7,
             ],
             cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
-            recv_timeout_us: i32::try_from(params.recv_timeout_us).unwrap_or_else(|_| {
-                panic!(
-                    "recv_timeout_us ({}) exceeds i32::MAX",
-                    params.recv_timeout_us
-                )
-            }),
+            recv_timeout_us: params.recv_timeout_us,
             limits: model.limits(),
         };
 
@@ -184,17 +196,18 @@ fn main() -> Result<()> {
         }
 
         // Hardware bringup: sequence mirrors ROS2 v10_simple_hardware on_init/on_activate.
+        // Arm motor lineup + CAN addressing are identical across generations; open()
+        // registers them.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-        // Arm motor lineup + CAN addressing are identical across generations.
-        let mut arm = ArmCan::new(&can_interface, ENABLE_FD).expect("ArmCan::new");
-        arm.init_motors(&ARM_MOTOR_TYPES, &ARM_SEND_IDS, &ARM_RECV_IDS);
-        arm.set_callback_mode(CallbackMode::Ignore);
-        arm.enable_all();
-        tokio::time::sleep(POST_ENABLE_SLEEP).await;
-        arm.recv_all(BRINGUP_RECV_US);
-        arm.set_callback_mode(CallbackMode::State);
-        // recv_all in State mode populates initial joint state; without it get_state() returns zeros.
-        arm.recv_all(BRINGUP_RECV_US);
+        let mut arm = ArmCan::open(&can_interface, ENABLE_FD).map_err(can_err)?;
+        // On failure past enable, best-effort disable before returning
+        // through the runtime's error path, which releases the instance lock.
+        if let Err(e) = bring_up(&mut arm).await {
+            if let Err(disable_err) = arm.disable_all() {
+                error!("disable after failed bringup: {disable_err}");
+            }
+            return Err(can_err(e));
+        }
         info!("arm ready");
 
         let arm = Arc::new(Mutex::new(arm));
@@ -209,7 +222,13 @@ fn main() -> Result<()> {
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
-                        Ok(is_ready::Response::new(ready.load(Ordering::SeqCst)))
+                        // A latched fault revokes readiness immediately:
+                        // services stay reachable while shutdown hooks run,
+                        // and the gate must not see ready during a disable.
+                        Ok(is_ready::Response::new(
+                            ready.load(Ordering::SeqCst)
+                                && !control::HARD_FAULT.load(Ordering::SeqCst),
+                        ))
                     })
                     .await
                     {
@@ -235,13 +254,19 @@ fn main() -> Result<()> {
         ));
         // Cancel the node the moment either stream task stops: a dead listener
         // or publisher would otherwise hold the arm silently while is_ready
-        // stays true (same supervision as the sim followers).
+        // stays true (same supervision as the sim followers). A stop before
+        // the token was cancelled is the fault, not a reaction to shutdown,
+        // so record it and exit as failed.
         {
             let token = node_runner.cancellation_token().clone();
             tokio::spawn(async move {
                 tokio::select! {
                     _ = listener => {}
                     _ = publisher => {}
+                }
+                if !token.is_cancelled() {
+                    error!("stream task exited unexpectedly");
+                    control::HARD_FAULT.store(true, Ordering::SeqCst);
                 }
                 token.cancel();
             });
@@ -261,5 +286,25 @@ fn main() -> Result<()> {
         ready.store(true, Ordering::SeqCst);
 
         Ok(())
-    })
+    })?;
+
+    // The runtime has returned, so the shutdown hooks (motor disable via the
+    // control loop, lock release) have already run; exiting non-zero here
+    // makes the daemon record a hard CAN fault as failed instead of finished.
+    if control::HARD_FAULT.load(Ordering::SeqCst) {
+        return Err(peppygen::Error::Io(std::io::Error::other(
+            "hard fault stopped this node; the log names the failing component",
+        )));
+    }
+    Ok(())
+}
+
+/// Enable the motors, drain the enable replies, then solicit and decode one
+/// state pass so `get_state()` is real before the control loop's first tick.
+async fn bring_up(arm: &mut ArmCan) -> openarm_can::Result<()> {
+    arm.enable_all()?;
+    tokio::time::sleep(POST_ENABLE_SLEEP).await;
+    arm.drain(BRINGUP_RECV_US)?;
+    arm.refresh_all()?;
+    arm.recv_all(BRINGUP_RECV_US)
 }
