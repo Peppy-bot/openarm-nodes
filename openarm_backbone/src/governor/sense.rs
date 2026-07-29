@@ -3,10 +3,10 @@
 //! Every clearance and gradient the pipeline needs is sampled here into an
 //! immutable [`Sensed`], before any limiter runs. The model rewrites its
 //! finger placement on every query ([`BimanualCollisionModel::set_gripper_openings`]),
-//! so a design where limiters query it directly makes their order load-bearing:
-//! whoever asks last leaves the model configured for whoever asks next, and the
-//! gradient silently becomes one taken at the wrong finger placement. Sampling
-//! once removes that coupling by construction rather than by comment.
+//! so a design where limiters query it directly would make their order
+//! load-bearing: whoever asks last leaves the model configured for whoever asks
+//! next, and the gradient becomes one taken at the wrong finger placement.
+//! Sampling once removes that coupling by construction.
 //!
 //! This is also the only stage that carries state across ticks: the
 //! measured-state tripwire's hysteresis latch.
@@ -30,12 +30,15 @@ const _: () = assert!(MONITOR_TRIP_FRACTION > 0.0 && MONITOR_TRIP_FRACTION < 1.0
 
 /// Everything the limiters and the barrier read, sampled once at `prev`.
 pub(super) struct Sensed {
+    /// This tick's period (s). Carried here so a limiter is a pure function of
+    /// the step and the snapshot alone.
+    pub dt: f64,
     /// Signed surface clearance at `prev` (m; negative is penetration).
     pub d_prev: f64,
     /// `d(clearance)/d(dof)` at `prev`. `None` in deep penetration, where the
     /// witness points coincide and no separating direction exists: the barrier
     /// stands down there and the floor scan alone guards the step, so the
-    /// operator can still drive out instead of being frozen inside the contact.
+    /// operator can still drive out of the contact.
     pub grad: Option<[f64; GOV_DOF]>,
     /// The nearest checked pair at `prev`, for the log line and the readout.
     pub pair: NearestPair,
@@ -66,6 +69,7 @@ impl Governor {
     /// cannot be obtained at all, which the caller turns into a hold.
     pub(super) fn sense(
         &mut self,
+        dt: f64,
         prev: &GovState,
         cand: &GovState,
         measured: &GovState,
@@ -88,6 +92,7 @@ impl Governor {
                 grad[LEFT_OPENING] = g.grad_openings[0];
                 grad[RIGHT_OPENING] = g.grad_openings[1];
                 Some(Sensed {
+                    dt,
                     d_prev: g.proximity.distance,
                     grad: Some(grad),
                     pair: NearestPair {
@@ -105,6 +110,7 @@ impl Governor {
                 // inside the collision.
                 let pair = self.proximity(prev)?;
                 Some(Sensed {
+                    dt,
                     d_prev: pair.distance,
                     grad: None,
                     pair,

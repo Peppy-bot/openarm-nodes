@@ -19,16 +19,23 @@
 
 use super::{
     APPROACH_VELOCITY_AT_SAFE_M_S, Clip, DUAL_DOF, FLOOR_BISECT_ITERS, GOV_DOF, Governor,
-    MAX_PROBE_ARC_RAD, MAX_PROBE_OPENING_FRAC, MIN_GRADIENT_NORM_SQ, SEGMENT_SAMPLES_MIN, dot,
-    is_left_dof, split,
+    MAX_PROBE_ARC_RAD, MAX_PROBE_OPENING_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S,
+    SEGMENT_SAMPLES_MIN, dot, is_left_dof, split,
 };
 
 impl Governor {
-    /// The clearance this tick's governed step must not drop below: `d_stop`
-    /// normally, or the current clearance if the arms are already inside it (so an
-    /// in-penetration recovery is never forced to close further).
-    fn step_floor(&self, d_now: f64) -> f64 {
-        d_now.min(self.d_stop)
+    /// The clearance this tick's governed step must not drop below.
+    ///
+    /// `d_stop` on an approach, or the current clearance if the arms are inside
+    /// it, so closing further is refused. Once the bodies actually overlap the
+    /// rule relaxes to a bounded rate of loss: escaping an interpenetration
+    /// routinely sweeps deeper before it separates, and a floor that forbids any
+    /// loss refuses that whole segment every tick. See [`RECOVERY_LOSS_M_PER_S`].
+    fn step_floor(&self, d_now: f64, dt: f64) -> f64 {
+        if d_now >= 0.0 {
+            return d_now.min(self.d_stop);
+        }
+        d_now - RECOVERY_LOSS_M_PER_S * dt
     }
 
     /// The closing-velocity barrier: scale back only the gap-closing component of the
@@ -63,6 +70,12 @@ impl Governor {
                     true,
                 )
             };
+        if !limited {
+            // Unrestricted motion must carry the commanded value itself: the
+            // clamp below reconstructs each DOF from `prev + delta`, which is not
+            // bit-identical to the candidate.
+            return (*cand_q, false);
+        }
         // The minimum-norm correction spreads the closing reduction along the
         // gradient, which can jog a DOF the operator did not drive or reverse one
         // they did. Clamp each DOF's governed step into [0, commanded step]: a held
@@ -70,13 +83,20 @@ impl Governor {
         let governed = std::array::from_fn(|i| {
             prev_q[i] + (projected[i] - prev_q[i]).clamp(step[i].min(0.0), step[i].max(0.0))
         });
-        (governed, limited)
+        (governed, true)
     }
 
-    /// Permitted approach speed (m/s) at signed surface distance `d`: zero at or
+    /// Permitted closing speed (m/s) at signed surface distance `d`: zero at or
     /// under `d_stop`, the full approach at or over `d_safe`, linear between.
+    ///
+    /// Inside an actual overlap this is a recovery budget rather than an
+    /// approach one. Leaving it at zero there makes the projection itself the
+    /// trap: an escape whose first move goes deeper is a closing step, so it
+    /// would be projected away and the arms could never leave the collision.
     fn allowed_closing(&self, d: f64) -> f64 {
-        if d <= self.d_stop {
+        if d < 0.0 {
+            RECOVERY_LOSS_M_PER_S
+        } else if d <= self.d_stop {
             0.0
         } else if d >= self.d_safe {
             APPROACH_VELOCITY_AT_SAFE_M_S
@@ -175,7 +195,7 @@ impl Governor {
         d_now: f64,
         dt: f64,
     ) -> Clip {
-        let floor = self.step_floor(d_now);
+        let floor = self.step_floor(d_now, dt);
         // Held DOF (a separating side) sit at `target` for the whole scan; the
         // rest interpolate, so the clip retracts only the approaching side.
         let point_at = |t: f64| -> [f64; GOV_DOF] {
@@ -187,20 +207,13 @@ impl Governor {
                 }
             })
         };
-        // The chase velocity-limits every DOF before it reaches the governor (arm
-        // joints by the joint speed cap, openings by the opening rate). A larger
-        // excursion is an upstream bug that would silently under-resolve the
-        // scan, so fail loudly (the `* 1.01` absorbs float rounding at the exact
-        // limit). The same per-DOF ratio sizes the probe count below: probes are
-        // spaced so no DOF moves more than its probe resolution between them.
+        // Probe spacing: one probe per resolution unit of the fastest-moving
+        // DOF, so no DOF moves more than its probe resolution between probes.
+        // The step reaching here is bounded by `DofSpeed` in the limit stage,
+        // which is what keeps this count finite.
         let mut max_probe_ratio = 0.0_f64;
         for i in 0..GOV_DOF {
             let excursion = (target[i] - prev[i]).abs();
-            let max_step = self.dof_speed_limit(i) * dt;
-            assert!(
-                excursion <= max_step * 1.01,
-                "governed step {excursion:.4} on DOF {i} exceeds its velocity-limited bound {max_step:.4}"
-            );
             let probe_resolution = if i < DUAL_DOF {
                 MAX_PROBE_ARC_RAD
             } else {

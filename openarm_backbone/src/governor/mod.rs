@@ -12,8 +12,10 @@
 //! witness points (one distance query, no finite differencing). The residual
 //! approximation is the per-tick linearization of the step, bounded by the small
 //! control-rate step and absorbed by the exact line-search backstop: each tick the
-//! realized clearance is held at or above the floor `min(d_now, d_stop)`, so an
-//! approach never crosses `d_stop` and an in-penetration recovery never deepens.
+//! realized clearance is held at or above the step floor, so an approach never
+//! crosses `d_stop`. Inside an actual overlap the floor instead decays at a
+//! bounded rate, so a recovery whose path sweeps deeper before it separates is
+//! throttled rather than refused outright.
 //!
 //! The barrier above shapes only the commanded stream and is blind to how well the
 //! arms track it. A second, independent measured-state monitor (defense in depth)
@@ -36,7 +38,7 @@ mod limiters;
 mod sense;
 
 use allowance::Limits;
-use limiters::{Limiter, MeasuredTripwire};
+use limiters::{DofSpeed, Limiter, MeasuredTripwire};
 use sense::Sensed;
 
 /// Joints across both arms, left (0..7) then right (7..14).
@@ -112,6 +114,18 @@ const MAX_OPENING_RATE_FRAC_S: f64 = 3.0;
 /// analog of `MAX_PROBE_ARC_RAD`: one probe per this much opening travel, ~0.7 mm
 /// of jaw motion, comparable surface resolution to the joint arc.
 const MAX_PROBE_OPENING_FRAC: f64 = 0.01;
+
+/// Clearance an already-overlapping configuration may give up per second while
+/// recovering. Escaping an interpenetration routinely sweeps deeper before it
+/// separates, so a floor that forbids any loss refuses that escape every tick.
+/// Another joint may still get the operator out, but the obvious command is
+/// silently held with the readout reading `stopped`, and the natural next move
+/// is to switch the guard off while the arms are in contact. This bounds how
+/// fast an overlap may worsen instead of forbidding it: at the shipped 100 Hz,
+/// 2 mm per tick, enough to cross the pockets seen in sim and slow enough to
+/// stay controlled. It applies ONLY at negative clearance; the guarded band
+/// above zero keeps the strict floor, so an approach still parks at `d_stop`.
+const RECOVERY_LOSS_M_PER_S: f64 = 0.2;
 
 /// A squared gradient norm at or below this (m/rad)² means the clearance is locally
 /// insensitive to motion (no closing direction exists), so the step passes
@@ -240,11 +254,9 @@ impl Governor {
         self.enabled = enabled;
         if !enabled {
             // Only the log/readout state resets. The tripwire latch is a fact
-            // about where the bodies actually are, not about the toggle: an
-            // off/on cycle while the measured clearance sits inside the
-            // hysteresis band used to drop the latch and re-arm at the weaker
-            // untripped threshold, silently freeing closing commands the
-            // tripwire was holding one tick earlier.
+            // about where the bodies are, not about the toggle: dropping it here
+            // would re-arm at the weaker untripped threshold and free closing
+            // commands while the measured clearance is still inside the band.
             self.guard = Guard::Clear;
         }
     }
@@ -334,7 +346,7 @@ impl Governor {
             self.report(Guard::Clear, None, None);
             return *cand;
         }
-        let Some(sensed) = self.sense(prev, cand, measured) else {
+        let Some(sensed) = self.sense(dt, prev, cand, measured) else {
             self.report(Guard::Stopped, None, None);
             return *prev;
         };
@@ -367,7 +379,10 @@ impl Governor {
     /// output, so the order of this list changes only which name is recorded on
     /// a tie, never the governed step.
     fn limit(&self, step: &Step, sensed: &Sensed) -> Limits {
-        let limiters: [&dyn Limiter; 1] = [&MeasuredTripwire];
+        let dof_speed = DofSpeed {
+            max_step: std::array::from_fn(|i| self.dof_speed_limit(i) * sensed.dt),
+        };
+        let limiters: [&dyn Limiter; 2] = [&dof_speed, &MeasuredTripwire];
         limiters.iter().fold(Limits::unrestricted(), |limits, l| {
             limits.add(l.name(), l.allow(step, sensed))
         })
@@ -421,11 +436,9 @@ impl Governor {
     /// Record and log this tick's disposition, once per transition rather than
     /// at the control rate.
     ///
-    /// The only place `guard` is assigned while running, so a fault taken on
-    /// one path can never strand the readout on another: a non-finite candidate
-    /// arriving while the governor was disabled used to pin the operator status
-    /// to "stopped" until the toggle was cycled twice, because the passthrough
-    /// return never recomputed it.
+    /// The only place `guard` is assigned while running, so a fault taken on one
+    /// path can never strand the readout on another. Every return recomputes it,
+    /// including the passthrough one.
     fn report(&mut self, next: Guard, pair: Option<&NearestPair>, by: Option<&'static str>) {
         if next == self.guard {
             return;
@@ -615,11 +628,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "exceeds its velocity-limited bound")]
-    fn a_step_beyond_the_velocity_limit_trips_the_scan_assert() {
-        // A tiny velocity makes the bound (max_joint_velocity * DT) 5e-4 rad, so any
-        // real step exceeds it and the scan's velocity-limit assertion fires rather
-        // than silently under-resolving the segment.
+    fn a_step_beyond_the_velocity_limit_is_clamped_not_panicked() {
+        // A tiny velocity makes the bound (max_joint_velocity * DT) 5e-4 rad,
+        // so any real step exceeds it. The scan sizes its probe count from that
+        // bound, so an over-limit step would under-resolve the segment; this
+        // `DofSpeed` clamps to the bound, so the scan keeps its resolution
+        // precondition without the node going down over an upstream bug.
+        let velocity = 0.05;
         let meshes_dir = fixture_meshes_dir(openarm_description::HardwareVersion::V1);
         let mut g = Governor::build(
             openarm_description::HardwareVersion::V1.urdf(),
@@ -628,14 +643,34 @@ mod tests {
             openarm_description::HardwareVersion::V1.base_link(openarm_description::Side::Right),
             D_STOP,
             D_SAFE,
-            0.05,
+            velocity,
             true,
         )
         .expect("build governor from bundled description");
         let prev = at(home());
         let mut cand = prev;
         cand.arms.left[0] += 0.5; // 0.5 rad >> the 5e-4 rad velocity-limited bound
-        let _ = g.govern(&prev, &cand, &prev, DT);
+
+        let governed = g.govern(&prev, &cand, &prev, DT);
+        let bound = velocity * DT;
+        let taken = governed.arms.left[0] - prev.arms.left[0];
+        assert!(
+            taken > 0.0,
+            "an over-limit command must still move, just slower"
+        );
+        assert!(
+            taken <= bound * (1.0 + 1e-9),
+            "step {taken:.6} exceeded its velocity-limited bound {bound:.6}"
+        );
+        for (i, (&q, &p)) in governed
+            .arms
+            .right
+            .iter()
+            .zip(prev.arms.right.iter())
+            .enumerate()
+        {
+            assert_eq!(q, p, "uncommanded right joint {i} moved");
+        }
     }
 
     /// Both arms elbow-bent, j3 wrapping the wrists toward the centerline by `t`.
@@ -728,18 +763,21 @@ mod tests {
         };
         // Escape toward home increases clearance: allowed, never frozen.
         let escape = at(chase(&deep.arms, &home(), 0.02));
+        // While overlapping the floor decays at RECOVERY_LOSS_M_PER_S so a
+        // recovery can cross a pocket; the step may lose at most that much.
+        let slack = RECOVERY_LOSS_M_PER_S * DT + 1e-3;
         let out = clip_only(&mut g, &deep, &escape);
         assert_ne!(out, deep, "escape was frozen in place");
         assert!(
-            distance(&mut g, &out) >= floor - 1e-3,
+            distance(&mut g, &out) >= floor - slack,
             "escape dropped below the floor"
         );
-        // A deeper command is held at the floor, never pushed past it.
+        // A deeper command is still bounded: it may not run away past the slack.
         let deeper = at(chase(&deep.arms, &wrists_inward(2.0), 0.02));
         let held = clip_only(&mut g, &deep, &deeper);
         assert!(
-            distance(&mut g, &held) >= floor - 1e-3,
-            "guard let penetration deepen"
+            distance(&mut g, &held) >= floor - slack,
+            "guard let penetration deepen without bound"
         );
     }
 
@@ -1360,6 +1398,56 @@ mod tests {
             g.govern(&at(home()), &deep, &in_band, DT),
             at(home()),
             "an in-band measurement tripped from a clear state"
+        );
+    }
+
+    #[test]
+    fn a_penetrated_arm_can_still_drive_out_when_the_way_out_dips_deeper() {
+        // Field repro (MuJoCo v2): with the wrists swept in, the arms sat
+        // interpenetrating and every escape command was refused, because the
+        // way out sweeps DEEPER before it separates and the floor scan rejected
+        // the whole segment on every tick. The operator's only recourse was to
+        // switch the governor off, which is the worst moment to have no guard.
+        //
+        // `wrists_inward` has exactly that shape: t = 1.20 is a local clearance
+        // maximum inside a penetrating pocket, so retreating toward home makes
+        // the clearance worse before it makes it better.
+        let mut g = v2_governor(true);
+        let trapped = at(wrists_inward(1.20));
+        let d0 = distance(&mut g, &trapped);
+        assert!(d0 < 0.0, "setup: the repro pose must overlap, got {d0:+.5}");
+        let backed_off = distance(&mut g, &at(wrists_inward(1.15)));
+        assert!(
+            backed_off < d0,
+            "setup: retreating must dip deeper first ({backed_off:+.5} vs {d0:+.5})"
+        );
+
+        // One velocity-limited tick toward home must not be frozen.
+        let one = at(chase(&trapped.arms, &home(), 0.02));
+        let governed = g.govern(&trapped, &one, &trapped, DT);
+        assert_ne!(
+            governed, trapped,
+            "escape frozen: a penetrated arm must never be trapped by the governor"
+        );
+
+        // And driving out must actually work: the operator reaches clear air.
+        let mut state = trapped;
+        let budget = RECOVERY_LOSS_M_PER_S * DT + 1e-6;
+        for _ in 0..400 {
+            let before = distance(&mut g, &state);
+            let cand = GovState::new(chase(&state.arms, &home(), 0.02), state.openings);
+            state = g.govern(&state, &cand, &state, DT);
+            let after = distance(&mut g, &state);
+            assert!(
+                after >= before - budget,
+                "recovery gave up {:.5} m in one tick, over the {budget:.5} m budget",
+                before - after
+            );
+        }
+        let out = distance(&mut g, &state);
+        assert!(
+            out > 0.0,
+            "the operator could not drive out of the collision: d={out:+.5}"
         );
     }
 

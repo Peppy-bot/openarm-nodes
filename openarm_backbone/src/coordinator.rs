@@ -7,6 +7,11 @@
 //! always governed together against a consistent configuration, and the
 //! governed result is fed back so the next tick chases from where each DOF was
 //! actually allowed to go.
+//!
+//! An arm whose follower has stopped delivering state is frozen at its held
+//! setpoint and its wire goes silent, and the first delivery after the gap
+//! re-anchors that setpoint on the measured pose, so a follower that restarts
+//! is never handed a target that drifted while nobody could see the arm.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +31,7 @@ use tracing::{error, info, warn};
 use control_core::{Pacer, filters::LowPassFilter};
 
 use crate::governor::{GovState, Governor, Guard};
+use crate::liveness::{self, Admission, Liveness};
 use crate::planner::{BusyGuard, Goal, Planner};
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
 use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
@@ -64,9 +70,11 @@ pub struct ArmChannels {
     pub gripper_busy: Arc<AtomicBool>,
 }
 
-/// The coordinator's run parameters. A commander that stops streaming simply
-/// leaves its last governed setpoint in place (the follower holds it), so
-/// there is no freshness deadman to configure.
+/// The coordinator's run parameters. A *commander* that stops streaming simply
+/// leaves its last governed setpoint in place, which is a hold and needs no
+/// deadman. A *follower* that stops delivering is the opposite case and does
+/// have one, keyed to the control period rather than configured here (see
+/// [`crate::liveness`]).
 pub struct RunConfig {
     pub cycle_period: Duration,
     /// Cutoff (Hz) for the low-pass on each published desired velocity. `dq` is a
@@ -254,6 +262,13 @@ pub async fn run(
     let readout_every = (0.05 / dt).round().max(1.0) as u64;
     let mut tick: u64 = 0;
     let mut pacer = Pacer::new(cycle_period).expect("control_rate_hz is asserted > 0 at startup");
+    // Both arms are seeded from their first measurement above, which is the
+    // anchor a recovery would re-establish, so they start live.
+    let stale_limit = liveness::stale_limit(cycle_period);
+    let mut arm_liveness = {
+        let seeded = Instant::now();
+        ArmPair::new(Liveness::seeded(seeded), Liveness::seeded(seeded))
+    };
     loop {
         // A move in progress consumes its side's streamed command: while the busy
         // flag is set, clear the command watch every tick so a setpoint still in
@@ -281,9 +296,40 @@ pub async fn run(
         planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
         let now = Instant::now();
 
+        // Judge each arm's follower before commanding it. A follower that has
+        // stopped delivering cannot be vouched for: its limb freezes at the
+        // held setpoint and its wire goes silent, so the follower holds its own
+        // last setpoint instead of tracking one that keeps advancing on the
+        // operator's stream while the real arm drifts. The first delivery back
+        // re-anchors the held setpoint on the measured pose, so the limb never
+        // steps by the drift it accumulated unseen.
+        let arm_admission = ArmPair::new(
+            arm_liveness.left.admit(
+                channels.left.measured.has_changed().unwrap_or(false),
+                now,
+                stale_limit,
+            ),
+            arm_liveness.right.admit(
+                channels.right.measured.has_changed().unwrap_or(false),
+                now,
+                stale_limit,
+            ),
+        );
         let arm_candidate = ArmPair::new(
-            tick_arm(&mut channels.left, &mut planners.left, now).await,
-            tick_arm(&mut channels.right, &mut planners.right, now).await,
+            tick_arm(
+                &mut channels.left,
+                &mut planners.left,
+                arm_admission.left,
+                now,
+            )
+            .await,
+            tick_arm(
+                &mut channels.right,
+                &mut planners.right,
+                arm_admission.right,
+                now,
+            )
+            .await,
         );
         let measured_openings = ArmPair::new(
             opening(&channels.left.gripper),
@@ -381,7 +427,7 @@ pub async fn run(
             Vec<f64>,
             Vec<f64>,
         ) -> peppygen::Result<peppylib::Payload>;
-        for (side, planner, filters, arm_pub, build, prev_q, governed_q) in [
+        for (side, planner, filters, arm_pub, build, prev_q, governed_q, admission) in [
             (
                 Side::Left,
                 &mut planners.left,
@@ -390,6 +436,7 @@ pub async fn run(
                 left_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.left,
                 governed.arms.left,
+                arm_admission.left,
             ),
             (
                 Side::Right,
@@ -399,13 +446,21 @@ pub async fn run(
                 right_arm_link::joint_setpoints::build_message as BuildSetpoint,
                 prev.arms.right,
                 governed.arms.right,
+                arm_admission.right,
             ),
         ] {
             // Desired velocity is the per-tick position delta; low-pass it per joint so a
             // noisy stream does not drive the arm's Kd term into buzz. The published
             // position (`governed_q`) is untouched, so tracking is unaffected.
             let dq = filtered_velocity(filters, &governed_q, &prev_q, dt);
+            // Every side commits (identity for a stale one, whose candidate was
+            // the frozen setpoint), but a stale side stays silent so its
+            // follower holds its own last setpoint rather than tracking one the
+            // backbone can no longer vouch for.
             planner.commit(governed_q);
+            if admission == Admission::Stale {
+                continue;
+            }
             match pairing_stamp().and_then(|stamp| {
                 build(stamp, governed_q.to_vec(), dq.to_vec(), Vec::new())
                     .map_err(|e| e.to_string())
@@ -679,11 +734,29 @@ async fn wait_for_first<T>(
 /// Advance one arm's planner to its candidate setpoint for this tick: anchor on the
 /// measured pose (or the held setpoint if no measurement yet), feed the latest
 /// commander command, and admit any pending move goal.
-async fn tick_arm(channels: &mut ArmChannels, planner: &mut Planner, now: Instant) -> JointVec {
-    let measured_q = match *channels.measured.borrow() {
+async fn tick_arm(
+    channels: &mut ArmChannels,
+    planner: &mut Planner,
+    admission: Admission,
+    now: Instant,
+) -> JointVec {
+    let measured_q = match *channels.measured.borrow_and_update() {
         Some(s) => s.positions,
         None => planner.setpoint(),
     };
+    // A stale limb holds exactly where it was last governed. Advancing the
+    // planner would walk the setpoint away from an arm nobody can see.
+    if admission == Admission::Stale {
+        return planner.setpoint();
+    }
+    // First delivery after a gap: the held setpoint is now fiction, so adopt
+    // the measured pose before advancing. The per-joint velocity limit in the
+    // chase then walks it back to the operator's command instead of the
+    // follower stepping the whole divergence in one tick.
+    if admission == Admission::Reanchor {
+        warn!("arm follower stream recovered; re-anchoring on the measured pose");
+        planner.seed_from_measured(measured_q);
+    }
     let command = channels.command.borrow().clone();
     planner
         .tick(

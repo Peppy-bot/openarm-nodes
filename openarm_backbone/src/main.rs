@@ -14,6 +14,7 @@ mod arm_pair;
 mod chase;
 mod coordinator;
 mod governor;
+mod liveness;
 mod planner;
 mod servo;
 mod startup;
