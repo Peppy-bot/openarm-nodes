@@ -2,7 +2,7 @@
 //! clamp that keeps streamed joint targets inside the arm's limits.
 //!
 //! [`rate_limited`] is the one place a per-tick rate limit is applied. Every
-//! chase in the node goes through it (the arm's joints, the jaws' opening, the
+//! chase in the node goes through it (the arm's joints, the grippers' opening, the
 //! servo's post-filter re-clamp), so they cannot round or bound differently.
 
 use srs_model::Limit;
@@ -11,6 +11,11 @@ use crate::{ARM_DOF, JointVec};
 
 /// Advance `from` one tick toward `target`, moving at most `rate * dt`. A
 /// target within reach lands on it exactly.
+///
+/// `rate` and `dt` must be finite and non-negative: the clamp bounds are
+/// `[-rate * dt, rate * dt]` and `f64::clamp` panics if they invert, so an
+/// unvalidated rate fails loudly at the call site rather than limping. Every
+/// current caller's rate is bringup-validated.
 pub(crate) fn rate_limited(from: f64, target: f64, rate: f64, dt: f64) -> f64 {
     let max_step = rate * dt;
     from + (target - from).clamp(-max_step, max_step)
@@ -39,7 +44,7 @@ pub(crate) fn clamp_to_limits(q: &JointVec, limits: &[Limit; ARM_DOF]) -> JointV
 mod tests {
     use super::*;
 
-    // The scalar rate limit the arm chase, the jaw chase and the servo's
+    // The scalar rate limit the arm chase, the gripper chase and the servo's
     // post-filter clamp all share.
     #[test]
     fn rate_limited_caps_both_directions_and_lands_exactly() {

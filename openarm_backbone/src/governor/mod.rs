@@ -41,41 +41,43 @@ use crate::{ARM_DOF, ArmPair, JointVec};
 
 mod barrier;
 mod limiters;
+mod model;
 mod sense;
 
 use limiters::{DofSpeed, EeSpeed, Limiter, Limits, MeasuredTripwire};
+use model::ConfiguredModel;
 use sense::Sensed;
 
 /// Joints across both arms, left (0..7) then right (7..14).
 const DUAL_DOF: usize = 2 * ARM_DOF;
 
 /// Every governed degree of freedom: both arms' joints, then the left and
-/// right jaws. One vector so the barrier, the floor scan, the separating
-/// hold, and the measured-state monitor treat a jaw exactly like a joint.
+/// right grippers. One vector so the barrier, the floor scan, the separating
+/// hold, and the measured-state monitor treat a gripper exactly like a joint.
 const GOV_DOF: usize = DUAL_DOF + 2;
-const LEFT_JAW: usize = DUAL_DOF;
-const RIGHT_JAW: usize = DUAL_DOF + 1;
+const LEFT_GRIPPER: usize = DUAL_DOF;
+const RIGHT_GRIPPER: usize = DUAL_DOF + 1;
 
-/// One governed configuration: both arms' joints and both jaws. The single
+/// One governed configuration: both arms' joints and both grippers. The single
 /// state [`Governor::govern`] throttles, scans, and monitors, so every
 /// guarantee the arms get covers the fingers identically.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GovState {
     pub arms: ArmPair<JointVec>,
-    /// Jaw opening fraction per side: 0 closed, 1 fully open.
-    pub jaws: ArmPair<f64>,
+    /// Gripper opening fraction per side: 0 closed, 1 fully open.
+    pub grippers: ArmPair<f64>,
 }
 
 impl GovState {
-    pub fn new(arms: ArmPair<JointVec>, jaws: ArmPair<f64>) -> Self {
-        Self { arms, jaws }
+    pub fn new(arms: ArmPair<JointVec>, grippers: ArmPair<f64>) -> Self {
+        Self { arms, grippers }
     }
 }
 
 /// A proposed motion of the whole governed configuration over one tick: where
 /// the DOF are now (the last governed setpoint) and where the commanded stream
 /// would put them. Flat over [`GOV_DOF`] because every stage of the pipeline
-/// treats a jaw exactly like a joint.
+/// treats a gripper exactly like a joint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Step {
     prev: [f64; GOV_DOF],
@@ -107,17 +109,17 @@ const APPROACH_VELOCITY_AT_SAFE_M_S: f64 = 0.15;
 /// gripper opening: the opening analog of the arm joint speed cap, bounding each
 /// tick's opening step before it reaches the governor (whose `DofSpeed` clamp
 /// and floor-scan probe sizing key off the same rate via
-/// [`max_jaw_rate_frac_s`](Governor::max_jaw_rate_frac_s)). The gripper
+/// [`max_gripper_rate_frac_s`](Governor::max_gripper_rate_frac_s)). The gripper
 /// node and hardware own the real opening speed. Stated in opening fraction, the
 /// unit every opening DOF (wire and model alike) already uses: `3.0 /s` drives a
 /// full open or close in ~1/3 s. A module constant like the approach speed above;
 /// promote it to a parameter when tuning on hardware.
-const MAX_JAW_RATE_FRAC_S: f64 = 3.0;
+const MAX_GRIPPER_RATE_FRAC_S: f64 = 3.0;
 
 /// Probe resolution of the floor scan on an opening DOF (fraction), the opening
 /// analog of `MAX_PROBE_ARC_RAD`: one probe per this much opening travel, ~0.7 mm
-/// of jaw motion, comparable surface resolution to the joint arc.
-const MAX_PROBE_JAW_FRAC: f64 = 0.01;
+/// of gripper motion, comparable surface resolution to the joint arc.
+const MAX_PROBE_GRIPPER_FRAC: f64 = 0.01;
 
 /// Clearance an already-overlapping configuration may give up per second while
 /// recovering. Escaping an interpenetration routinely sweeps deeper before it
@@ -188,7 +190,7 @@ pub struct NearestPair {
 }
 
 pub struct Governor {
-    model: BimanualCollisionModel,
+    model: ConfiguredModel,
     /// Closing is fully stopped at or under this signed surface distance (m).
     d_stop: f64,
     /// Outside this signed surface distance (m) the barrier is inactive.
@@ -238,7 +240,9 @@ impl Governor {
                 "invalid max_ee_velocity_m_s ({max_ee_velocity_m_s}): must be finite and > 0"
             ));
         }
-        let model = build_collision_model(urdf, meshes_dir, left_base, right_base)?;
+        let model = ConfiguredModel::new(build_collision_model(
+            urdf, meshes_dir, left_base, right_base,
+        )?);
         Ok(Self {
             model,
             d_stop,
@@ -276,21 +280,12 @@ impl Governor {
     }
 
     /// The nearest checked pair's signed surface distance and link names at this
-    /// configuration (fingers placed at its jaws), for the operator readout.
+    /// configuration (fingers placed at its grippers), for the operator readout.
     /// Excluded pairs are never returned (the model drops them), and this is
     /// independent of the enabled state so the readout is live even in
     /// passthrough. `None` if the distance query fails.
     pub fn proximity(&mut self, state: &GovState) -> Option<NearestPair> {
-        self.model
-            .set_gripper_openings(state.jaws.left, state.jaws.right);
-        self.model
-            .min_distance(&state.arms.left, &state.arms.right)
-            .ok()
-            .map(|p| NearestPair {
-                distance: p.distance,
-                link_a: p.link_a.to_string(),
-                link_b: p.link_b.to_string(),
-            })
+        self.model.proximity(&concat(state))
     }
 
     /// Disposition of the last governed cycle, for the status readout. Clear
@@ -333,7 +328,7 @@ impl Governor {
     }
 
     /// Govern one bimanual step from `prev` to `cand` over `dt`, returning the
-    /// governed configuration. Arms and jaws ride the same vector,
+    /// governed configuration. Arms and grippers ride the same vector,
     /// so every guarantee the joints get covers the fingers identically.
     ///
     /// Six stages, in this order, each contractive with respect to the last:
@@ -346,8 +341,12 @@ impl Governor {
     ///    the most restrictive. These are motion-shaping controls, not
     ///    collision guards: they run in both modes, so the operator toggle
     ///    gates collision avoidance and nothing else.
-    /// 3. **Sense.** One immutable snapshot of the collision model. Nothing
-    ///    downstream queries it, so no stage can perturb another's view.
+    /// 3. **Sense.** One immutable snapshot of everything the limiters and
+    ///    the projection decide on, so neither can perturb the other's view.
+    ///    Only the clip stage queries the model after this, and every query
+    ///    goes through [`model::ConfiguredModel`], which takes the whole
+    ///    configuration per call: a read at a stale finger placement is
+    ///    unrepresentable.
     /// 4. **Limit (tripwire).** The measured-state tripwire's allowance joins
     ///    the combination. Order-free with stage 2 by construction, and the
     ///    binding limiter falls out of the combination rather than being
@@ -465,8 +464,8 @@ impl Governor {
     /// Largest rate (fraction/s) the coordinator's chase may drive an opening
     /// candidate; the floor scan's probe sizing and the `DofSpeed` clamp are
     /// keyed to the same value.
-    pub fn max_jaw_rate_frac_s(&self) -> f64 {
-        MAX_JAW_RATE_FRAC_S
+    pub fn max_gripper_rate_frac_s(&self) -> f64 {
+        MAX_GRIPPER_RATE_FRAC_S
     }
 
     /// Largest per-tick step governed DOF `i` may take, from the chase's arm
@@ -476,20 +475,14 @@ impl Governor {
         if i < DUAL_DOF {
             self.max_joint_velocity_rad_s
         } else {
-            self.max_jaw_rate_frac_s()
+            self.max_gripper_rate_frac_s()
         }
     }
 
-    /// Signed clearance at a governed configuration: fingers placed at its
-    /// jaw fractions, then the min distance over all checked pairs. `None` on a
-    /// query error so callers fail safe.
+    /// Signed clearance at a governed configuration. `None` on a query error
+    /// so callers fail safe.
     fn distance_at(&mut self, q: &[f64; GOV_DOF]) -> Option<f64> {
-        let s = split(q);
-        self.model.set_gripper_openings(s.jaws.left, s.jaws.right);
-        self.model
-            .min_distance(&s.arms.left, &s.arms.right)
-            .ok()
-            .map(|p| p.distance)
+        self.model.distance(q)
     }
 
     /// Record and log this tick's disposition, once per transition rather than
@@ -544,8 +537,8 @@ pub(crate) fn valid_band(d_stop: f64, d_safe: f64) -> bool {
 /// left opening, right opening.
 fn concat(s: &GovState) -> [f64; GOV_DOF] {
     std::array::from_fn(|i| match i {
-        LEFT_JAW => s.jaws.left,
-        RIGHT_JAW => s.jaws.right,
+        LEFT_GRIPPER => s.grippers.left,
+        RIGHT_GRIPPER => s.grippers.right,
         i if i < ARM_DOF => s.arms.left[i],
         i => s.arms.right[i - ARM_DOF],
     })
@@ -558,13 +551,13 @@ fn split(q: &[f64; GOV_DOF]) -> GovState {
             std::array::from_fn(|i| q[i]),
             std::array::from_fn(|i| q[ARM_DOF + i]),
         ),
-        jaws: ArmPair::new(q[LEFT_JAW], q[RIGHT_JAW]),
+        grippers: ArmPair::new(q[LEFT_GRIPPER], q[RIGHT_GRIPPER]),
     }
 }
 
 /// True if governed DOF `i` belongs to the left half (arm joints or opening).
 fn is_left_dof(i: usize) -> bool {
-    i < ARM_DOF || i == LEFT_JAW
+    i < ARM_DOF || i == LEFT_GRIPPER
 }
 
 fn dot(a: &[f64; GOV_DOF], b: &[f64; GOV_DOF]) -> f64 {
@@ -625,8 +618,8 @@ mod tests {
         )
     }
 
-    /// Arms at `arms` with both jaws fully open: the widest finger envelope, which
-    /// is what the arm-barrier scenarios governed against before jaws were
+    /// Arms at `arms` with both grippers fully open: the widest finger envelope, which
+    /// is what the arm-barrier scenarios governed against before grippers were
     /// governed DOF, so their tuned poses and distances carry over unchanged.
     fn at(arms: ArmPair<JointVec>) -> GovState {
         GovState::new(arms, ArmPair::new(1.0, 1.0))
@@ -751,7 +744,7 @@ mod tests {
         )
     }
 
-    /// Signed clearance at a governed configuration (fingers placed at its jaws).
+    /// Signed clearance at a governed configuration (fingers placed at its grippers).
     fn distance(g: &mut Governor, s: &GovState) -> f64 {
         g.distance_at(&concat(s)).expect("finite config")
     }
@@ -868,7 +861,7 @@ mod tests {
         // Command only the left arm further toward the centerline (closing); hold
         // the right exactly where it is.
         let pushed = chase(&q.arms, &wrists_inward(1.5), 0.02);
-        let cand = GovState::new(ArmPair::new(pushed.left, q.arms.right), q.jaws);
+        let cand = GovState::new(ArmPair::new(pushed.left, q.arms.right), q.grippers);
         let governed = g.govern(&q, &cand, &q, NO_HANDS, DT);
         // The held right arm must not be jogged by the barrier's correction.
         assert_eq!(
@@ -893,16 +886,12 @@ mod tests {
         let q = drive_into_band(&mut g);
         // Build a step orthogonal to the distance gradient (purely tangential): it
         // does not change clearance, so the barrier must pass it unthrottled.
-        g.model.set_gripper_openings(q.jaws.left, q.jaws.right);
-        let grad_pair = g
-            .model
-            .distance_gradient(&q.arms.left, &q.arms.right)
-            .expect("gradient");
+        let grad_pair = g.model.gradient(&concat(&q)).expect("gradient");
         let mut grad = [0.0; GOV_DOF];
         grad[..ARM_DOF].copy_from_slice(&grad_pair.grad_left);
         grad[ARM_DOF..DUAL_DOF].copy_from_slice(&grad_pair.grad_right);
-        grad[LEFT_JAW] = grad_pair.grad_openings[0];
-        grad[RIGHT_JAW] = grad_pair.grad_openings[1];
+        grad[LEFT_GRIPPER] = grad_pair.grad_openings[0];
+        grad[RIGHT_GRIPPER] = grad_pair.grad_openings[1];
         let raw: [f64; GOV_DOF] = std::array::from_fn(|i| {
             if i < DUAL_DOF {
                 ((i % 3) as f64 - 1.0) * 0.01
@@ -945,10 +934,10 @@ mod tests {
         let toward16 = concat(&at(chase(&q.arms, &wrists_inward(1.5), 0.02)));
         let step16: [f64; GOV_DOF] = std::array::from_fn(|i| toward16[i] - prev16[i]);
         let dq = split(&step16);
-        let bound = g.model.clearance_step_bound(
+        let bound = g.model.step_bound(
             &dq.arms.left,
             &dq.arms.right,
-            &[dq.jaws.left, dq.jaws.right],
+            &[dq.grippers.left, dq.grippers.right],
         );
         assert!(bound > 0.0, "setup: a closing step has a positive bound");
 
@@ -958,10 +947,10 @@ mod tests {
             // (margin > bound of the scaled step), or a reshaped bound would
             // quietly turn this into a generic floor sweep.
             let scaled = split(&std::array::from_fn(|i| target16[i] - prev16[i]));
-            let scaled_bound = g.model.clearance_step_bound(
+            let scaled_bound = g.model.step_bound(
                 &scaled.arms.left,
                 &scaled.arms.right,
-                &[scaled.jaws.left, scaled.jaws.right],
+                &[scaled.grippers.left, scaled.grippers.right],
             );
             assert_eq!(
                 margin > scaled_bound,
@@ -1067,11 +1056,157 @@ mod tests {
     /// Invariant 2 is what caught the separating-side exemption scanning a
     /// two-leg path the arms never travel; a scalar endpoint check cannot see
     /// that, so the path is sampled rather than assumed.
-    /// Captured live (MuJoCo v2): wrists swept in with the jaws wide, parked
+    /// Hand-run timing report (ignored in normal runs; timing asserts nothing):
+    /// `cargo test --release governor_tick_timing_report -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing report, run by hand in release"]
+    fn governor_tick_timing_report() {
+        use std::time::Instant;
+
+        let time_us = |label: &str, iters: u32, mut f: Box<dyn FnMut() + '_>| {
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                f();
+            }
+            let us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+            println!("TIMING {label}: {us:.1} us/call");
+            us
+        };
+
+        // The raw queries.
+        let far = concat(&at(home()));
+        let mut g2 = v2_governor(true);
+        time_us(
+            "distance (far)",
+            2000,
+            Box::new(move || {
+                g2.model.distance(&far).unwrap();
+            }),
+        );
+        let near = concat(&at(wrists_inward(1.05)));
+        let mut g3 = v2_governor(true);
+        time_us(
+            "distance (in band)",
+            2000,
+            Box::new(move || {
+                g3.model.distance(&near).unwrap();
+            }),
+        );
+        let mut g4 = v2_governor(true);
+        time_us(
+            "gradient (in band)",
+            2000,
+            Box::new(move || {
+                g4.model.gradient(&near).map(|_| ()).unwrap();
+            }),
+        );
+
+        // The speed limiters alone (no model).
+        let hands = ArmPair::new(
+            Some(srs_model::Jacobian::zeros()),
+            Some(srs_model::Jacobian::zeros()),
+        );
+        let prev = at(home());
+        let mut cand = prev;
+        cand.arms.left[2] += 0.01;
+        let step = Step::new(&prev, &cand).unwrap();
+        let gl = governor(true);
+        time_us(
+            "speed limiters fold",
+            20000,
+            Box::new(move || {
+                std::hint::black_box(gl.limit_speed(&step, &hands, DT));
+            }),
+        );
+
+        // Whole ticks by regime. `closed` keeps the v2 home pose out of the
+        // wide-gripper torso overlap, so "far apart" really is far apart; the
+        // overlap gets its own regime at the end.
+        let closed = |arms: ArmPair<JointVec>| GovState::new(arms, ArmPair::new(0.0, 0.0));
+        let regimes: [(&str, GovState, GovState, GovState); 5] = [
+            (
+                "tick: far apart (skip)",
+                closed(home()),
+                closed(chase(&home(), &wrists_inward(0.4), 0.02)),
+                closed(home()),
+            ),
+            (
+                "tick: in-band approach",
+                at(wrists_inward(1.05)),
+                at(chase(&wrists_inward(1.05), &wrists_inward(1.5), 0.02)),
+                at(wrists_inward(1.05)),
+            ),
+            (
+                "tick: hold at the wall",
+                at(wrists_inward(1.093)),
+                at(chase(&wrists_inward(1.093), &wrists_inward(1.5), 0.02)),
+                at(wrists_inward(1.093)),
+            ),
+            (
+                "tick: tripwire latched",
+                at(wrists_inward(1.05)),
+                at(chase(&wrists_inward(1.05), &wrists_inward(1.5), 0.02)),
+                at(wrists_inward(1.15)),
+            ),
+            (
+                "tick: penetration escape",
+                at(home()),
+                at(chase(&home(), &wrists_inward(0.4), 0.02)),
+                at(home()),
+            ),
+        ];
+        // The disabled tick: parse + speed limiters + apply, no model at all.
+        {
+            let mut g = v2_governor(false);
+            let prev = at(wrists_inward(1.05));
+            let cand = at(chase(&wrists_inward(1.05), &wrists_inward(1.5), 0.02));
+            time_us(
+                "tick: governor disabled",
+                20000,
+                Box::new(move || {
+                    std::hint::black_box(g.govern(&prev, &cand, &prev, NO_HANDS, DT));
+                }),
+            );
+        }
+        // The planner's per-tick kinematics outside the governor, for the
+        // whole-loop picture: the Jacobian a streamed tick hands out.
+        {
+            let version = openarm_description::HardwareVersion::V2;
+            let mut arm =
+                crate::arm_model(version, version.base_link(openarm_description::Side::Left))
+                    .expect("arm model");
+            let q = [0.1, -0.2, 0.3, 0.5, 0.1, -0.1, 0.2];
+            time_us(
+                "planner: jacobian at measured",
+                5000,
+                Box::new(move || {
+                    std::hint::black_box(arm.at(&q).jacobian());
+                }),
+            );
+        }
+        let mut worst = 0.0_f64;
+        for (label, prev, cand, measured) in regimes {
+            let mut g = v2_governor(true);
+            let us = time_us(
+                label,
+                500,
+                Box::new(move || {
+                    std::hint::black_box(g.govern(&prev, &cand, &measured, NO_HANDS, DT));
+                }),
+            );
+            worst = worst.max(us);
+        }
+        println!(
+            "TIMING worst tick {worst:.1} us -> {:.0} Hz ceiling (one core, this machine)",
+            1e6 / worst
+        );
+    }
+
+    /// Captured live (MuJoCo v2): wrists swept in with the grippers wide, parked
     /// against the stop with an open finger near the torso. An operator's
     /// "retreat" to a tucked pose from here is actually a closing command for
     /// the binding pair, and the governor refused it for 19 s straight.
-    fn wedged_open_jawed_at_the_torso() -> GovState {
+    fn wedged_open_gripper_at_the_torso() -> GovState {
         GovState::new(
             ArmPair::new(
                 [-0.0743, -0.0735, 0.8353, 0.3973, 0.0009, -0.0074, 0.1502],
@@ -1083,13 +1218,13 @@ mod tests {
 
     /// The field wedge above is not a trap: the refused command was genuinely
     /// closing (a tucked "safe" pose swings the open fingers toward the
-    /// torso), and both real escapes pass. Closing the jaws alone opens the
-    /// binding gap immediately, and swinging the wrists outward with the jaws
+    /// torso), and both real escapes pass. Closing the grippers alone opens the
+    /// binding gap immediately, and swinging the wrists outward with the grippers
     /// closing drives the whole configuration to clear air.
     #[test]
-    fn the_open_jawed_torso_wedge_is_refused_but_never_a_trap() {
+    fn the_open_gripper_torso_wedge_is_refused_but_never_a_trap() {
         let mut g = v2_governor(true);
-        let wedge = wedged_open_jawed_at_the_torso();
+        let wedge = wedged_open_gripper_at_the_torso();
         let d0 = distance(&mut g, &wedge);
         assert!(
             (0.0..D_SAFE).contains(&d0),
@@ -1105,7 +1240,7 @@ mod tests {
         );
         let mut q = wedge;
         for _ in 0..100 {
-            let cand = GovState::new(chase(&q.arms, &tucked, 0.02), q.jaws);
+            let cand = GovState::new(chase(&q.arms, &tucked, 0.02), q.grippers);
             q = g.govern(&q, &cand, &q, NO_HANDS, DT);
             let d = distance(&mut g, &q);
             assert!(
@@ -1114,35 +1249,36 @@ mod tests {
             );
         }
 
-        // Real escape 1: closing the jaws alone opens the binding gap.
+        // Real escape 1: closing the grippers alone opens the binding gap.
+        let rate = g.max_gripper_rate_frac_s();
         q = wedge;
         for _ in 0..200 {
             let cand = GovState::new(
                 q.arms,
                 ArmPair::new(
-                    rate_limited(q.jaws.left, 0.0, 3.0, DT),
-                    rate_limited(q.jaws.right, 0.0, 3.0, DT),
+                    rate_limited(q.grippers.left, 0.0, rate, DT),
+                    rate_limited(q.grippers.right, 0.0, rate, DT),
                 ),
             );
             q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
-        let jaws_closed = distance(&mut g, &q);
+        let grippers_closed = distance(&mut g, &q);
         assert!(
-            jaws_closed > d0 + 0.005,
-            "closing the jaws must open the torso gap materially: {jaws_closed:+.6}"
+            grippers_closed > d0 + 0.005,
+            "closing the grippers must open the torso gap materially: {grippers_closed:+.6}"
         );
 
-        // Real escape 2, from where escape 1 leaves off: with the jaws closed
+        // Real escape 2, from where escape 1 leaves off: with the grippers closed
         // and the gap reopened, swinging the wrists outward reaches clear air.
         // (Sequencing matters: bundling the outward swing with the still-open
-        // jaws is itself a closing command here, since the chase's first step
+        // grippers is itself a closing command here, since the chase's first step
         // toward a distant pose sweeps the fingers through the torso.)
         let outward = ArmPair::new(
             [0.0, 0.0, -0.4, 0.5, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.4, 0.5, 0.0, 0.0, 0.0],
         );
         for _ in 0..300 {
-            let cand = GovState::new(chase(&q.arms, &outward, 0.02), q.jaws);
+            let cand = GovState::new(chase(&q.arms, &outward, 0.02), q.grippers);
             q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
         let out = distance(&mut g, &q);
@@ -1159,6 +1295,7 @@ mod tests {
             openarm_description::HardwareVersion::V2,
         ] {
             let mut g = governor_for(version, true);
+            let rate = g.max_gripper_rate_frac_s();
             let mut rng = Lcg(0x5EED_1234_ABCD_0001);
             let mut q = at(home());
             let mut target = q;
@@ -1181,8 +1318,8 @@ mod tests {
                 let cand = GovState::new(
                     chase(&prev.arms, &target.arms, 0.02),
                     ArmPair::new(
-                        rate_limited(prev.jaws.left, target.jaws.left, 3.0, DT),
-                        rate_limited(prev.jaws.right, target.jaws.right, 3.0, DT),
+                        rate_limited(prev.grippers.left, target.grippers.left, rate, DT),
+                        rate_limited(prev.grippers.right, target.grippers.right, rate, DT),
                     ),
                 );
                 q = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
@@ -1228,19 +1365,19 @@ mod tests {
     }
 
     /// The v2 description places a fully-splayed finger inside the torso proxy
-    /// at home, so an operator who opens the jaws with the arms down starts
+    /// at home, so an operator who opens the grippers with the arms down starts
     /// overlapping. Whether that overlap is real is a question for the URDF's
     /// finger travel; what must hold here is that the governor never makes it a
     /// trap. If this setup assertion ever fails, the description changed and
     /// the escape below is what needs re-confirming, not the number.
     #[test]
-    fn v2_wide_jaws_at_home_overlap_the_torso_and_the_operator_still_gets_out() {
+    fn v2_wide_grippers_at_home_overlap_the_torso_and_the_operator_still_gets_out() {
         let mut g = v2_governor(true);
         let wide = GovState::new(home(), ArmPair::new(1.0, 1.0));
         let d0 = distance(&mut g, &wide);
         assert!(
             d0 < 0.0,
-            "setup: v2 home with both jaws wide should overlap, got {d0:+.6}"
+            "setup: v2 home with both grippers wide should overlap, got {d0:+.6}"
         );
         let pair = g.proximity(&wide).expect("a nearest pair at home");
         assert!(
@@ -1250,30 +1387,31 @@ mod tests {
             pair.link_b
         );
 
-        // Closing the jaws is the direct way out, and it must not be refused.
+        // Closing the grippers is the direct way out, and it must not be refused.
+        let rate = g.max_gripper_rate_frac_s();
         let mut q = wide;
         for _ in 0..200 {
             let cand = GovState::new(
                 q.arms,
                 ArmPair::new(
-                    rate_limited(q.jaws.left, 0.0, 3.0, DT),
-                    rate_limited(q.jaws.right, 0.0, 3.0, DT),
+                    rate_limited(q.grippers.left, 0.0, rate, DT),
+                    rate_limited(q.grippers.right, 0.0, rate, DT),
                 ),
             );
             q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
         assert!(
             distance(&mut g, &q) > 0.0,
-            "closing the jaws must clear the torso overlap"
+            "closing the grippers must clear the torso overlap"
         );
 
-        // So is swinging the arms out with the jaws left wide.
+        // So is swinging the arms out with the grippers left wide.
         let mut q = wide;
         let mut out = home();
         out.left[1] = -0.6;
         out.right[1] = 0.6;
         for _ in 0..200 {
-            let cand = GovState::new(chase(&q.arms, &out, 0.02), q.jaws);
+            let cand = GovState::new(chase(&q.arms, &out, 0.02), q.grippers);
             q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
         assert!(
@@ -1317,7 +1455,7 @@ mod tests {
         assert_eq!(g.guard(), Guard::Stopped, "a fault hold reads stopped");
         // A non-finite OPENING is the same class of upstream glitch.
         let mut bad_opening = at(wrists_inward(0.2));
-        bad_opening.jaws.left = f64::NAN;
+        bad_opening.grippers.left = f64::NAN;
         assert_eq!(g.govern(&prev, &bad_opening, &prev, NO_HANDS, DT), prev);
         // Disabled fast path: still never passes a non-finite candidate through.
         g.set_enabled(false);
@@ -1435,14 +1573,14 @@ mod tests {
             let cr = chase(&q.arms, &home(), pull).right;
             let solo_left = distance(
                 &mut g,
-                &GovState::new(ArmPair::new(cl, q.arms.right), q.jaws),
+                &GovState::new(ArmPair::new(cl, q.arms.right), q.grippers),
             );
             let solo_right = distance(
                 &mut g,
-                &GovState::new(ArmPair::new(q.arms.left, cr), q.jaws),
+                &GovState::new(ArmPair::new(q.arms.left, cr), q.grippers),
             );
             if solo_left < d_wall && solo_right > d_wall {
-                found = Some((GovState::new(ArmPair::new(cl, cr), q.jaws), solo_right));
+                found = Some((GovState::new(ArmPair::new(cl, cr), q.grippers), solo_right));
                 break;
             }
         }
@@ -1463,7 +1601,7 @@ mod tests {
         // token sliver (the frozen-arm bug clipped it to a few percent).
         let opened = distance(
             &mut g,
-            &GovState::new(ArmPair::new(q.arms.left, governed.arms.right), q.jaws),
+            &GovState::new(ArmPair::new(q.arms.left, governed.arms.right), q.grippers),
         );
         assert!(
             opened >= d_wall + 0.5 * (solo_right - d_wall),
@@ -1510,11 +1648,15 @@ mod tests {
         for (push_step, pull_step) in [(0.05, 0.01), (0.1, 0.01), (0.15, 0.02), (0.2, 0.02)] {
             let push = chase(&measured.arms, &deep.arms, push_step);
             let pull = chase(&measured.arms, &home(), pull_step);
-            let cand = GovState::new(ArmPair::new(push.left, pull.right), measured.jaws);
-            let solo_right =
-                GovState::new(ArmPair::new(prev.arms.left, cand.arms.right), measured.jaws);
-            let solo_left =
-                GovState::new(ArmPair::new(cand.arms.left, prev.arms.right), measured.jaws);
+            let cand = GovState::new(ArmPair::new(push.left, pull.right), measured.grippers);
+            let solo_right = GovState::new(
+                ArmPair::new(prev.arms.left, cand.arms.right),
+                measured.grippers,
+            );
+            let solo_left = GovState::new(
+                ArmPair::new(cand.arms.left, prev.arms.right),
+                measured.grippers,
+            );
             if distance(&mut g, &cand) <= d_measured
                 && distance(&mut g, &solo_right) > d_measured
                 && distance(&mut g, &solo_left) <= d_measured
@@ -1774,7 +1916,7 @@ mod tests {
         let budget = RECOVERY_LOSS_M_PER_S * DT + 1e-6;
         for _ in 0..400 {
             let before = distance(&mut g, &state);
-            let cand = GovState::new(chase(&state.arms, &home(), 0.02), state.jaws);
+            let cand = GovState::new(chase(&state.arms, &home(), 0.02), state.grippers);
             state = g.govern(&state, &cand, &state, NO_HANDS, DT);
             let after = distance(&mut g, &state);
             assert!(
@@ -1862,13 +2004,13 @@ mod tests {
 
     // --- Gripper scenarios (v2, whose fingers travel the farthest) -----------
     //
-    // The jaws are ordinary governed DOF, so every arm guarantee above
+    // The grippers are ordinary governed DOF, so every arm guarantee above
     // already applies to them; these pin the finger-specific geometry paths:
-    // opening into the other arm, bilateral jaws sharing one clearance,
+    // opening into the other arm, bilateral grippers sharing one clearance,
     // closing as separation, and the monitor judging measured fingers.
 
     /// A wrists-inward v2 pose whose left finger sweeps toward the right palm as
-    /// the jaw opens: with the jaws closed the palms are ~23 mm clear, fully open
+    /// the gripper opens: with the grippers closed the palms are ~23 mm clear, fully open
     /// the finger penetrates. The gripper scenarios open into it.
     fn finger_into_other_arm() -> ArmPair<JointVec> {
         ArmPair::new(
@@ -1878,19 +2020,19 @@ mod tests {
     }
 
     /// Drive `start` toward `target` through the governor tick by tick with
-    /// velocity-limited candidates (arms and jaws alike), asserting the
+    /// velocity-limited candidates (arms and grippers alike), asserting the
     /// realized clearance never crosses the stop floor on any tick; measured
     /// tracks commanded (perfect tracking). Returns the settled state.
     fn drive(g: &mut Governor, start: GovState, target: &GovState, ticks: usize) -> GovState {
-        let jaw_step = g.max_jaw_rate_frac_s() * DT;
-        let chase_frac = |from: f64, to: f64| from + (to - from).clamp(-jaw_step, jaw_step);
+        let gripper_step = g.max_gripper_rate_frac_s() * DT;
+        let chase_frac = |from: f64, to: f64| from + (to - from).clamp(-gripper_step, gripper_step);
         let mut s = start;
         for _ in 0..ticks {
             let cand = GovState::new(
                 chase(&s.arms, &target.arms, 0.02),
                 ArmPair::new(
-                    chase_frac(s.jaws.left, target.jaws.left),
-                    chase_frac(s.jaws.right, target.jaws.right),
+                    chase_frac(s.grippers.left, target.grippers.left),
+                    chase_frac(s.grippers.right, target.grippers.right),
                 ),
             );
             s = g.govern(&s, &cand, &s, NO_HANDS, DT);
@@ -1907,18 +2049,21 @@ mod tests {
         let start = GovState::new(arms, ArmPair::new(0.0, 0.0));
         assert!(
             distance(&mut g, &start) >= D_SAFE,
-            "setup: closed jaws start clear of the band"
+            "setup: closed grippers start clear of the band"
         );
-        // Command the left jaw fully open; the barrier admits a useful partial
+        // Command the left gripper fully open; the barrier admits a useful partial
         // opening and parks it at the floor, holding the floor on every tick.
         let target = GovState::new(arms, ArmPair::new(1.0, 0.0));
         let settled = drive(&mut g, start, &target, 300);
         assert!(
-            (1e-4..1.0 - 1e-4).contains(&settled.jaws.left),
+            (1e-4..1.0 - 1e-4).contains(&settled.grippers.left),
             "opening into the other arm should settle to a safe partial, got {}",
-            settled.jaws.left
+            settled.grippers.left
         );
-        assert_eq!(settled.jaws.right, 0.0, "uncommanded right gripper opened");
+        assert_eq!(
+            settled.grippers.right, 0.0,
+            "uncommanded right gripper opened"
+        );
         // Settled NEAR the stop, not stalled far above it.
         let d = distance(&mut g, &settled);
         assert!(
@@ -1937,7 +2082,7 @@ mod tests {
         let mut g = v2_governor(true);
         let arms = finger_into_other_arm();
         // Park the left opening at the floor, then command fully closed. Closing
-        // is NOT exempt from governing: a jaw has two fingers, and at an angled
+        // is NOT exempt from governing: a gripper has two fingers, and at an angled
         // pose retracting the near finger advances the far one, so a closing
         // sub-motion can itself reduce clearance and gets budgeted like any
         // other. The invariants are the floor holding on every tick (asserted
@@ -1957,33 +2102,33 @@ mod tests {
             300,
         );
         assert!(
-            closed.jaws.left < 1e-6,
-            "the jaw did not close: settled at {}",
-            closed.jaws.left
+            closed.grippers.left < 1e-6,
+            "the gripper did not close: settled at {}",
+            closed.grippers.left
         );
         assert!(
             distance(&mut g, &closed) > d_parked,
-            "closing the jaw should recover clearance"
+            "closing the gripper should recover clearance"
         );
     }
 
     #[test]
-    fn bilateral_jaws_share_one_clearance_budget() {
+    fn bilateral_grippers_share_one_clearance_budget() {
         let mut g = v2_governor(true);
-        // Two grippers facing each other across the centerline: with the jaws
+        // Two grippers facing each other across the centerline: with the grippers
         // closed the pose is clear of the band, with both fully open the fingers
-        // interpenetrate, so opening EITHER jaw closes the same gap.
+        // interpenetrate, so opening EITHER gripper closes the same gap.
         let pose = wrists_inward(0.55);
         let start = GovState::new(pose, ArmPair::new(0.0, 0.0));
         assert!(
             distance(&mut g, &start) >= D_SAFE,
-            "setup: closed jaws start clear of the band"
+            "setup: closed grippers start clear of the band"
         );
         assert!(
             distance(&mut g, &GovState::new(pose, ArmPair::new(1.0, 1.0))) < 0.0,
-            "setup: both jaws open must interpenetrate"
+            "setup: both grippers open must interpenetrate"
         );
-        // Command BOTH jaws fully open at once. One shared barrier budgets the
+        // Command BOTH grippers fully open at once. One shared barrier budgets the
         // joint motion, so the combined opening still holds the floor on every
         // tick (asserted inside drive); two independent barriers would each
         // spend the full budget and jointly breach it.
@@ -1996,14 +2141,14 @@ mod tests {
         let d = distance(&mut g, &settled);
         assert!(
             (D_STOP - 1e-9..D_STOP + 4e-3).contains(&d),
-            "bilateral jaws should park the shared clearance at the stop, got {d:+.5}"
+            "bilateral grippers should park the shared clearance at the stop, got {d:+.5}"
         );
-        // Both jaws made real progress: the budget was shared, not starved onto
+        // Both grippers made real progress: the budget was shared, not starved onto
         // one side.
         assert!(
-            settled.jaws.left > 1e-3 && settled.jaws.right > 1e-3,
-            "both jaws should open partially, got {:?}",
-            settled.jaws
+            settled.grippers.left > 1e-3 && settled.grippers.right > 1e-3,
+            "both grippers should open partially, got {:?}",
+            settled.grippers
         );
     }
 
@@ -2012,7 +2157,7 @@ mod tests {
         let mut g = v2_governor(true);
         let arms = finger_into_other_arm();
         let start = GovState::new(arms, ArmPair::new(0.0, 0.0));
-        // Drive the left arm further inward AND its jaw open in the same ticks:
+        // Drive the left arm further inward AND its gripper open in the same ticks:
         // the shared barrier budgets the combined closing motion, and the floor
         // holds on every tick (asserted inside drive).
         let mut pushed = arms;
@@ -2042,9 +2187,9 @@ mod tests {
             d_stuck < D_STOP,
             "setup: the forced state breaches the floor"
         );
-        let jaw_step = g.max_jaw_rate_frac_s() * DT;
-        let deeper = GovState::new(arms, ArmPair::new(0.5 + jaw_step, 0.0));
-        let closing = GovState::new(arms, ArmPair::new(0.5 - jaw_step, 0.0));
+        let gripper_step = g.max_gripper_rate_frac_s() * DT;
+        let deeper = GovState::new(arms, ArmPair::new(0.5 + gripper_step, 0.0));
+        let closing = GovState::new(arms, ArmPair::new(0.5 - gripper_step, 0.0));
         assert!(
             distance(&mut g, &deeper) < d_stuck && distance(&mut g, &closing) > d_stuck,
             "setup: at this pose opening must deepen and closing must recover"
@@ -2108,7 +2253,7 @@ mod tests {
         // vanish with the toggle).
         let mut g = v2_governor(false);
         let arms = finger_into_other_arm();
-        let legal_step = g.max_jaw_rate_frac_s() * DT;
+        let legal_step = g.max_gripper_rate_frac_s() * DT;
         let prev = GovState::new(arms, ArmPair::new(0.0, 0.0));
         let open = GovState::new(arms, ArmPair::new(legal_step, 0.0));
         assert_eq!(
@@ -2118,7 +2263,7 @@ mod tests {
         );
         let jump = GovState::new(arms, ArmPair::new(1.0, 0.0));
         assert_eq!(
-            g.govern(&prev, &jump, &prev, NO_HANDS, DT).jaws.left,
+            g.govern(&prev, &jump, &prev, NO_HANDS, DT).grippers.left,
             legal_step,
             "an over-rate jump is rate-limited even while disabled"
         );
@@ -2129,7 +2274,7 @@ mod tests {
         let mut g = v2_governor(true);
         let arms = finger_into_other_arm();
         // The MEASURED fingers are open into the other arm past the trip floor
-        // (tracking divergence: the commanded jaw is still nearly closed).
+        // (tracking divergence: the commanded gripper is still nearly closed).
         let measured = config_at_distance(
             &mut g,
             &GovState::new(arms, ArmPair::new(0.0, 0.0)),
@@ -2141,9 +2286,9 @@ mod tests {
             "setup: measured fingers breach the monitor floor"
         );
         let prev = GovState::new(arms, ArmPair::new(0.1, 0.0));
-        let jaw_step = g.max_jaw_rate_frac_s() * DT;
+        let gripper_step = g.max_gripper_rate_frac_s() * DT;
         // Opening further closes the commanded-space gap: held.
-        let open_more = GovState::new(arms, ArmPair::new(0.1 + jaw_step, 0.0));
+        let open_more = GovState::new(arms, ArmPair::new(0.1 + gripper_step, 0.0));
         assert!(
             distance(&mut g, &open_more) < distance(&mut g, &prev),
             "setup: opening closes the gap"
@@ -2155,7 +2300,7 @@ mod tests {
         );
         assert_eq!(g.guard(), Guard::Stopped, "a monitor hold reads stopped");
         // Closing (separation) still passes: the operator is never trapped.
-        let close = GovState::new(arms, ArmPair::new(0.1 - jaw_step, 0.0));
+        let close = GovState::new(arms, ArmPair::new(0.1 - gripper_step, 0.0));
         assert_ne!(
             g.govern(&prev, &close, &measured, NO_HANDS, DT),
             prev,

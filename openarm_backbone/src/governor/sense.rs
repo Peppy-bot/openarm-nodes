@@ -1,22 +1,26 @@
-//! The one place the collision model is queried each tick.
+//! The pre-projection model read: every clearance and gradient the limiters
+//! and the projection decide on is sampled here into an immutable [`Sensed`]
+//! before any of them run.
 //!
-//! Every clearance and gradient the pipeline needs is sampled here into an
-//! immutable [`Sensed`], before any limiter runs. The model rewrites its
-//! finger placement on every query ([`BimanualCollisionModel::set_gripper_openings`]),
-//! so a design where limiters query it directly would make their order
-//! load-bearing: whoever asks last leaves the model configured for whoever asks
-//! next, and the gradient becomes one taken at the wrong finger placement.
-//! Sampling once removes that coupling by construction.
+//! The model rewrites its finger placement on every query
+//! ([`BimanualCollisionModel::set_gripper_openings`]), so a design where
+//! limiters query it directly would make their order load-bearing: whoever
+//! asks last leaves the model configured for whoever asks next, and the
+//! gradient becomes one taken at the wrong finger placement. Sampling once
+//! removes that coupling for everything that decides on the snapshot.
 //!
-//! Each mechanism owns its own sampling; this module only sequences them, so
-//! that the model is read here and nowhere else.
+//! The clip stage still probes the model live: the floor scan's whole job is
+//! to check configurations no snapshot can anticipate. That is safe because
+//! [`super::model::ConfiguredModel`] is the only door to the model and every
+//! query through it takes the whole configuration, so a read at a stale
+//! placement is unrepresentable rather than merely avoided.
 
 use bimanual_collision_model::CollisionError;
 use tracing::error;
 
 use super::limiters::Tripwire;
-use super::{ARM_DOF, DUAL_DOF, GOV_DOF, GovState, Governor, LEFT_JAW};
-use super::{NearestPair, RIGHT_JAW};
+use super::{ARM_DOF, DUAL_DOF, GOV_DOF, GovState, Governor, LEFT_GRIPPER, concat};
+use super::{NearestPair, RIGHT_GRIPPER};
 
 /// Everything the collision stages read, sampled once at `prev`.
 pub(super) struct Sensed {
@@ -48,18 +52,13 @@ impl Governor {
         // between these calls and their use.
         let tripwire = self.sense_tripwire(prev, cand, measured);
 
-        self.model
-            .set_gripper_openings(prev.jaws.left, prev.jaws.right);
-        match self
-            .model
-            .distance_gradient(&prev.arms.left, &prev.arms.right)
-        {
+        match self.model.gradient(&concat(prev)) {
             Ok(g) => {
                 let mut grad = [0.0; GOV_DOF];
                 grad[..ARM_DOF].copy_from_slice(&g.grad_left);
                 grad[ARM_DOF..DUAL_DOF].copy_from_slice(&g.grad_right);
-                grad[LEFT_JAW] = g.grad_openings[0];
-                grad[RIGHT_JAW] = g.grad_openings[1];
+                grad[LEFT_GRIPPER] = g.grad_openings[0];
+                grad[RIGHT_GRIPPER] = g.grad_openings[1];
                 Some(Sensed {
                     d_prev: g.proximity.distance,
                     grad: Some(grad),

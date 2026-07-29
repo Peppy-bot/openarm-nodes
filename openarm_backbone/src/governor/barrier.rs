@@ -19,7 +19,7 @@
 
 use super::{
     APPROACH_VELOCITY_AT_SAFE_M_S, Clip, DUAL_DOF, FLOOR_BISECT_ITERS, GOV_DOF, Governor,
-    MAX_PROBE_ARC_RAD, MAX_PROBE_JAW_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S,
+    MAX_PROBE_ARC_RAD, MAX_PROBE_GRIPPER_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S,
     SEGMENT_SAMPLES_MIN, dot, is_left_dof, split,
 };
 
@@ -156,8 +156,10 @@ impl Governor {
     /// Retract `target` to the furthest point along the segment from `prev`
     /// that stays at or above the step floor.
     ///
-    /// Computes its own separating-side exemption, so callers never thread a
-    /// hold mask: the exemption is this stage's business and nothing else's.
+    /// The strict scan runs first: its Lipschitz skip decides most ticks
+    /// without a single probe, and a clear strict scan means nothing would be
+    /// clipped, so there is nothing for an exemption to protect. Only a strict
+    /// clip pays for the separating-side machinery.
     ///
     /// A granted exemption scans a two-leg path (the separating side already at
     /// `target`, the other interpolating from there), but the arms travel the
@@ -165,7 +167,8 @@ impl Governor {
     /// result is re-scanned on that line: the point that goes out is always one
     /// this stage proved on the path the arms will actually take, and the
     /// exemption survives as the endpoint it aims for rather than as an
-    /// unverified shortcut.
+    /// unverified shortcut. When the exemption changes nothing, the strict
+    /// clip stands.
     pub(super) fn clip_to_floor(
         &mut self,
         prev: &[f64; GOV_DOF],
@@ -174,9 +177,13 @@ impl Governor {
         dt: f64,
     ) -> Clip {
         const NO_HOLD: [bool; GOV_DOF] = [false; GOV_DOF];
+        let strict = match self.scan_to_floor(prev, target, &NO_HOLD, d_now, dt) {
+            Clip::Clear => return Clip::Clear,
+            Clip::Clipped(q) => q,
+        };
         let hold = self.separating_hold(prev, target, d_now, dt);
         if hold == NO_HOLD {
-            return self.scan_to_floor(prev, target, &NO_HOLD, d_now, dt);
+            return Clip::Clipped(strict);
         }
         let exempted = match self.scan_to_floor(prev, target, &hold, d_now, dt) {
             Clip::Clear => *target,
@@ -184,7 +191,6 @@ impl Governor {
         };
         match self.scan_to_floor(prev, &exempted, &NO_HOLD, d_now, dt) {
             Clip::Clipped(q) => Clip::Clipped(q),
-            Clip::Clear if exempted == *target => Clip::Clear,
             Clip::Clear => Clip::Clipped(exempted),
         }
     }
@@ -202,11 +208,17 @@ impl Governor {
     /// query counts as a breach (so a model-rejected configuration is never
     /// returned), retracting conservatively.
     ///
-    /// Skips the scan outright when the step provably cannot reach the floor:
-    /// the model's Lipschitz step bound caps the clearance change anywhere along
-    /// the segment, so `d_now - floor > bound` means no interior point can cross.
-    /// This makes the common ticks (holding still, slow motion, ample clearance)
-    /// nearly free while fast in-band approaches keep the full scan.
+    /// A clear probe vouches for the span it covers: the model's Lipschitz
+    /// step bound caps how fast the clearance can change along the segment, so
+    /// clearance `d` at blend `t` proves everything up to
+    /// `t + (d - floor) / bound` cannot cross the floor, and those probes are
+    /// skipped. Ample clearance clears the whole segment from its starting
+    /// clearance alone (holding still, slow motion far apart), while in-band
+    /// margins are small, so the region where clipping actually happens keeps
+    /// its full probe density. The vouching base at `t = 0` is `d_now` only
+    /// when nothing is held (a hold starts the scan from a different
+    /// configuration); every later base is a probe on the scanned path itself,
+    /// so advancement is sound under a hold too.
     pub(super) fn scan_to_floor(
         &mut self,
         prev: &[f64; GOV_DOF],
@@ -237,33 +249,61 @@ impl Governor {
             let probe_resolution = if i < DUAL_DOF {
                 MAX_PROBE_ARC_RAD
             } else {
-                MAX_PROBE_JAW_FRAC
+                MAX_PROBE_GRIPPER_FRAC
             };
             max_probe_ratio = max_probe_ratio.max(excursion / probe_resolution);
         }
-        // The Lipschitz early-out is keyed to `d_now` at `prev` (all-prev); a hold
-        // starts the scan from a different base, so only skip when nothing is held.
+        // The bound scales linearly along the straight segment, so clearance
+        // `d` vouches for `(d - floor) / bound` of blend beyond its own point.
+        // A zero bound means the step cannot change the clearance at all, and
+        // vouches for everything.
         let step_q: [f64; GOV_DOF] = std::array::from_fn(|i| target[i] - prev[i]);
         let dq = split(&step_q);
-        if hold.iter().all(|&h| !h)
-            && d_now - floor
-                > self.model.clearance_step_bound(
-                    &dq.arms.left,
-                    &dq.arms.right,
-                    &[dq.jaws.left, dq.jaws.right],
-                )
-        {
-            return Clip::Clear;
-        }
+        let bound = self.model.step_bound(
+            &dq.arms.left,
+            &dq.arms.right,
+            &[dq.grippers.left, dq.grippers.right],
+        );
+        let vouches_until = |t: f64, d: f64| -> f64 {
+            if bound > 0.0 {
+                t + (d - floor) / bound
+            } else {
+                f64::INFINITY
+            }
+        };
         // One probe per resolution unit of the fastest-moving DOF (floored for
         // tiny steps); no fixed ceiling, so the spacing guarantee holds for any
-        // step within the bound above.
+        // step the limit stage admits.
         let samples = (max_probe_ratio.ceil() as usize).max(SEGMENT_SAMPLES_MIN);
-        let mut last_clear = 0.0_f64;
-        for s in 1..=samples {
+        let unheld_base = hold.iter().all(|&h| !h);
+        // `last_clear` is the furthest blend PROVEN at or above the floor, by a
+        // probe or by a vouched span; the retraction below may only return a
+        // proven point.
+        let mut vouched = if unheld_base {
+            vouches_until(0.0, d_now)
+        } else {
+            0.0
+        };
+        if vouched >= 1.0 {
+            return Clip::Clear;
+        }
+        let mut last_clear = vouched;
+        let mut s = 1;
+        while s <= samples {
             let t = s as f64 / samples as f64;
+            if t <= vouched {
+                s += 1;
+                continue;
+            }
             match self.distance_at(&point_at(t)) {
-                Some(d) if d >= floor => last_clear = t,
+                Some(d) if d >= floor => {
+                    vouched = vouches_until(t, d);
+                    if vouched >= 1.0 {
+                        return Clip::Clear;
+                    }
+                    last_clear = t.max(vouched);
+                    s += 1;
+                }
                 _ => {
                     let (mut lo, mut hi) = (last_clear, t);
                     for _ in 0..FLOOR_BISECT_ITERS {

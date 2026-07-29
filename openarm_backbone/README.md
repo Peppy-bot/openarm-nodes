@@ -7,7 +7,7 @@ governed pipeline against one self-collision model. The node is
 engine-agnostic: the same binary drives hardware, MuJoCo, and Isaac, because
 the launcher decides what pairs into each slot.
 
-```
+```text
              leader_left_arm . leader_right_arm . leader_left_gripper . leader_right_gripper
  (streams in)     joint_setpoints    |    gripper_setpoints      [pairing slots, leading node]
                         v            v
@@ -23,8 +23,8 @@ the launcher decides what pairs into each slot.
 ```
 
 Sixteen degrees of freedom are governed as one configuration: seven joints per
-arm plus each gripper's jaw (its opening fraction, 0 closed to 1 fully open).
-A jaw is an ordinary governed DOF, so every guarantee the arms get covers the
+arm plus each gripper's gripper (its opening fraction, 0 closed to 1 fully open).
+A gripper is an ordinary governed DOF, so every guarantee the arms get covers the
 fingers identically.
 
 ## The tick
@@ -33,7 +33,7 @@ fingers identically.
 
 1. **Consume the streams of busy sides** - a discrete move wipes its side's
    streamed command every tick, so a setpoint still in flight when the move
-   was fired cannot re-target the arm (or snap the jaws) when the move ends.
+   was fired cannot re-target the arm (or snap the grippers) when the move ends.
 2. **Apply controls** - the commander's live `governor_control` stream retunes
    the enable toggle, the band, and the EE speed cap; invalid values are
    rejected, keeping the last good ones.
@@ -56,7 +56,7 @@ fingers identically.
 `Governor::govern(prev, cand, measured, hands, dt)` runs six stages, each
 contractive with respect to the last:
 
-```
+```text
  parse -> limit(speed) -> sense -> limit(tripwire) -> project -> clip
            always on      [------- collision avoidance, toggleable ------]
 ```
@@ -67,10 +67,12 @@ contractive with respect to the last:
    Jacobian the planner handed out). These are motion shaping, not collision
    guards: they run in both modes, so the collision toggle gates collision
    avoidance and nothing else.
-3. **Sense.** The one place the collision model is queried. Everything
-   downstream reads an immutable snapshot, so no stage can perturb another's
-   view (the model re-places its fingers on every query, which would otherwise
-   make query order load-bearing).
+3. **Sense.** One immutable snapshot of everything the limiters and the
+   projection decide on. The clip stage still probes the model live - its job
+   is to check configurations no snapshot can anticipate - and every query in
+   the governor goes through one placement-explicit door
+   (`governor/model.rs`): each call takes the whole configuration, so a read
+   at a stale finger placement is unrepresentable, not merely avoided.
 4. **Limit (tripwire).** `MeasuredTripwire`, defense in depth against tracking
    error: latched with hysteresis on the *measured* clearance, it holds
    closing motion per side until the real gap recovers. It alone feeds the
@@ -103,11 +105,11 @@ barrier, and the scan. The speed caps keep working. Disabling with a closing
 command live *will* collide (that is what disabling means); the governed path
 back out exists once re-enabled, and the sim campaign exercises exactly that.
 
-A wedge lesson worth knowing: parked against the stop with the jaws wide, a
+A wedge lesson worth knowing: parked against the stop with the grippers wide, a
 bundled "go somewhere safe" command can be net-closing for the binding pair
 (the chase's first step sweeps the open fingers toward the torso) and the
 governor will rightly refuse it. Single-purpose commands escape: close the
-jaws first, then reposition. The regression suite pins this from a captured
+grippers first, then reposition. The regression suite pins this from a captured
 field pose.
 
 ## Actions
@@ -140,11 +142,12 @@ failure of the move machinery).
 | `coordinator.rs` | the tick, gripper move execution, the upstream relay | IO orchestration; its seam with the safety core is exactly one `govern` call, which is why the governor is not folded into it |
 | `liveness.rs` | follower admission (`Live` / `Reanchor` / `Stale`) | delivery-cadence policy for the coordinator, independent of any message type |
 | `planner.rs` | per-arm mode machine (Follow / joint move / Cartesian move) -> one rate-limited candidate + the stream-tick Jacobian | knows one arm only; never the other arm, never the collision model |
-| `chase.rs` | `rate_limited`, the one per-tick rate clamp every chase shares | the arm chase, the jaw chase and the servo re-clamp cannot round differently |
+| `chase.rs` | `rate_limited`, the one per-tick rate clamp every chase shares | the arm chase, the gripper chase and the servo re-clamp cannot round differently |
 | `trajectory.rs` | quintic joint trajectories, Cartesian line planning, tier selection | plan-time; validates what the planner then executes |
 | `servo.rs` | the guarded servo law + its plan-time rollout | identical law offline and online, so acceptance is proof |
 | `governor/mod.rs` | `GovState`, the pipeline, the runtime controls, disposition and readout | the only mutable resource is the collision model |
-| `governor/sense.rs` | the single model-read phase per tick | removes query-order coupling by construction |
+| `governor/sense.rs` | the pre-projection model read (`Sensed`) | limiters and the projection decide on one snapshot |
+| `governor/model.rs` | `ConfiguredModel`, the only door to the collision model | every query takes the whole configuration; stale-placement reads are unrepresentable |
 | `governor/limiters/` | the `Limiter` trait, one module per limiter, and `allowance.rs` (the `Allowance`/`Limits` currency they speak) | everything expressible as a per-DOF fraction lives together |
 | `governor/barrier.rs` | the projection and the floor scan | the two stages that are not per-DOF fractions |
 | `torso.rs` | the torso clip regions the URDF does not carry | geometry facts, versioned with the node |
@@ -174,6 +177,22 @@ peppy stack launch /path/to/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
 # Unit tests run directly; both hardware generations' models are exercised:
 cargo test
 ```
+
+## Performance
+
+A hand-run timing report ships with the suite
+(`cargo test --release governor_tick_timing_report -- --ignored --nocapture`).
+Single core, release. Dev laptop (x86_64): one distance or gradient query
+~100 us; the speed limiters ~0.1 us; a disabled-governor tick 0.1 us (the
+model is never touched); whole governed ticks 0.4-1.0 ms by regime
+(penetration escape 0.45 ms, moving far apart 0.42 ms, in-band approach
+0.87 ms, parked at the wall pushing 1.05 ms worst). Jetson (aarch64):
+queries ~170 us, worst governed tick 1.83 ms. At the shipped 100 Hz the
+worst tick uses ~10% of the budget on the laptop and ~18% on the Jetson;
+500 Hz is feasible on the laptop and marginal on the Jetson; 1 kHz is not
+reachable with the current floor-scan probe budget. The scan dominates: cost scales with probes per tick, so a
+faster loop means revisiting `MAX_PROBE_ARC_RAD` / `SEGMENT_SAMPLES_MIN`
+against the band width, not micro-optimizing the queries.
 
 The test suite pins behavior, not just code paths: bit-exact passthrough where
 the followers require it, the floor holding under a 28k-tick random walk (with

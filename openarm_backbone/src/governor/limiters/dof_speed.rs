@@ -1,5 +1,5 @@
 //! The per-tick travel each governed DOF may take: the arm joint speed cap for
-//! a joint, the jaw rate for a finger.
+//! a joint, the gripper rate for a finger.
 //!
 //! The chase upstream already limits every DOF, so on a healthy tick this is
 //! inert. It is here because the floor scan sizes its probe count from the same

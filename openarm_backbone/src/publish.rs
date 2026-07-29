@@ -15,7 +15,8 @@
 //! all is a bringup fault and takes the node down.
 
 use std::future::Future;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::collision_status;
@@ -26,7 +27,7 @@ use peppygen::paired_topics::{
 use peppylib::{Payload, TopicPublisher};
 use tracing::{error, warn};
 
-use crate::streams::GripperState;
+use crate::streams::{GripperState, warn_throttled};
 use crate::{ArmPair, JointVec};
 
 /// Pairing stamp from the daemon-resolved clock (sim time under a simulated
@@ -54,6 +55,14 @@ pub struct Publisher<Build> {
     publisher: TopicPublisher,
     build: Build,
     what: &'static str,
+    /// Throttles this slot's failure logs: a stalled clock or a persistently
+    /// failing wire hits every cycle, and the log must say so once per
+    /// [`crate::streams::THROTTLED_WARN_PERIOD`] per slot, not at the control
+    /// rate. One state for both failure kinds (a message either fails to build
+    /// or fails to publish, never both). A mutex only because the coordinator
+    /// future must be `Send`; it is touched exclusively on error paths, by one
+    /// task.
+    last_error: Mutex<Option<Instant>>,
 }
 
 impl<Build> Publisher<Build> {
@@ -66,6 +75,7 @@ impl<Build> Publisher<Build> {
             publisher: declare(what, declaring).await?,
             build,
             what,
+            last_error: Mutex::new(None),
         })
     }
 }
@@ -106,6 +116,12 @@ impl Publisher<ApertureBuild> {
 }
 
 impl<Build> Publisher<Build> {
+    /// Emit one failure line for this slot, at most once per throttle window.
+    fn log_throttled(&self, emit: impl FnOnce()) {
+        let mut last = self.last_error.lock().expect("no panic while logging");
+        warn_throttled(&mut last, emit);
+    }
+
     /// Stamp, build and publish, naming the slot in either failure. A publish
     /// error is a transient wire condition; a build error (or a clock that has
     /// not ticked) means the message was never formed. Neither is fatal: the
@@ -114,10 +130,12 @@ impl<Build> Publisher<Build> {
         match pairing_stamp().and_then(|stamp| build(stamp).map_err(|e| e.to_string())) {
             Ok(msg) => {
                 if let Err(e) = self.publisher.publish(msg).await {
-                    warn!("{} publish: {e}", self.what);
+                    self.log_throttled(|| warn!("{} publish: {e}", self.what));
                 }
             }
-            Err(e) => error!("{} build: {e}", self.what),
+            Err(e) => {
+                self.log_throttled(|| error!("{} build: {e}", self.what));
+            }
         }
     }
 }
@@ -126,7 +144,7 @@ impl<Build> Publisher<Build> {
 pub struct Publishers {
     /// The governed joint setpoints, one per paired arm.
     pub arm_setpoints: ArmPair<Publisher<JointBuild>>,
-    /// The governed jaw opening fractions, one per paired gripper.
+    /// The governed gripper opening fractions, one per paired gripper.
     pub gripper_setpoints: ArmPair<Publisher<OpeningBuild>>,
     /// Each arm's measured state, relayed up its leader slot so the leading
     /// node sees the same back-channel a follower gives the backbone.
@@ -136,6 +154,8 @@ pub struct Publishers {
     /// The operator readout: an emitted topic rather than a pairing slot, and
     /// the one message with no stamp of its own.
     status: TopicPublisher,
+    /// The readout's failure throttle, matching the per-slot ones.
+    status_error: Mutex<Option<Instant>>,
 }
 
 impl Publishers {
@@ -202,6 +222,7 @@ impl Publishers {
                 collision_status::declare_publisher(runner),
             )
             .await?,
+            status_error: Mutex::new(None),
         })
     }
 
@@ -215,13 +236,17 @@ impl Publishers {
         throttling: bool,
         stopped: bool,
     ) {
+        let throttled = |emit: &dyn Fn()| {
+            let mut last = self.status_error.lock().expect("no panic while logging");
+            warn_throttled(&mut last, emit);
+        };
         match collision_status::build_message(distance, link_a, link_b, throttling, stopped) {
             Ok(msg) => {
                 if let Err(e) = self.status.publish(msg).await {
-                    warn!("collision_status publish: {e}");
+                    throttled(&|| warn!("collision_status publish: {e}"));
                 }
             }
-            Err(e) => error!("collision_status build: {e}"),
+            Err(e) => throttled(&|| error!("collision_status build: {e}")),
         }
     }
 }

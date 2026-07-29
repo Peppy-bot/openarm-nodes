@@ -26,10 +26,10 @@ use tracing::{error, warn};
 
 use crate::{JointVec, Side};
 
-/// At most one dropped-message warning per stream in this window, so a
-/// misrouted or persistently malformed producer is visible in the log
-/// without flooding it at the stream rate.
-const THROTTLED_WARN_PERIOD: Duration = Duration::from_secs(1);
+/// At most one dropped-message warning per stream (and one build/stamp error
+/// per publisher) in this window, so a misrouted producer or a stalled clock
+/// is visible in the log without flooding it at the stream rate.
+pub(crate) const THROTTLED_WARN_PERIOD: Duration = Duration::from_secs(1);
 
 /// Pause after a receive error before retrying, so a persistently broken
 /// subscription cannot spin the listener at full CPU or flood the log at the stream
@@ -77,7 +77,7 @@ pub struct GripperState {
 }
 
 /// Run `emit` at most once per [`THROTTLED_WARN_PERIOD`] per `last` state.
-fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
+pub(crate) fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
     let now = Instant::now();
     if last.is_none_or(|t| now.duration_since(t) >= THROTTLED_WARN_PERIOD) {
         emit();

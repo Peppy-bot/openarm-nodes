@@ -84,17 +84,17 @@ impl Governor {
                 if side_is_left { cand } else { prev }.arms.left,
                 if side_is_left { prev } else { cand }.arms.right,
             ),
-            jaws: ArmPair::new(
-                if side_is_left { cand } else { prev }.jaws.left,
-                if side_is_left { prev } else { cand }.jaws.right,
+            grippers: ArmPair::new(
+                if side_is_left { cand } else { prev }.grippers.left,
+                if side_is_left { prev } else { cand }.grippers.right,
             ),
         };
         let moves = |side_is_left: bool| {
             let (c, p) = (cand, prev);
             if side_is_left {
-                c.arms.left != p.arms.left || c.jaws.left != p.jaws.left
+                c.arms.left != p.arms.left || c.grippers.left != p.grippers.left
             } else {
-                c.arms.right != p.arms.right || c.jaws.right != p.jaws.right
+                c.arms.right != p.arms.right || c.grippers.right != p.grippers.right
             }
         };
         let sample = |g: &mut Self, side_is_left: bool| -> Option<f64> {
@@ -152,5 +152,96 @@ impl Limiter for MeasuredTripwire<'_> {
             (None, Some(_)) => Allowance::gate(|i| !is_left_dof(i)),
             (None, None) => Allowance::FREEZE,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ARM_DOF;
+
+    use super::super::super::{GOV_DOF, LEFT_GRIPPER, RIGHT_GRIPPER};
+    use super::*;
+
+    const D_PREV: f64 = 0.004;
+
+    fn allowance_for(d_solo: ArmPair<Option<f64>>, d_cand: f64) -> Allowance {
+        let tripwire = Tripwire { d_cand, d_solo };
+        let limiter = MeasuredTripwire {
+            d_prev: D_PREV,
+            tripwire: Some(&tripwire),
+        };
+        // The gate ignores the step's contents; any finite step will do.
+        limiter.allow(&Step {
+            prev: [0.0; GOV_DOF],
+            target: [0.1; GOV_DOF],
+        })
+    }
+
+    fn frees(a: &Allowance, left_side: bool) -> bool {
+        let arm = if left_side { 0 } else { ARM_DOF };
+        let gripper = if left_side {
+            LEFT_GRIPPER
+        } else {
+            RIGHT_GRIPPER
+        };
+        let step = Step {
+            prev: [0.0; GOV_DOF],
+            target: [1.0; GOV_DOF],
+        };
+        let governed = a.apply(&step);
+        governed[arm] == 1.0 && governed[gripper] == 1.0
+    }
+
+    /// The four-way side-freeing decision, pinned as a table without any
+    /// geometry: which side stays free while the real clearance is breached is
+    /// the sharpest call the limiter set makes.
+    #[test]
+    fn the_side_freeing_match_pins_all_four_arms_and_the_tie() {
+        let closing = Some(D_PREV - 0.001);
+        let opens_a_little = Some(D_PREV + 0.001);
+        let opens_more = Some(D_PREV + 0.002);
+
+        // Both sides open alone: the one opening more is freed, the other held.
+        let a = allowance_for(ArmPair::new(opens_a_little, opens_more), 0.0);
+        assert!(!frees(&a, true) && frees(&a, false));
+        let a = allowance_for(ArmPair::new(opens_more, opens_a_little), 0.0);
+        assert!(frees(&a, true) && !frees(&a, false));
+
+        // A tie frees the left side (the match's documented >= choice).
+        let a = allowance_for(ArmPair::new(opens_more, opens_more), 0.0);
+        assert!(frees(&a, true) && !frees(&a, false));
+
+        // Exactly one side opens alone: that side and only that side is free.
+        let a = allowance_for(ArmPair::new(opens_more, closing), 0.0);
+        assert!(frees(&a, true) && !frees(&a, false));
+        let a = allowance_for(ArmPair::new(closing, opens_more), 0.0);
+        assert!(!frees(&a, true) && frees(&a, false));
+
+        // A side that does not move (or whose query failed) reads None and is
+        // held, exactly like a closing one.
+        let a = allowance_for(ArmPair::new(None, opens_more), 0.0);
+        assert!(!frees(&a, true) && frees(&a, false));
+
+        // Neither opens alone: everything freezes.
+        let a = allowance_for(ArmPair::new(closing, None), 0.0);
+        assert_eq!(a, Allowance::FREEZE);
+    }
+
+    /// The gate stands down entirely when the joint candidate does not close
+    /// on the held setpoint, and when the latch is not armed at all.
+    #[test]
+    fn a_non_closing_candidate_and_an_unarmed_latch_pass_in_full() {
+        let a = allowance_for(ArmPair::new(None, None), D_PREV);
+        assert_eq!(a, Allowance::FULL, "candidate at d_prev is not closing");
+
+        let unarmed = MeasuredTripwire {
+            d_prev: D_PREV,
+            tripwire: None,
+        };
+        let step = Step {
+            prev: [0.0; GOV_DOF],
+            target: [0.1; GOV_DOF],
+        };
+        assert_eq!(unarmed.allow(&step), Allowance::FULL);
     }
 }
