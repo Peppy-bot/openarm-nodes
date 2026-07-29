@@ -30,6 +30,7 @@ use control_core::filters::ButterworthFilter;
 use srs_model::Arm;
 use srs_model::nalgebra::{Isometry3, Rotation3, Vector3};
 
+use crate::chase::rate_limited;
 use crate::trajectory::{PlanLimits, interpolate_pose};
 use crate::{ARM_DOF, JointVec};
 
@@ -177,8 +178,7 @@ impl ServoState {
         // commanded velocity always holds regardless of the filter transient.
         let smoothed = std::array::from_fn(|i| {
             let filtered = self.smoothing[i].filter(next[i]);
-            let cap = max_joint_velocity_rad_s[i] * dt_s;
-            q[i] + (filtered - q[i]).clamp(-cap, cap)
+            rate_limited(q[i], filtered, max_joint_velocity_rad_s[i], dt_s)
         });
         ServoStep::Stepped(smoothed)
     }
