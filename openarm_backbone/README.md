@@ -196,8 +196,8 @@ holding, approaching) settle at a handful of probes and 0.8-1.8 ms, but they
 are not the budget that matters: none of them clips, so none reaches the
 machinery that makes a tick expensive. A jog does. It commands a fresh pose
 every tick, so its segment needs full probe density, and a clipped tick walks
-that segment up to four times (the strict scan, each side's solo scan, the
-exempted scan).
+that segment three times (the strict scan, the exempted scan, and the re-scan
+that proves the published line).
 
 **A tick's cost is proportional to the distance it travels, so it falls as the
 control rate rises.** A segment is `speed * dt` long and is probed once per
@@ -211,19 +211,19 @@ the rate against a jog at the J1/J2 limit (Jetson, 20 s per rate):
 
 | rate    | budget | p50     | p95     | p99     | max      | over budget  |
 | ------- | ------ | ------- | ------- | ------- | -------- | ------------ |
-| 100 Hz  | 10 ms  | 0.34 ms | 1.54 ms | 3.96 ms | 13.29 ms | 2 / 2000     |
-| 250 Hz  | 4 ms   | 0.31 ms | 3.45 ms | 3.48 ms | 4.20 ms  | 1 / 5000     |
-| 500 Hz  | 2 ms   | 0.31 ms | 0.97 ms | 1.34 ms | 3.31 ms  | 17 / 10000   |
-| 1000 Hz | 1 ms   | 0.31 ms | 0.97 ms | 1.33 ms | 3.19 ms  | 437 / 20000  |
+| 100 Hz  | 10 ms  | 0.34 ms | 1.46 ms | 3.00 ms | 10.30 ms | 1 / 2000     |
+| 250 Hz  | 4 ms   | 0.31 ms | 2.17 ms | 2.19 ms | 2.98 ms  | 0 / 5000     |
+| 500 Hz  | 2 ms   | 0.31 ms | 0.97 ms | 1.02 ms | 2.53 ms  | 7 / 10000    |
+| 1000 Hz | 1 ms   | 0.31 ms | 0.97 ms | 0.98 ms | 2.40 ms  | 178 / 20000  |
 
 Per-tick cost against jog speed at the shipped rate, stated in rad/s because
 that is the rate-independent quantity (Jetson, 100 Hz, 4000-tick walk):
 
 | jog         | per tick  | p50     | p95     | p99     | max      |
 | ----------- | --------- | ------- | ------- | ------- | -------- |
-| 2.0 rad/s   | 0.020 rad | 0.50 ms | 1.78 ms | 2.46 ms | 3.95 ms  |
-| 5.0 rad/s   | 0.050 rad | 0.40 ms | 1.35 ms | 1.98 ms | 4.97 ms  |
-| 16.75 rad/s | 0.168 rad | 0.38 ms | 1.05 ms | 4.39 ms | 13.30 ms |
+| 2.0 rad/s   | 0.020 rad | 0.50 ms | 1.27 ms | 1.78 ms | 3.08 ms  |
+| 5.0 rad/s   | 0.050 rad | 0.40 ms | 1.01 ms | 1.34 ms | 3.77 ms  |
+| 16.75 rad/s | 0.168 rad | 0.38 ms | 1.05 ms | 2.82 ms | 10.29 ms |
 
 The last row is the J1/J2 velocity limit, the fastest any joint is chased at
 (J3/J4 are clamped lower by `DofSpeed` before the scan sees them). A live 

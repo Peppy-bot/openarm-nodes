@@ -108,19 +108,22 @@ impl Governor {
     /// alone yet may jointly close, nothing is held and the shared-segment
     /// backstop governs both.
     ///
-    /// A hold pins that side at `target` for the whole scan, so the scan never
-    /// probes the held side's own sweep: the hold is granted only when that solo
-    /// sweep itself scans clear of the floor (the endpoint alone can step over a
-    /// pocket), which also keeps the scan's clear-start precondition (the held
-    /// base is the solo config, at or above `d_prev`). A side that does not move
-    /// is never held: pinning it would be a no-op that only disables the scan's
-    /// Lipschitz skip.
+    /// A hold pins that side at `target` for the whole scan, so the exempted
+    /// scan never probes the held side's own sweep. What proves that sweep is
+    /// the re-scan in [`clip_to_floor`], which walks the true `prev`-to-published
+    /// line with nothing held and therefore covers both sides moving together:
+    /// the point that goes out is proved on the path the arms travel, however
+    /// the hold was decided. So the hold only has to leave the exempted scan a
+    /// legal starting point, which the endpoint check does by requiring the solo
+    /// configuration to be at or above `d_prev`.
+    ///
+    /// A side that does not move is never held: pinning it would be a no-op that
+    /// only disables the scan's Lipschitz skip.
     fn separating_hold(
         &mut self,
         prev: &[f64; GOV_DOF],
         target: &[f64; GOV_DOF],
         d_prev: f64,
-        dt: f64,
     ) -> [bool; GOV_DOF] {
         let side_dofs = |left: bool| (0..GOV_DOF).filter(move |&i| is_left_dof(i) == left);
         let solo = |left: bool| -> [f64; GOV_DOF] {
@@ -131,11 +134,8 @@ impl Governor {
             q
         };
         let moves = |left: bool| side_dofs(left).any(|i| target[i] != prev[i]);
-        let no_hold = [false; GOV_DOF];
-        let separates = |g: &mut Self, q: &[f64; GOV_DOF]| {
-            g.distance_at(q).is_some_and(|d| d >= d_prev)
-                && matches!(g.scan_to_floor(prev, q, &no_hold, d_prev, dt), Clip::Clear)
-        };
+        let separates =
+            |g: &mut Self, q: &[f64; GOV_DOF]| g.distance_at(q).is_some_and(|d| d >= d_prev);
         let (solo_left, solo_right) = (solo(true), solo(false));
         let sep_left = moves(true) && separates(self, &solo_left);
         let sep_right = moves(false) && separates(self, &solo_right);
@@ -174,7 +174,7 @@ impl Governor {
             Clip::Clear => return Clip::Clear,
             Clip::Clipped(q) => q,
         };
-        let hold = self.separating_hold(prev, target, d_now, dt);
+        let hold = self.separating_hold(prev, target, d_now);
         if hold == NO_HOLD {
             return Clip::Clipped(strict);
         }
