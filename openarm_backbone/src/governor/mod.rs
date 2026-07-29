@@ -24,11 +24,20 @@
 //! shares the governor enable, so the operator toggle gates the commanded
 //! barrier and this tripwire together.
 
-use bimanual_collision_model::{BimanualCollisionModel, CollisionError};
-use tracing::{error, info, warn};
+use bimanual_collision_model::BimanualCollisionModel;
+use tracing::{info, warn};
 
 use crate::torso::{TORSO_BODY, torso_regions};
 use crate::{ARM_DOF, ArmPair, JointVec};
+
+mod allowance;
+mod barrier;
+mod limiters;
+mod sense;
+
+use allowance::Limits;
+use limiters::{Limiter, MeasuredTripwire};
+use sense::Sensed;
 
 /// Joints across both arms, left (0..7) then right (7..14).
 const DUAL_DOF: usize = 2 * ARM_DOF;
@@ -54,6 +63,30 @@ pub struct GovState {
 impl GovState {
     pub fn new(arms: ArmPair<JointVec>, openings: ArmPair<f64>) -> Self {
         Self { arms, openings }
+    }
+}
+
+/// A proposed motion of the whole governed configuration over one tick: where
+/// the DOF are now (the last governed setpoint) and where the commanded stream
+/// would put them. Flat over [`GOV_DOF`] because every stage of the pipeline
+/// treats a finger opening exactly like a joint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Step {
+    pub prev: [f64; GOV_DOF],
+    pub target: [f64; GOV_DOF],
+}
+
+impl Step {
+    /// Parse a proposed motion. A non-finite endpoint is an upstream fault to
+    /// hold on, never a step to shape, so it has no representation in this
+    /// type and every later stage may assume finite arithmetic.
+    pub fn new(prev: &GovState, target: &GovState) -> Option<Self> {
+        let step = Self {
+            prev: concat(prev),
+            target: concat(target),
+        };
+        let finite = |q: &[f64; GOV_DOF]| q.iter().all(|x| x.is_finite());
+        (finite(&step.prev) && finite(&step.target)).then_some(step)
     }
 }
 
@@ -84,17 +117,6 @@ const MAX_PROBE_OPENING_FRAC: f64 = 0.01;
 /// insensitive to motion (no closing direction exists), so the step passes
 /// unconstrained instead of dividing by a near-zero norm.
 const MIN_GRADIENT_NORM_SQ: f64 = 1e-18;
-
-/// The measured-state monitor trips when the real clearance drops below this
-/// fraction of `d_stop`, and releases only once it recovers past the full `d_stop`
-/// (hysteresis). Sitting below the commanded floor leaves headroom for tracking
-/// jitter at the wall, where the barrier parks the commanded clearance at `d_stop`,
-/// so only a genuine divergence trips it. A module constant (not a node parameter),
-/// like the approach speed above; promote it to a parameter when tuning on hardware.
-const MONITOR_TRIP_FRACTION: f64 = 0.5;
-// The trip floor must sit strictly inside (0, d_stop) or the hysteresis band
-// [trip_floor, d_stop) collapses and the latch logic degrades silently.
-const _: () = assert!(MONITOR_TRIP_FRACTION > 0.0 && MONITOR_TRIP_FRACTION < 1.0);
 
 /// Floor-scan resolution: the backstop walks a per-tick segment and probes at least
 /// once every `MAX_PROBE_ARC_RAD` of joint motion, so the spatial resolution is
@@ -217,8 +239,13 @@ impl Governor {
         );
         self.enabled = enabled;
         if !enabled {
+            // Only the log/readout state resets. The tripwire latch is a fact
+            // about where the bodies actually are, not about the toggle: an
+            // off/on cycle while the measured clearance sits inside the
+            // hysteresis band used to drop the latch and re-arm at the weaker
+            // untripped threshold, silently freeing closing commands the
+            // tripwire was holding one tick earlier.
             self.guard = Guard::Clear;
-            self.monitor_tripped = false;
         }
     }
 
@@ -264,19 +291,34 @@ impl Governor {
     }
 
     /// Govern one bimanual step from `prev` to `cand` over `dt`, returning the
-    /// governed configuration. Arms and gripper openings ride the same vector:
-    /// the gap-closing component of the step is limited so the clearance loses
-    /// no more than `allowed_closing(d) * dt` this tick, whether the closing
-    /// motion is a joint or a finger opening; tangential and separating motion
-    /// pass unchanged, and a disabled governor passes `cand` straight through.
-    /// Fails safe to holding `prev` if the distance query fails (the model
-    /// rejects a non-finite configuration or coincident witnesses in deep
-    /// penetration).
+    /// governed configuration. Arms and gripper openings ride the same vector,
+    /// so every guarantee the joints get covers the fingers identically.
     ///
-    /// `measured` is the real joint state and opening fractions. Independently
-    /// of the commanded barrier, if the measured clearance has closed past the
-    /// monitor floor the last setpoint is held until it recovers (defense in
-    /// depth, gated by the same enable, so a disabled governor skips it too).
+    /// Five stages, in this order, each contractive with respect to the last:
+    ///
+    /// 1. **Parse.** A non-finite endpoint is an upstream fault, not a step. It
+    ///    has no representation in [`Step`], so every stage below may assume
+    ///    finite arithmetic.
+    /// 2. **Sense.** One immutable snapshot of the collision model. Nothing
+    ///    downstream queries it, so no stage can perturb another's view.
+    /// 3. **Limit.** Independent per-DOF allowances, combined by keeping the
+    ///    most restrictive. Order-free, and the binding limiter falls out of
+    ///    the combination rather than being threaded out of it.
+    /// 4. **Project.** The closing-velocity barrier removes just enough of the
+    ///    gap-closing component that the clearance loses no more than
+    ///    `allowed_closing(d) * dt`, leaving tangential and separating motion
+    ///    untouched. Directional, so no per-DOF fraction can express it and it
+    ///    is not a limiter; it runs *after* them so its guarantee holds on the
+    ///    step that is actually published.
+    /// 5. **Clip.** The exact floor scan. Surface distance is not monotone
+    ///    along a joint-space segment, so this is the only stage that can prove
+    ///    the realized path stays clear, and it is what makes stage 3's
+    ///    order-independence safe rather than merely convenient.
+    ///
+    /// `measured` is the real joint state and opening fractions, which only the
+    /// measured-state tripwire reads. A disabled governor skips stages 2, 4 and
+    /// 5 and the collision limiters with them; the stage 1 fault hold still
+    /// applies, so a non-finite candidate is never streamed in either mode.
     pub fn govern(
         &mut self,
         prev: &GovState,
@@ -284,304 +326,64 @@ impl Governor {
         measured: &GovState,
         dt: f64,
     ) -> GovState {
-        // Fail-safe up front: never stream a non-finite candidate (an upstream
-        // glitch) to the followers. The in-band paths reach this via the distance
-        // query, but the disabled and far-apart fast paths return `cand` directly,
-        // so guard here so every path holds `prev` rather than passing it through.
-        if concat(cand).iter().any(|x| !x.is_finite()) {
-            self.guard = Guard::Stopped;
+        let Some(step) = Step::new(prev, cand) else {
+            self.report(Guard::Stopped, None, None);
             return *prev;
-        }
+        };
         if !self.enabled {
+            self.report(Guard::Clear, None, None);
             return *cand;
         }
-        // Measured-state tripwire: the commanded barrier below shapes only the
-        // commanded stream and cannot see tracking error, so if the bodies have
-        // actually closed past the monitor floor, hold the closing motion. The
-        // gate is per side: a side whose own motion opens the real gap stays
-        // free even while the other side's push is held, so neither operator can
-        // trap the other's escape.
-        let monitor_held;
-        let cand = match self.monitor_gate(prev, cand, measured) {
-            Some(gated) if gated == *prev => {
-                self.guard = Guard::Stopped;
-                return *prev;
-            }
-            Some(gated) => {
-                monitor_held = true;
-                gated
-            }
-            None => {
-                monitor_held = false;
-                *cand
-            }
+        let Some(sensed) = self.sense(prev, cand, measured) else {
+            self.report(Guard::Stopped, None, None);
+            return *prev;
         };
-        let cand = &cand;
-        // One analytic query yields the current clearance and its gradient over
-        // all governed DOF (the fingers are placed at prev's openings first, so
-        // the query and its opening columns are evaluated at prev).
-        self.model
-            .set_gripper_openings(prev.openings.left, prev.openings.right);
-        let (d_now, grad, link_a, link_b) = match self
-            .model
-            .distance_gradient(&prev.arms.left, &prev.arms.right)
-        {
-            Ok(g) => {
-                let mut grad = [0.0; GOV_DOF];
-                grad[..ARM_DOF].copy_from_slice(&g.grad_left);
-                grad[ARM_DOF..DUAL_DOF].copy_from_slice(&g.grad_right);
-                grad[LEFT_OPENING] = g.grad_openings[0];
-                grad[RIGHT_OPENING] = g.grad_openings[1];
-                (
-                    g.proximity.distance,
-                    grad,
-                    g.proximity.link_a.to_string(),
-                    g.proximity.link_b.to_string(),
-                )
-            }
-            Err(CollisionError::WitnessesCoincide { .. }) => {
-                // No usable gradient (deep penetration: the witnesses coincide). Do
-                // not freeze (that traps the operator inside the collision); fall
-                // back to a gradient-free, distance-only guard that still lets them
-                // escape and never lets penetration deepen.
-                if self.guard != Guard::Stopped {
-                    warn!("collision: deep penetration, distance-only escape guard");
-                    self.guard = Guard::Stopped;
-                }
-                return self.govern_without_gradient(prev, cand, dt);
-            }
-            Err(e) => {
-                // NonFinite / NoPairs cannot arise from a finite, governed prev with
-                // pairs configured; treat as a fault and hold rather than steer on it.
-                error!("collision: distance_gradient: {e}; holding");
-                self.guard = Guard::Stopped;
-                return *prev;
-            }
-        };
-        let prev_q = concat(prev);
-        let cand_q = concat(cand);
 
-        // Outside the influence zone the barrier imposes no closing limit, but the
-        // candidate must still not cross the stop floor. Distance is not monotone
-        // along the segment, so scan it rather than trusting either endpoint: a
-        // single tick can pass through a pocket while both ends read clear.
-        // A partial monitor hold (one side kept at prev) restricts the operator
-        // even when the barrier below finds the gated candidate free, so the
-        // reported disposition is never Clear while it is active.
-        let monitor_floor = if monitor_held {
-            Guard::Throttling
-        } else {
-            Guard::Clear
-        };
-        if d_now >= self.d_safe {
-            let hold = self.separating_hold(&prev_q, &cand_q, d_now, dt);
-            let (guard, governed) = match self.clip_to_floor(&prev_q, &cand_q, &hold, d_now, dt) {
-                Clip::Clear => (Guard::Clear, *cand),
-                Clip::Clipped(q) => (Guard::Stopped, split(&q)),
-            };
-            self.log_transition(guard.max(monitor_floor), d_now, &link_a, &link_b);
-            return governed;
-        }
+        let limits = self.limit(&step, &sensed);
+        let limited = limits.apply(&step);
 
-        // In the band: throttle only the closing component (the velocity-damper
-        // barrier), then hold the realized clearance at the floor with the exact
-        // backstop, since the first-order projection can still let surface curvature
-        // carry the clamped step past it. The backstop holds a separating side at its
-        // target so one operator's push cannot clip the other's retreat.
-        let (projected_q, throttled) = self.throttle_closing(&prev_q, &cand_q, &grad, d_now, dt);
-        let hold = self.separating_hold(&prev_q, &projected_q, d_now, dt);
-        let (governed_q, limited) =
-            match self.clip_to_floor(&prev_q, &projected_q, &hold, d_now, dt) {
-                Clip::Clear => (projected_q, throttled),
+        // The barrier stands down in deep penetration: with the witness points
+        // coincident there is no separating direction to steer on. The floor
+        // scan below still lets the operator drive out and still refuses to let
+        // the penetration deepen, so standing down never traps them inside it.
+        let (projected, throttled) = match sensed.grad {
+            Some(grad) => self.project_closing(&step.prev, &limited, &grad, sensed.d_prev, dt),
+            None => (limited, false),
+        };
+
+        let (governed, clipped) =
+            match self.clip_to_floor(&step.prev, &projected, sensed.d_prev, dt) {
+                Clip::Clear => (projected, false),
                 Clip::Clipped(q) => (q, true),
             };
 
-        let guard = if !limited {
-            Guard::Clear
-        } else if d_now <= self.d_stop {
-            Guard::Stopped
-        } else {
-            Guard::Throttling
-        };
-        self.log_transition(guard.max(monitor_floor), d_now, &link_a, &link_b);
-        split(&governed_q)
+        let guard = self.disposition(&sensed, &limits, throttled || clipped);
+        self.report(guard, Some(&sensed.pair), limits.tightest());
+        split(&governed)
     }
 
-    /// Measured-state monitor (defense in depth): the commanded barrier shapes only
-    /// the commanded stream and cannot see tracking error, so this watches the real
-    /// clearance from the measured state (joints and openings alike). When the
-    /// bodies have actually closed past `MONITOR_TRIP_FRACTION * d_stop` it blocks
-    /// commands that would close the gap further, until the clearance recovers past
-    /// `d_stop` (hysteresis, latched in `monitor_tripped`, so a measurement
-    /// hovering at the wall cannot chatter).
-    ///
-    /// While tripped, "closes further" is judged in the commanded space: a
-    /// candidate keeps its freedom when its clearance is at or above the held
-    /// setpoint's own clearance, so tracking divergence between the commanded and
-    /// measured configurations can neither wave closing commands through nor
-    /// deadlock a recovering escape, and a breach the candidate does not worsen
-    /// (a pair not involving it) never freezes it.
-    ///
-    /// Separation is never blocked, and it is judged PER SIDE (an arm and its
-    /// gripper opening together): one operator's closing push must not trap the
-    /// other side's escape, so when the joint candidate closes, each side's motion
-    /// is re-judged with the other held and any sub-motion that does not worsen
-    /// the commanded clearance passes. Two individually opening motions can still
-    /// jointly close (both sides converging on one gap); the joint candidate was
-    /// already confirmed closing in that case, so the gate keeps only the single
-    /// better escape.
-    ///
-    /// Returns `None` to pass the candidate unchanged, or `Some(gated)` with the
-    /// closing sides held at `prev` (both held means a full hold). A failed
-    /// distance query counts as closing (fail-safe). Only consulted while enabled.
-    fn monitor_gate(
-        &mut self,
-        prev: &GovState,
-        cand: &GovState,
-        measured: &GovState,
-    ) -> Option<GovState> {
-        // No measured clearance (non-finite state or deep penetration): defer to the
-        // main governing (whose deep-penetration fallback still lets the operator
-        // escape), so a failed query never blocks separation or latches the hold.
-        let d_measured = self.distance_at(&concat(measured))?;
-        let trip_floor = MONITOR_TRIP_FRACTION * self.d_stop;
-        let threshold = if self.monitor_tripped {
-            self.d_stop
-        } else {
-            trip_floor
-        };
-        let breached = d_measured < threshold;
-        if breached != self.monitor_tripped {
-            if breached {
-                warn!(
-                    "collision MONITOR: measured clearance past {trip_floor:+.4} m, blocking approach (separation still allowed)"
-                );
-            } else {
-                info!("collision MONITOR: measured clearance recovered past d_stop, resuming");
-            }
-            self.monitor_tripped = breached;
-        }
-        if !breached {
-            return None;
-        }
-        // The candidate is judged against the held setpoint's own clearance, in
-        // the same (commanded) space: cross-space comparison against d_measured
-        // would pass every closing command under a systematic tracking offset,
-        // and freeze every escape under the opposite offset.
-        let d_prev = self.distance_at(&concat(prev))?;
-        let opens = |g: &mut Self, s: &GovState| -> Option<f64> {
-            g.distance_at(&concat(s)).filter(|d| *d >= d_prev)
-        };
-        if opens(self, cand).is_some() {
-            return None;
-        }
-        // The joint candidate closes: judge each side's motion with the other
-        // held, so the closing side is held while an escaping side stays free.
-        let solo_left = GovState {
-            arms: ArmPair::new(cand.arms.left, prev.arms.right),
-            openings: ArmPair::new(cand.openings.left, prev.openings.right),
-        };
-        let solo_right = GovState {
-            arms: ArmPair::new(prev.arms.left, cand.arms.right),
-            openings: ArmPair::new(prev.openings.left, cand.openings.right),
-        };
-        let left_moves =
-            cand.arms.left != prev.arms.left || cand.openings.left != prev.openings.left;
-        let right_moves =
-            cand.arms.right != prev.arms.right || cand.openings.right != prev.openings.right;
-        let d_left = left_moves.then(|| opens(self, &solo_left)).flatten();
-        let d_right = right_moves.then(|| opens(self, &solo_right)).flatten();
-        Some(match (d_left, d_right) {
-            // Both open alone yet close together: keep the better single escape.
-            (Some(dl), Some(dr)) => {
-                if dl >= dr {
-                    solo_left
-                } else {
-                    solo_right
-                }
-            }
-            (Some(_), None) => solo_left,
-            (None, Some(_)) => solo_right,
-            (None, None) => *prev,
+    /// Run every limiter over the same snapshot and keep the most restrictive
+    /// fraction per DOF. Nothing here reads the model or another limiter's
+    /// output, so the order of this list changes only which name is recorded on
+    /// a tie, never the governed step.
+    fn limit(&self, step: &Step, sensed: &Sensed) -> Limits {
+        let limiters: [&dyn Limiter; 1] = [&MeasuredTripwire];
+        limiters.iter().fold(Limits::unrestricted(), |limits, l| {
+            limits.add(l.name(), l.allow(step, sensed))
         })
     }
 
-    /// Gradient-free fallback for deep penetration: with no usable gradient, allow
-    /// the commanded step as long as the realized clearance does not drop below the
-    /// floor (the current clearance, since we are already inside `d_stop`), else
-    /// retract toward `prev`. Escape (which increases clearance) always passes;
-    /// penetration never deepens; the operator is never frozen in place.
-    fn govern_without_gradient(&mut self, prev: &GovState, cand: &GovState, dt: f64) -> GovState {
-        let prev_q = concat(prev);
-        let cand_q = concat(cand);
-        let Some(d_now) = self.distance_at(&prev_q) else {
-            return *prev;
-        };
-        let hold = self.separating_hold(&prev_q, &cand_q, d_now, dt);
-        match self.clip_to_floor(&prev_q, &cand_q, &hold, d_now, dt) {
-            Clip::Clear => split(&cand_q),
-            Clip::Clipped(q) => split(&q),
+    /// This tick's disposition. Any DOF denied outright, or a step already at
+    /// the wall, reads as a stop; anything else that restricted the step reads
+    /// as throttling.
+    fn disposition(&self, sensed: &Sensed, limits: &Limits, shaped: bool) -> Guard {
+        if !(shaped || limits.restricted()) {
+            return Guard::Clear;
         }
-    }
-
-    /// The clearance this tick's governed step must not drop below: `d_stop`
-    /// normally, or the current clearance if the arms are already inside it (so an
-    /// in-penetration recovery is never forced to close further).
-    fn step_floor(&self, d_now: f64) -> f64 {
-        d_now.min(self.d_stop)
-    }
-
-    /// The closing-velocity barrier: scale back only the gap-closing component of the
-    /// step (minimum-norm, along the distance gradient) so the clearance loses no more
-    /// than `allowed_closing(d_now) * dt`, then clamp each DOF's step into
-    /// `[0, commanded]` so the barrier can only slow motion, never add motion a DOF
-    /// was not commanded nor reverse one it was. Returns the governed configuration
-    /// and whether it limited the step.
-    fn throttle_closing(
-        &self,
-        prev_q: &[f64; GOV_DOF],
-        cand_q: &[f64; GOV_DOF],
-        grad: &[f64; GOV_DOF],
-        d_now: f64,
-        dt: f64,
-    ) -> ([f64; GOV_DOF], bool) {
-        let step: [f64; GOV_DOF] = std::array::from_fn(|i| cand_q[i] - prev_q[i]);
-        // Predicted change in clearance over this tick if the full step is taken, and
-        // the most clearance the barrier permits losing.
-        let predicted_delta_d = dot(grad, &step);
-        let max_loss = self.allowed_closing(d_now) * dt;
-        let norm_sq = dot(grad, grad);
-        let (projected, limited) =
-            if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
-                (*cand_q, false)
-            } else {
-                // Subtract just enough of the closing component (along the gradient) to
-                // land on the barrier `grad . step = -max_loss`.
-                let excess = (predicted_delta_d + max_loss) / norm_sq;
-                (
-                    std::array::from_fn(|i| prev_q[i] + step[i] - excess * grad[i]),
-                    true,
-                )
-            };
-        // The minimum-norm correction spreads the closing reduction along the
-        // gradient, which can jog a DOF the operator did not drive or reverse one
-        // they did. Clamp each DOF's governed step into [0, commanded step]: a held
-        // DOF stays put, none reverses, separating motion is untouched.
-        let governed = std::array::from_fn(|i| {
-            prev_q[i] + (projected[i] - prev_q[i]).clamp(step[i].min(0.0), step[i].max(0.0))
-        });
-        (governed, limited)
-    }
-
-    /// Permitted approach speed (m/s) at signed surface distance `d`: zero at or
-    /// under `d_stop`, the full approach at or over `d_safe`, linear between.
-    fn allowed_closing(&self, d: f64) -> f64 {
-        if d <= self.d_stop {
-            0.0
-        } else if d >= self.d_safe {
-            APPROACH_VELOCITY_AT_SAFE_M_S
+        if limits.frozen() || sensed.d_prev <= self.d_stop {
+            Guard::Stopped
         } else {
-            APPROACH_VELOCITY_AT_SAFE_M_S * (d - self.d_stop) / (self.d_safe - self.d_stop)
+            Guard::Throttling
         }
     }
 
@@ -616,164 +418,31 @@ impl Governor {
             .map(|p| p.distance)
     }
 
-    /// The per-DOF hold mask for [`clip_to_floor`]. When exactly one side's own
-    /// motion (the other held at `prev`) opens the clearance, that separating
-    /// side is held at `target` while the floor scan clips the other, so the
-    /// approaching side's clip cannot drag the separating side's escape back
-    /// with it: the shared segment parameter would otherwise retract both to the
-    /// same point. Two operators can then retreat independently even while one
-    /// pushes in. When both sides approach (nothing separates), or both separate
-    /// alone yet may jointly close, nothing is held and the shared-segment
-    /// backstop governs both.
+    /// Record and log this tick's disposition, once per transition rather than
+    /// at the control rate.
     ///
-    /// A hold pins that side at `target` for the whole scan, so the scan never
-    /// probes the held side's own sweep: the hold is granted only when that solo
-    /// sweep itself scans clear of the floor (the endpoint alone can step over a
-    /// pocket), which also keeps the scan's clear-start precondition (the held
-    /// base is the solo config, at or above `d_prev`). A side that does not move
-    /// is never held: pinning it would be a no-op that only disables the scan's
-    /// Lipschitz skip.
-    fn separating_hold(
-        &mut self,
-        prev: &[f64; GOV_DOF],
-        target: &[f64; GOV_DOF],
-        d_prev: f64,
-        dt: f64,
-    ) -> [bool; GOV_DOF] {
-        let side_dofs = |left: bool| (0..GOV_DOF).filter(move |&i| is_left_dof(i) == left);
-        let solo = |left: bool| -> [f64; GOV_DOF] {
-            let mut q = *prev;
-            for i in side_dofs(left) {
-                q[i] = target[i];
-            }
-            q
-        };
-        let moves = |left: bool| side_dofs(left).any(|i| target[i] != prev[i]);
-        let no_hold = [false; GOV_DOF];
-        let separates = |g: &mut Self, q: &[f64; GOV_DOF]| {
-            g.distance_at(q).is_some_and(|d| d >= d_prev)
-                && matches!(g.clip_to_floor(prev, q, &no_hold, d_prev, dt), Clip::Clear)
-        };
-        let (solo_left, solo_right) = (solo(true), solo(false));
-        let sep_left = moves(true) && separates(self, &solo_left);
-        let sep_right = moves(false) && separates(self, &solo_right);
-        std::array::from_fn(|i| match (sep_left, sep_right) {
-            (true, false) => is_left_dof(i),
-            (false, true) => !is_left_dof(i),
-            _ => false,
-        })
-    }
-
-    /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
-    /// point where the straight segment drops below the step floor, or
-    /// [`Clip::Clear`] if every probed point stays at or above it. `d_now` is the
-    /// clearance at `prev`; the floor is [`step_floor`](Self::step_floor)`(d_now)`,
-    /// so `prev` itself is at or above it by construction. Bimanual distance is
-    /// not monotone along a joint-space segment, so this probes interior points
-    /// (one per `MAX_PROBE_ARC_RAD` of joint motion, at least
-    /// `SEGMENT_SAMPLES_MIN`) to bracket the first breach (an endpoint check
-    /// alone can step over a pocket, and a fixed grid can step over one on a
-    /// large jump) and bisects within that bracket for the boundary. A failed
-    /// query counts as a breach (so a model-rejected configuration is never
-    /// returned), retracting conservatively.
-    ///
-    /// Skips the scan outright when the step provably cannot reach the floor:
-    /// the model's Lipschitz step bound caps the clearance change anywhere along
-    /// the segment, so `d_now - floor > bound` means no interior point can cross.
-    /// This makes the common ticks (holding still, slow motion, ample clearance)
-    /// nearly free while fast in-band approaches keep the full scan.
-    fn clip_to_floor(
-        &mut self,
-        prev: &[f64; GOV_DOF],
-        target: &[f64; GOV_DOF],
-        hold: &[bool; GOV_DOF],
-        d_now: f64,
-        dt: f64,
-    ) -> Clip {
-        let floor = self.step_floor(d_now);
-        // Held DOF (a separating side) sit at `target` for the whole scan; the
-        // rest interpolate, so the clip retracts only the approaching side.
-        let point_at = |t: f64| -> [f64; GOV_DOF] {
-            std::array::from_fn(|i| {
-                if hold[i] {
-                    target[i]
-                } else {
-                    prev[i] + t * (target[i] - prev[i])
-                }
-            })
-        };
-        // The chase velocity-limits every DOF before it reaches the governor (arm
-        // joints by the joint speed cap, openings by the opening rate). A larger
-        // excursion is an upstream bug that would silently under-resolve the
-        // scan, so fail loudly (the `* 1.01` absorbs float rounding at the exact
-        // limit). The same per-DOF ratio sizes the probe count below: probes are
-        // spaced so no DOF moves more than its probe resolution between them.
-        let mut max_probe_ratio = 0.0_f64;
-        for i in 0..GOV_DOF {
-            let excursion = (target[i] - prev[i]).abs();
-            let max_step = self.dof_speed_limit(i) * dt;
-            assert!(
-                excursion <= max_step * 1.01,
-                "governed step {excursion:.4} on DOF {i} exceeds its velocity-limited bound {max_step:.4}"
-            );
-            let probe_resolution = if i < DUAL_DOF {
-                MAX_PROBE_ARC_RAD
-            } else {
-                MAX_PROBE_OPENING_FRAC
-            };
-            max_probe_ratio = max_probe_ratio.max(excursion / probe_resolution);
-        }
-        // The Lipschitz early-out is keyed to `d_now` at `prev` (all-prev); a hold
-        // starts the scan from a different base, so only skip when nothing is held.
-        let step_q: [f64; GOV_DOF] = std::array::from_fn(|i| target[i] - prev[i]);
-        let dq = split(&step_q);
-        if hold.iter().all(|&h| !h)
-            && d_now - floor
-                > self.model.clearance_step_bound(
-                    &dq.arms.left,
-                    &dq.arms.right,
-                    &[dq.openings.left, dq.openings.right],
-                )
-        {
-            return Clip::Clear;
-        }
-        // One probe per resolution unit of the fastest-moving DOF (floored for
-        // tiny steps); no fixed ceiling, so the spacing guarantee holds for any
-        // step within the bound above.
-        let samples = (max_probe_ratio.ceil() as usize).max(SEGMENT_SAMPLES_MIN);
-        let mut last_clear = 0.0_f64;
-        for s in 1..=samples {
-            let t = s as f64 / samples as f64;
-            match self.distance_at(&point_at(t)) {
-                Some(d) if d >= floor => last_clear = t,
-                _ => {
-                    let (mut lo, mut hi) = (last_clear, t);
-                    for _ in 0..FLOOR_BISECT_ITERS {
-                        let mid = 0.5 * (lo + hi);
-                        match self.distance_at(&point_at(mid)) {
-                            Some(d) if d >= floor => lo = mid,
-                            _ => hi = mid,
-                        }
-                    }
-                    return Clip::Clipped(point_at(lo));
-                }
-            }
-        }
-        Clip::Clear
-    }
-
-    fn log_transition(&mut self, next: Guard, d: f64, link_a: &str, link_b: &str) {
+    /// The only place `guard` is assigned while running, so a fault taken on
+    /// one path can never strand the readout on another: a non-finite candidate
+    /// arriving while the governor was disabled used to pin the operator status
+    /// to "stopped" until the toggle was cycled twice, because the passthrough
+    /// return never recomputed it.
+    fn report(&mut self, next: Guard, pair: Option<&NearestPair>, by: Option<&'static str>) {
         if next == self.guard {
             return;
         }
-        match next {
-            Guard::Stopped => warn!(
-                "collision: STOP - motion halted at d={d:+.4} m between {link_a} and {link_b}"
+        let by = by.unwrap_or("barrier");
+        match (next, pair) {
+            (Guard::Stopped, Some(p)) => warn!(
+                "collision: STOP - motion halted by {by} at d={:+.4} m between {} and {}",
+                p.distance, p.link_a, p.link_b
             ),
-            Guard::Throttling => {
-                warn!("collision: throttling approach, d={d:+.4} m, pair {link_a}/{link_b}")
-            }
-            Guard::Clear => info!("collision: clear, resuming full speed"),
+            (Guard::Stopped, None) => warn!("collision: STOP - motion halted on a fault hold"),
+            (Guard::Throttling, Some(p)) => warn!(
+                "collision: throttling approach ({by}), d={:+.4} m, pair {}/{}",
+                p.distance, p.link_a, p.link_b
+            ),
+            (Guard::Throttling, None) => warn!("collision: throttling approach ({by})"),
+            (Guard::Clear, _) => info!("collision: clear, resuming full speed"),
         }
         self.guard = next;
     }
@@ -833,6 +502,7 @@ fn dot(a: &[f64; GOV_DOF], b: &[f64; GOV_DOF]) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::sense::MONITOR_TRIP_FRACTION;
     use super::*;
 
     /// Materialize a generation's bundled collision meshes so the file-based collision
@@ -1038,15 +708,27 @@ mod tests {
     }
 
     #[test]
-    fn gradient_free_guard_allows_escape_never_deepens() {
+    fn the_clip_stage_alone_allows_escape_and_never_deepens() {
+        // In deep penetration the witnesses coincide, no gradient exists, and
+        // the barrier stands down: `govern` runs the clip stage alone. That
+        // stage by itself must still let the operator drive out and still
+        // refuse to let the penetration deepen, so exercise it directly.
         let mut g = governor(true);
-        // Deeply folded pose, the regime where the analytic gradient can degrade.
         let deep = at(wrists_inward(1.5));
         let d0 = distance(&mut g, &deep);
         let floor = d0.min(D_STOP);
+        let clip_only = |g: &mut Governor, from: &GovState, to: &GovState| match g.clip_to_floor(
+            &concat(from),
+            &concat(to),
+            d0,
+            DT,
+        ) {
+            Clip::Clear => *to,
+            Clip::Clipped(q) => split(&q),
+        };
         // Escape toward home increases clearance: allowed, never frozen.
         let escape = at(chase(&deep.arms, &home(), 0.02));
-        let out = g.govern_without_gradient(&deep, &escape, DT);
+        let out = clip_only(&mut g, &deep, &escape);
         assert_ne!(out, deep, "escape was frozen in place");
         assert!(
             distance(&mut g, &out) >= floor - 1e-3,
@@ -1054,7 +736,7 @@ mod tests {
         );
         // A deeper command is held at the floor, never pushed past it.
         let deeper = at(chase(&deep.arms, &wrists_inward(2.0), 0.02));
-        let held = g.govern_without_gradient(&deep, &deeper, DT);
+        let held = clip_only(&mut g, &deep, &deeper);
         assert!(
             distance(&mut g, &held) >= floor - 1e-3,
             "guard let penetration deepen"
@@ -1170,7 +852,7 @@ mod tests {
                 "scale {scale} does not straddle the skip predicate (margin {margin:.5}, bound {scaled_bound:.5})"
             );
             // No hold: this exercises the shared-segment skip predicate directly.
-            match g.clip_to_floor(&prev16, &target16, &[false; GOV_DOF], d_now, DT) {
+            match g.scan_to_floor(&prev16, &target16, &[false; GOV_DOF], d_now, DT) {
                 Clip::Clear => {
                     // Whether cleared by the skip or by the scan, no point of
                     // the accepted segment may sit below the stop floor.
