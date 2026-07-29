@@ -1073,6 +1073,91 @@ mod tests {
     /// Invariant 2 is what caught the separating-side exemption scanning a
     /// two-leg path the arms never travel; a scalar endpoint check cannot see
     /// that, so the path is sampled rather than assumed.
+    /// Captured live (MuJoCo v2): wrists swept in with the jaws wide, parked
+    /// against the stop with an open finger near the torso. An operator's
+    /// "retreat" to a tucked pose from here is actually a closing command for
+    /// the binding pair, and the governor refused it for 19 s straight.
+    fn wedged_open_jawed_at_the_torso() -> GovState {
+        GovState::new(
+            ArmPair::new(
+                [-0.0743, -0.0735, 0.8353, 0.3973, 0.0009, -0.0074, 0.1502],
+                [0.0682, 0.0724, -0.8067, 0.3973, 0.0006, 0.0076, -0.1422],
+            ),
+            ArmPair::new(1.0, 1.0),
+        )
+    }
+
+    /// The field wedge above is not a trap: the refused command was genuinely
+    /// closing (a tucked "safe" pose swings the open fingers toward the
+    /// torso), and both real escapes pass. Closing the jaws alone opens the
+    /// binding gap immediately, and swinging the wrists outward with the jaws
+    /// closing drives the whole configuration to clear air.
+    #[test]
+    fn the_open_jawed_torso_wedge_is_refused_but_never_a_trap() {
+        let mut g = v2_governor(true);
+        let wedge = wedged_open_jawed_at_the_torso();
+        let d0 = distance(&mut g, &wedge);
+        assert!(
+            (0.0..D_SAFE).contains(&d0),
+            "setup: the wedge parks inside the band, got {d0:+.6}"
+        );
+
+        // The escape that failed in the field: a tucked pose with the wrists
+        // inward. It closes the torso-finger gap, so whatever the governor
+        // passes must not breach the floor.
+        let tucked = ArmPair::new(
+            [0.0, 0.0, 0.2, 0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -0.2, 0.5, 0.0, 0.0, 0.0],
+        );
+        let mut q = wedge;
+        for _ in 0..100 {
+            let cand = GovState::new(chase(&q.arms, &tucked, 0.02), q.openings);
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
+            let d = distance(&mut g, &q);
+            assert!(
+                d >= d0.min(D_STOP) - 1e-9,
+                "tucked escape breached: {d:+.6}"
+            );
+        }
+
+        // Real escape 1: closing the jaws alone opens the binding gap.
+        q = wedge;
+        for _ in 0..200 {
+            let cand = GovState::new(
+                q.arms,
+                ArmPair::new(
+                    rate_limited(q.openings.left, 0.0, 3.0, DT),
+                    rate_limited(q.openings.right, 0.0, 3.0, DT),
+                ),
+            );
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
+        }
+        let jaws_closed = distance(&mut g, &q);
+        assert!(
+            jaws_closed > d0 + 0.005,
+            "closing the jaws must open the torso gap materially: {jaws_closed:+.6}"
+        );
+
+        // Real escape 2, from where escape 1 leaves off: with the jaws closed
+        // and the gap reopened, swinging the wrists outward reaches clear air.
+        // (Sequencing matters: bundling the outward swing with the still-open
+        // jaws is itself a closing command here, since the chase's first step
+        // toward a distant pose sweeps the fingers through the torso.)
+        let outward = ArmPair::new(
+            [0.0, 0.0, -0.4, 0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.4, 0.5, 0.0, 0.0, 0.0],
+        );
+        for _ in 0..300 {
+            let cand = GovState::new(chase(&q.arms, &outward, 0.02), q.openings);
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
+        }
+        let out = distance(&mut g, &q);
+        assert!(
+            out >= D_SAFE,
+            "the outward escape must reach clear air: {out:+.6}"
+        );
+    }
+
     #[test]
     fn the_realized_path_holds_the_floor_under_a_random_walk() {
         for version in [
