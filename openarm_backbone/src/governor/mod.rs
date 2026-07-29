@@ -1184,6 +1184,31 @@ mod tests {
                 }),
             );
         }
+        // The exemption path stacks the most queries: parked at the wall,
+        // one side escaping (its solo scan must prove itself) while the other
+        // keeps pushing (its clip bisects). Built from the live fixture
+        // rather than a synthetic pose so the hold is actually granted.
+        {
+            let mut g = v2_governor(true);
+            // Park AT the stop (not merely in-band): govern an approach until
+            // it settles, so the pushing side's clip and the escaping side's
+            // exemption both actually engage.
+            let mut parked = at(wrists_inward(1.05));
+            for _ in 0..250 {
+                let cand = at(chase(&parked.arms, &wrists_inward(1.5), 0.02));
+                parked = g.govern(&parked, &cand, &parked, NO_HANDS, DT);
+            }
+            let mut cand = parked;
+            cand.arms.left = chase(&parked.arms, &home(), 0.02).left;
+            cand.arms.right = chase(&parked.arms, &wrists_inward(1.5), 0.02).right;
+            time_us(
+                "tick: wall, one side escaping (exemption)",
+                300,
+                Box::new(move || {
+                    std::hint::black_box(g.govern(&parked, &cand, &parked, NO_HANDS, DT));
+                }),
+            );
+        }
         let mut worst = 0.0_f64;
         for (label, prev, cand, measured) in regimes {
             let mut g = v2_governor(true);
