@@ -517,6 +517,7 @@ fn dot(a: &[f64; GOV_DOF], b: &[f64; GOV_DOF]) -> f64 {
 mod tests {
     use super::limiters::measured_tripwire::MONITOR_TRIP_FRACTION;
     use super::*;
+    use crate::chase::rate_limited;
 
     /// Materialize a generation's bundled collision meshes so the file-based collision
     /// builder can fit hulls; the URDF itself comes from the same `HardwareVersion`.
@@ -936,6 +937,185 @@ mod tests {
         assert!(
             distance(&mut g, &q) < D_STOP + 4e-3,
             "did not settle near the stop distance"
+        );
+    }
+
+    /// Deterministic pseudo-random configurations, so a walk that finds
+    /// something can be replayed from its seed.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+        fn in_range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (hi - lo) * self.next_f64()
+        }
+        fn pose(&mut self) -> ArmPair<JointVec> {
+            let mut one = || -> JointVec {
+                [
+                    self.in_range(-1.6, 1.6),
+                    self.in_range(-1.6, 1.6),
+                    self.in_range(-1.6, 1.6),
+                    self.in_range(0.05, 2.2),
+                    self.in_range(-1.2, 1.2),
+                    self.in_range(-1.2, 1.2),
+                    self.in_range(-1.2, 1.2),
+                ]
+            };
+            ArmPair::new(one(), one())
+        }
+    }
+
+    /// The floor scan proves its probes clear, not the space between them, so a
+    /// realized path may dip this far under the floor before the next probe
+    /// catches it. Sized from the measured worst case with headroom: at the
+    /// shipped 5 mm stop it is a 5% erosion, and it is the residue the scan's
+    /// probe spacing buys back only by spending queries per tick.
+    const SCAN_PATH_RESIDUE_M: f64 = 2.5e-4;
+
+    /// Random-walk the governor the way an operator jogs it, and check every
+    /// in-band tick against the invariants the whole design rests on:
+    ///
+    /// 1. the governed configuration never sits below the step floor;
+    /// 2. the straight line the arms actually travel to reach it never dips
+    ///    more than [`SCAN_PATH_RESIDUE_M`] under that floor;
+    /// 3. a commanded step is never frozen outright while its own endpoint is
+    ///    admissible, so no jog can be refused with somewhere to go.
+    ///
+    /// Invariant 2 is what caught the separating-side exemption scanning a
+    /// two-leg path the arms never travel; a scalar endpoint check cannot see
+    /// that, so the path is sampled rather than assumed.
+    #[test]
+    fn the_realized_path_holds_the_floor_under_a_random_walk() {
+        for version in [
+            openarm_description::HardwareVersion::V1,
+            openarm_description::HardwareVersion::V2,
+        ] {
+            let mut g = governor_for(version, true);
+            let mut rng = Lcg(0x5EED_1234_ABCD_0001);
+            let mut q = at(home());
+            let mut target = q;
+            let mut in_band = 0u32;
+            let mut worst_dip = 0.0_f64;
+            for k in 0..5_000 {
+                // Re-aim periodically, so the walk both approaches and retreats
+                // rather than parking on one wall.
+                if k % 60 == 0 {
+                    target = GovState::new(
+                        rng.pose(),
+                        ArmPair::new(rng.in_range(0.0, 1.0), rng.in_range(0.0, 1.0)),
+                    );
+                }
+                let prev = q;
+                let Some(d_prev) = g.distance_at(&concat(&prev)) else {
+                    q = at(home());
+                    continue;
+                };
+                let cand = GovState::new(
+                    chase(&prev.arms, &target.arms, 0.02),
+                    ArmPair::new(
+                        rate_limited(prev.openings.left, target.openings.left, 3.0, DT),
+                        rate_limited(prev.openings.right, target.openings.right, 3.0, DT),
+                    ),
+                );
+                q = g.govern(&prev, &cand, &prev, DT);
+                if d_prev >= D_SAFE {
+                    continue;
+                }
+                in_band += 1;
+                let floor = if d_prev >= 0.0 {
+                    d_prev.min(D_STOP)
+                } else {
+                    d_prev - RECOVERY_LOSS_M_PER_S * DT
+                };
+
+                let d_governed = g.distance_at(&concat(&q)).unwrap_or(f64::NEG_INFINITY);
+                assert!(
+                    d_governed >= floor - 1e-9,
+                    "{version:?} k={k}: governed below the floor, {d_governed:+.6} < {floor:+.6}"
+                );
+
+                worst_dip = worst_dip.max(floor - segment_min(&mut g, &prev, &q, 16));
+
+                let moved: f64 = (0..GOV_DOF)
+                    .map(|i| (concat(&q)[i] - concat(&prev)[i]).abs())
+                    .fold(0.0, f64::max);
+                let commanded: f64 = (0..GOV_DOF)
+                    .map(|i| (concat(&cand)[i] - concat(&prev)[i]).abs())
+                    .fold(0.0, f64::max);
+                let d_cand = g.distance_at(&concat(&cand)).unwrap_or(f64::NEG_INFINITY);
+                assert!(
+                    moved > 0.0 || commanded <= 1e-12 || d_cand < floor,
+                    "{version:?} k={k}: frozen with a way out, d_cand={d_cand:+.6} floor={floor:+.6}"
+                );
+            }
+            assert!(
+                in_band > 1_000,
+                "{version:?}: the walk barely entered the band ({in_band} ticks); it proves nothing"
+            );
+            assert!(
+                worst_dip <= SCAN_PATH_RESIDUE_M,
+                "{version:?}: the realized path dipped {worst_dip:.6} m under the floor, over the {SCAN_PATH_RESIDUE_M:.6} m scan residue"
+            );
+        }
+    }
+
+    /// The v2 description places a fully-splayed finger inside the torso proxy
+    /// at home, so an operator who opens the jaws with the arms down starts
+    /// overlapping. Whether that overlap is real is a question for the URDF's
+    /// finger travel; what must hold here is that the governor never makes it a
+    /// trap. If this setup assertion ever fails, the description changed and
+    /// the escape below is what needs re-confirming, not the number.
+    #[test]
+    fn v2_wide_jaws_at_home_overlap_the_torso_and_the_operator_still_gets_out() {
+        let mut g = v2_governor(true);
+        let wide = GovState::new(home(), ArmPair::new(1.0, 1.0));
+        let d0 = distance(&mut g, &wide);
+        assert!(
+            d0 < 0.0,
+            "setup: v2 home with both jaws wide should overlap, got {d0:+.6}"
+        );
+        let pair = g.proximity(&wide).expect("a nearest pair at home");
+        assert!(
+            pair.link_a.contains("body") || pair.link_b.contains("body"),
+            "setup: the overlap should be a finger against the torso, got {} <-> {}",
+            pair.link_a,
+            pair.link_b
+        );
+
+        // Closing the jaws is the direct way out, and it must not be refused.
+        let mut q = wide;
+        for _ in 0..200 {
+            let cand = GovState::new(
+                q.arms,
+                ArmPair::new(
+                    rate_limited(q.openings.left, 0.0, 3.0, DT),
+                    rate_limited(q.openings.right, 0.0, 3.0, DT),
+                ),
+            );
+            q = g.govern(&q, &cand, &q, DT);
+        }
+        assert!(
+            distance(&mut g, &q) > 0.0,
+            "closing the jaws must clear the torso overlap"
+        );
+
+        // So is swinging the arms out with the jaws left wide.
+        let mut q = wide;
+        let mut out = home();
+        out.left[1] = -0.6;
+        out.right[1] = 0.6;
+        for _ in 0..200 {
+            let cand = GovState::new(chase(&q.arms, &out, 0.02), q.openings);
+            q = g.govern(&q, &cand, &q, DT);
+        }
+        assert!(
+            distance(&mut g, &q) > 0.0,
+            "swinging the arms clear must also resolve the overlap"
         );
     }
 

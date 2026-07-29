@@ -158,6 +158,14 @@ impl Governor {
     ///
     /// Computes its own separating-side exemption, so callers never thread a
     /// hold mask: the exemption is this stage's business and nothing else's.
+    ///
+    /// A granted exemption scans a two-leg path (the separating side already at
+    /// `target`, the other interpolating from there), but the arms travel the
+    /// straight line from `prev` to whatever is published. So the exemption's
+    /// result is re-scanned on that line: the point that goes out is always one
+    /// this stage proved on the path the arms will actually take, and the
+    /// exemption survives as the endpoint it aims for rather than as an
+    /// unverified shortcut.
     pub(super) fn clip_to_floor(
         &mut self,
         prev: &[f64; GOV_DOF],
@@ -165,8 +173,20 @@ impl Governor {
         d_now: f64,
         dt: f64,
     ) -> Clip {
+        const NO_HOLD: [bool; GOV_DOF] = [false; GOV_DOF];
         let hold = self.separating_hold(prev, target, d_now, dt);
-        self.scan_to_floor(prev, target, &hold, d_now, dt)
+        if hold == NO_HOLD {
+            return self.scan_to_floor(prev, target, &NO_HOLD, d_now, dt);
+        }
+        let exempted = match self.scan_to_floor(prev, target, &hold, d_now, dt) {
+            Clip::Clear => *target,
+            Clip::Clipped(q) => q,
+        };
+        match self.scan_to_floor(prev, &exempted, &NO_HOLD, d_now, dt) {
+            Clip::Clipped(q) => Clip::Clipped(q),
+            Clip::Clear if exempted == *target => Clip::Clear,
+            Clip::Clear => Clip::Clipped(exempted),
+        }
     }
 
     /// Walk from `prev` toward `target` and return [`Clip::Clipped`] at the first
