@@ -1,8 +1,8 @@
 //! The bimanual coordination loop. Every tick it advances both arms' planners
-//! and both grippers' openings to candidate setpoints, governs the whole step
-//! against the self-collision model in one call (arms and openings are one
+//! and both jaws to candidate setpoints, governs the whole step
+//! against the self-collision model in one call (arms and jaws are one
 //! governed configuration), and publishes the governed per-arm setpoints and
-//! per-gripper openings. One loop owns the governor (the single collision
+//! per-gripper jaw fractions. One loop owns the governor (the single collision
 //! model), both planners, and the backbone-executed gripper moves, so everything is
 //! always governed together against a consistent configuration, and the
 //! governed result is fed back so the next tick chases from where each DOF was
@@ -30,7 +30,7 @@ use crate::governor::{GovState, Governor, Guard};
 use crate::liveness::{self, Admission, Liveness};
 use crate::planner::{self, BusyGuard, Goal, Planner};
 use crate::publish::Publishers;
-use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
+use crate::streams::{ArmState, GovernorConfig, GripperCommand, GripperState, JointCommand};
 use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 
 /// How long [`seed_all`] waits for an arm's first measured state before warning that
@@ -51,8 +51,8 @@ const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 pub struct ArmChannels {
     pub command: watch::Sender<Option<JointCommand>>,
     pub gripper_command: watch::Sender<Option<GripperCommand>>,
-    pub measured: watch::Receiver<Option<MeasuredState>>,
-    pub gripper: watch::Receiver<Option<GripperOpening>>,
+    pub measured: watch::Receiver<Option<ArmState>>,
+    pub gripper: watch::Receiver<Option<GripperState>>,
     pub goals: mpsc::Receiver<Goal>,
     pub busy: Arc<AtomicBool>,
     pub gripper_goals: mpsc::Receiver<GripperGoal>,
@@ -142,10 +142,10 @@ pub async fn run(
     }
     info!("bimanual backbone: both arms reporting; governed streaming begins");
 
-    // A gripper's latest measured opening fraction. `seed` gated on each side's
-    // first reading and the watch never reverts to `None`, so the read is
-    // infallible from here on.
-    let opening = |gripper: &watch::Receiver<Option<GripperOpening>>| {
+    // A gripper's latest measured jaw fraction. `seed_all` gated on each
+    // side's first reading and the watch never reverts to `None`, so the read
+    // is infallible from here on.
+    let jaw_fraction = |gripper: &watch::Receiver<Option<GripperState>>| {
         gripper
             .borrow()
             .map(|g| g.fraction)
@@ -156,10 +156,10 @@ pub async fn run(
     // side idles) so governing always ramps from where the fingers really are;
     // the opening rate is read from the governor (its single owner) rather than
     // carried here.
-    let opening_rate = governor.max_opening_rate_frac_s();
-    let mut governed_openings = ArmPair::new(
-        opening(&channels.left.gripper),
-        opening(&channels.right.gripper),
+    let jaw_rate = governor.max_jaw_rate_frac_s();
+    let mut governed_jaws = ArmPair::new(
+        jaw_fraction(&channels.left.gripper),
+        jaw_fraction(&channels.right.gripper),
     );
     // In-flight backbone-executed gripper moves, one single-flight slot per side.
     let mut gripper_moves: ArmPair<Option<GripperMove>> = ArmPair::new(None, None);
@@ -184,13 +184,13 @@ pub async fn run(
         let seeded = Instant::now();
         ArmPair::new(Liveness::seeded(seeded), Liveness::seeded(seeded))
     };
-    // The openings chase their target at the opening rate exactly as the planner
+    // The jaws chase their target at the jaw rate exactly as the planner
     // velocity-limits the arm candidates; an idle side chases nowhere.
-    let chase_opening = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
+    let chase_jaw = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
         rate_limited(
             prev_frac,
             target.map_or(prev_frac, |t| t.frac),
-            opening_rate,
+            jaw_rate,
             dt,
         )
     };
@@ -203,16 +203,16 @@ pub async fn run(
         let arm_ticks = advance_arms(&mut channels, &mut planners, arm_admission, now).await;
         let arm_candidate = ArmPair::new(arm_ticks.left.candidate, arm_ticks.right.candidate);
         let hands = ArmPair::new(arm_ticks.left.streamed_hand, arm_ticks.right.streamed_hand);
-        let measured_openings = ArmPair::new(
-            opening(&channels.left.gripper),
-            opening(&channels.right.gripper),
+        let measured_jaws = ArmPair::new(
+            jaw_fraction(&channels.left.gripper),
+            jaw_fraction(&channels.right.gripper),
         );
         service_gripper_moves(
             &mut gripper_moves,
             &mut channels,
-            governed_openings,
-            measured_openings,
-            opening_rate,
+            governed_jaws,
+            measured_jaws,
+            jaw_rate,
             now,
         )
         .await;
@@ -226,29 +226,29 @@ pub async fn run(
             gripper_target(&gripper_moves.right, &channels.right),
         );
         if targets.left.is_none() {
-            governed_openings.left = measured_openings.left;
+            governed_jaws.left = measured_jaws.left;
         }
         if targets.right.is_none() {
-            governed_openings.right = measured_openings.right;
+            governed_jaws.right = measured_jaws.right;
         }
 
-        // One governed configuration: the last published setpoints and openings
+        // One governed configuration: the last published setpoints and jaws
         // as `prev`, the rate-limited chases as the candidate. The governor
         // throttles, holds, scans and monitors everything through one barrier.
         let prev = GovState::new(
             ArmPair::new(planners.left.setpoint(), planners.right.setpoint()),
-            governed_openings,
+            governed_jaws,
         );
         let cand = GovState::new(
             arm_candidate,
             ArmPair::new(
-                chase_opening(prev.openings.left, targets.left),
-                chase_opening(prev.openings.right, targets.right),
+                chase_jaw(prev.jaws.left, targets.left),
+                chase_jaw(prev.jaws.right, targets.right),
             ),
         );
-        let measured = measured_config(&channels, &prev, measured_openings);
+        let measured = measured_config(&channels, &prev, measured_jaws);
         let governed = governor.govern(&prev, &cand, &measured, &hands, dt);
-        governed_openings = governed.openings;
+        governed_jaws = governed.jaws;
 
         // Publish one governed setpoint per arm on its pairing slot; the slot
         // scopes the stream to its paired arm, so the message carries no arm_id.
@@ -256,7 +256,7 @@ pub async fn run(
             (
                 &mut planners.left,
                 &mut dq_filters.left,
-                &publishers.setpoints.left,
+                &publishers.arm_setpoints.left,
                 prev.arms.left,
                 governed.arms.left,
                 arm_admission.left,
@@ -264,7 +264,7 @@ pub async fn run(
             (
                 &mut planners.right,
                 &mut dq_filters.right,
-                &publishers.setpoints.right,
+                &publishers.arm_setpoints.right,
                 prev.arms.right,
                 governed.arms.right,
                 arm_admission.right,
@@ -289,20 +289,20 @@ pub async fn run(
         // slot (the slot scopes the stream to its paired gripper, so the message
         // carries no gripper_id); an idle side stays silent and its gripper
         // holds the jaws.
-        for (wire, opening_frac, target) in [
+        for (wire, jaw_frac, target) in [
             (
-                &publishers.openings.left,
-                governed_openings.left,
+                &publishers.gripper_setpoints.left,
+                governed_jaws.left,
                 targets.left,
             ),
             (
-                &publishers.openings.right,
-                governed_openings.right,
+                &publishers.gripper_setpoints.right,
+                governed_jaws.right,
                 targets.right,
             ),
         ] {
             if let Some(target) = target {
-                wire.send(opening_frac, target.max_effort).await;
+                wire.send(jaw_frac, target.max_effort).await;
             }
         }
 
@@ -420,7 +420,7 @@ async fn service_gripper_moves(
     channels: &mut ArmPair<ArmChannels>,
     governed: ArmPair<f64>,
     measured: ArmPair<f64>,
-    opening_rate_frac_s: f64,
+    jaw_rate_frac_s: f64,
     now: Instant,
 ) {
     service_gripper_move(
@@ -428,7 +428,7 @@ async fn service_gripper_moves(
         &mut channels.left,
         governed.left,
         measured.left,
-        opening_rate_frac_s,
+        jaw_rate_frac_s,
         now,
     )
     .await;
@@ -437,7 +437,7 @@ async fn service_gripper_moves(
         &mut channels.right,
         governed.right,
         measured.right,
-        opening_rate_frac_s,
+        jaw_rate_frac_s,
         now,
     )
     .await;
@@ -450,7 +450,7 @@ async fn service_gripper_moves(
 fn measured_config(
     channels: &ArmPair<ArmChannels>,
     prev: &GovState,
-    openings: ArmPair<f64>,
+    jaws: ArmPair<f64>,
 ) -> GovState {
     let positions = |ch: &ArmChannels, held: JointVec| {
         ch.measured.borrow().as_ref().map_or(held, |m| m.positions)
@@ -460,7 +460,7 @@ fn measured_config(
             positions(&channels.left, prev.arms.left),
             positions(&channels.right, prev.arms.right),
         ),
-        openings,
+        jaws,
     )
 }
 
@@ -503,7 +503,7 @@ struct Shutdown;
 const SEED_REFUSAL: &str = "the follower has not reported its first state yet";
 
 /// Wait for both arms' first measured states and both grippers' first
-/// openings, then seed each planner's held setpoint from its measured pose
+/// jaw fractions, then seed each planner's held setpoint from its measured pose
 /// (clamped into the joint limits). One wait over all four goal queues: a
 /// goal accepted for EITHER side before its follower reports is refused with
 /// its busy claim released, so a silent side cannot strand the other side's
@@ -568,8 +568,8 @@ async fn refuse_seed_arm_goal(goal: Goal, channels: &ArmChannels, planner: &mut 
 /// opening when one already arrived and releasing the goal's busy claim.
 async fn refuse_seed_gripper_goal(goal: GripperGoal, channels: &ArmChannels) {
     let _release = BusyGuard(channels.gripper_busy.clone());
-    let opening = (*channels.gripper.borrow()).map_or(0.0, |g| g.fraction);
-    goal.refuse(SEED_REFUSAL, opening).await;
+    let reported = (*channels.gripper.borrow()).map_or(0.0, |g| g.fraction);
+    goal.refuse(SEED_REFUSAL, reported).await;
 }
 
 /// Block until `latest` holds its first value, warning every
@@ -646,14 +646,14 @@ async fn tick_arm(
 /// bit-exact, so anything past this is a real clamp. Nanometer-scale jaw
 /// travel, orders of magnitude below actuator resolution; goal satisfaction
 /// is the caller's judgment from the reported `final_opening`.
-const OPENING_LANDED_FRAC: f64 = 1e-9;
+const JAW_LANDED_FRAC: f64 = 1e-9;
 
 /// Nominal duration (s) of a gripper move admitted with the chase at
 /// `governed_frac`: the commanded travel at the opening rate. The gripper
 /// analog of the arm servo's plan-time rollout, graded by the same
 /// [`motion_timed_out`] rule.
-fn gripper_move_budget_s(governed_frac: f64, target_frac: f64, opening_rate_frac_s: f64) -> f64 {
-    (target_frac - governed_frac).abs() / opening_rate_frac_s
+fn gripper_move_budget_s(governed_frac: f64, target_frac: f64, jaw_rate_frac_s: f64) -> f64 {
+    (target_frac - governed_frac).abs() / jaw_rate_frac_s
 }
 
 /// Admit a queued gripper goal into a free side and drive an in-flight move to
@@ -668,7 +668,7 @@ async fn service_gripper_move(
     channels: &mut ArmChannels,
     governed_frac: f64,
     measured_frac: f64,
-    opening_rate_frac_s: f64,
+    jaw_rate_frac_s: f64,
     now: Instant,
 ) {
     // Drain fully: every queued goal is answered, never left parked.
@@ -679,7 +679,7 @@ async fn service_gripper_move(
                 max_effort: goal.max_effort,
                 ctx: goal.ctx,
                 started: now,
-                budget_s: gripper_move_budget_s(governed_frac, goal.opening, opening_rate_frac_s),
+                budget_s: gripper_move_budget_s(governed_frac, goal.opening, jaw_rate_frac_s),
                 _busy: BusyGuard(channels.gripper_busy.clone()),
             });
         } else {
@@ -689,7 +689,7 @@ async fn service_gripper_move(
     }
     let Some(m) = mv.as_ref() else { return };
     let elapsed_s = now.duration_since(m.started).as_secs_f64();
-    let landed = (governed_frac - m.target_frac).abs() <= OPENING_LANDED_FRAC;
+    let landed = (governed_frac - m.target_frac).abs() <= JAW_LANDED_FRAC;
     let (success, message, cancelled) = if m.ctx.is_cancelled() {
         (false, "goal cancelled".to_string(), true)
     } else if landed {
@@ -934,6 +934,6 @@ mod tests {
             let step = (target - governed).clamp(-0.03, 0.03);
             governed += step;
         }
-        assert!((governed - target).abs() <= OPENING_LANDED_FRAC);
+        assert!((governed - target).abs() <= JAW_LANDED_FRAC);
     }
 }

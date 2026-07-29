@@ -10,19 +10,20 @@
 //! here. The closing-velocity barrier is the one such case in the governor: it
 //! is a directional projection, and it lives in [`super::barrier`].
 
+pub(in crate::governor) mod allowance;
 pub(in crate::governor) mod dof_speed;
 pub(in crate::governor) mod ee_speed;
 pub(in crate::governor) mod measured_tripwire;
 
+pub(in crate::governor) use allowance::{Allowance, Limits};
 pub(in crate::governor) use dof_speed::DofSpeed;
 pub(in crate::governor) use ee_speed::EeSpeed;
 pub(in crate::governor) use measured_tripwire::{MeasuredTripwire, Tripwire};
 
 use super::Step;
-use super::allowance::Allowance;
 
 /// One independent restriction on a step.
-pub(super) trait Limiter {
+pub(in crate::governor) trait Limiter {
     /// Reported as the binding mechanism when this limiter is the tightest.
     fn name(&self) -> &'static str;
 

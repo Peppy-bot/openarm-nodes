@@ -2,8 +2,8 @@
 //! consumes the commander's joint stream and exposes the joint / Cartesian move
 //! actions, generates the trajectories, runs the self-collision governor over
 //! both arms together, and streams the governed per-arm setpoints the arms
-//! follow. Grippers run through the backbone the same way: the commander's opening
-//! stream and move_gripper goals both feed the coordinator, the openings ride
+//! follow. Grippers run through the backbone the same way: the commander's jaw
+//! stream and move_gripper goals both feed the coordinator, the jaws ride
 //! the same governed configuration as the arm joints (a gripper cannot open its
 //! fingers into the other arm), and the governed opening streams to each
 //! gripper over its gripper_link pairing slot. The governor is URDF-based, so

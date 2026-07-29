@@ -11,9 +11,9 @@
 
 use tracing::{info, warn};
 
-use super::super::allowance::Allowance;
 use super::super::{ArmPair, GovState, Governor, Step, concat, is_left_dof};
 use super::Limiter;
+use super::allowance::Allowance;
 
 /// The measured-state tripwire trips when the real clearance drops below this
 /// fraction of `d_stop`, and releases only once it recovers past the full
@@ -84,17 +84,17 @@ impl Governor {
                 if side_is_left { cand } else { prev }.arms.left,
                 if side_is_left { prev } else { cand }.arms.right,
             ),
-            openings: ArmPair::new(
-                if side_is_left { cand } else { prev }.openings.left,
-                if side_is_left { prev } else { cand }.openings.right,
+            jaws: ArmPair::new(
+                if side_is_left { cand } else { prev }.jaws.left,
+                if side_is_left { prev } else { cand }.jaws.right,
             ),
         };
         let moves = |side_is_left: bool| {
             let (c, p) = (cand, prev);
             if side_is_left {
-                c.arms.left != p.arms.left || c.openings.left != p.openings.left
+                c.arms.left != p.arms.left || c.jaws.left != p.jaws.left
             } else {
-                c.arms.right != p.arms.right || c.openings.right != p.openings.right
+                c.arms.right != p.arms.right || c.jaws.right != p.jaws.right
             }
         };
         let sample = |g: &mut Self, side_is_left: bool| -> Option<f64> {

@@ -15,8 +15,8 @@ use bimanual_collision_model::CollisionError;
 use tracing::error;
 
 use super::limiters::Tripwire;
-use super::{ARM_DOF, DUAL_DOF, GOV_DOF, GovState, Governor, LEFT_OPENING};
-use super::{NearestPair, RIGHT_OPENING};
+use super::{ARM_DOF, DUAL_DOF, GOV_DOF, GovState, Governor, LEFT_JAW};
+use super::{NearestPair, RIGHT_JAW};
 
 /// Everything the collision stages read, sampled once at `prev`.
 pub(super) struct Sensed {
@@ -49,7 +49,7 @@ impl Governor {
         let tripwire = self.sense_tripwire(prev, cand, measured);
 
         self.model
-            .set_gripper_openings(prev.openings.left, prev.openings.right);
+            .set_gripper_openings(prev.jaws.left, prev.jaws.right);
         match self
             .model
             .distance_gradient(&prev.arms.left, &prev.arms.right)
@@ -58,8 +58,8 @@ impl Governor {
                 let mut grad = [0.0; GOV_DOF];
                 grad[..ARM_DOF].copy_from_slice(&g.grad_left);
                 grad[ARM_DOF..DUAL_DOF].copy_from_slice(&g.grad_right);
-                grad[LEFT_OPENING] = g.grad_openings[0];
-                grad[RIGHT_OPENING] = g.grad_openings[1];
+                grad[LEFT_JAW] = g.grad_openings[0];
+                grad[RIGHT_JAW] = g.grad_openings[1];
                 Some(Sensed {
                     d_prev: g.proximity.distance,
                     grad: Some(grad),

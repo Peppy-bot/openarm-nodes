@@ -10,7 +10,7 @@
 //! line and the operator readout can name the mechanism that is actually
 //! binding instead of reconstructing it from flags threaded across the module.
 
-use super::{GOV_DOF, Step};
+use super::super::{GOV_DOF, Step};
 
 /// Name reported for a DOF no limiter has restricted.
 const UNRESTRICTED: &str = "unrestricted";
@@ -22,7 +22,7 @@ const UNRESTRICTED: &str = "unrestricted";
 /// `[0, 1]`. Every value of this type is therefore a valid attenuation, so no
 /// composition of allowances can add motion or reverse it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Allowance([f64; GOV_DOF]);
+pub(in crate::governor) struct Allowance([f64; GOV_DOF]);
 
 impl Allowance {
     /// Take all of the proposed motion.
@@ -72,7 +72,7 @@ impl Allowance {
 /// The combined allowance of every limiter that ran, plus which one set each
 /// DOF's fraction.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Limits {
+pub(in crate::governor) struct Limits {
     allowance: Allowance,
     binding: [&'static str; GOV_DOF],
 }
@@ -130,7 +130,7 @@ impl Limits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::governor::{DUAL_DOF, LEFT_OPENING};
+    use crate::governor::{DUAL_DOF, LEFT_JAW};
 
     const A: &str = "a";
     const B: &str = "b";
@@ -226,7 +226,7 @@ mod tests {
         let free = Allowance::gate(|i| i < DUAL_DOF);
         assert_eq!(free.get(0), 1.0);
         assert_eq!(free.get(DUAL_DOF - 1), 1.0);
-        assert_eq!(free.get(LEFT_OPENING), 0.0);
+        assert_eq!(free.get(LEFT_JAW), 0.0);
     }
 
     #[test]

@@ -60,7 +60,7 @@ pub struct GripperCommand {
 /// governor queries on position; the velocities ride along for the upstream
 /// state relay only.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MeasuredState {
+pub struct ArmState {
     pub positions: JointVec,
     pub velocities: JointVec,
 }
@@ -70,7 +70,7 @@ pub struct MeasuredState {
 /// see an out-of-range placement, plus the measured effort and the follower's
 /// effort ceiling, which ride along for the upstream state relay only.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GripperOpening {
+pub struct GripperState {
     pub fraction: f64,
     pub effort: f64,
     pub max_effort: f64,
@@ -90,10 +90,7 @@ fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
 /// must carry exactly [`crate::ARM_DOF`] positions with matching velocities,
 /// all finite; the generic contract's empty-velocities form is deliberately
 /// rejected here rather than half-accepted.
-fn parse_joint_state(
-    positions: Vec<f64>,
-    velocities: Vec<f64>,
-) -> Result<MeasuredState, &'static str> {
+fn parse_joint_state(positions: Vec<f64>, velocities: Vec<f64>) -> Result<ArmState, &'static str> {
     let finite = positions
         .iter()
         .chain(velocities.iter())
@@ -107,7 +104,7 @@ fn parse_joint_state(
     if !finite {
         return Err("non-finite values");
     }
-    Ok(MeasuredState {
+    Ok(ArmState {
         positions,
         velocities,
     })
@@ -149,14 +146,14 @@ fn parse_gripper_state(
     opening: f64,
     effort: f64,
     max_effort: f64,
-) -> Result<GripperOpening, &'static str> {
+) -> Result<GripperState, &'static str> {
     if !opening.is_finite() || !effort.is_finite() || !max_effort.is_finite() {
         return Err("non-finite values");
     }
     if max_effort < 0.0 {
         return Err("a negative effort ceiling");
     }
-    Ok(GripperOpening {
+    Ok(GripperState {
         fraction: opening.clamp(0.0, 1.0),
         effort,
         max_effort,
@@ -300,7 +297,7 @@ pub async fn run_gripper_command_listener(
 /// trajectory or a governor query on a bad measurement.
 pub async fn run_joint_state_listener(
     runner: Arc<NodeRunner>,
-    latest: [watch::Sender<Option<MeasuredState>>; 2],
+    latest: [watch::Sender<Option<ArmState>>; 2],
 ) {
     const WHAT: &str = "joint_states";
     let Some((mut left, mut right)) = subscribe_pair(
@@ -339,7 +336,7 @@ pub async fn run_joint_state_listener(
 /// so a stray broadcast producer cannot spoof the modeled fingers.
 pub async fn run_gripper_state_listener(
     runner: Arc<NodeRunner>,
-    latest: [watch::Sender<Option<GripperOpening>>; 2],
+    latest: [watch::Sender<Option<GripperState>>; 2],
 ) {
     const WHAT: &str = "gripper_states";
     let Some((mut left, mut right)) = subscribe_pair(

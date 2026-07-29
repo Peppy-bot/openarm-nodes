@@ -19,7 +19,7 @@
 
 use super::{
     APPROACH_VELOCITY_AT_SAFE_M_S, Clip, DUAL_DOF, FLOOR_BISECT_ITERS, GOV_DOF, Governor,
-    MAX_PROBE_ARC_RAD, MAX_PROBE_OPENING_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S,
+    MAX_PROBE_ARC_RAD, MAX_PROBE_JAW_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S,
     SEGMENT_SAMPLES_MIN, dot, is_left_dof, split,
 };
 
@@ -237,7 +237,7 @@ impl Governor {
             let probe_resolution = if i < DUAL_DOF {
                 MAX_PROBE_ARC_RAD
             } else {
-                MAX_PROBE_OPENING_FRAC
+                MAX_PROBE_JAW_FRAC
             };
             max_probe_ratio = max_probe_ratio.max(excursion / probe_resolution);
         }
@@ -250,7 +250,7 @@ impl Governor {
                 > self.model.clearance_step_bound(
                     &dq.arms.left,
                     &dq.arms.right,
-                    &[dq.openings.left, dq.openings.right],
+                    &[dq.jaws.left, dq.jaws.right],
                 )
         {
             return Clip::Clear;

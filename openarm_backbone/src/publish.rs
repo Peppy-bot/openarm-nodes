@@ -26,7 +26,7 @@ use peppygen::paired_topics::{
 use peppylib::{Payload, TopicPublisher};
 use tracing::{error, warn};
 
-use crate::streams::GripperOpening;
+use crate::streams::GripperState;
 use crate::{ArmPair, JointVec};
 
 /// Pairing stamp from the daemon-resolved clock (sim time under a simulated
@@ -92,7 +92,7 @@ impl Publisher<OpeningBuild> {
 
 impl Publisher<ApertureBuild> {
     /// Relay one gripper's measured state as its follower reported it.
-    pub async fn send(&self, measured: &GripperOpening) {
+    pub async fn send(&self, measured: &GripperState) {
         self.emit(|stamp| {
             (self.build)(
                 stamp,
@@ -125,9 +125,9 @@ impl<Build> Publisher<Build> {
 /// Every publisher the coordination loop owns, declared once at bringup.
 pub struct Publishers {
     /// The governed joint setpoints, one per paired arm.
-    pub setpoints: ArmPair<Publisher<JointBuild>>,
-    /// The governed opening fractions, one per paired gripper.
-    pub openings: ArmPair<Publisher<OpeningBuild>>,
+    pub arm_setpoints: ArmPair<Publisher<JointBuild>>,
+    /// The governed jaw opening fractions, one per paired gripper.
+    pub gripper_setpoints: ArmPair<Publisher<OpeningBuild>>,
     /// Each arm's measured state, relayed up its leader slot so the leading
     /// node sees the same back-channel a follower gives the backbone.
     pub arm_states: ArmPair<Publisher<JointBuild>>,
@@ -141,7 +141,7 @@ pub struct Publishers {
 impl Publishers {
     pub async fn declare(runner: &NodeRunner) -> peppygen::Result<Self> {
         Ok(Self {
-            setpoints: ArmPair::new(
+            arm_setpoints: ArmPair::new(
                 Publisher::declare(
                     "left joint_setpoints",
                     left_arm_link::joint_setpoints::declare_publisher(runner),
@@ -155,7 +155,7 @@ impl Publishers {
                 )
                 .await?,
             ),
-            openings: ArmPair::new(
+            gripper_setpoints: ArmPair::new(
                 Publisher::declare(
                     "left gripper_setpoints",
                     left_gripper_link::gripper_setpoints::declare_publisher(runner),

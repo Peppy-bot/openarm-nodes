@@ -15,8 +15,8 @@
 use srs_model::Jacobian;
 use srs_model::nalgebra::SVector;
 
-use super::super::allowance::Allowance;
 use super::super::{ARM_DOF, ArmPair, is_left_dof};
+use super::allowance::Allowance;
 use super::{Limiter, Step};
 
 pub(in crate::governor) struct EeSpeed<'tick> {
