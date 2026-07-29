@@ -207,6 +207,10 @@ pub struct Governor {
     /// hysteresis: set when the real clearance closes past `MONITOR_TRIP_FRACTION *
     /// d_stop`, cleared once it recovers past `d_stop`.
     monitor_tripped: bool,
+    /// Clip-stage probes taken, so the timing report can state what a tick
+    /// actually costs in model queries rather than in wall time alone.
+    #[cfg(test)]
+    probe_count: usize,
 }
 
 impl Governor {
@@ -252,6 +256,8 @@ impl Governor {
             enabled,
             guard: Guard::Clear,
             monitor_tripped: false,
+            #[cfg(test)]
+            probe_count: 0,
         })
     }
 
@@ -491,7 +497,17 @@ impl Governor {
     /// Signed clearance at a governed configuration. `None` on a query error
     /// so callers fail safe.
     fn distance_at(&mut self, q: &[f64; GOV_DOF]) -> Option<f64> {
+        #[cfg(test)]
+        {
+            self.probe_count += 1;
+        }
         self.model.distance(q)
+    }
+
+    /// Clip-stage probes since the last read, for the timing report.
+    #[cfg(test)]
+    fn take_probe_count(&mut self) -> usize {
+        std::mem::take(&mut self.probe_count)
     }
 
     /// Record and log this tick's disposition, once per transition rather than
@@ -1218,22 +1234,56 @@ mod tests {
                 }),
             );
         }
-        let mut worst = 0.0_f64;
         for (label, prev, cand, measured) in regimes {
             let mut g = v2_governor(true);
-            let us = time_us(
+            time_us(
                 label,
                 500,
                 Box::new(move || {
                     std::hint::black_box(g.govern(&prev, &cand, &measured, NO_HANDS, DT));
                 }),
             );
-            worst = worst.max(us);
         }
-        println!(
-            "TIMING worst tick {worst:.1} us -> {:.0} Hz ceiling (one core, this machine)",
-            1e6 / worst
-        );
+
+        // The regimes above are steady states: each holds one pose pair, so the
+        // step is small, the scan clears in a handful of probes, and the clip
+        // never bisects. A jog does neither. This walk commands fresh poses at
+        // the joint-velocity limit, so segments are long enough to need their
+        // full probe density and the clip stage runs its exemption machinery,
+        // which is where the tick's real tail lives. Percentiles, not a mean:
+        // the loop's deadline is missed by the tail, and the tail is what a
+        // mean hides.
+        for chase_rad in [0.02_f64, 0.05, 0.15] {
+            let mut g = v2_governor(true);
+            let mut rng = Lcg(0x5eed_1729);
+            // Closed grippers: the v2 open-gripper home overlaps, and the
+            // penetration-recovery floor is a different regime than an approach.
+            let mut q = GovState::new(home(), ArmPair::new(0.0, 0.0));
+            let mut target = rng.pose();
+            let (mut times, mut worst_probes) = (Vec::with_capacity(4000), 0usize);
+            for tick in 0..4000 {
+                if tick % 150 == 0 {
+                    target = rng.pose();
+                }
+                let cand = GovState::new(chase(&q.arms, &target, chase_rad), q.grippers);
+                let t0 = Instant::now();
+                q = g.govern(&q, &cand, &q, NO_HANDS, DT);
+                times.push(t0.elapsed().as_micros());
+                worst_probes = worst_probes.max(g.take_probe_count());
+            }
+            times.sort_unstable();
+            let pct = |p: usize| times[(times.len() - 1) * p / 100];
+            let max = *times.last().expect("4000 ticks timed");
+            println!(
+                "TIMING jog chase={chase_rad:.2}rad: p50={} p95={} p99={} max={} us \
+                 | worst tick {worst_probes} probes -> {:.0} Hz ceiling",
+                pct(50),
+                pct(95),
+                pct(99),
+                max,
+                1e6 / max as f64
+            );
+        }
     }
 
     /// Captured live (MuJoCo v2): wrists swept in with the grippers wide, parked
