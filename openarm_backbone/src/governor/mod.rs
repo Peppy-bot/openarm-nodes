@@ -515,7 +515,7 @@ fn dot(a: &[f64; GOV_DOF], b: &[f64; GOV_DOF]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::sense::MONITOR_TRIP_FRACTION;
+    use super::limiters::measured_tripwire::MONITOR_TRIP_FRACTION;
     use super::*;
 
     /// Materialize a generation's bundled collision meshes so the file-based collision

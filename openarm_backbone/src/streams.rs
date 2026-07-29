@@ -6,6 +6,7 @@
 //! the coordinator reads every tick. One held subscription per stream means no
 //! re-subscribe gap, so a message is never dropped between receives.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -157,51 +158,94 @@ fn parse_gripper_state(
     })
 }
 
+/// Subscribe both of a pairing's slots, naming the stream if either fails.
+/// `None` ends the listener: a stream that cannot be subscribed never delivers.
+async fn subscribe_pair<L, R>(
+    what: &'static str,
+    left: impl Future<Output = peppygen::Result<L>>,
+    right: impl Future<Output = peppygen::Result<R>>,
+) -> Option<(L, R)> {
+    match tokio::join!(left, right) {
+        (Ok(l), Ok(r)) => Some((l, r)),
+        (l, r) => {
+            error!("{what} subscribe: left {:?}, right {:?}", l.err(), r.err());
+            None
+        }
+    }
+}
+
+/// Apply one received message to its side's watch, and report whether the
+/// listener should keep going.
+///
+/// This is the whole receive policy, in one place: a well-formed message
+/// replaces that side's latest, a malformed one is dropped with a throttled
+/// reason rather than driving an arm, a receive error backs off instead of
+/// spinning, and a closed subscription ends the listener (the node is shutting
+/// down). Each generated slot has its own message type and the subscriptions
+/// share no trait, so the select that produced `received` stays with its
+/// listener; everything after it is here.
+async fn accept<Raw, Parsed>(
+    what: &'static str,
+    side: Side,
+    received: peppygen::Result<Option<Raw>>,
+    parse: impl Fn(Raw) -> Result<Parsed, &'static str>,
+    latest: &[watch::Sender<Option<Parsed>>; 2],
+    last_reject_warn: &mut Option<Instant>,
+) -> bool {
+    match received {
+        Ok(Some(raw)) => match parse(raw) {
+            Ok(parsed) => {
+                latest[side.index()].send_replace(Some(parsed));
+            }
+            Err(reason) => warn_throttled(last_reject_warn, || {
+                warn!("{what}: dropping {} message with {reason}", side.label());
+            }),
+        },
+        Ok(None) => return false,
+        Err(e) => {
+            error!("{what} receive ({}): {e}", side.label());
+            tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
+        }
+    }
+    true
+}
+
 /// Receive both upstream arm setpoint streams forever (the leading node's
 /// joint_link command direction), keeping the latest well-formed message per
 /// side. The slot IS the side (a pairing delivers only its one peer), so there
-/// is no id demux; a malformed message is dropped rather than driving an arm.
+/// is no id demux. Whichever slot delivers next wins the select; the other
+/// stays queued in its own subscription, so neither side can starve the other.
 pub async fn run_joint_command_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<JointCommand>>; 2],
 ) {
-    let (left, right) = tokio::join!(
+    const WHAT: &str = "upstream joint_setpoints";
+    let Some((mut left, mut right)) = subscribe_pair(
+        WHAT,
         leader_left_arm::joint_setpoints::subscribe(&runner),
         leader_right_arm::joint_setpoints::subscribe(&runner),
-    );
-    let (mut left, mut right) = match (left, right) {
-        (Ok(l), Ok(r)) => (l, r),
-        (l, r) => {
-            return error!(
-                "upstream joint_setpoints subscribe: left {:?}, right {:?}",
-                l.err(),
-                r.err()
-            );
-        }
+    )
+    .await
+    else {
+        return;
     };
-    let mut last_reject_warn: Option<Instant> = None;
+    let mut warned = None;
     loop {
         let (side, received) = tokio::select! {
             r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| msg.positions))),
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.positions))),
         };
-        match received {
-            Ok(Some(positions)) => match parse_joint_command(positions) {
-                Ok(command) => {
-                    latest[side.index()].send_replace(Some(command));
-                }
-                Err(reason) => warn_throttled(&mut last_reject_warn, || {
-                    warn!(
-                        "upstream joint_setpoints: dropping {} message with {reason}",
-                        side.label()
-                    );
-                }),
-            },
-            Ok(None) => return, // subscription closed: node shutting down
-            Err(e) => {
-                error!("upstream joint_setpoints receive ({}): {e}", side.label());
-                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-            }
+        if !accept(
+            WHAT,
+            side,
+            received,
+            parse_joint_command,
+            &latest,
+            &mut warned,
+        )
+        .await
+        {
+            return;
         }
     }
 }
@@ -213,50 +257,39 @@ pub async fn run_gripper_command_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<GripperCommand>>; 2],
 ) {
-    let (left, right) = tokio::join!(
+    const WHAT: &str = "upstream gripper_setpoints";
+    let Some((mut left, mut right)) = subscribe_pair(
+        WHAT,
         leader_left_gripper::gripper_setpoints::subscribe(&runner),
         leader_right_gripper::gripper_setpoints::subscribe(&runner),
-    );
-    let (mut left, mut right) = match (left, right) {
-        (Ok(l), Ok(r)) => (l, r),
-        (l, r) => {
-            return error!(
-                "upstream gripper_setpoints subscribe: left {:?}, right {:?}",
-                l.err(),
-                r.err()
-            );
-        }
+    )
+    .await
+    else {
+        return;
     };
-    let mut last_reject_warn: Option<Instant> = None;
+    let mut warned = None;
     loop {
         let (side, received) = tokio::select! {
             r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.max_effort)))),
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.max_effort)))),
         };
-        match received {
-            Ok(Some((opening, max_effort))) => match parse_gripper_command(opening, max_effort) {
-                Ok(command) => {
-                    latest[side.index()].send_replace(Some(command));
-                }
-                Err(reason) => warn_throttled(&mut last_reject_warn, || {
-                    warn!(
-                        "upstream gripper_setpoints: dropping {} message with {reason}",
-                        side.label()
-                    );
-                }),
-            },
-            Ok(None) => return,
-            Err(e) => {
-                error!("upstream gripper_setpoints receive ({}): {e}", side.label());
-                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-            }
+        let applied = accept(
+            WHAT,
+            side,
+            received,
+            |(opening, max_effort)| parse_gripper_command(opening, max_effort),
+            &latest,
+            &mut warned,
+        )
+        .await;
+        if !applied {
+            return;
         }
     }
 }
 
-/// Receive both paired arms' measured state forever (the joint_link back-channel),
-/// keeping the latest per side. The slot IS the side (a pairing delivers only
-/// its one peer), so there is no id demux, and the governor anchors only on its
+/// Receive both paired arms' measured state forever (the joint_link
+/// back-channel), keeping the latest per side. The governor anchors only on its
 /// exclusive command-loop peers: a stray broadcast producer cannot pose as an
 /// arm. Non-finite states are dropped so the coordinator never anchors a
 /// trajectory or a governor query on a bad measurement.
@@ -264,101 +297,72 @@ pub async fn run_joint_state_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<MeasuredState>>; 2],
 ) {
-    let (left, right) = tokio::join!(
+    const WHAT: &str = "joint_states";
+    let Some((mut left, mut right)) = subscribe_pair(
+        WHAT,
         left_arm_link::joint_states::subscribe(&runner),
         right_arm_link::joint_states::subscribe(&runner),
-    );
-    let (mut left, mut right) = match (left, right) {
-        (Ok(l), Ok(r)) => (l, r),
-        (l, r) => {
-            return error!(
-                "joint_states subscribe: left {:?}, right {:?}",
-                l.err(),
-                r.err()
-            );
-        }
+    )
+    .await
+    else {
+        return;
     };
-    let mut last_reject_warn: Option<Instant> = None;
+    let mut warned = None;
     loop {
-        // Whichever slot delivers next wins the select; the other stays queued in
-        // its own subscription, so neither side can starve the other.
         let (side, received) = tokio::select! {
             r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.positions, msg.velocities)))),
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.positions, msg.velocities)))),
         };
-        match received {
-            Ok(Some((positions, velocities))) => match parse_joint_state(positions, velocities) {
-                Ok(state) => {
-                    latest[side.index()].send_replace(Some(state));
-                }
-                Err(reason) => warn_throttled(&mut last_reject_warn, || {
-                    warn!(
-                        "joint_states: dropping {} message with {reason}",
-                        side.label()
-                    );
-                }),
-            },
-            Ok(None) => return, // subscription closed: node shutting down
-            Err(e) => {
-                error!("joint_states receive ({}): {e}", side.label());
-                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-            }
+        let applied = accept(
+            WHAT,
+            side,
+            received,
+            |(positions, velocities)| parse_joint_state(positions, velocities),
+            &latest,
+            &mut warned,
+        )
+        .await;
+        if !applied {
+            return;
         }
     }
 }
 
 /// Receive both paired grippers' measured aperture forever (the gripper_link
-/// back-channel), keeping the latest opening fraction per side. The slot IS the
-/// side (a pairing delivers only its one peer's messages), so there is no id
-/// demux, and the backbone's collision model reads finger positions only from its
-/// exclusive command-loop peers: a stray broadcast producer cannot spoof the
-/// modeled fingers. A non-finite opening is dropped so the model never places
-/// the fingers on a bad reading; the fraction is clamped into `[0, 1]`.
+/// back-channel), keeping the latest opening fraction per side. The collision
+/// model reads finger positions only from these exclusive command-loop peers,
+/// so a stray broadcast producer cannot spoof the modeled fingers.
 pub async fn run_gripper_state_listener(
     runner: Arc<NodeRunner>,
     latest: [watch::Sender<Option<GripperOpening>>; 2],
 ) {
-    let (left, right) = tokio::join!(
+    const WHAT: &str = "gripper_states";
+    let Some((mut left, mut right)) = subscribe_pair(
+        WHAT,
         left_gripper_link::gripper_states::subscribe(&runner),
         right_gripper_link::gripper_states::subscribe(&runner),
-    );
-    let (mut left, mut right) = match (left, right) {
-        (Ok(l), Ok(r)) => (l, r),
-        (l, r) => {
-            return error!(
-                "gripper_states subscribe: left {:?}, right {:?}",
-                l.err(),
-                r.err()
-            );
-        }
+    )
+    .await
+    else {
+        return;
     };
-    let mut last_reject_warn: Option<Instant> = None;
+    let mut warned = None;
     loop {
-        // Whichever slot delivers next wins the select; the other stays queued in
-        // its own subscription, so neither side can starve the other.
         let (side, received) = tokio::select! {
             r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.effort, msg.max_effort)))),
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.opening, msg.effort, msg.max_effort)))),
         };
-        match received {
-            Ok(Some((opening, effort, max_effort))) => {
-                match parse_gripper_state(opening, effort, max_effort) {
-                    Ok(opening) => {
-                        latest[side.index()].send_replace(Some(opening));
-                    }
-                    Err(reason) => warn_throttled(&mut last_reject_warn, || {
-                        warn!(
-                            "gripper_states: dropping {} message with {reason}",
-                            side.label()
-                        );
-                    }),
-                }
-            }
-            Ok(None) => return, // subscription closed: node shutting down
-            Err(e) => {
-                error!("gripper_states receive ({}): {e}", side.label());
-                tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;
-            }
+        let applied = accept(
+            WHAT,
+            side,
+            received,
+            |(opening, effort, max_effort)| parse_gripper_state(opening, effort, max_effort),
+            &latest,
+            &mut warned,
+        )
+        .await;
+        if !applied {
+            return;
         }
     }
 }

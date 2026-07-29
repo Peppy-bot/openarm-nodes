@@ -22,6 +22,7 @@ mod streams;
 mod torso;
 mod trajectory;
 mod types;
+mod wire;
 
 pub(crate) use arm_pair::ArmPair;
 pub(crate) use types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
