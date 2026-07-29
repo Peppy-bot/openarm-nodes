@@ -116,9 +116,9 @@ field pose.
 
 | Action | Goal | Refused when |
 |---|---|---|
-| `move_arm_joints` | `arm_id`, 7 joint positions (rad), `duration_s` | non-finite, out of joint limits, side busy |
-| `move_arm` | `arm_id`, world pose (position m + quaternion `[x, y, z, w]`), `duration_s` | non-finite, degenerate quaternion, side busy |
-| `move_gripper` | `gripper_id`, opening fraction in [0, 1], `max_effort` | non-finite, out of range, side busy |
+| `move_arm_joints` | `arm_id`, 7 joint positions (rad), `duration_s` | non-finite, negative duration, out of joint limits, side busy |
+| `move_arm` | `arm_id`, world pose (position m + quaternion `[x, y, z, w]`), `duration_s` | non-finite, degenerate quaternion, negative duration, side busy |
+| `move_gripper` | `gripper_id`, opening fraction in [0, 1], `max_effort` | non-finite, out of range, negative effort cap, side busy |
 
 `arm_id`/`gripper_id`: 0 = left, 1 = right. One move per side at a time (a
 single-flight busy slot whose release rides a drop guard, so no terminal can

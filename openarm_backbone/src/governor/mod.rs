@@ -379,6 +379,15 @@ impl Governor {
         hands: &ArmPair<Option<Jacobian>>,
         dt: f64,
     ) -> GovState {
+        // The tick period is an input like any other: a non-finite or
+        // non-positive dt would make every speed budget infinite and the
+        // overlap floor unbounded, so it holds exactly as a non-finite
+        // candidate does. Production cannot produce one (the control rate is
+        // bringup-asserted), which is no reason for the boundary to trust it.
+        if !(dt.is_finite() && dt > 0.0) {
+            self.report(Guard::Stopped, None, None);
+            return *prev;
+        }
         let Some(step) = Step::new(prev, cand) else {
             self.report(Guard::Stopped, None, None);
             return *prev;
@@ -1467,6 +1476,23 @@ mod tests {
             distance(&mut g, &governed) >= D_STOP,
             "large jump breached the stop floor"
         );
+    }
+
+    #[test]
+    fn an_invalid_tick_period_holds_prev() {
+        let mut g = governor(true);
+        let prev = at(home());
+        let cand = at(wrists_inward(0.4));
+        for dt in [0.0, -0.01, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                g.govern(&prev, &cand, &prev, NO_HANDS, dt),
+                prev,
+                "dt={dt} must hold"
+            );
+            assert_eq!(g.guard(), Guard::Stopped);
+        }
+        // A valid tick immediately after is unaffected.
+        assert_eq!(g.govern(&prev, &cand, &prev, NO_HANDS, DT), cand);
     }
 
     #[test]

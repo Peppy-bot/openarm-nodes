@@ -58,24 +58,17 @@ impl Governor {
         let predicted_delta_d = dot(grad, &step);
         let max_loss = self.allowed_closing(d_now) * dt;
         let norm_sq = dot(grad, grad);
-        let (projected, limited) =
-            if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
-                (*cand_q, false)
-            } else {
-                // Subtract just enough of the closing component (along the gradient) to
-                // land on the barrier `grad . step = -max_loss`.
-                let excess = (predicted_delta_d + max_loss) / norm_sq;
-                (
-                    std::array::from_fn(|i| prev_q[i] + step[i] - excess * grad[i]),
-                    true,
-                )
-            };
-        if !limited {
+        if predicted_delta_d >= -max_loss || norm_sq <= MIN_GRADIENT_NORM_SQ {
             // Unrestricted motion must carry the commanded value itself: the
-            // clamp below reconstructs each DOF from `prev + delta`, which is not
-            // bit-identical to the candidate.
+            // clamp below reconstructs each DOF from `prev + delta`, which is
+            // not bit-identical to the candidate.
             return (*cand_q, false);
         }
+        // Subtract just enough of the closing component (along the gradient) to
+        // land on the barrier `grad . step = -max_loss`.
+        let excess = (predicted_delta_d + max_loss) / norm_sq;
+        let projected: [f64; GOV_DOF] =
+            std::array::from_fn(|i| prev_q[i] + step[i] - excess * grad[i]);
         // The minimum-norm correction spreads the closing reduction along the
         // gradient, which can jog a DOF the operator did not drive or reverse one
         // they did. Clamp each DOF's governed step into [0, commanded step]: a held
