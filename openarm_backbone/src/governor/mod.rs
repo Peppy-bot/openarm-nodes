@@ -1094,18 +1094,6 @@ max={} us | over budget {over}/{}",
         }
     }
 
-    /// Random-walk the governor the way an operator jogs it, and check every
-    /// in-band tick against the invariants the whole design rests on:
-    ///
-    /// 1. the governed configuration never sits below the step floor;
-    /// 2. the straight line the arms actually travel to reach it never dips
-    ///    more than [`SCAN_PATH_RESIDUE_M`] under that floor;
-    /// 3. a commanded step is never frozen outright while its own endpoint is
-    ///    admissible, so no jog can be refused with somewhere to go.
-    ///
-    /// Invariant 2 is what caught the separating-side exemption scanning a
-    /// two-leg path the arms never travel; a scalar endpoint check cannot see
-    /// that, so the path is sampled rather than assumed.
     /// Hand-run timing report (ignored in normal runs; timing asserts nothing):
     /// `cargo test --release governor_tick_timing_report -- --ignored --nocapture`
     #[test]
@@ -1405,6 +1393,18 @@ max={} us | over budget {over}/{}",
         );
     }
 
+    /// Random-walk the governor the way an operator jogs it, and check every
+    /// in-band tick against the invariants the whole design rests on:
+    ///
+    /// 1. the governed configuration never sits below the step floor;
+    /// 2. the straight line the arms actually travel to reach it never dips
+    ///    more than [`SCAN_PATH_RESIDUE_M`] under that floor;
+    /// 3. a commanded step is never frozen outright while its own endpoint is
+    ///    admissible, so no jog can be refused with somewhere to go.
+    ///
+    /// Invariant 2 is what caught the separating-side exemption scanning a
+    /// two-leg path the arms never travel; a scalar endpoint check cannot see
+    /// that, so the path is sampled rather than assumed.
     #[test]
     fn the_realized_path_holds_the_floor_under_a_random_walk() {
         for version in [
