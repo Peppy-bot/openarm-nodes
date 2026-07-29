@@ -117,16 +117,18 @@ field pose.
 | Action | Goal | Refused when |
 |---|---|---|
 | `move_arm_joints` | `arm_id`, 7 joint positions (rad), `duration_s` | non-finite, out of joint limits, side busy |
-| `move_arm` | `arm_id`, world pose (position m + quaternion `[x, y, z, w]`), `duration_s` | non-finite, degenerate quaternion, side busy, pose unreachable |
+| `move_arm` | `arm_id`, world pose (position m + quaternion `[x, y, z, w]`), `duration_s` | non-finite, degenerate quaternion, side busy |
 | `move_gripper` | `gripper_id`, opening fraction in [0, 1], `max_effort` | non-finite, out of range, side busy |
 
 `arm_id`/`gripper_id`: 0 = left, 1 = right. One move per side at a time (a
 single-flight busy slot whose release rides a drop guard, so no terminal can
 leak it). `move_arm` plans the quietest tier that works: a held-elbow line, a
 steered-elbow line, or the guarded servo (a damped resolved-rate law that can
-cross singular surfaces a discrete IK walk cannot), each validated up front -
-a servo move is accepted only if an offline rollout of the identical law
-reaches the pose. Completion is graded on the commanded motion with a
+cross singular surfaces a discrete IK walk cannot). Planning runs after
+admission (peppy's goal decision is pre-context, so reachability cannot be a
+refusal): an accepted goal whose pose no tier reaches, servo rollout
+included, completes unsuccessfully at once. Completion is graded on the
+commanded motion with a
 2x-nominal timeout; results report the measured state and the caller judges
 how close it landed (the governor may have held it short, and that is not a
 failure of the move machinery).
@@ -186,8 +188,9 @@ Single core, release. Dev laptop (x86_64): one distance or gradient query
 ~100 us; the speed limiters ~0.1 us; a disabled-governor tick 0.1 us (the
 model is never touched); whole governed ticks 0.4-1.0 ms by regime
 (penetration escape 0.45 ms, moving far apart 0.42 ms, in-band approach
-0.87 ms, parked at the wall pushing 1.05 ms worst). Jetson (aarch64):
-queries ~170 us, worst governed tick 1.83 ms. At the shipped 100 Hz the
+0.87 ms, one side escaping the wall under an exemption 1.03 ms, parked at
+the wall pushing 1.05 ms worst). Jetson (aarch64): queries ~170 us, worst
+governed tick 1.83 ms. At the shipped 100 Hz the
 worst tick uses ~10% of the budget on the laptop and ~18% on the Jetson;
 500 Hz is feasible on the laptop and marginal on the Jetson; 1 kHz is not
 reachable with the current floor-scan probe budget. The scan dominates: cost scales with probes per tick, so a

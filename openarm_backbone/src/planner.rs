@@ -661,10 +661,20 @@ impl Planner {
                 })
             }
         };
+        // The line's velocity guard compares each sample against the last
+        // commanded target, so the first comparison must sit on the plan's own
+        // IK branch (start_q), which can differ from the held setpoint at a
+        // redundancy or limit boundary; seeding from the setpoint there would
+        // trip the guard on a valid line's first tick. The servo has no branch
+        // to disagree with and steps from the governed setpoint.
+        let prev_q_des = match &path {
+            MovePath::Line(line) => line.seed,
+            MovePath::Servo(_) => self.setpoint,
+        };
         Mode::CartesianMove(CartesianMove {
             path,
             ctx,
-            prev_q_des: self.setpoint,
+            prev_q_des,
             _busy: busy,
         })
     }
