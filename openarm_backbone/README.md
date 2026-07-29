@@ -23,7 +23,7 @@ the launcher decides what pairs into each slot.
 ```
 
 Sixteen degrees of freedom are governed as one configuration: seven joints per
-arm plus each gripper's gripper (its opening fraction, 0 closed to 1 fully open).
+arm plus each gripper's opening fraction (0 closed to 1 fully open).
 A gripper is an ordinary governed DOF, so every guarantee the arms get covers the
 fingers identically.
 

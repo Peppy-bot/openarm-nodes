@@ -180,9 +180,12 @@ pub async fn run(
     // Both arms are seeded from their first measurement above, which is the
     // anchor a recovery would re-establish, so they start live.
     let stale_limit = liveness::stale_limit(cycle_period);
-    let mut arm_liveness = {
+    let (mut arm_liveness, mut gripper_liveness) = {
         let seeded = Instant::now();
-        ArmPair::new(Liveness::seeded(seeded), Liveness::seeded(seeded))
+        (
+            ArmPair::new(Liveness::seeded(seeded), Liveness::seeded(seeded)),
+            ArmPair::new(Liveness::seeded(seeded), Liveness::seeded(seeded)),
+        )
     };
     // The grippers chase their target at the gripper rate exactly as the planner
     // velocity-limits the arm candidates; an idle side chases nowhere.
@@ -200,6 +203,8 @@ pub async fn run(
         let now = Instant::now();
 
         let arm_admission = admit_arms(&mut arm_liveness, &channels, now, stale_limit);
+        let gripper_admission =
+            admit_grippers(&mut gripper_liveness, &mut channels, now, stale_limit);
         let arm_ticks = advance_arms(&mut channels, &mut planners, arm_admission, now).await;
         let arm_candidate = ArmPair::new(arm_ticks.left.candidate, arm_ticks.right.candidate);
         let hands = ArmPair::new(arm_ticks.left.streamed_hand, arm_ticks.right.streamed_hand);
@@ -306,7 +311,7 @@ pub async fn run(
             }
         }
 
-        relay_upstream(&publishers, &channels, arm_admission).await;
+        relay_upstream(&publishers, &channels, arm_admission, gripper_admission).await;
 
         // Operator proximity readout (rate-limited): the nearest checked pair's
         // signed distance and link names, live regardless of the governor state,
@@ -392,6 +397,33 @@ fn admit_arms(
     )
 }
 
+/// Judge each gripper follower's delivery, the opening analog of
+/// [`admit_arms`] over each gripper's own pairing.
+///
+/// Gates the upstream relay only: a gripper that has stopped delivering must
+/// not have its last aperture republished under a fresh stamp, which would show
+/// the leading node a live-looking back-channel. The governed opening still
+/// streams down, because a held gripper holds where the operator put it rather
+/// than drifting away unseen the way an uncommanded arm does.
+fn admit_grippers(
+    liveness: &mut ArmPair<Liveness>,
+    channels: &mut ArmPair<ArmChannels>,
+    now: Instant,
+    stale_limit: Duration,
+) -> ArmPair<Admission> {
+    // Read the flag, then mark the watch seen, so the next tick asks about that
+    // tick's delivery rather than every delivery since the loop began. Nothing
+    // else updates this watch; the other readers only borrow.
+    let delivered_left = channels.left.gripper.has_changed().unwrap_or(false);
+    let _ = channels.left.gripper.borrow_and_update();
+    let delivered_right = channels.right.gripper.has_changed().unwrap_or(false);
+    let _ = channels.right.gripper.borrow_and_update();
+    ArmPair::new(
+        liveness.left.admit(delivered_left, now, stale_limit),
+        liveness.right.admit(delivered_right, now, stale_limit),
+    )
+}
+
 /// Advance both planners to this tick's candidate setpoints and hand bases.
 async fn advance_arms(
     channels: &mut ArmPair<ArmChannels>,
@@ -474,20 +506,20 @@ fn measured_config(
 async fn relay_upstream(
     publishers: &Publishers,
     channels: &ArmPair<ArmChannels>,
-    admission: ArmPair<Admission>,
+    arm_admission: ArmPair<Admission>,
+    gripper_admission: ArmPair<Admission>,
 ) {
-    let live_arm = |ch: &ArmChannels, admission: Admission| {
-        (admission != Admission::Stale)
-            .then(|| *ch.measured.borrow())
-            .flatten()
-    };
+    // A stale side reads as nothing to relay, whatever the measurement is.
+    fn live<T>(admission: Admission, read: impl FnOnce() -> Option<T>) -> Option<T> {
+        (admission != Admission::Stale).then(read).flatten()
+    }
     let arms = ArmPair::new(
-        live_arm(&channels.left, admission.left),
-        live_arm(&channels.right, admission.right),
+        live(arm_admission.left, || *channels.left.measured.borrow()),
+        live(arm_admission.right, || *channels.right.measured.borrow()),
     );
     let grippers = ArmPair::new(
-        *channels.left.gripper.borrow(),
-        *channels.right.gripper.borrow(),
+        live(gripper_admission.left, || *channels.left.gripper.borrow()),
+        live(gripper_admission.right, || *channels.right.gripper.borrow()),
     );
     for (wire, measured) in [
         (&publishers.arm_states.left, arms.left),
