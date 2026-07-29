@@ -1,15 +1,18 @@
-//! The backbone's outbound wire: every publisher it owns, and the one path that
-//! stamps, builds, publishes and reports a message.
+//! Every publisher the backbone owns, and the one path that stamps, builds,
+//! publishes and reports a message. (Peppy vocabulary throughout: a *publisher*
+//! sends on a topic; a pairing *slot* carries one direction of a pairing's two
+//! one-way streams to its one *peer*; "wire" below means the encoded message
+//! on the transport, nothing else.)
 //!
-//! Each pairing slot is its own generated module, so two slots carrying the same
-//! schema expose two distinct `build_message` items. Holding the builder as a
-//! function pointer lets one [`Wire`] type serve both sides of a pairing, and
-//! the send path is written once instead of once per slot.
+//! Each pairing slot is its own generated module, so two slots carrying the
+//! same schema expose two distinct `build_message` items. Holding the builder
+//! as a function pointer lets one [`Publisher`] serve both sides of a pairing,
+//! and the send path is written once instead of once per slot.
 //!
 //! Publishing on an unpaired slot is a legal no-op, so the backbone declares
-//! every slot at bringup and streams regardless; a follower simply starts
-//! tracking once its pair is established. A slot that cannot be declared at all
-//! is a bringup fault and takes the node down.
+//! every slot at bringup and publishes regardless; a follower simply starts
+//! tracking once its pair is established. A slot that cannot be declared at
+//! all is a bringup fault and takes the node down.
 
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,13 +50,13 @@ type ApertureBuild = fn(SystemTime, f64, f64, f64) -> peppygen::Result<Payload>;
 
 /// One outbound slot: its declared publisher, that slot's generated
 /// `build_message`, and the phrase naming it in a log line.
-pub struct Wire<Build> {
+pub struct Publisher<Build> {
     publisher: TopicPublisher,
     build: Build,
     what: &'static str,
 }
 
-impl<Build> Wire<Build> {
+impl<Build> Publisher<Build> {
     async fn declare(
         what: &'static str,
         declaring: impl Future<Output = peppygen::Result<TopicPublisher>>,
@@ -67,7 +70,7 @@ impl<Build> Wire<Build> {
     }
 }
 
-impl Wire<JointBuild> {
+impl Publisher<JointBuild> {
     /// Publish one limb's joint vector. Efforts ride empty: this backbone
     /// neither commands nor measures them, which the contract spells as an
     /// empty list rather than a vector of zeros.
@@ -77,7 +80,7 @@ impl Wire<JointBuild> {
     }
 }
 
-impl Wire<OpeningBuild> {
+impl Publisher<OpeningBuild> {
     /// Publish one gripper's governed opening fraction and the effort cap to
     /// relay (`None` rides as the wire's 0: no preference, leaving the
     /// follower's configured ceiling in charge).
@@ -87,7 +90,7 @@ impl Wire<OpeningBuild> {
     }
 }
 
-impl Wire<ApertureBuild> {
+impl Publisher<ApertureBuild> {
     /// Relay one gripper's measured state as its follower reported it.
     pub async fn send(&self, measured: &GripperOpening) {
         self.emit(|stamp| {
@@ -102,7 +105,7 @@ impl Wire<ApertureBuild> {
     }
 }
 
-impl<Build> Wire<Build> {
+impl<Build> Publisher<Build> {
     /// Stamp, build and publish, naming the slot in either failure. A publish
     /// error is a transient wire condition; a build error (or a clock that has
     /// not ticked) means the message was never formed. Neither is fatal: the
@@ -120,32 +123,32 @@ impl<Build> Wire<Build> {
 }
 
 /// Every publisher the coordination loop owns, declared once at bringup.
-pub struct Wires {
+pub struct Publishers {
     /// The governed joint setpoints, one per paired arm.
-    pub setpoints: ArmPair<Wire<JointBuild>>,
+    pub setpoints: ArmPair<Publisher<JointBuild>>,
     /// The governed opening fractions, one per paired gripper.
-    pub openings: ArmPair<Wire<OpeningBuild>>,
+    pub openings: ArmPair<Publisher<OpeningBuild>>,
     /// Each arm's measured state, relayed up its leader slot so the leading
     /// node sees the same back-channel a follower gives the backbone.
-    pub arm_states: ArmPair<Wire<JointBuild>>,
+    pub arm_states: ArmPair<Publisher<JointBuild>>,
     /// Each gripper's measured state, relayed up its leader slot.
-    pub gripper_states: ArmPair<Wire<ApertureBuild>>,
+    pub gripper_states: ArmPair<Publisher<ApertureBuild>>,
     /// The operator readout: an emitted topic rather than a pairing slot, and
     /// the one message with no stamp of its own.
     status: TopicPublisher,
 }
 
-impl Wires {
+impl Publishers {
     pub async fn declare(runner: &NodeRunner) -> peppygen::Result<Self> {
         Ok(Self {
             setpoints: ArmPair::new(
-                Wire::declare(
+                Publisher::declare(
                     "left joint_setpoints",
                     left_arm_link::joint_setpoints::declare_publisher(runner),
                     left_arm_link::joint_setpoints::build_message as JointBuild,
                 )
                 .await?,
-                Wire::declare(
+                Publisher::declare(
                     "right joint_setpoints",
                     right_arm_link::joint_setpoints::declare_publisher(runner),
                     right_arm_link::joint_setpoints::build_message as JointBuild,
@@ -153,13 +156,13 @@ impl Wires {
                 .await?,
             ),
             openings: ArmPair::new(
-                Wire::declare(
+                Publisher::declare(
                     "left gripper_setpoints",
                     left_gripper_link::gripper_setpoints::declare_publisher(runner),
                     left_gripper_link::gripper_setpoints::build_message as OpeningBuild,
                 )
                 .await?,
-                Wire::declare(
+                Publisher::declare(
                     "right gripper_setpoints",
                     right_gripper_link::gripper_setpoints::declare_publisher(runner),
                     right_gripper_link::gripper_setpoints::build_message as OpeningBuild,
@@ -167,13 +170,13 @@ impl Wires {
                 .await?,
             ),
             arm_states: ArmPair::new(
-                Wire::declare(
+                Publisher::declare(
                     "upstream left joint_states",
                     leader_left_arm::joint_states::declare_publisher(runner),
                     leader_left_arm::joint_states::build_message as JointBuild,
                 )
                 .await?,
-                Wire::declare(
+                Publisher::declare(
                     "upstream right joint_states",
                     leader_right_arm::joint_states::declare_publisher(runner),
                     leader_right_arm::joint_states::build_message as JointBuild,
@@ -181,13 +184,13 @@ impl Wires {
                 .await?,
             ),
             gripper_states: ArmPair::new(
-                Wire::declare(
+                Publisher::declare(
                     "upstream left gripper_states",
                     leader_left_gripper::gripper_states::declare_publisher(runner),
                     leader_left_gripper::gripper_states::build_message as ApertureBuild,
                 )
                 .await?,
-                Wire::declare(
+                Publisher::declare(
                     "upstream right gripper_states",
                     leader_right_gripper::gripper_states::declare_publisher(runner),
                     leader_right_gripper::gripper_states::build_message as ApertureBuild,

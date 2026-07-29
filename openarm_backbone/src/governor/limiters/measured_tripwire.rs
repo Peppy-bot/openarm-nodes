@@ -12,7 +12,6 @@
 use tracing::{info, warn};
 
 use super::super::allowance::Allowance;
-use super::super::sense::Sensed;
 use super::super::{ArmPair, GovState, Governor, Step, concat, is_left_dof};
 use super::Limiter;
 
@@ -119,24 +118,30 @@ impl Governor {
 /// sub-motion that does not worsen the commanded clearance stays free.
 ///
 /// Whether the tripwire is armed at all, and the clearances this reads, are
-/// decided in [`super::sense`]; by the time it limits, the decision is already data.
-pub(in crate::governor) struct MeasuredTripwire;
+/// decided in [`super::super::sense`]; by the time it limits, the decision is
+/// already data, carried here by construction.
+pub(in crate::governor) struct MeasuredTripwire<'tick> {
+    /// Clearance of the held setpoint, the commanded-space reference.
+    pub d_prev: f64,
+    /// `Some` only while the latch is armed.
+    pub tripwire: Option<&'tick Tripwire>,
+}
 
-impl Limiter for MeasuredTripwire {
+impl Limiter for MeasuredTripwire<'_> {
     fn name(&self) -> &'static str {
         "measured-tripwire"
     }
 
-    fn allow(&self, _step: &Step, sensed: &Sensed) -> Allowance {
-        let Some(tripwire) = &sensed.tripwire else {
+    fn allow(&self, _step: &Step) -> Allowance {
+        let Some(tripwire) = self.tripwire else {
             return Allowance::FULL;
         };
         // Judged against the held setpoint's own clearance, in the same
         // (commanded) space: comparing across spaces would pass every closing
         // command under a systematic tracking offset and freeze every escape
         // under the opposite one.
-        let opens = |d: Option<f64>| d.filter(|d| *d >= sensed.d_prev);
-        if tripwire.d_cand >= sensed.d_prev {
+        let opens = |d: Option<f64>| d.filter(|d| *d >= self.d_prev);
+        if tripwire.d_cand >= self.d_prev {
             return Allowance::FULL;
         }
         // The joint candidate closes, so free at most one side: the two can

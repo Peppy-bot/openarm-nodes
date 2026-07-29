@@ -1,10 +1,15 @@
-//! Inbound stream plumbing for the backbone: the leading node's per-limb
-//! setpoint streams (the upstream pairings' command direction), both paired
-//! arms' measured joint state, both paired grippers' measured aperture, and
-//! the runtime governor controls. Each listener holds
-//! one subscription and keeps the latest well-formed message in a watch channel
-//! the coordinator reads every tick. One held subscription per stream means no
-//! re-subscribe gap, so a message is never dropped between receives.
+//! Every subscription the backbone holds. (Peppy vocabulary throughout: a
+//! pairing *slot* delivers one direction of its pairing's two one-way *streams*
+//! from its one *peer*; a *subscription* receives a stream, live and never
+//! replayed, and delivers nothing while the slot is unpaired.)
+//!
+//! The streams: the leading node's per-limb setpoints (the upstream pairings'
+//! command direction), both paired arms' measured joint state, both paired
+//! grippers' measured aperture, and the runtime governor controls. Each
+//! listener holds one subscription and keeps the latest well-formed message in
+//! a watch channel the coordinator reads every tick. One held subscription per
+//! stream means no re-subscribe gap, so a message is never dropped between
+//! receives.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -235,7 +240,7 @@ pub async fn run_joint_command_listener(
             r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| msg.positions))),
             r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| msg.positions))),
         };
-        if !accept(
+        let applied = accept(
             WHAT,
             side,
             received,
@@ -243,8 +248,8 @@ pub async fn run_joint_command_listener(
             &latest,
             &mut warned,
         )
-        .await
-        {
+        .await;
+        if !applied {
             return;
         }
     }

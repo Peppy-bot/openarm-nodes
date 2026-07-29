@@ -16,13 +16,13 @@ mod coordinator;
 mod governor;
 mod liveness;
 mod planner;
+mod publish;
 mod servo;
 mod startup;
 mod streams;
 mod torso;
 mod trajectory;
 mod types;
-mod wire;
 
 pub(crate) use arm_pair::ArmPair;
 pub(crate) use types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
@@ -171,6 +171,7 @@ fn main() -> Result<()> {
                 .iter()
                 .copied()
                 .fold(0.0_f64, f64::max),
+            params.max_ee_velocity_m_s,
             params.collision_governor_enabled,
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));

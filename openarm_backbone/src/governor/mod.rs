@@ -25,8 +25,15 @@
 //! the hold); an arm whose own motion opens the real gap always stays free. It
 //! shares the governor enable, so the operator toggle gates the commanded
 //! barrier and this tripwire together.
+//!
+//! The governor also runs the two speed caps (the per-DOF rate bound and the
+//! operator's end-effector speed cap) as limiters ahead of the collision
+//! stages. They are motion shaping, not collision avoidance: they run in both
+//! modes and never touch the collision readout, so the toggle gates collision
+//! avoidance and nothing else.
 
 use bimanual_collision_model::BimanualCollisionModel;
+use srs_model::Jacobian;
 use tracing::{info, warn};
 
 use crate::torso::{TORSO_BODY, torso_regions};
@@ -38,7 +45,7 @@ mod limiters;
 mod sense;
 
 use allowance::Limits;
-use limiters::{DofSpeed, Limiter, MeasuredTripwire};
+use limiters::{DofSpeed, EeSpeed, Limiter, MeasuredTripwire};
 use sense::Sensed;
 
 /// Joints across both arms, left (0..7) then right (7..14).
@@ -101,8 +108,8 @@ const APPROACH_VELOCITY_AT_SAFE_M_S: f64 = 0.15;
 
 /// Largest rate (opening fraction per second) the coordinator's chase drives a
 /// gripper opening: the opening analog of the arm joint speed cap, bounding each
-/// tick's opening step before it reaches the governor (whose floor scan asserts
-/// and sizes probes against the same rate via
+/// tick's opening step before it reaches the governor (whose `DofSpeed` clamp
+/// and floor-scan probe sizing key off the same rate via
 /// [`max_opening_rate_frac_s`](Governor::max_opening_rate_frac_s)). The gripper
 /// node and hardware own the real opening speed. Stated in opening fraction, the
 /// unit every opening DOF (wire and model alike) already uses: `3.0 /s` drives a
@@ -145,9 +152,9 @@ const MAX_PROBE_ARC_RAD: f64 = 0.01;
 /// per-arc count (a full-speed step still gets `excursion / MAX_PROBE_ARC_RAD`
 /// probes); this floor only keeps a handful of probes on the smallest steps, so
 /// it is sized for per-tick cost at high control rates rather than density.
-/// There is no fixed ceiling; the count scales with the step, and
-/// `clip_to_floor` asserts the step never exceeds its velocity-limited bound,
-/// which is what caps the count.
+/// There is no fixed ceiling; the count scales with the step, and the
+/// `DofSpeed` limiter clamps every step to its velocity-limited bound, which
+/// is what caps the count.
 const SEGMENT_SAMPLES_MIN: usize = 4;
 
 /// Bisection iterations within a bracketing interval once the scan finds the first
@@ -189,9 +196,12 @@ pub struct Governor {
     d_stop: f64,
     /// Outside this signed surface distance (m) the barrier is inactive.
     d_safe: f64,
-    /// Largest single-joint speed (rad/s). The per-tick floor scan bounds its probe
-    /// count to the velocity-limited step and asserts no step exceeds it.
+    /// Largest single-joint speed (rad/s). The `DofSpeed` limiter clamps every
+    /// step to it, which is what bounds the floor scan's probe count.
     max_joint_velocity_rad_s: f64,
+    /// The operator's cap on a streamed hand's linear speed (m/s), applied by
+    /// the EE-speed limiter to each side that carries a stream basis.
+    max_ee_velocity_m_s: f64,
     enabled: bool,
     guard: Guard,
     /// Whether the measured-state monitor is currently holding. Latched with
@@ -213,6 +223,7 @@ impl Governor {
         d_stop: f64,
         d_safe: f64,
         max_joint_velocity_rad_s: f64,
+        max_ee_velocity_m_s: f64,
         enabled: bool,
     ) -> Result<Self, String> {
         if !valid_band(d_stop, d_safe) {
@@ -225,12 +236,18 @@ impl Governor {
                 "invalid max_joint_velocity_rad_s ({max_joint_velocity_rad_s}): must be finite and > 0"
             ));
         }
+        if !(max_ee_velocity_m_s.is_finite() && max_ee_velocity_m_s > 0.0) {
+            return Err(format!(
+                "invalid max_ee_velocity_m_s ({max_ee_velocity_m_s}): must be finite and > 0"
+            ));
+        }
         let model = build_collision_model(urdf, meshes_dir, left_base, right_base)?;
         Ok(Self {
             model,
             d_stop,
             d_safe,
             max_joint_velocity_rad_s,
+            max_ee_velocity_m_s,
             enabled,
             guard: Guard::Clear,
             monitor_tripped: false,
@@ -248,7 +265,7 @@ impl Governor {
             if enabled {
                 "ENABLED"
             } else {
-                "DISABLED (passthrough)"
+                "DISABLED (speed caps only)"
             }
         );
         self.enabled = enabled;
@@ -280,7 +297,8 @@ impl Governor {
     }
 
     /// Disposition of the last governed cycle, for the status readout. Clear
-    /// while disabled (passthrough restricts nothing), except the non-finite
+    /// while disabled (the collision machinery stands down; the speed caps
+    /// still shape motion but are not collision events), except the non-finite
     /// candidate hold, which reports Stopped in either mode.
     pub fn guard(&self) -> Guard {
         self.guard
@@ -302,57 +320,95 @@ impl Governor {
         self.d_safe = d_safe;
     }
 
+    /// Retune the end-effector speed cap at runtime (the operator's speed
+    /// control). Rejects a non-positive or non-finite value, keeping the
+    /// current cap, and is a no-op when unchanged so it can be called every tick.
+    pub fn set_ee_cap(&mut self, max_ee_velocity_m_s: f64) {
+        if max_ee_velocity_m_s == self.max_ee_velocity_m_s {
+            return;
+        }
+        if !(max_ee_velocity_m_s.is_finite() && max_ee_velocity_m_s > 0.0) {
+            warn!("collision: ignoring invalid EE speed cap ({max_ee_velocity_m_s})");
+            return;
+        }
+        info!("EE speed cap set to {max_ee_velocity_m_s} m/s");
+        self.max_ee_velocity_m_s = max_ee_velocity_m_s;
+    }
+
     /// Govern one bimanual step from `prev` to `cand` over `dt`, returning the
     /// governed configuration. Arms and gripper openings ride the same vector,
     /// so every guarantee the joints get covers the fingers identically.
     ///
-    /// Five stages, in this order, each contractive with respect to the last:
+    /// Six stages, in this order, each contractive with respect to the last:
     ///
     /// 1. **Parse.** A non-finite endpoint is an upstream fault, not a step. It
     ///    has no representation in [`Step`], so every stage below may assume
     ///    finite arithmetic.
-    /// 2. **Sense.** One immutable snapshot of the collision model. Nothing
+    /// 2. **Limit (speed).** The per-DOF rate bound and the operator's
+    ///    end-effector speed cap, as independent allowances combined by keeping
+    ///    the most restrictive. These are motion-shaping controls, not
+    ///    collision guards: they run in both modes, so the operator toggle
+    ///    gates collision avoidance and nothing else.
+    /// 3. **Sense.** One immutable snapshot of the collision model. Nothing
     ///    downstream queries it, so no stage can perturb another's view.
-    /// 3. **Limit.** Independent per-DOF allowances, combined by keeping the
-    ///    most restrictive. Order-free, and the binding limiter falls out of
-    ///    the combination rather than being threaded out of it.
-    /// 4. **Project.** The closing-velocity barrier removes just enough of the
+    /// 4. **Limit (tripwire).** The measured-state tripwire's allowance joins
+    ///    the combination. Order-free with stage 2 by construction, and the
+    ///    binding limiter falls out of the combination rather than being
+    ///    threaded out of it.
+    /// 5. **Project.** The closing-velocity barrier removes just enough of the
     ///    gap-closing component that the clearance loses no more than
     ///    `allowed_closing(d) * dt`, leaving tangential and separating motion
     ///    untouched. Directional, so no per-DOF fraction can express it and it
     ///    is not a limiter; it runs *after* them so its guarantee holds on the
     ///    step that is actually published.
-    /// 5. **Clip.** The exact floor scan. Surface distance is not monotone
+    /// 6. **Clip.** The exact floor scan. Surface distance is not monotone
     ///    along a joint-space segment, so this is the only stage that can prove
-    ///    the realized path stays clear, and it is what makes stage 3's
+    ///    the realized path stays clear, and it is what makes the limiters'
     ///    order-independence safe rather than merely convenient.
     ///
     /// `measured` is the real joint state and opening fractions, which only the
-    /// measured-state tripwire reads. A disabled governor skips stages 2, 4 and
-    /// 5 and the collision limiters with them; the stage 1 fault hold still
-    /// applies, so a non-finite candidate is never streamed in either mode.
+    /// measured-state tripwire reads. `hands` carries each side's end-effector
+    /// Jacobian at the measured pose while that side follows the operator's
+    /// stream; a planned move rides with `None` there, because it was budgeted
+    /// against the cap at admission and capping it again per tick would stretch
+    /// it past its validated duration. A disabled governor skips stages 3
+    /// through 6; the stage 1 fault hold and the stage 2 speed caps still
+    /// apply, so a non-finite candidate is never streamed and the speed
+    /// controls do not vanish with the collision toggle.
     pub fn govern(
         &mut self,
         prev: &GovState,
         cand: &GovState,
         measured: &GovState,
+        hands: &ArmPair<Option<Jacobian>>,
         dt: f64,
     ) -> GovState {
         let Some(step) = Step::new(prev, cand) else {
             self.report(Guard::Stopped, None, None);
             return *prev;
         };
+        let speed_limits = self.limit_speed(&step, hands, dt);
         if !self.enabled {
             self.report(Guard::Clear, None, None);
-            return *cand;
+            return split(&speed_limits.apply(&step));
         }
-        let Some(sensed) = self.sense(dt, prev, cand, measured) else {
+        let Some(sensed) = self.sense(prev, cand, measured) else {
             self.report(Guard::Stopped, None, None);
             return *prev;
         };
 
-        let limits = self.limit(&step, &sensed);
-        let limited = limits.apply(&step);
+        // The tripwire's allowance is folded into the same combination as the
+        // speed caps, but judged separately: it is the only limiter that is a
+        // collision guard, so it alone feeds the operator readout below.
+        let tripwire = MeasuredTripwire {
+            d_prev: sensed.d_prev,
+            tripwire: sensed.tripwire.as_ref(),
+        };
+        let trip_allowance = tripwire.allow(&step);
+        let trip_limits = Limits::unrestricted().add(tripwire.name(), trip_allowance);
+        let limited = speed_limits
+            .add(tripwire.name(), trip_allowance)
+            .apply(&step);
 
         // The barrier stands down in deep penetration: with the witness points
         // coincident there is no separating direction to steer on. The floor
@@ -369,33 +425,40 @@ impl Governor {
                 Clip::Clipped(q) => (q, true),
             };
 
-        let guard = self.disposition(&sensed, &limits, throttled || clipped);
-        self.report(guard, Some(&sensed.pair), limits.tightest());
+        let guard = self.disposition(&sensed, &trip_limits, throttled || clipped);
+        self.report(guard, Some(&sensed.pair), trip_limits.tightest());
         split(&governed)
     }
 
-    /// Run every limiter over the same snapshot and keep the most restrictive
-    /// fraction per DOF. Nothing here reads the model or another limiter's
-    /// output, so the order of this list changes only which name is recorded on
-    /// a tie, never the governed step.
-    fn limit(&self, step: &Step, sensed: &Sensed) -> Limits {
+    /// The always-on limiters: the per-DOF rate bound and the end-effector
+    /// speed cap. Nothing here reads the model or another limiter's output, so
+    /// the order of this list changes only which name is recorded on a tie,
+    /// never the governed step.
+    fn limit_speed(&self, step: &Step, hands: &ArmPair<Option<Jacobian>>, dt: f64) -> Limits {
         let dof_speed = DofSpeed {
-            max_step: std::array::from_fn(|i| self.dof_speed_limit(i) * sensed.dt),
+            max_step: std::array::from_fn(|i| self.dof_speed_limit(i) * dt),
         };
-        let limiters: [&dyn Limiter; 2] = [&dof_speed, &MeasuredTripwire];
+        let ee_speed = EeSpeed {
+            cap_m_s: self.max_ee_velocity_m_s,
+            hands,
+            dt,
+        };
+        let limiters: [&dyn Limiter; 2] = [&dof_speed, &ee_speed];
         limiters.iter().fold(Limits::unrestricted(), |limits, l| {
-            limits.add(l.name(), l.allow(step, sensed))
+            limits.add(l.name(), l.allow(step))
         })
     }
 
-    /// This tick's disposition. Any DOF denied outright, or a step already at
-    /// the wall, reads as a stop; anything else that restricted the step reads
-    /// as throttling.
-    fn disposition(&self, sensed: &Sensed, limits: &Limits, shaped: bool) -> Guard {
-        if !(shaped || limits.restricted()) {
+    /// This tick's collision disposition, judged from the collision mechanisms
+    /// alone (the tripwire's limits plus the barrier and floor scan): the speed
+    /// caps shape ordinary motion and must not read as a collision event. A
+    /// side denied outright, or a step already at the wall, reads as a stop;
+    /// anything else the collision machinery restricted reads as throttling.
+    fn disposition(&self, sensed: &Sensed, trip_limits: &Limits, shaped: bool) -> Guard {
+        if !(shaped || trip_limits.restricted()) {
             return Guard::Clear;
         }
-        if limits.frozen() || sensed.d_prev <= self.d_stop {
+        if trip_limits.frozen() || sensed.d_prev <= self.d_stop {
             Guard::Stopped
         } else {
             Guard::Throttling
@@ -403,15 +466,15 @@ impl Governor {
     }
 
     /// Largest rate (fraction/s) the coordinator's chase may drive an opening
-    /// candidate; the probe sizing and the velocity-limit assertion in
-    /// [`clip_to_floor`](Self::clip_to_floor) are keyed to the same value.
+    /// candidate; the floor scan's probe sizing and the `DofSpeed` clamp are
+    /// keyed to the same value.
     pub fn max_opening_rate_frac_s(&self) -> f64 {
         MAX_OPENING_RATE_FRAC_S
     }
 
     /// Largest per-tick step governed DOF `i` may take, from the chase's arm
     /// velocity limit or the opening rate limit. The floor scan's probe count
-    /// and its upstream-bug assertion both key off this.
+    /// and the `DofSpeed` clamp both key off this.
     fn dof_speed_limit(&self, i: usize) -> f64 {
         if i < DUAL_DOF {
             self.max_joint_velocity_rad_s
@@ -546,9 +609,18 @@ mod tests {
     const D_STOP: f64 = 0.005;
     const D_SAFE: f64 = 0.02;
     const DT: f64 = 0.01;
-    /// Generous so the velocity-limited-step assertion never binds on the synthetic
-    /// direct-jump configs these tests use; the assertion itself is covered separately.
+    /// No side carries a stream basis: collision scenarios exercise the
+    /// collision stages, not the EE cap.
+    const NO_HANDS: &ArmPair<Option<Jacobian>> = &ArmPair {
+        left: None,
+        right: None,
+    };
+    /// Generous so the `DofSpeed` clamp never binds on the synthetic
+    /// direct-jump configs these tests use; the clamp itself is covered separately.
     const MAX_JOINT_VELOCITY_RAD_S: f64 = 1000.0;
+    /// Positive as build requires; irrelevant to these tests, which pass no
+    /// stream basis, so the EE limiter never engages.
+    const TEST_EE_CAP_M_S: f64 = 0.5;
 
     /// In-limit home; the elbow's one-sided lower limit is 0.05.
     fn home() -> ArmPair<JointVec> {
@@ -575,6 +647,7 @@ mod tests {
             D_STOP,
             D_SAFE,
             MAX_JOINT_VELOCITY_RAD_S,
+            TEST_EE_CAP_M_S,
             enabled,
         )
         .expect("build governor from bundled description")
@@ -645,6 +718,7 @@ mod tests {
             D_STOP,
             D_SAFE,
             velocity,
+            TEST_EE_CAP_M_S,
             true,
         )
         .expect("build governor from bundled description");
@@ -652,7 +726,7 @@ mod tests {
         let mut cand = prev;
         cand.arms.left[0] += 0.5; // 0.5 rad >> the 5e-4 rad velocity-limited bound
 
-        let governed = g.govern(&prev, &cand, &prev, DT);
+        let governed = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
         let bound = velocity * DT;
         let taken = governed.arms.left[0] - prev.arms.left[0];
         assert!(
@@ -707,17 +781,24 @@ mod tests {
                 break;
             }
             let cand = at(chase(&q.arms, &target, 0.05));
-            q = g.govern(&q, &cand, &q, DT);
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
         q
     }
 
     #[test]
-    fn disabled_is_passthrough() {
+    fn disabled_passes_a_speed_legal_step_bit_exact() {
+        // With the collision machinery down and no speed limiter binding (the
+        // test velocity bound is huge; no side carries a stream basis), the
+        // candidate must come back bit-exact: the followers require an
+        // unrestricted DOF to carry the commanded value itself.
         let mut g = governor(false);
         let deep = at(wrists_inward(1.2));
-        assert_eq!(g.govern(&at(home()), &deep, &at(home()), DT), deep);
-        assert_eq!(g.guard(), Guard::Clear, "passthrough restricts nothing");
+        assert_eq!(
+            g.govern(&at(home()), &deep, &at(home()), NO_HANDS, DT),
+            deep
+        );
+        assert_eq!(g.guard(), Guard::Clear, "disabled restricts no collision");
     }
 
     #[test]
@@ -729,7 +810,10 @@ mod tests {
             distance(&mut g, &at(home())) >= D_SAFE,
             "home should sit outside the band"
         );
-        assert_eq!(g.govern(&at(home()), &cand, &at(home()), DT), cand);
+        assert_eq!(
+            g.govern(&at(home()), &cand, &at(home()), NO_HANDS, DT),
+            cand
+        );
         assert_eq!(g.guard(), Guard::Clear, "unrestricted motion reads clear");
     }
 
@@ -740,7 +824,7 @@ mod tests {
         // (clearance increasing) is never throttled.
         let q = drive_into_band(&mut g);
         let cand = at(chase(&q.arms, &home(), 0.02));
-        assert_eq!(g.govern(&q, &cand, &q, DT), cand);
+        assert_eq!(g.govern(&q, &cand, &q, NO_HANDS, DT), cand);
     }
 
     #[test]
@@ -790,7 +874,7 @@ mod tests {
         // the right exactly where it is.
         let pushed = chase(&q.arms, &wrists_inward(1.5), 0.02);
         let cand = GovState::new(ArmPair::new(pushed.left, q.arms.right), q.openings);
-        let governed = g.govern(&q, &cand, &q, DT);
+        let governed = g.govern(&q, &cand, &q, NO_HANDS, DT);
         // The held right arm must not be jogged by the barrier's correction.
         assert_eq!(
             governed.arms.right, q.arms.right,
@@ -836,7 +920,7 @@ mod tests {
         let tangential: [f64; GOV_DOF] = std::array::from_fn(|i| raw[i] - comp * grad[i]);
         let q16 = concat(&q);
         let cand = split(&std::array::from_fn(|i| q16[i] + tangential[i]));
-        let governed = g.govern(&q, &cand, &q, DT);
+        let governed = g.govern(&q, &cand, &q, NO_HANDS, DT);
         for i in 0..ARM_DOF {
             assert!(
                 (governed.arms.left[i] - cand.arms.left[i]).abs() < 1e-9,
@@ -919,7 +1003,7 @@ mod tests {
         for _ in 0..250 {
             let prev = q;
             let cand = at(chase(&prev.arms, &target, 0.02));
-            q = g.govern(&prev, &cand, &prev, DT);
+            q = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
             let d = distance(&mut g, &q);
             entered_band |= d < D_SAFE;
             // The exact backstop holds the realized clearance at the floor, so the
@@ -1022,7 +1106,7 @@ mod tests {
                         rate_limited(prev.openings.right, target.openings.right, 3.0, DT),
                     ),
                 );
-                q = g.govern(&prev, &cand, &prev, DT);
+                q = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
                 if d_prev >= D_SAFE {
                     continue;
                 }
@@ -1097,7 +1181,7 @@ mod tests {
                     rate_limited(q.openings.right, 0.0, 3.0, DT),
                 ),
             );
-            q = g.govern(&q, &cand, &q, DT);
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
         assert!(
             distance(&mut g, &q) > 0.0,
@@ -1111,7 +1195,7 @@ mod tests {
         out.right[1] = 0.6;
         for _ in 0..200 {
             let cand = GovState::new(chase(&q.arms, &out, 0.02), q.openings);
-            q = g.govern(&q, &cand, &q, DT);
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
         }
         assert!(
             distance(&mut g, &q) > 0.0,
@@ -1135,7 +1219,7 @@ mod tests {
             distance(&mut g, &deep) < D_STOP,
             "target should be past the stop floor"
         );
-        let governed = g.govern(&start, &deep, &start, DT);
+        let governed = g.govern(&start, &deep, &start, NO_HANDS, DT);
         assert_ne!(governed, deep, "oversized step passed unfloored");
         assert!(
             distance(&mut g, &governed) >= D_STOP,
@@ -1150,15 +1234,15 @@ mod tests {
         let mut bad = at(wrists_inward(0.2));
         bad.arms.left[0] = f64::NAN;
         // Enabled: the up-front guard holds prev rather than steering on NaN.
-        assert_eq!(g.govern(&prev, &bad, &prev, DT), prev);
+        assert_eq!(g.govern(&prev, &bad, &prev, NO_HANDS, DT), prev);
         assert_eq!(g.guard(), Guard::Stopped, "a fault hold reads stopped");
         // A non-finite OPENING is the same class of upstream glitch.
         let mut bad_opening = at(wrists_inward(0.2));
         bad_opening.openings.left = f64::NAN;
-        assert_eq!(g.govern(&prev, &bad_opening, &prev, DT), prev);
+        assert_eq!(g.govern(&prev, &bad_opening, &prev, NO_HANDS, DT), prev);
         // Disabled fast path: still never passes a non-finite candidate through.
         g.set_enabled(false);
-        assert_eq!(g.govern(&prev, &bad, &prev, DT), prev);
+        assert_eq!(g.govern(&prev, &bad, &prev, NO_HANDS, DT), prev);
     }
 
     #[test]
@@ -1171,14 +1255,14 @@ mod tests {
             distance(&mut g, &near) < D_SAFE,
             "near pose should be in the band"
         );
-        assert_ne!(g.govern(&near, &closer, &near, DT), closer);
+        assert_ne!(g.govern(&near, &closer, &near, NO_HANDS, DT), closer);
         assert_ne!(
             g.guard(),
             Guard::Clear,
             "a limited step must read restricted"
         );
         g.set_enabled(false);
-        assert_eq!(g.govern(&near, &closer, &near, DT), closer);
+        assert_eq!(g.govern(&near, &closer, &near, NO_HANDS, DT), closer);
         assert_eq!(g.guard(), Guard::Clear, "disabling resets the readout");
     }
 
@@ -1224,7 +1308,7 @@ mod tests {
             distance(&mut g, &retreat) > distance(&mut g, &measured),
             "retreat opens the gap"
         );
-        let governed = g.govern(&prev, &retreat, &measured, DT);
+        let governed = g.govern(&prev, &retreat, &measured, NO_HANDS, DT);
         assert_ne!(
             governed, prev,
             "separation was blocked while the monitor was tripped"
@@ -1285,7 +1369,7 @@ mod tests {
         }
         let (cand, solo_right) = found.expect("setup: some push/retreat pair is mixed");
 
-        let governed = g.govern(&q, &cand, &q, DT);
+        let governed = g.govern(&q, &cand, &q, NO_HANDS, DT);
         // The retreating (right) arm must actually move; the governed config
         // stays at or above the stop floor.
         assert_ne!(
@@ -1366,7 +1450,7 @@ mod tests {
         }
         let cand = found.expect("setup: some push/pull pair produces the mixed case");
 
-        let governed = g.govern(&prev, &cand, &measured, DT);
+        let governed = g.govern(&prev, &cand, &measured, NO_HANDS, DT);
         assert_eq!(
             governed.arms.left, prev.arms.left,
             "the pushing arm must be held"
@@ -1407,7 +1491,7 @@ mod tests {
             "deep is a closing command"
         );
         assert_eq!(
-            g.govern(&prev, &deep, &measured, DT),
+            g.govern(&prev, &deep, &measured, NO_HANDS, DT),
             prev,
             "a closing command was not held on a measured breach"
         );
@@ -1418,7 +1502,7 @@ mod tests {
         let mut g = governor(true);
         // A systematic tracking offset: the measured arms breach the monitor
         // floor while the commanded setpoints still read ~15 mm clear. Judged
-        // against the measured clearance (the old cross-space baseline), every
+        // against the measured clearance (across spaces), every
         // velocity-limited closing candidate would read as "opening" (~15 mm vs
         // ~2 mm) and pass; judged in the commanded space, a candidate that
         // closes on the held setpoint is held.
@@ -1436,7 +1520,7 @@ mod tests {
             "setup: the candidate closes on the held setpoint"
         );
         assert_eq!(
-            g.govern(&prev, &cand, &measured, DT),
+            g.govern(&prev, &cand, &measured, NO_HANDS, DT),
             prev,
             "a closing command passed the tripped monitor under a tracking offset"
         );
@@ -1448,7 +1532,7 @@ mod tests {
             "setup: the retreat opens on the held setpoint"
         );
         assert_ne!(
-            g.govern(&prev, &retreat, &measured, DT),
+            g.govern(&prev, &retreat, &measured, NO_HANDS, DT),
             prev,
             "a separating command was frozen by the cross-space baseline"
         );
@@ -1466,7 +1550,7 @@ mod tests {
             "precondition: home sits outside the band"
         );
         assert_eq!(
-            g.govern(&prev, &cand, &prev, DT),
+            g.govern(&prev, &cand, &prev, NO_HANDS, DT),
             cand,
             "monitor tripped under good tracking"
         );
@@ -1502,20 +1586,20 @@ mod tests {
 
         // Breach trips the latch: the closing command is held at prev.
         assert_eq!(
-            g.govern(&prev, &deep, &breaching, DT),
+            g.govern(&prev, &deep, &breaching, NO_HANDS, DT),
             prev,
             "closing command not held on a breach"
         );
         // In-band measurement (above the trip floor, below d_stop): still held (hysteresis).
         assert_eq!(
-            g.govern(&prev, &deep, &in_band, DT),
+            g.govern(&prev, &deep, &in_band, NO_HANDS, DT),
             prev,
             "released before recovering past d_stop"
         );
         // Recovered past d_stop: the latch releases, so the command is governed
         // normally (clipped toward the floor), not force-held at prev.
         assert_ne!(
-            g.govern(&prev, &deep, &at(home()), DT),
+            g.govern(&prev, &deep, &at(home()), NO_HANDS, DT),
             prev,
             "did not release after recovery"
         );
@@ -1524,7 +1608,7 @@ mod tests {
         // from the untripped threshold and not re-hold. A latch stuck set would
         // force-hold here forever.
         assert_ne!(
-            g.govern(&prev, &deep, &in_band, DT),
+            g.govern(&prev, &deep, &in_band, NO_HANDS, DT),
             prev,
             "the latch did not clear on recovery"
         );
@@ -1537,7 +1621,7 @@ mod tests {
         // measured arms breach the floor.
         let cand = at(wrists_inward(0.2));
         let breaching = at(wrists_inward(2.0));
-        assert_eq!(g.govern(&at(home()), &cand, &breaching, DT), cand);
+        assert_eq!(g.govern(&at(home()), &cand, &breaching, NO_HANDS, DT), cand);
     }
 
     #[test]
@@ -1551,7 +1635,7 @@ mod tests {
         let mut measured = at(home());
         measured.arms.left[0] = f64::NAN;
         assert_eq!(
-            g.govern(&prev, &cand, &measured, DT),
+            g.govern(&prev, &cand, &measured, NO_HANDS, DT),
             cand,
             "monitor blocked a command on a failed measured query"
         );
@@ -1575,7 +1659,7 @@ mod tests {
             "setup: in_band not in the hysteresis band"
         );
         assert_ne!(
-            g.govern(&at(home()), &deep, &in_band, DT),
+            g.govern(&at(home()), &deep, &in_band, NO_HANDS, DT),
             at(home()),
             "an in-band measurement tripped from a clear state"
         );
@@ -1604,7 +1688,7 @@ mod tests {
 
         // One velocity-limited tick toward home must not be frozen.
         let one = at(chase(&trapped.arms, &home(), 0.02));
-        let governed = g.govern(&trapped, &one, &trapped, DT);
+        let governed = g.govern(&trapped, &one, &trapped, NO_HANDS, DT);
         assert_ne!(
             governed, trapped,
             "escape frozen: a penetrated arm must never be trapped by the governor"
@@ -1616,7 +1700,7 @@ mod tests {
         for _ in 0..400 {
             let before = distance(&mut g, &state);
             let cand = GovState::new(chase(&state.arms, &home(), 0.02), state.openings);
-            state = g.govern(&state, &cand, &state, DT);
+            state = g.govern(&state, &cand, &state, NO_HANDS, DT);
             let after = distance(&mut g, &state);
             assert!(
                 after >= before - budget,
@@ -1690,7 +1774,7 @@ mod tests {
 
         // Trusting the (clear) endpoints would pass `cand` through; the segment scan
         // must clip it to a setpoint that is itself clear of the stop.
-        let governed = g.govern(&prev, &cand, &prev, DT);
+        let governed = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
         assert_ne!(
             governed, cand,
             "a clear-ended segment with a sub-stop interior was passed unclipped"
@@ -1734,7 +1818,7 @@ mod tests {
                     chase_frac(s.openings.right, target.openings.right),
                 ),
             );
-            s = g.govern(&s, &cand, &s, DT);
+            s = g.govern(&s, &cand, &s, NO_HANDS, DT);
             let d = distance(g, &s);
             assert!(d >= D_STOP - 1e-9, "floor breached mid-drive: d={d:+.6}");
         }
@@ -1894,13 +1978,13 @@ mod tests {
             "setup: at this pose opening must deepen and closing must recover"
         );
         // Opening further is fully frozen (the floor is the current clearance).
-        let held = g.govern(&stuck, &deeper, &stuck, DT);
+        let held = g.govern(&stuck, &deeper, &stuck, NO_HANDS, DT);
         assert!(
             distance(&mut g, &held) >= d_stuck - 1e-9,
             "an opening below the floor deepened the breach"
         );
         // Closing recovers: the escape passes and clearance increases.
-        let governed = g.govern(&stuck, &closing, &stuck, DT);
+        let governed = g.govern(&stuck, &closing, &stuck, NO_HANDS, DT);
         assert_eq!(governed, closing, "the closing escape was throttled");
         assert!(
             distance(&mut g, &governed) > d_stuck,
@@ -1909,15 +1993,62 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_hand_is_capped_and_the_toggle_does_not_uncap_it() {
+        // A basis-carrying side is capped through the whole pipeline, enabled
+        // or not, and the guard does not read a comfort cap as a collision
+        // event. Joint 0 moves the hand 1 m/rad, so a 0.1 rad step over DT is
+        // 10 m/s against the 0.5 m/s test cap: the governed step must be the
+        // cap's fraction of the command, on the streamed side only.
+        for enabled in [true, false] {
+            let mut g = governor(enabled);
+            let mut jac = Jacobian::zeros();
+            jac[(0, 0)] = 1.0;
+            let hands = ArmPair::new(Some(jac), None);
+            let prev = at(home());
+            let mut cand = prev;
+            cand.arms.left[0] += 0.1;
+            cand.arms.right[0] += 0.1;
+            let governed = g.govern(&prev, &cand, &prev, &hands, DT);
+            let expected = prev.arms.left[0] + TEST_EE_CAP_M_S * DT;
+            assert!(
+                (governed.arms.left[0] - expected).abs() < 1e-12,
+                "streamed side not at the cap (enabled={enabled}): {}",
+                governed.arms.left[0]
+            );
+            assert_eq!(
+                governed.arms.right[0], cand.arms.right[0],
+                "the basis-free side is not capped"
+            );
+            assert_eq!(
+                g.guard(),
+                Guard::Clear,
+                "a speed cap must not read as a collision event"
+            );
+        }
+    }
+
+    #[test]
     fn disabled_passes_a_colliding_opening_through() {
+        // The toggle stands down the collision machinery and nothing else: a
+        // rate-legal opening into a collision passes bit-exact, while an
+        // over-rate jump is still clamped to the opening rate (the speed
+        // limiters are motion shaping, not collision avoidance, so they do not
+        // vanish with the toggle).
         let mut g = v2_governor(false);
         let arms = finger_into_other_arm();
+        let legal_step = g.max_opening_rate_frac_s() * DT;
         let prev = GovState::new(arms, ArmPair::new(0.0, 0.0));
-        let open = GovState::new(arms, ArmPair::new(1.0, 0.0));
+        let open = GovState::new(arms, ArmPair::new(legal_step, 0.0));
         assert_eq!(
-            g.govern(&prev, &open, &prev, DT),
+            g.govern(&prev, &open, &prev, NO_HANDS, DT),
             open,
-            "disabled governor throttled the opening"
+            "disabled governor throttled a rate-legal colliding opening"
+        );
+        let jump = GovState::new(arms, ArmPair::new(1.0, 0.0));
+        assert_eq!(
+            g.govern(&prev, &jump, &prev, NO_HANDS, DT).openings.left,
+            legal_step,
+            "an over-rate jump is rate-limited even while disabled"
         );
     }
 
@@ -1946,7 +2077,7 @@ mod tests {
             "setup: opening closes the gap"
         );
         assert_eq!(
-            g.govern(&prev, &open_more, &measured, DT),
+            g.govern(&prev, &open_more, &measured, NO_HANDS, DT),
             prev,
             "the monitor passed an opening during a measured finger breach"
         );
@@ -1954,7 +2085,7 @@ mod tests {
         // Closing (separation) still passes: the operator is never trapped.
         let close = GovState::new(arms, ArmPair::new(0.1 - opening_step, 0.0));
         assert_ne!(
-            g.govern(&prev, &close, &measured, DT),
+            g.govern(&prev, &close, &measured, NO_HANDS, DT),
             prev,
             "the monitor froze the closing escape"
         );

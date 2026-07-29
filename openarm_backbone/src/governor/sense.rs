@@ -18,11 +18,8 @@ use super::limiters::Tripwire;
 use super::{ARM_DOF, DUAL_DOF, GOV_DOF, GovState, Governor, LEFT_OPENING};
 use super::{NearestPair, RIGHT_OPENING};
 
-/// Everything the limiters and the barrier read, sampled once at `prev`.
+/// Everything the collision stages read, sampled once at `prev`.
 pub(super) struct Sensed {
-    /// This tick's period (s). Carried here so a limiter is a pure function of
-    /// the step and the snapshot alone.
-    pub dt: f64,
     /// Signed surface clearance at `prev` (m; negative is penetration).
     pub d_prev: f64,
     /// `d(clearance)/d(dof)` at `prev`. `None` in deep penetration, where the
@@ -42,7 +39,6 @@ impl Governor {
     /// cannot be obtained at all, which the caller turns into a hold.
     pub(super) fn sense(
         &mut self,
-        dt: f64,
         prev: &GovState,
         cand: &GovState,
         measured: &GovState,
@@ -65,7 +61,6 @@ impl Governor {
                 grad[LEFT_OPENING] = g.grad_openings[0];
                 grad[RIGHT_OPENING] = g.grad_openings[1];
                 Some(Sensed {
-                    dt,
                     d_prev: g.proximity.distance,
                     grad: Some(grad),
                     pair: NearestPair {
@@ -83,7 +78,6 @@ impl Governor {
                 // inside the collision.
                 let pair = self.proximity(prev)?;
                 Some(Sensed {
-                    dt,
                     d_prev: pair.distance,
                     grad: None,
                     pair,

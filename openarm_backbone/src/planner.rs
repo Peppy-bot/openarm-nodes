@@ -7,18 +7,20 @@
 //! was actually allowed to go.
 //!
 //! Every mode reduces to "chase a target": the setpoint advances toward the
-//! target at the per-joint velocity limits (Follow also caps end-effector speed),
-//! so streaming and moves stay smooth under throttling - when the governor holds
-//! the setpoint, the chase simply catches up at the velocity limit once clear,
-//! with no jump. Follow's target is the commander command; a joint move's target
-//! is the quintic sample; a Cartesian move's target is the IK of the pose sample.
+//! target at the per-joint velocity limits, so streaming and moves stay smooth
+//! under throttling - when the governor holds the setpoint, the chase simply
+//! catches up at the velocity limit once clear, with no jump. Follow's target
+//! is the commander command (its end-effector speed is capped by the
+//! governor's EE-speed limiter, fed by the Jacobian this planner hands out); a
+//! joint move's target is the quintic sample; a Cartesian move's target is the
+//! IK of the pose sample.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::exposed_actions::{move_arm, move_arm_joints};
-use srs_model::nalgebra::{Isometry3, SVector};
+use srs_model::nalgebra::Isometry3;
 use srs_model::{Arm, ArmAnglePolicy, Jacobian, Limit};
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -190,14 +192,23 @@ enum PathStep {
     Failed(String),
 }
 
-/// Where this tick's joint target came from. Only a streamed target is chased
-/// under the end-effector speed cap: a planned move was rolled out against that
-/// cap up front and tracks its own schedule, so capping it again would stretch
-/// the move past the duration its budget was sized from.
+/// Where this tick's joint target came from. Only a streamed target carries a
+/// hand basis out for the governor's EE-speed limiter: a planned move was
+/// rolled out against that cap up front and tracks its own schedule, so
+/// capping it again would stretch it past the duration its budget was sized
+/// from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Origin {
     Streamed,
     PlannedMove,
+}
+
+/// One planner tick's product: the velocity-limited candidate setpoint, and
+/// the end-effector Jacobian at the measured pose when the target came from
+/// the operator's stream (the governor's EE-speed limiter caps only those).
+pub struct Tick {
+    pub candidate: JointVec,
+    pub streamed_hand: Option<Jacobian>,
 }
 
 /// One mode's advance result: the joint target this tick, the next mode (the
@@ -264,7 +275,10 @@ impl Planner {
     }
 
     /// Retune the end-effector speed cap at runtime (the commander's control).
-    /// Ignores a non-positive or non-finite value, keeping the current cap.
+    /// This copy budgets planned moves at admission and paces the servo
+    /// reference; the per-tick cap on streamed motion is the governor's
+    /// EE-speed limiter, retuned from the same control message. Ignores a
+    /// non-positive or non-finite value, keeping the current cap.
     pub fn set_max_ee_velocity(&mut self, v: f64) {
         if v.is_finite() && v > 0.0 {
             self.cfg.max_ee_velocity_m_s = v;
@@ -273,6 +287,11 @@ impl Planner {
 
     /// Produce this tick's candidate setpoint: admit a pending goal, advance the
     /// active mode to a joint target, then chase it under the velocity limits.
+    ///
+    /// A streamed tick also carries the arm's end-effector Jacobian at the
+    /// measured pose: the governor's EE-speed limiter caps a streamed hand, and
+    /// this is the one place the arm's kinematic model lives. A planned move
+    /// carries `None`, because it was budgeted against the cap at admission.
     pub async fn tick(
         &mut self,
         measured_q: JointVec,
@@ -280,7 +299,7 @@ impl Planner {
         goals: &mut mpsc::Receiver<Goal>,
         busy: &Arc<AtomicBool>,
         now: Instant,
-    ) -> JointVec {
+    ) -> Tick {
         let mut mode = std::mem::replace(&mut self.mode, Mode::Follow);
         // Drain fully: every queued goal is answered, never left parked.
         while let Ok(goal) = goals.try_recv() {
@@ -305,18 +324,12 @@ impl Planner {
             &self.cfg.max_joint_velocity_rad_s,
             dt,
         );
-        match origin {
-            Origin::Streamed => {
-                let jac: Jacobian = self.model.at(&measured_q).jacobian();
-                cap_ee_speed(
-                    &self.setpoint,
-                    &stepped,
-                    &jac,
-                    self.cfg.max_ee_velocity_m_s,
-                    dt,
-                )
-            }
-            Origin::PlannedMove => clamp_to_limits(&stepped, &self.cfg.limits),
+        Tick {
+            candidate: clamp_to_limits(&stepped, &self.cfg.limits),
+            streamed_hand: match origin {
+                Origin::Streamed => Some(self.model.at(&measured_q).jacobian()),
+                Origin::PlannedMove => None,
+            },
         }
     }
 
@@ -681,27 +694,6 @@ impl Planner {
     }
 }
 
-/// Scale the chase step so the end-effector's linear speed stays under `max_ee`,
-/// using the Jacobian at the measured configuration (mirrors the arm's Follow). A
-/// step that does not move the hand passes unchanged.
-fn cap_ee_speed(
-    setpoint: &JointVec,
-    stepped: &JointVec,
-    jac: &Jacobian,
-    max_ee: f64,
-    dt: f64,
-) -> JointVec {
-    let delta: JointVec = std::array::from_fn(|i| stepped[i] - setpoint[i]);
-    let twist = jac * SVector::<f64, ARM_DOF>::from_column_slice(&delta);
-    let ee_speed = twist.fixed_rows::<3>(0).norm() / dt;
-    let scale = if ee_speed.is_finite() && ee_speed > max_ee {
-        max_ee / ee_speed
-    } else {
-        1.0
-    };
-    std::array::from_fn(|i| setpoint[i] + delta[i] * scale)
-}
-
 /// Resolve the Follow target: chase the commander command (clamped into the
 /// joint limits), holding `held` when none has arrived. The command stream is
 /// paired to one producer, so there is nothing to arbitrate; if the producer stops
@@ -851,32 +843,6 @@ mod tests {
             [0.4; ARM_DOF],
             "a command after the move resumes following"
         );
-    }
-
-    #[test]
-    fn cap_ee_speed_throttles_a_hand_moving_step_to_the_cap() {
-        // Joint 0 moves the hand 1 m per rad along x; the rest do not move it.
-        let mut jac = Jacobian::zeros();
-        jac[(0, 0)] = 1.0;
-        let dt = 0.01;
-        let max_ee = 0.25;
-        let mut stepped = [0.0; ARM_DOF];
-        stepped[0] = 0.1; // 0.1 rad over 0.01 s is 10 m/s of hand speed, over the cap.
-        let next = cap_ee_speed(&[0.0; ARM_DOF], &stepped, &jac, max_ee, dt);
-        assert!(
-            (next[0] - max_ee * dt).abs() < 1e-12,
-            "joint 0 not scaled to the cap"
-        );
-        assert_eq!(next[1..], [0.0; ARM_DOF - 1]);
-    }
-
-    #[test]
-    fn cap_ee_speed_leaves_a_step_that_does_not_move_the_hand() {
-        let jac = Jacobian::zeros();
-        let mut stepped = [0.0; ARM_DOF];
-        stepped[3] = 0.2;
-        let next = cap_ee_speed(&[0.0; ARM_DOF], &stepped, &jac, 0.25, 0.01);
-        assert_eq!(next, stepped);
     }
 
     #[test]

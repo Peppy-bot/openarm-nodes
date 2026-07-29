@@ -28,9 +28,9 @@ use control_core::{Pacer, filters::LowPassFilter};
 use crate::chase::rate_limited;
 use crate::governor::{GovState, Governor, Guard};
 use crate::liveness::{self, Admission, Liveness};
-use crate::planner::{BusyGuard, Goal, Planner};
+use crate::planner::{self, BusyGuard, Goal, Planner};
+use crate::publish::Publishers;
 use crate::streams::{GovernorConfig, GripperCommand, GripperOpening, JointCommand, MeasuredState};
-use crate::wire::Wires;
 use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 
 /// How long [`seed_all`] waits for an arm's first measured state before warning that
@@ -133,7 +133,7 @@ pub async fn run(
         cycle_period,
         velocity_filter_cutoff_hz,
     } = config;
-    let wires = Wires::declare(&runner).await?;
+    let publishers = Publishers::declare(&runner).await?;
 
     // Hold each arm's real pose, not a neutral zero: wait for the first measured
     // state from both arms and seed the held setpoints there before publishing.
@@ -200,7 +200,9 @@ pub async fn run(
         let now = Instant::now();
 
         let arm_admission = admit_arms(&mut arm_liveness, &channels, now, stale_limit);
-        let arm_candidate = advance_arms(&mut channels, &mut planners, arm_admission, now).await;
+        let arm_ticks = advance_arms(&mut channels, &mut planners, arm_admission, now).await;
+        let arm_candidate = ArmPair::new(arm_ticks.left.candidate, arm_ticks.right.candidate);
+        let hands = ArmPair::new(arm_ticks.left.streamed_hand, arm_ticks.right.streamed_hand);
         let measured_openings = ArmPair::new(
             opening(&channels.left.gripper),
             opening(&channels.right.gripper),
@@ -245,7 +247,7 @@ pub async fn run(
             ),
         );
         let measured = measured_config(&channels, &prev, measured_openings);
-        let governed = governor.govern(&prev, &cand, &measured, dt);
+        let governed = governor.govern(&prev, &cand, &measured, &hands, dt);
         governed_openings = governed.openings;
 
         // Publish one governed setpoint per arm on its pairing slot; the slot
@@ -254,7 +256,7 @@ pub async fn run(
             (
                 &mut planners.left,
                 &mut dq_filters.left,
-                &wires.setpoints.left,
+                &publishers.setpoints.left,
                 prev.arms.left,
                 governed.arms.left,
                 arm_admission.left,
@@ -262,7 +264,7 @@ pub async fn run(
             (
                 &mut planners.right,
                 &mut dq_filters.right,
-                &wires.setpoints.right,
+                &publishers.setpoints.right,
                 prev.arms.right,
                 governed.arms.right,
                 arm_admission.right,
@@ -288,9 +290,13 @@ pub async fn run(
         // carries no gripper_id); an idle side stays silent and its gripper
         // holds the jaws.
         for (wire, opening_frac, target) in [
-            (&wires.openings.left, governed_openings.left, targets.left),
             (
-                &wires.openings.right,
+                &publishers.openings.left,
+                governed_openings.left,
+                targets.left,
+            ),
+            (
+                &publishers.openings.right,
                 governed_openings.right,
                 targets.right,
             ),
@@ -300,7 +306,7 @@ pub async fn run(
             }
         }
 
-        relay_upstream(&wires, &channels).await;
+        relay_upstream(&publishers, &channels).await;
 
         // Operator proximity readout (rate-limited): the nearest checked pair's
         // signed distance and link names, live regardless of the governor state,
@@ -309,7 +315,7 @@ pub async fn run(
             && let Some(p) = governor.proximity(&prev)
         {
             let guard = governor.guard();
-            wires
+            publishers
                 .send_status(
                     p.distance,
                     p.link_a,
@@ -351,6 +357,9 @@ fn consume_streams_of_busy_sides(channels: &ArmPair<ArmChannels>) {
 fn apply_controls(governor: &mut Governor, planners: &mut ArmPair<Planner>, cfg: GovernorConfig) {
     governor.set_enabled(cfg.enabled);
     governor.set_band(cfg.d_stop, cfg.d_safe);
+    // The cap lives twice by design: the governor limits streamed hands with
+    // it, the planners budget planned moves against it at admission.
+    governor.set_ee_cap(cfg.max_ee_velocity_m_s);
     planners.left.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
     planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
 }
@@ -383,13 +392,13 @@ fn admit_arms(
     )
 }
 
-/// Advance both planners to this tick's candidate setpoints.
+/// Advance both planners to this tick's candidate setpoints and hand bases.
 async fn advance_arms(
     channels: &mut ArmPair<ArmChannels>,
     planners: &mut ArmPair<Planner>,
     admission: ArmPair<Admission>,
     now: Instant,
-) -> ArmPair<JointVec> {
+) -> ArmPair<planner::Tick> {
     ArmPair::new(
         tick_arm(&mut channels.left, &mut planners.left, admission.left, now).await,
         tick_arm(
@@ -459,7 +468,7 @@ fn measured_config(
 /// while unpaired), so the leading node sees the same back-channel a follower
 /// gives the backbone. Each watch is read out before its send, so no borrow
 /// guard is held across an await.
-async fn relay_upstream(wires: &Wires, channels: &ArmPair<ArmChannels>) {
+async fn relay_upstream(publishers: &Publishers, channels: &ArmPair<ArmChannels>) {
     let arms = ArmPair::new(
         *channels.left.measured.borrow(),
         *channels.right.measured.borrow(),
@@ -469,16 +478,16 @@ async fn relay_upstream(wires: &Wires, channels: &ArmPair<ArmChannels>) {
         *channels.right.gripper.borrow(),
     );
     for (wire, measured) in [
-        (&wires.arm_states.left, arms.left),
-        (&wires.arm_states.right, arms.right),
+        (&publishers.arm_states.left, arms.left),
+        (&publishers.arm_states.right, arms.right),
     ] {
         if let Some(m) = measured {
             wire.send(&m.positions, &m.velocities).await;
         }
     }
     for (wire, measured) in [
-        (&wires.gripper_states.left, grippers.left),
-        (&wires.gripper_states.right, grippers.right),
+        (&publishers.gripper_states.left, grippers.left),
+        (&publishers.gripper_states.right, grippers.right),
     ] {
         if let Some(g) = measured {
             wire.send(&g).await;
@@ -597,15 +606,19 @@ async fn tick_arm(
     planner: &mut Planner,
     admission: Admission,
     now: Instant,
-) -> JointVec {
+) -> planner::Tick {
     let measured_q = match *channels.measured.borrow_and_update() {
         Some(s) => s.positions,
         None => planner.setpoint(),
     };
     // A stale limb holds exactly where it was last governed. Advancing the
-    // planner would walk the setpoint away from an arm nobody can see.
+    // planner would walk the setpoint away from an arm nobody can see, and a
+    // held setpoint needs no hand basis: there is no streamed motion to cap.
     if admission == Admission::Stale {
-        return planner.setpoint();
+        return planner::Tick {
+            candidate: planner.setpoint(),
+            streamed_hand: None,
+        };
     }
     // First delivery after a gap: the held setpoint is now fiction, so adopt
     // the measured pose before advancing. The per-joint velocity limit in the
