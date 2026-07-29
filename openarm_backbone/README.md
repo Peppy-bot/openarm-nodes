@@ -182,42 +182,65 @@ cargo test
 
 ## Performance
 
-A hand-run timing report ships with the suite
-(`cargo test --release governor_tick_timing_report -- --ignored --nocapture`).
-Single core, release. Dev laptop (x86_64): one distance or gradient query
-~90-100 us; the speed limiters ~0.1 us; a disabled-governor tick 0.1 us (the
-model is never touched). Jetson (aarch64): queries ~170 us.
+Two hand-run reports ship with the suite:
+`governor_tick_timing_report` (what a tick costs) and `control_rate_sweep`
+(whether a faster loop is affordable), both
+`cargo test --release <name> -- --ignored --nocapture`. Numbers below are the
+**Jetson** (aarch64). One distance or gradient query ~170 us there; the speed 
+limiters ~0.1 us; a disabled-governor tick 0.1 us, because the model is never 
+touched.
 
-Cost is set by probes per tick, and probes per tick are set by how far the
-step travels and whether the clip stage engages. The steady-state regimes
-(parked, holding, approaching) settle at 4-8 probes and 0.4-1.0 ms, but they
-are not the budget that matters. A jog commands a fresh pose every tick, so
-its segments need their full probe density, and a clipped tick can run the
-strict scan, both solo scans, the exempted scan and the re-scan. Measured
-over a 4000-tick random walk, per chase step (laptop):
+Cost is probes per tick, and probes per tick are set by how far the step
+travels and whether the clip stage engages. The steady-state regimes (parked,
+holding, approaching) settle at a handful of probes and 0.8-1.8 ms, but they
+are not the budget that matters: none of them clips, so none reaches the
+machinery that makes a tick expensive. A jog does. It commands a fresh pose
+every tick, so its segment needs full probe density, and a clipped tick walks
+that segment up to four times (the strict scan, each side's solo scan, the
+exempted scan).
 
-| chase | p50 | p95 | p99 | max | worst tick |
-|---|---|---|---|---|---|
-| 0.02 rad | 0.60 ms | 2.2 ms | 3.2 ms | 3.8 ms | 35 probes |
-| 0.05 rad | 0.59 ms | 2.3 ms | 4.3 ms | 4.5 ms | 43 probes |
-| 0.15 rad | 0.60 ms | 1.6 ms | 3.2 ms | 8.0 ms | 79 probes |
+**A tick's cost is proportional to the distance it travels, so it falls as the
+control rate rises.** A segment is `speed * dt` long and is probed once per
+`MAX_PROBE_ARC_RAD`, giving `v_max * dt / MAX_PROBE_ARC_RAD` probes per scan:
+at 100 Hz the 16.75 rad/s J1/J2 limit is 0.168 rad per tick and ~17 probes,
+while at 500 Hz the same jog is 0.034 rad and ~3, floored by
+`SEGMENT_SAMPLES_MIN` at 4. The work per second is about the same either way
+(~1700 vs ~2000 probes); the rate only decides whether it arrives in one
+indivisible lump that must fit inside one period, or spread thin. Sweeping
+the rate against a jog at the J1/J2 limit (Jetson, 20 s per rate):
 
-0.15 rad/tick is a jog at the shipped joint-velocity limit, so the last row
-is the operational worst case, not a synthetic one: **~8 ms against the 10 ms
-budget at 100 Hz.** A live MuJoCo soak of aggressive teleop confirms it,
-logging control-loop overruns (the Pacer reports them at WARN) at ~37/min,
-worst 15 ms late. Overruns degrade safely - `dt` is the nominal period rather
-than the measured one, so a late tick cannot inflate the next step, and the
-Pacer re-anchors instead of bursting - and the floor held exactly through all
-of it. But the headroom is thin, and 500 Hz is not reachable on either
-machine: p95 alone exceeds a 2 ms budget.
+| rate    | budget | p50     | p95     | p99     | max      | over budget  |
+| ------- | ------ | ------- | ------- | ------- | -------- | ------------ |
+| 100 Hz  | 10 ms  | 0.34 ms | 1.54 ms | 3.96 ms | 13.29 ms | 2 / 2000     |
+| 250 Hz  | 4 ms   | 0.31 ms | 3.45 ms | 3.48 ms | 4.20 ms  | 1 / 5000     |
+| 500 Hz  | 2 ms   | 0.31 ms | 0.97 ms | 1.34 ms | 3.31 ms  | 17 / 10000   |
+| 1000 Hz | 1 ms   | 0.31 ms | 0.97 ms | 1.33 ms | 3.19 ms  | 437 / 20000  |
 
-Roughly half of the tail is not ours. Timing an *identical* 12-probe tick
-20000 times spreads p50 1.5 ms to max 6.8 ms on a loaded laptop: this is a
-general-purpose kernel, not an RTOS, so preemption, migration and frequency
-scaling set a floor on jitter that no algorithmic work removes. Treat
-measured maxima as compute plus scheduling, and prefer p99 when comparing
-implementations.
+Per-tick cost against jog speed at the shipped rate, stated in rad/s because
+that is the rate-independent quantity (Jetson, 100 Hz, 4000-tick walk):
+
+| jog         | per tick  | p50     | p95     | p99     | max      |
+| ----------- | --------- | ------- | ------- | ------- | -------- |
+| 2.0 rad/s   | 0.020 rad | 0.50 ms | 1.78 ms | 2.46 ms | 3.95 ms  |
+| 5.0 rad/s   | 0.050 rad | 0.40 ms | 1.35 ms | 1.98 ms | 4.97 ms  |
+| 16.75 rad/s | 0.168 rad | 0.38 ms | 1.05 ms | 4.39 ms | 13.30 ms |
+
+The last row is the J1/J2 velocity limit, the fastest any joint is chased at
+(J3/J4 are clamped lower by `DofSpeed` before the scan sees them). A live 
+MuJoCo test of aggressive teleop logs no control-loop overruns at all; the 
+same test against a build whose clip stage refined every breach by bisection 
+logged them at ~37/min, worst 15 ms late. Overruns degrade safely when they 
+happen - `dt` is the nominal period rather than the measured one, so a late 
+tick cannot inflate the next step, the Pacer re-anchors instead of bursting to 
+catch up, and the follower runs its own control loop off the last setpoint it 
+got - but they cost smoothness, so the loop is sized to avoid them rather than 
+to survive them.
+
+Part of the remaining tail is not the code's. Timing an *identical* 12-probe
+tick 20000 times spreads p50 1.5 ms to max 6.8 ms on a loaded machine: this is
+a general-purpose kernel, not an RTOS, so preemption, migration and frequency
+scaling set a jitter floor that no algorithmic work removes. Treat a measured
+maximum as compute plus scheduling, and compare implementations on p99.
 
 The test suite pins behavior, not just code paths: bit-exact passthrough where
 the followers require it, the floor holding under a 28k-tick random walk (with

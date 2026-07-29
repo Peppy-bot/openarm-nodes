@@ -156,10 +156,6 @@ const MAX_PROBE_ARC_RAD: f64 = 0.01;
 /// is what caps the count.
 const SEGMENT_SAMPLES_MIN: usize = 4;
 
-/// Bisection iterations within a bracketing interval once the scan finds the first
-/// crossing: at the coarsest, `1/SEGMENT_SAMPLES_MIN / 2^8 ~= 1e-3` of the step.
-const FLOOR_BISECT_ITERS: usize = 8;
-
 /// Disposition of the last governed cycle: the commanded motion passed
 /// unrestricted, was scaled down to hold the band, or was denied entirely
 /// (stop floor, measured-state monitor hold, or a fault hold). Ordered by
@@ -207,10 +203,6 @@ pub struct Governor {
     /// hysteresis: set when the real clearance closes past `MONITOR_TRIP_FRACTION *
     /// d_stop`, cleared once it recovers past `d_stop`.
     monitor_tripped: bool,
-    /// Clip-stage probes taken, so the timing report can state what a tick
-    /// actually costs in model queries rather than in wall time alone.
-    #[cfg(test)]
-    probe_count: usize,
 }
 
 impl Governor {
@@ -256,8 +248,6 @@ impl Governor {
             enabled,
             guard: Guard::Clear,
             monitor_tripped: false,
-            #[cfg(test)]
-            probe_count: 0,
         })
     }
 
@@ -497,17 +487,7 @@ impl Governor {
     /// Signed clearance at a governed configuration. `None` on a query error
     /// so callers fail safe.
     fn distance_at(&mut self, q: &[f64; GOV_DOF]) -> Option<f64> {
-        #[cfg(test)]
-        {
-            self.probe_count += 1;
-        }
         self.model.distance(q)
-    }
-
-    /// Clip-stage probes since the last read, for the timing report.
-    #[cfg(test)]
-    fn take_probe_count(&mut self) -> usize {
-        std::mem::take(&mut self.probe_count)
     }
 
     /// Record and log this tick's disposition, once per transition rather than
@@ -1069,6 +1049,51 @@ mod tests {
     /// probe spacing buys back only by spending queries per tick.
     const SCAN_PATH_RESIDUE_M: f64 = 2.5e-4;
 
+    /// Whether a faster control loop is affordable. A jog is a speed, so a
+    /// shorter period means a shorter segment and fewer probes per tick, while
+    /// the budget shrinks in step: this reports which side wins. Run by hand:
+    /// `cargo test --release control_rate_sweep -- --ignored --nocapture`
+    #[test]
+    #[ignore = "rate sweep, run by hand in release"]
+    fn control_rate_sweep() {
+        use std::time::Instant;
+
+        /// The fastest joint-velocity limit the chase drives (J1/J2, rad/s), so
+        /// each rate is measured at the longest segment it can be asked for.
+        const J12_LIMIT_RAD_S: f64 = 16.754666;
+        for rate_hz in [100.0_f64, 250.0, 500.0, 1000.0] {
+            let dt = 1.0 / rate_hz;
+            let budget_us = 1e6 / rate_hz;
+            let mut g = v2_governor(true);
+            let mut rng = Lcg(0x5eed_1729);
+            let mut q = GovState::new(home(), ArmPair::new(0.0, 0.0));
+            let mut target = rng.pose();
+            let ticks = (rate_hz as usize) * 20;
+            let mut times = Vec::with_capacity(ticks);
+            for tick in 0..ticks {
+                if tick % (ticks / 20) == 0 {
+                    target = rng.pose();
+                }
+                let cand = GovState::new(chase(&q.arms, &target, J12_LIMIT_RAD_S * dt), q.grippers);
+                let t0 = Instant::now();
+                q = g.govern(&q, &cand, &q, NO_HANDS, dt);
+                times.push(t0.elapsed().as_micros());
+            }
+            let over = times.iter().filter(|&&t| t as f64 > budget_us).count();
+            times.sort_unstable();
+            let pct = |p: usize| times[(times.len() - 1) * p / 100];
+            println!(
+                "TIMING rate {rate_hz:.0} Hz (budget {budget_us:.0} us): p50={} p95={} p99={} \
+max={} us | over budget {over}/{}",
+                pct(50),
+                pct(95),
+                pct(99),
+                times[times.len() - 1],
+                times.len()
+            );
+        }
+    }
+
     /// Random-walk the governor the way an operator jogs it, and check every
     /// in-band tick against the invariants the whole design rests on:
     ///
@@ -1246,21 +1271,29 @@ mod tests {
         }
 
         // The regimes above are steady states: each holds one pose pair, so the
-        // step is small, the scan clears in a handful of probes, and the clip
-        // never bisects. A jog does neither. This walk commands fresh poses at
-        // the joint-velocity limit, so segments are long enough to need their
-        // full probe density and the clip stage runs its exemption machinery,
-        // which is where the tick's real tail lives. Percentiles, not a mean:
-        // the loop's deadline is missed by the tail, and the tail is what a
-        // mean hides.
-        for chase_rad in [0.02_f64, 0.05, 0.15] {
+        // step is small and the scan clears in a handful of probes. A jog does
+        // neither. This walk commands a fresh pose every tick, so segments are
+        // long enough to need their full probe density and the clip stage runs
+        // its exemption machinery, which is where the tick's real tail lives.
+        // Percentiles, not a mean: the deadline is missed by the tail, and the
+        // tail is what a mean hides.
+        //
+        // Speeds are stated in rad/s and turned into a per-tick excursion here,
+        // because that is the rate-independent quantity: the probe count a tick
+        // pays is `speed * dt / MAX_PROBE_ARC_RAD`, so the same jog costs fewer
+        // probes per tick on a faster loop (against a proportionally smaller
+        // budget). The fastest entry is the shipped J1/J2 limit, the fastest
+        // any joint is chased at; J3/J4 are clamped to their own lower limits
+        // by `DofSpeed` before the scan sees them.
+        for jog_rad_s in [2.0_f64, 5.0, 16.754666] {
+            let chase_rad = jog_rad_s * DT;
             let mut g = v2_governor(true);
             let mut rng = Lcg(0x5eed_1729);
             // Closed grippers: the v2 open-gripper home overlaps, and the
             // penetration-recovery floor is a different regime than an approach.
             let mut q = GovState::new(home(), ArmPair::new(0.0, 0.0));
             let mut target = rng.pose();
-            let (mut times, mut worst_probes) = (Vec::with_capacity(4000), 0usize);
+            let mut times = Vec::with_capacity(4000);
             for tick in 0..4000 {
                 if tick % 150 == 0 {
                     target = rng.pose();
@@ -1269,14 +1302,14 @@ mod tests {
                 let t0 = Instant::now();
                 q = g.govern(&q, &cand, &q, NO_HANDS, DT);
                 times.push(t0.elapsed().as_micros());
-                worst_probes = worst_probes.max(g.take_probe_count());
             }
             times.sort_unstable();
             let pct = |p: usize| times[(times.len() - 1) * p / 100];
             let max = *times.last().expect("4000 ticks timed");
             println!(
-                "TIMING jog chase={chase_rad:.2}rad: p50={} p95={} p99={} max={} us \
-                 | worst tick {worst_probes} probes -> {:.0} Hz ceiling",
+                "TIMING jog {jog_rad_s:.1} rad/s ({chase_rad:.4} rad/tick at {:.0} Hz): \
+                 p50={} p95={} p99={} max={} us -> {:.0} Hz ceiling",
+                1.0 / DT,
                 pct(50),
                 pct(95),
                 pct(99),

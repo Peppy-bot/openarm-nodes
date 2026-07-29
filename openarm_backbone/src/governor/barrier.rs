@@ -18,9 +18,9 @@
 //! order-independence safe rather than merely convenient.
 
 use super::{
-    APPROACH_VELOCITY_AT_SAFE_M_S, Clip, DUAL_DOF, FLOOR_BISECT_ITERS, GOV_DOF, Governor,
-    MAX_PROBE_ARC_RAD, MAX_PROBE_GRIPPER_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S,
-    SEGMENT_SAMPLES_MIN, dot, is_left_dof, split,
+    APPROACH_VELOCITY_AT_SAFE_M_S, Clip, DUAL_DOF, GOV_DOF, Governor, MAX_PROBE_ARC_RAD,
+    MAX_PROBE_GRIPPER_FRAC, MIN_GRADIENT_NORM_SQ, RECOVERY_LOSS_M_PER_S, SEGMENT_SAMPLES_MIN, dot,
+    is_left_dof, split,
 };
 
 impl Governor {
@@ -179,7 +179,9 @@ impl Governor {
             return Clip::Clipped(strict);
         }
         let exempted = match self.scan_to_floor(prev, target, &hold, d_now, dt) {
-            Clip::Clear => *target,
+            // The exemption reaches `target`, so the re-scan below would repeat
+            // the strict scan argument for argument, and that scan clipped.
+            Clip::Clear => return Clip::Clipped(strict),
             Clip::Clipped(q) => q,
         };
         match self.scan_to_floor(prev, &exempted, &NO_HOLD, d_now, dt) {
@@ -195,11 +197,17 @@ impl Governor {
     /// so `prev` itself is at or above it by construction. Bimanual distance is
     /// not monotone along a joint-space segment, so this probes interior points
     /// (one per `MAX_PROBE_ARC_RAD` of joint motion, at least
-    /// `SEGMENT_SAMPLES_MIN`) to bracket the first breach (an endpoint check
-    /// alone can step over a pocket, and a fixed grid can step over one on a
-    /// large jump) and bisects within that bracket for the boundary. A failed
-    /// query counts as a breach (so a model-rejected configuration is never
+    /// `SEGMENT_SAMPLES_MIN`) to find the first breach (an endpoint check alone
+    /// can step over a pocket, and a fixed grid can step over one on a large
+    /// jump) and retracts to the last point it proved clear. A failed query
+    /// counts as a breach (so a model-rejected configuration is never
     /// returned), retracting conservatively.
+    ///
+    /// The retraction is to a proven point, never an interpolated one, so
+    /// refining the breach any further would only recover motion the next tick
+    /// takes anyway: the chase re-issues its command every cycle, so a step cut
+    /// a fraction of a probe short is made up immediately, and the arms park in
+    /// the same place either way.
     ///
     /// A clear probe vouches for the span it covers: the model's Lipschitz
     /// step bound caps how fast the clearance can change along the segment, so
@@ -297,17 +305,7 @@ impl Governor {
                     last_clear = t.max(vouched);
                     s += 1;
                 }
-                _ => {
-                    let (mut lo, mut hi) = (last_clear, t);
-                    for _ in 0..FLOOR_BISECT_ITERS {
-                        let mid = 0.5 * (lo + hi);
-                        match self.distance_at(&point_at(mid)) {
-                            Some(d) if d >= floor => lo = mid,
-                            _ => hi = mid,
-                        }
-                    }
-                    return Clip::Clipped(point_at(lo));
-                }
+                _ => return Clip::Clipped(point_at(last_clear)),
             }
         }
         Clip::Clear
