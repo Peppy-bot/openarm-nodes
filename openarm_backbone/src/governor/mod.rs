@@ -1632,10 +1632,22 @@ max={} us | over budget {over}/{}",
         assert_eq!(g.guard(), Guard::Clear, "disabling resets the readout");
     }
 
-    /// Interpolate from `lo_pose` (clearance >= target) toward `hi_pose` (clearance <
-    /// target) and return the configuration whose real clearance is ~`target`, by
-    /// bisection on the distance query: a measured pose at a chosen clearance for the
-    /// monitor tests.
+    /// Blends the segment from `lo_pose` to `hi_pose` and returns the
+    /// configuration where the real clearance first falls to `target`: a
+    /// measured pose at a chosen clearance, for the scenarios whose setup needs
+    /// one.
+    ///
+    /// Searching is a scan, and only the refinement is a bisection. Clearance
+    /// along a joint-space segment is not monotone (a finger sweeps through the
+    /// other arm and back out, so both endpoints can sit above a target an
+    /// interior stretch dips below), and a bisection handed the whole segment
+    /// is not a search at all: it only converges on a crossing when the
+    /// midpoints it happens to pick straddle one, and it steps over anything
+    /// narrower. The scan states its resolution instead of leaving it to that
+    /// accident, and the bisection then runs inside a bracket it was given
+    /// rather than one it assumed.
+    const CROSSING_SCAN_STEPS: usize = 256;
+
     fn config_at_distance(
         g: &mut Governor,
         lo_pose: &GovState,
@@ -1645,7 +1657,26 @@ max={} us | over budget {over}/{}",
         let lo = concat(lo_pose);
         let hi = concat(hi_pose);
         let point_at = |t: f64| split(&std::array::from_fn(|i| lo[i] + t * (hi[i] - lo[i])));
-        let (mut a, mut b) = (0.0_f64, 1.0_f64);
+        // Walk the segment for the first adjacent pair straddling the target.
+        // Anything thinner than one scan cell is invisible to this, which is
+        // what the resolution above buys and the panic below reports.
+        let cell = 1.0 / CROSSING_SCAN_STEPS as f64;
+        let mut left = (0.0_f64, distance(g, &point_at(0.0)));
+        let bracket = (1..=CROSSING_SCAN_STEPS).find_map(|k| {
+            let right = (k as f64 * cell, distance(g, &point_at(k as f64 * cell)));
+            let straddles = left.1 >= target && right.1 < target;
+            let found = straddles.then_some((left.0, right.0));
+            left = right;
+            found
+        });
+        let Some((mut a, mut b)) = bracket else {
+            panic!(
+                "config_at_distance found no crossing of {target:+.6} at {CROSSING_SCAN_STEPS} \
+                 steps: endpoints are {:+.6} and {:+.6}",
+                distance(g, lo_pose),
+                distance(g, hi_pose)
+            );
+        };
         for _ in 0..50 {
             let m = 0.5 * (a + b);
             if distance(g, &point_at(m)) >= target {
@@ -1654,29 +1685,36 @@ max={} us | over budget {over}/{}",
                 b = m
             }
         }
-        // Whether the segment crosses `target` is a post-condition here, not a
-        // precondition on the endpoints: clearance along a segment is not
-        // monotone (a finger sweeps through the other arm and back out again,
-        // so both ends can sit above a target an interior point dips below).
-        // What the callers need is that the pose returned really is on a
-        // crossing, which is exactly `a` at or above the target with `b` a
-        // hair's blend away below it. A segment that never crosses leaves `b`
-        // at the far endpoint and fails here instead of silently handing back
-        // an endpoint at some unrelated clearance.
-        let (d_a, d_b) = (distance(g, &point_at(a)), distance(g, &point_at(b)));
-        assert!(
-            d_a >= target && d_b < target,
-            "config_at_distance found no crossing of {target:+.6}: bracketed \
-             {d_a:+.6} and {d_b:+.6} from endpoints {:+.6} and {:+.6}",
-            distance(g, lo_pose),
-            distance(g, hi_pose)
-        );
         point_at(a)
     }
 
-    /// The fixture builder's own guard: a segment that never reaches the
-    /// requested clearance must fail loudly, not hand back an endpoint at some
-    /// unrelated one. Every collision scenario's setup rests on this.
+    /// The fixture builder's own guard, both ways round. Every collision
+    /// scenario's setup rests on it, so it has to find an interior crossing its
+    /// endpoints do not reveal, and it has to fail loudly rather than hand back
+    /// an endpoint at some unrelated clearance when there is none to find.
+    #[test]
+    fn config_at_distance_finds_a_crossing_neither_endpoint_reveals() {
+        let mut g = v2_governor(true);
+        let arms = finger_into_other_arm();
+        let (shut, wide) = (
+            GovState::new(arms, ArmPair::new(0.0, 0.0)),
+            GovState::new(arms, ArmPair::new(1.0, 0.0)),
+        );
+        // The finger sweeps through the other arm and back out, so the dip is
+        // strictly interior: a bisection over the whole segment can miss it.
+        let target = 0.5 * MONITOR_TRIP_FRACTION * D_STOP;
+        assert!(
+            distance(&mut g, &shut) > target && distance(&mut g, &wide) > target,
+            "setup: both ends must sit above the target for this to mean anything"
+        );
+        let found = config_at_distance(&mut g, &shut, &wide, target);
+        assert!(
+            (distance(&mut g, &found) - target).abs() < 1e-6,
+            "the scan should land on the target, got {:+.6}",
+            distance(&mut g, &found)
+        );
+    }
+
     #[test]
     #[should_panic(expected = "found no crossing")]
     fn config_at_distance_refuses_a_segment_that_never_crosses() {
