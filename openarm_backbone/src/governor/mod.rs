@@ -1481,32 +1481,47 @@ max={} us | over budget {over}/{}",
         }
     }
 
-    /// The v2 description places a fully-splayed finger inside the torso proxy
-    /// at home, so an operator who opens the grippers with the arms down starts
-    /// overlapping. Whether that overlap is real is a question for the URDF's
-    /// finger travel; what must hold here is that the governor never makes it a
-    /// trap. If this setup assertion ever fails, the description changed and
-    /// the escape below is what needs re-confirming, not the number.
+    /// An operator who opens the grippers with the arms down and tucked drives a
+    /// fully-splayed finger into the torso proxy. What must hold is that the
+    /// governor never makes that overlap a trap: two independent escapes work.
+    ///
+    /// The overlap is *constructed* rather than read off a fixed pose. How deep
+    /// any given configuration sits inside the proxy depends on how tightly the
+    /// collision meshes are fitted, which is a property of the model and not of
+    /// this invariant, so the test bisects to a definite overlap and proves the
+    /// escapes from there. Pinning a pose instead makes this test silently stop
+    /// exercising its own escapes the day the fit changes.
     #[test]
-    fn v2_wide_grippers_at_home_overlap_the_torso_and_the_operator_still_gets_out() {
+    fn a_wide_gripper_overlapping_the_torso_is_never_a_trap() {
         let mut g = v2_governor(true);
         let wide = GovState::new(home(), ArmPair::new(1.0, 1.0));
-        let d0 = distance(&mut g, &wide);
+        // Tucking the shoulders swings the splayed fingers into the torso; stop
+        // short of the depth where a whole link, not a finger, becomes nearest.
+        let tucked = GovState::new(
+            {
+                let mut arms = home();
+                arms.left[1] = 0.1;
+                arms.right[1] = 0.1;
+                arms
+            },
+            ArmPair::new(1.0, 1.0),
+        );
+        let overlapped = config_at_distance(&mut g, &wide, &tucked, -0.003);
+        let d0 = distance(&mut g, &overlapped);
         assert!(
             d0 < 0.0,
-            "setup: v2 home with both grippers wide should overlap, got {d0:+.6}"
+            "setup: the constructed pose should overlap, got {d0:+.6}"
         );
-        let pair = g.proximity(&wide).expect("a nearest pair at home");
+        let pair = g.proximity(&overlapped).expect("a nearest pair");
+        let names = format!("{} <-> {}", pair.link_a, pair.link_b);
         assert!(
-            pair.link_a.contains("body") || pair.link_b.contains("body"),
-            "setup: the overlap should be a finger against the torso, got {} <-> {}",
-            pair.link_a,
-            pair.link_b
+            names.contains("body") && names.contains("ee_link"),
+            "setup: the overlap should be a finger against the torso, got {names}"
         );
 
         // Closing the grippers is the direct way out, and it must not be refused.
         let rate = g.max_gripper_rate_frac_s();
-        let mut q = wide;
+        let mut q = overlapped;
         for _ in 0..200 {
             let cand = GovState::new(
                 q.arms,
@@ -1523,7 +1538,7 @@ max={} us | over budget {over}/{}",
         );
 
         // So is swinging the arms out with the grippers left wide.
-        let mut q = wide;
+        let mut q = overlapped;
         let mut out = home();
         out.left[1] = -0.6;
         out.right[1] = 0.6;
@@ -1617,10 +1632,22 @@ max={} us | over budget {over}/{}",
         assert_eq!(g.guard(), Guard::Clear, "disabling resets the readout");
     }
 
-    /// Interpolate from `lo_pose` (clearance >= target) toward `hi_pose` (clearance <
-    /// target) and return the configuration whose real clearance is ~`target`, by
-    /// bisection on the distance query: a measured pose at a chosen clearance for the
-    /// monitor tests.
+    /// Blends the segment from `lo_pose` to `hi_pose` and returns the
+    /// configuration where the real clearance first falls to `target`: a
+    /// measured pose at a chosen clearance, for the scenarios whose setup needs
+    /// one.
+    ///
+    /// Searching is a scan, and only the refinement is a bisection. Clearance
+    /// along a joint-space segment is not monotone (a finger sweeps through the
+    /// other arm and back out, so both endpoints can sit above a target an
+    /// interior stretch dips below), and a bisection handed the whole segment
+    /// is not a search at all: it only converges on a crossing when the
+    /// midpoints it happens to pick straddle one, and it steps over anything
+    /// narrower. The scan states its resolution instead of leaving it to that
+    /// accident, and the bisection then runs inside a bracket it was given
+    /// rather than one it assumed.
+    const CROSSING_SCAN_STEPS: usize = 256;
+
     fn config_at_distance(
         g: &mut Governor,
         lo_pose: &GovState,
@@ -1629,17 +1656,76 @@ max={} us | over budget {over}/{}",
     ) -> GovState {
         let lo = concat(lo_pose);
         let hi = concat(hi_pose);
-        let (mut a, mut b) = (0.0_f64, 1.0_f64);
+        let point_at = |t: f64| split(&std::array::from_fn(|i| lo[i] + t * (hi[i] - lo[i])));
+        // Walk the segment for the first adjacent pair straddling the target.
+        // Anything thinner than one scan cell is invisible to this, which is
+        // what the resolution above buys and the panic below reports.
+        let cell = 1.0 / CROSSING_SCAN_STEPS as f64;
+        let mut left = (0.0_f64, distance(g, &point_at(0.0)));
+        let bracket = (1..=CROSSING_SCAN_STEPS).find_map(|k| {
+            let right = (k as f64 * cell, distance(g, &point_at(k as f64 * cell)));
+            let straddles = left.1 >= target && right.1 < target;
+            let found = straddles.then_some((left.0, right.0));
+            left = right;
+            found
+        });
+        let Some((mut a, mut b)) = bracket else {
+            panic!(
+                "config_at_distance found no crossing of {target:+.6} at {CROSSING_SCAN_STEPS} \
+                 steps: endpoints are {:+.6} and {:+.6}",
+                distance(g, lo_pose),
+                distance(g, hi_pose)
+            );
+        };
         for _ in 0..50 {
             let m = 0.5 * (a + b);
-            let q = split(&std::array::from_fn(|i| lo[i] + m * (hi[i] - lo[i])));
-            if distance(g, &q) >= target {
+            if distance(g, &point_at(m)) >= target {
                 a = m
             } else {
                 b = m
             }
         }
-        split(&std::array::from_fn(|i| lo[i] + a * (hi[i] - lo[i])))
+        point_at(a)
+    }
+
+    /// The fixture builder's own guard, both ways round. Every collision
+    /// scenario's setup rests on it, so it has to find an interior crossing its
+    /// endpoints do not reveal, and it has to fail loudly rather than hand back
+    /// an endpoint at some unrelated clearance when there is none to find.
+    #[test]
+    fn config_at_distance_finds_a_crossing_neither_endpoint_reveals() {
+        let mut g = v2_governor(true);
+        let arms = finger_into_other_arm();
+        let (shut, wide) = (
+            GovState::new(arms, ArmPair::new(0.0, 0.0)),
+            GovState::new(arms, ArmPair::new(1.0, 0.0)),
+        );
+        // The finger sweeps through the other arm and back out, so the dip is
+        // strictly interior: a bisection over the whole segment can miss it.
+        let target = 0.5 * MONITOR_TRIP_FRACTION * D_STOP;
+        assert!(
+            distance(&mut g, &shut) > target && distance(&mut g, &wide) > target,
+            "setup: both ends must sit above the target for this to mean anything"
+        );
+        let found = config_at_distance(&mut g, &shut, &wide, target);
+        assert!(
+            (distance(&mut g, &found) - target).abs() < 1e-6,
+            "the scan should land on the target, got {:+.6}",
+            distance(&mut g, &found)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "found no crossing")]
+    fn config_at_distance_refuses_a_segment_that_never_crosses() {
+        let mut g = v2_governor(true);
+        let clear = at(home());
+        let also_clear = at(wrists_inward(0.1));
+        assert!(
+            distance(&mut g, &clear) > 0.0 && distance(&mut g, &also_clear) > 0.0,
+            "setup: both poses are clear, so no point between them overlaps"
+        );
+        config_at_distance(&mut g, &clear, &also_clear, -0.05);
     }
 
     #[test]
