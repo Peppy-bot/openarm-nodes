@@ -1644,17 +1644,50 @@ max={} us | over budget {over}/{}",
     ) -> GovState {
         let lo = concat(lo_pose);
         let hi = concat(hi_pose);
+        let point_at = |t: f64| split(&std::array::from_fn(|i| lo[i] + t * (hi[i] - lo[i])));
         let (mut a, mut b) = (0.0_f64, 1.0_f64);
         for _ in 0..50 {
             let m = 0.5 * (a + b);
-            let q = split(&std::array::from_fn(|i| lo[i] + m * (hi[i] - lo[i])));
-            if distance(g, &q) >= target {
+            if distance(g, &point_at(m)) >= target {
                 a = m
             } else {
                 b = m
             }
         }
-        split(&std::array::from_fn(|i| lo[i] + a * (hi[i] - lo[i])))
+        // Whether the segment crosses `target` is a post-condition here, not a
+        // precondition on the endpoints: clearance along a segment is not
+        // monotone (a finger sweeps through the other arm and back out again,
+        // so both ends can sit above a target an interior point dips below).
+        // What the callers need is that the pose returned really is on a
+        // crossing, which is exactly `a` at or above the target with `b` a
+        // hair's blend away below it. A segment that never crosses leaves `b`
+        // at the far endpoint and fails here instead of silently handing back
+        // an endpoint at some unrelated clearance.
+        let (d_a, d_b) = (distance(g, &point_at(a)), distance(g, &point_at(b)));
+        assert!(
+            d_a >= target && d_b < target,
+            "config_at_distance found no crossing of {target:+.6}: bracketed \
+             {d_a:+.6} and {d_b:+.6} from endpoints {:+.6} and {:+.6}",
+            distance(g, lo_pose),
+            distance(g, hi_pose)
+        );
+        point_at(a)
+    }
+
+    /// The fixture builder's own guard: a segment that never reaches the
+    /// requested clearance must fail loudly, not hand back an endpoint at some
+    /// unrelated one. Every collision scenario's setup rests on this.
+    #[test]
+    #[should_panic(expected = "found no crossing")]
+    fn config_at_distance_refuses_a_segment_that_never_crosses() {
+        let mut g = v2_governor(true);
+        let clear = at(home());
+        let also_clear = at(wrists_inward(0.1));
+        assert!(
+            distance(&mut g, &clear) > 0.0 && distance(&mut g, &also_clear) > 0.0,
+            "setup: both poses are clear, so no point between them overlaps"
+        );
+        config_at_distance(&mut g, &clear, &also_clear, -0.05);
     }
 
     #[test]
