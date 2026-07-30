@@ -21,14 +21,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::collision_status;
 use peppygen::paired_topics::{
-    leader_left_arm, leader_left_gripper, leader_right_arm, leader_right_gripper, left_arm_link,
-    left_gripper_link, right_arm_link, right_gripper_link,
+    leader_left_arm, leader_left_arm_pose, leader_left_gripper, leader_right_arm,
+    leader_right_arm_pose, leader_right_gripper, left_arm_link, left_gripper_link, right_arm_link,
+    right_gripper_link,
 };
 use peppylib::{Payload, TopicPublisher};
+use srs_model::nalgebra::Isometry3;
 use tracing::{error, warn};
 
 use crate::streams::{GripperState, warn_throttled};
-use crate::{ArmPair, JointVec};
+use crate::{ArmPair, JointVec, world_pose_arrays};
 
 /// Pairing stamp from the daemon-resolved clock (sim time under a simulated
 /// clock), so consumers age samples on the same timeline they read. Errors
@@ -48,6 +50,9 @@ type OpeningBuild = fn(SystemTime, f64, f64) -> peppygen::Result<Payload>;
 /// A measured aperture: the opening fraction, the measured effort, and the
 /// follower's effort ceiling.
 type ApertureBuild = fn(SystemTime, f64, f64, f64) -> peppygen::Result<Payload>;
+
+/// A world-frame end-effector pose: position and scalar-last quaternion.
+type PoseBuild = fn(SystemTime, [f64; 3], [f64; 4]) -> peppygen::Result<Payload>;
 
 /// One outbound slot: its declared publisher, that slot's generated
 /// `build_message`, and the phrase naming it in a log line.
@@ -96,6 +101,16 @@ impl Publisher<OpeningBuild> {
     /// follower's configured ceiling in charge).
     pub async fn send(&self, opening: f64, max_effort: Option<f64>) {
         self.emit(|stamp| (self.build)(stamp, opening, max_effort.unwrap_or(0.0)))
+            .await;
+    }
+}
+
+impl Publisher<PoseBuild> {
+    /// Publish one arm's measured end-effector pose, world frame. What lets a
+    /// Cartesian leader hold no kinematics of its own.
+    pub async fn send(&self, pose: &Isometry3<f64>) {
+        let (position, orientation) = world_pose_arrays(pose);
+        self.emit(|stamp| (self.build)(stamp, position, orientation))
             .await;
     }
 }
@@ -151,6 +166,9 @@ pub struct Publishers {
     pub arm_states: ArmPair<Publisher<JointBuild>>,
     /// Each gripper's measured state, relayed up its leader slot.
     pub gripper_states: ArmPair<Publisher<ApertureBuild>>,
+    /// Each arm's measured end-effector pose, relayed up its Cartesian leader
+    /// slot in pose mode (an unpaired slot is a no-op).
+    pub arm_pose_states: ArmPair<Publisher<PoseBuild>>,
     /// The operator readout: an emitted topic rather than a pairing slot, and
     /// the one message with no stamp of its own.
     status: TopicPublisher,
@@ -214,6 +232,20 @@ impl Publishers {
                     "upstream right gripper_states",
                     leader_right_gripper::gripper_states::declare_publisher(runner),
                     leader_right_gripper::gripper_states::build_message as ApertureBuild,
+                )
+                .await?,
+            ),
+            arm_pose_states: ArmPair::new(
+                Publisher::declare(
+                    "upstream left pose_states",
+                    leader_left_arm_pose::pose_states::declare_publisher(runner),
+                    leader_left_arm_pose::pose_states::build_message as PoseBuild,
+                )
+                .await?,
+                Publisher::declare(
+                    "upstream right pose_states",
+                    leader_right_arm_pose::pose_states::declare_publisher(runner),
+                    leader_right_arm_pose::pose_states::build_message as PoseBuild,
                 )
                 .await?,
             ),

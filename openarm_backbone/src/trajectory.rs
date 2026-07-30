@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use srs_model::nalgebra::{Isometry3, Translation3};
 use srs_model::{Arm, ArmAnglePolicy};
 
+use crate::servo::EeCaps;
 use crate::{ARM_DOF, JointVec};
 
 /// Quintic minimum-jerk trajectory in joint space.
@@ -180,7 +181,7 @@ fn line_duration_cap(requested_duration_secs: f64) -> f64 {
 /// control period the servo rollout steps at.
 pub struct PlanLimits<'a> {
     pub max_joint_velocity_rad_s: &'a JointVec,
-    pub max_ee_velocity_m_s: f64,
+    pub ee: EeCaps,
     pub control_period: Duration,
 }
 
@@ -300,9 +301,9 @@ pub fn plan_cartesian(
     ];
     // The EE speed cap is not enforced per tick on the move path (unlike Follow), so
     // size the duration to respect it up front alongside the joint limits: a short
-    // requested duration must not drive the hand past max_ee_velocity_m_s.
+    // requested duration must not drive the hand past the linear EE cap.
     let ee_ratio =
-        (end.translation.vector - start.translation.vector).norm() / limits.max_ee_velocity_m_s;
+        (end.translation.vector - start.translation.vector).norm() / limits.ee.linear_m_s;
     for (policy, steer_elbow) in tiers {
         let Some(walk) = walk_line(
             model,
@@ -412,12 +413,16 @@ mod tests {
     }
 
     const TEST_EE_CAP_M_S: f64 = 0.5;
+    const TEST_EE_CAP_RAD_S: f64 = 0.8;
     const TEST_DT: Duration = Duration::from_millis(10);
 
     fn v2_limits() -> PlanLimits<'static> {
         PlanLimits {
             max_joint_velocity_rad_s: &V_MAX_V2,
-            max_ee_velocity_m_s: TEST_EE_CAP_M_S,
+            ee: EeCaps {
+                linear_m_s: TEST_EE_CAP_M_S,
+                angular_rad_s: TEST_EE_CAP_RAD_S,
+            },
             control_period: TEST_DT,
         }
     }
@@ -425,7 +430,10 @@ mod tests {
     fn v1_limits() -> PlanLimits<'static> {
         PlanLimits {
             max_joint_velocity_rad_s: &V_MAX,
-            max_ee_velocity_m_s: TEST_EE_CAP_M_S,
+            ee: EeCaps {
+                linear_m_s: TEST_EE_CAP_M_S,
+                angular_rad_s: TEST_EE_CAP_RAD_S,
+            },
             control_period: TEST_DT,
         }
     }
@@ -452,7 +460,11 @@ mod tests {
         let mut q = seed;
         let steps = (crate::servo::MAX_SERVO_S / TEST_DT.as_secs_f64()).ceil() as usize;
         for _ in 0..steps {
-            match state.step(model, &q, &V_MAX_V2, TEST_EE_CAP_M_S, TEST_DT) {
+            let caps = EeCaps {
+                linear_m_s: TEST_EE_CAP_M_S,
+                angular_rad_s: TEST_EE_CAP_RAD_S,
+            };
+            match state.step(model, &q, &V_MAX_V2, caps, TEST_DT) {
                 crate::servo::ServoStep::Stepped(next) => {
                     for i in 0..ARM_DOF {
                         let v = (next[i] - q[i]).abs() / TEST_DT.as_secs_f64();
@@ -859,7 +871,10 @@ mod tests {
         let cap = 0.05; // tight EE cap (m/s) so it binds the duration, not the joints
         let limits = PlanLimits {
             max_joint_velocity_rad_s: &V_MAX,
-            max_ee_velocity_m_s: cap,
+            ee: EeCaps {
+                linear_m_s: cap,
+                angular_rad_s: TEST_EE_CAP_RAD_S,
+            },
             control_period: TEST_DT,
         };
         let Some(CartesianPlan::Line { duration_s, .. }) =

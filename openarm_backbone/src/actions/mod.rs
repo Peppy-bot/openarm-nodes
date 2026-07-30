@@ -1,5 +1,6 @@
 pub mod arm;
 pub mod gripper;
+pub mod ready;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

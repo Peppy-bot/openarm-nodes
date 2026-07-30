@@ -1,19 +1,19 @@
 //! Per-arm motion planner: the mode state machine that turns one arm's inputs
-//! (the commander's joint stream, and accepted joint / Cartesian move goals) into a
-//! candidate joint setpoint each tick. It does NOT command anything and does not
-//! know about the other arm: it produces a candidate, the coordinator governs
-//! both arms' candidates against the collision model, and feeds the governed
-//! result back via [`Planner::commit`] so the next tick chases from where the arm
-//! was actually allowed to go.
+//! (the leading node's joint or pose stream, and accepted joint / Cartesian
+//! move goals) into a candidate joint setpoint each tick. It does NOT command
+//! anything and does not know about the other arm: it produces a candidate,
+//! the coordinator governs both arms' candidates against the collision model,
+//! and feeds the governed result back via [`Planner::commit`] so the next
+//! tick chases from where the arm was actually allowed to go.
 //!
 //! Every mode reduces to "chase a target": the setpoint advances toward the
 //! target at the per-joint velocity limits, so streaming and moves stay smooth
 //! under throttling - when the governor holds the setpoint, the chase simply
 //! catches up at the velocity limit once clear, with no jump. Follow's target
-//! is the commander command (its end-effector speed is capped by the
-//! governor's EE-speed limiter, fed by the Jacobian this planner hands out); a
-//! joint move's target is the quintic sample; a Cartesian move's target is the
-//! IK of the pose sample.
+//! is the leading node's command (a streamed hand's end-effector speed is
+//! capped by the governor's EE-speed limiter, fed by the Jacobian this
+//! planner hands out); a joint move's target is the quintic sample; a
+//! Cartesian move's target is the IK of the pose sample.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,13 +26,13 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::chase::{chase_step, clamp_to_limits};
-use crate::servo::{ServoState, ServoStep};
-use crate::streams::JointCommand;
+use crate::servo::{EeCaps, ServoState, ServoStep, rate_step_toward};
 use crate::trajectory::{
     ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory, PlanLimits,
     plan_cartesian, subdivided_blends,
 };
-use crate::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+use crate::upstream::Upstream;
+use crate::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out, world_pose_arrays};
 
 /// Slack the runtime per-tick Cartesian velocity check allows over the planned
 /// limit before aborting (mirrors the arm's backstop over the up-front plan,
@@ -45,8 +45,77 @@ const VELOCITY_GUARD_MARGIN: f64 = 1.5;
 pub struct PlanConfig {
     pub cycle_period: Duration,
     pub max_joint_velocity_rad_s: JointVec,
-    pub max_ee_velocity_m_s: f64,
+    pub ee: EeCaps,
     pub limits: [Limit; ARM_DOF],
+}
+
+/// How a joint move ended, reported to a ready-move aggregation.
+pub struct ReadyOutcome {
+    pub success: bool,
+    pub message: String,
+}
+
+/// One arm's share of a whole-robot ready move: where its terminal reports,
+/// and the cancel flag the admission task flips on the action's cancel.
+pub struct ReadyReply {
+    pub done_tx: mpsc::Sender<ReadyOutcome>,
+    pub cancelled: Arc<AtomicBool>,
+}
+
+/// Where a joint move reports its terminal: the move_arm_joints action goal
+/// that carried it (boxed: the goal context dwarfs the other variant), or one
+/// arm's share of a move_to_ready goal.
+pub enum JointReply {
+    MoveArmJoints(Box<move_arm_joints::GoalContext>),
+    Ready(ReadyReply),
+}
+
+impl JointReply {
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::MoveArmJoints(ctx) => ctx.is_cancelled(),
+            Self::Ready(r) => r.cancelled.load(Ordering::Acquire),
+        }
+    }
+
+    /// Report the terminal. The ready share folds `Cancelled` into a failed
+    /// outcome; the joint action keeps its distinct cancelled completion.
+    async fn finish(
+        self,
+        side: &'static str,
+        outcome: Outcome,
+        measured_q: JointVec,
+        elapsed_s: f64,
+    ) {
+        let cancelled = matches!(outcome, Outcome::Cancelled);
+        let (success, message) = match outcome {
+            Outcome::Complete => (true, "trajectory complete".to_string()),
+            Outcome::Cancelled => (false, "goal cancelled".to_string()),
+            Outcome::Failed(reason) => (false, reason),
+        };
+        match self {
+            Self::MoveArmJoints(ctx) => {
+                let result = if cancelled {
+                    ctx.complete_cancelled(success, message, measured_q, elapsed_s)
+                        .await
+                } else {
+                    ctx.complete(success, message, measured_q, elapsed_s).await
+                };
+                if let Err(e) = result {
+                    error!("{side}: move_arm_joints complete: {e}");
+                }
+            }
+            Self::Ready(r) => {
+                let outcome = ReadyOutcome {
+                    success,
+                    message: format!("{side}: {message}"),
+                };
+                if r.done_tx.send(outcome).await.is_err() {
+                    error!("{side}: ready outcome aggregation closed");
+                }
+            }
+        }
+    }
 }
 
 /// A goal accepted by an action handler and handed to the planner.
@@ -54,32 +123,34 @@ pub enum Goal {
     Joint {
         target: JointVec,
         duration_s: f64,
-        ctx: move_arm_joints::GoalContext,
+        reply: JointReply,
     },
     Cartesian {
         target: Isometry3<f64>,
         duration_s: f64,
-        ctx: move_arm::GoalContext,
+        ctx: Box<move_arm::GoalContext>,
     },
 }
 
 impl Goal {
-    /// Complete unstarted, `success: false`, reporting the planner's held
-    /// setpoint. The busy flag is the caller's concern.
-    pub async fn refuse(self, reason: &str, planner: &mut Planner) {
+    /// Complete unstarted, `success: false`, reporting `reported_q` (the
+    /// measured joints, per the result contract). The busy flag is the
+    /// caller's concern.
+    pub async fn refuse(self, reason: &str, reported_q: JointVec, planner: &mut Planner) {
         match self {
-            Goal::Joint { ctx, .. } => {
-                if let Err(e) = ctx
-                    .complete(false, reason.into(), planner.setpoint, 0.0)
-                    .await
-                {
-                    error!("{}: move_arm_joints refuse: {e}", planner.side.label());
-                }
+            Goal::Joint { reply, .. } => {
+                reply
+                    .finish(
+                        planner.side.label(),
+                        Outcome::Failed(reason.to_string()),
+                        reported_q,
+                        0.0,
+                    )
+                    .await;
             }
             Goal::Cartesian { ctx, .. } => {
-                let held = planner.setpoint;
                 planner
-                    .finish_cartesian(&ctx, held, false, reason, 0.0, false)
+                    .finish_cartesian(&ctx, reported_q, false, reason, 0.0, false)
                     .await;
             }
         }
@@ -99,7 +170,7 @@ impl Drop for BusyGuard {
 }
 
 enum Mode {
-    /// Ambient: chase the commander stream, or hold when none is streaming.
+    /// Ambient: chase the leading node's stream, or hold when none is streaming.
     Follow,
     /// Tracking a quintic joint trajectory for an accepted move_arm_joints goal.
     JointMove(JointMove),
@@ -110,13 +181,13 @@ enum Mode {
 
 struct JointMove {
     traj: JointTrajectory,
-    ctx: move_arm_joints::GoalContext,
+    reply: JointReply,
     _busy: BusyGuard,
 }
 
 struct CartesianMove {
     path: MovePath,
-    ctx: move_arm::GoalContext,
+    ctx: Box<move_arm::GoalContext>,
     // Last commanded joint target: held on cancel/failure so the arm never snaps.
     prev_q_des: JointVec,
     _busy: BusyGuard,
@@ -176,8 +247,8 @@ impl MovePath {
     }
 }
 
-/// How a Cartesian move ended. `Cancelled` is the only terminal the caller
-/// asked for, and the only one reported through the cancelled completion.
+/// How a move ended. `Cancelled` is the only terminal the caller asked for,
+/// and the only one reported through the cancelled completion.
 enum Outcome {
     Complete,
     Cancelled,
@@ -274,14 +345,22 @@ impl Planner {
         self.setpoint
     }
 
+    /// World-frame end-effector pose at `q`; the planner owns this arm's chain.
+    pub fn ee_pose_world(&mut self, q: &JointVec) -> Isometry3<f64> {
+        let ee_base = self.model.at(q).ee_pose();
+        self.model.world_pose(&ee_base)
+    }
+
     /// Retune the end-effector speed cap at runtime (the commander's control).
-    /// This copy budgets planned moves at admission and paces the servo
-    /// reference; the per-tick cap on streamed motion is the governor's
-    /// EE-speed limiter, retuned from the same control message. Ignores a
-    /// non-positive or non-finite value, keeping the current cap.
+    /// This copy budgets planned moves at admission, paces the servo
+    /// reference, and steps streamed poses; a streamed joint command is capped
+    /// only by the governor's EE-speed limiter, retuned from the same control
+    /// message. The live control rescales the linear cap only; the angular cap
+    /// is launch-time. Ignores a non-positive or non-finite value, keeping the
+    /// current cap.
     pub fn set_max_ee_velocity(&mut self, v: f64) {
         if v.is_finite() && v > 0.0 {
-            self.cfg.max_ee_velocity_m_s = v;
+            self.cfg.ee.linear_m_s = v;
         }
     }
 
@@ -295,7 +374,7 @@ impl Planner {
     pub async fn tick(
         &mut self,
         measured_q: JointVec,
-        command: Option<JointCommand>,
+        command: Option<Upstream>,
         goals: &mut mpsc::Receiver<Goal>,
         busy: &Arc<AtomicBool>,
         now: Instant,
@@ -306,7 +385,8 @@ impl Planner {
             if matches!(mode, Mode::Follow) {
                 mode = self.start_goal(goal, busy.clone(), now).await;
             } else {
-                goal.refuse("another move is in flight", self).await;
+                goal.refuse("another move is in flight", measured_q, self)
+                    .await;
             }
         }
 
@@ -333,18 +413,74 @@ impl Planner {
         }
     }
 
+    /// Fail the active move and answer its caller: for a follower gone
+    /// stale, where the move can neither progress nor be verified. The result
+    /// reports `measured_q`, the follower's last (frozen) measurement. Ambient
+    /// Follow mode is untouched; the busy slot releases with the mode.
+    pub async fn abort_active(&mut self, reason: &str, measured_q: JointVec, now: Instant) {
+        match std::mem::replace(&mut self.mode, Mode::Follow) {
+            Mode::Follow => {}
+            Mode::JointMove(JointMove { traj, reply, _busy }) => {
+                let elapsed = now.duration_since(traj.motion_start).as_secs_f64();
+                reply
+                    .finish(
+                        self.side.label(),
+                        Outcome::Failed(reason.to_string()),
+                        measured_q,
+                        elapsed,
+                    )
+                    .await;
+            }
+            Mode::CartesianMove(m) => {
+                let elapsed = now.duration_since(m.path.motion_start()).as_secs_f64();
+                self.finish_cartesian(&m.ctx, measured_q, false, reason, elapsed, false)
+                    .await;
+            }
+        }
+    }
+
+    /// Resolve the Follow target, holding the last governed setpoint when no
+    /// command has arrived. If the producer stops, the latest command persists
+    /// (held for joints, converged to for a pose); no freshness deadman.
+    ///
+    /// A joint command is chased directly. A pose gets one damped
+    /// resolved-rate step from the *governed* setpoint (measured lags by
+    /// tracking error, and seeding from it would fold that error into every
+    /// step); bounded rather than solved, so an unreachable pose saturates
+    /// into a steady pull the governor can shape.
+    fn follow_target(&mut self, command: &Option<Upstream>) -> JointVec {
+        let target = match command {
+            None => return self.setpoint,
+            Some(Upstream::Joints(positions)) => *positions,
+            Some(Upstream::Pose(pose)) => {
+                let q = self.setpoint;
+                let ee = self.ee_pose_world(&q);
+                rate_step_toward(
+                    &mut self.model,
+                    &q,
+                    &ee,
+                    pose,
+                    &self.cfg.max_joint_velocity_rad_s,
+                    self.cfg.ee,
+                    self.cfg.cycle_period.as_secs_f64(),
+                )
+            }
+        };
+        clamp_to_limits(&target, &self.cfg.limits)
+    }
+
     /// Advance one mode and yield an [`Advance`] (target, next mode, origin).
     /// Owns `mode` (moved in), so `self.model` is free for FK/IK here.
     async fn advance(
         &mut self,
         mode: Mode,
         measured_q: JointVec,
-        command: &Option<JointCommand>,
+        command: &Option<Upstream>,
         now: Instant,
     ) -> Advance {
         match mode {
             Mode::Follow => Advance {
-                target: follow_target(command, self.setpoint, &self.cfg),
+                target: self.follow_target(command),
                 next_mode: Mode::Follow,
                 origin: Origin::Streamed,
             },
@@ -357,13 +493,13 @@ impl Planner {
     /// cancel or on running to the end. Either terminal drops `m` (and with it
     /// the busy guard), releasing the slot.
     async fn advance_joint(&mut self, m: JointMove, measured_q: JointVec, now: Instant) -> Advance {
-        let JointMove { traj, ctx, _busy } = m;
+        let JointMove { traj, reply, _busy } = m;
         let q_des = traj.sample(now);
-        let cancelled = ctx.is_cancelled();
+        let cancelled = reply.is_cancelled();
         if !cancelled && !traj.is_complete(now) {
             return Advance {
                 target: q_des,
-                next_mode: Mode::JointMove(JointMove { traj, ctx, _busy }),
+                next_mode: Mode::JointMove(JointMove { traj, reply, _busy }),
                 origin: Origin::PlannedMove,
             };
         }
@@ -371,16 +507,14 @@ impl Planner {
         // result carries the measured pose, so the caller judges how close it
         // landed; the governor may have held it short.
         let elapsed = now.duration_since(traj.motion_start).as_secs_f64();
-        let result = if cancelled {
-            ctx.complete_cancelled(false, "goal cancelled".into(), measured_q, elapsed)
-                .await
+        let outcome = if cancelled {
+            Outcome::Cancelled
         } else {
-            ctx.complete(true, "trajectory complete".into(), measured_q, elapsed)
-                .await
+            Outcome::Complete
         };
-        if let Err(e) = result {
-            error!("{}: move_arm_joints complete: {e}", self.side.label());
-        }
+        reply
+            .finish(self.side.label(), outcome, measured_q, elapsed)
+            .await;
         // A cancel holds where the arm already is; a completion holds the last
         // sample.
         Advance::ends_move(if cancelled { self.setpoint } else { q_des })
@@ -490,7 +624,7 @@ impl Planner {
             &mut self.model,
             &governed_q,
             &self.cfg.max_joint_velocity_rad_s,
-            self.cfg.max_ee_velocity_m_s,
+            self.cfg.ee,
             dt,
         );
         match step {
@@ -546,9 +680,9 @@ impl Planner {
             Goal::Joint {
                 target,
                 duration_s,
-                ctx,
+                reply,
             } => {
-                info!("{}: move_arm_joints start", self.side.label());
+                info!("{}: joint move start", self.side.label());
                 Mode::JointMove(JointMove {
                     traj: JointTrajectory::new(
                         self.setpoint,
@@ -556,7 +690,7 @@ impl Planner {
                         self.cfg.max_joint_velocity_rad_s,
                         duration_s,
                     ),
-                    ctx,
+                    reply,
                     _busy: busy,
                 })
             }
@@ -582,7 +716,7 @@ impl Planner {
         &mut self,
         target: Isometry3<f64>,
         duration_s: f64,
-        ctx: move_arm::GoalContext,
+        ctx: Box<move_arm::GoalContext>,
         busy: BusyGuard,
         now: Instant,
     ) -> Mode {
@@ -595,7 +729,7 @@ impl Planner {
             self.setpoint,
             &PlanLimits {
                 max_joint_velocity_rad_s: &self.cfg.max_joint_velocity_rad_s,
-                max_ee_velocity_m_s: self.cfg.max_ee_velocity_m_s,
+                ee: self.cfg.ee,
                 control_period: self.cfg.cycle_period,
             },
             duration_s,
@@ -704,25 +838,6 @@ impl Planner {
     }
 }
 
-/// Resolve the Follow target: chase the commander command (clamped into the
-/// joint limits), holding `held` when none has arrived. The command stream is
-/// paired to one producer, so there is nothing to arbitrate; if the producer stops
-/// the latest command simply persists and the arm holds it through the MIT loop, so
-/// no freshness deadman is needed.
-fn follow_target(command: &Option<JointCommand>, held: JointVec, cfg: &PlanConfig) -> JointVec {
-    match command {
-        Some(c) => clamp_to_limits(&c.positions, &cfg.limits),
-        None => held,
-    }
-}
-
-/// Decompose a world-frame pose into the wire `(position, quaternion)` arrays.
-fn world_pose_arrays(pose: &Isometry3<f64>) -> ([f64; 3], [f64; 4]) {
-    let t = pose.translation.vector;
-    let r = pose.rotation;
-    ([t.x, t.y, t.z], [r.i, r.j, r.k, r.w])
-}
-
 /// Whether stepping `q_prev -> q_new` over `dt` implies any joint velocity beyond
 /// the guard margin times its limit.
 fn exceeds_velocity_limits(
@@ -742,11 +857,16 @@ fn exceeds_velocity_limits(
 mod tests {
     use super::*;
 
+    use srs_model::nalgebra::{UnitQuaternion, Vector3};
+
     fn test_cfg() -> PlanConfig {
         PlanConfig {
             cycle_period: Duration::from_millis(10),
             max_joint_velocity_rad_s: [10.0; ARM_DOF],
-            max_ee_velocity_m_s: 1.0,
+            ee: EeCaps {
+                linear_m_s: 1.0,
+                angular_rad_s: 0.8,
+            },
             limits: [Limit {
                 lo: -10.0,
                 hi: 10.0,
@@ -754,8 +874,75 @@ mod tests {
         }
     }
 
-    fn joint_cmd(positions: JointVec) -> JointCommand {
-        JointCommand { positions }
+    fn joint_cmd(positions: JointVec) -> Upstream {
+        Upstream::Joints(positions)
+    }
+
+    fn left_arm_model() -> Arm {
+        let version = openarm_description::HardwareVersion::V1;
+        crate::arm_model(version, version.base_link(openarm_description::Side::Left))
+            .expect("build left arm from bundled URDF")
+    }
+
+    /// A planner over the bundled V1 left arm, with permissive test limits.
+    fn test_planner(held: JointVec) -> Planner {
+        let mut planner = Planner::new(Side::Left, left_arm_model(), test_cfg());
+        planner.commit(held);
+        planner
+    }
+
+    /// An in-limit pose: elbow off its 0.05 floor, j2 inside [-3.32, 0.17].
+    const POSE_TEST_Q: JointVec = [0.0, -0.8, 0.0, 1.2, 0.0, 0.0, 0.0];
+
+    /// A planner with the arm's own limits, seeded inside them: rate_step
+    /// clamps into model limits, so an off-limit seed would make the tests
+    /// measure the seed correction instead of the motion.
+    fn pose_planner() -> Planner {
+        let model = left_arm_model();
+        let cfg = PlanConfig {
+            limits: model.limits(),
+            ..test_cfg()
+        };
+        let mut planner = Planner::new(Side::Left, model, cfg);
+        planner.commit(POSE_TEST_Q);
+        planner
+    }
+
+    #[tokio::test]
+    async fn aborting_the_active_move_fails_it_and_frees_the_busy_slot() {
+        let mut planner = test_planner([0.0; ARM_DOF]);
+        let (done_tx, mut done_rx) = mpsc::channel(1);
+        let (goal_tx, mut goals) = mpsc::channel(1);
+        let busy = Arc::new(AtomicBool::new(true)); // claimed at accept
+        goal_tx
+            .send(Goal::Joint {
+                target: [0.5; ARM_DOF],
+                duration_s: 1.0,
+                reply: JointReply::Ready(ReadyReply {
+                    done_tx,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                }),
+            })
+            .await
+            .expect("queue the goal");
+        let now = Instant::now();
+        planner
+            .tick([0.0; ARM_DOF], None, &mut goals, &busy, now)
+            .await;
+        assert!(
+            busy.load(Ordering::Acquire),
+            "move in flight holds the slot"
+        );
+
+        planner
+            .abort_active("the follower stopped reporting", [0.1; ARM_DOF], now)
+            .await;
+        let outcome = done_rx.recv().await.expect("aborted move must report");
+        assert!(!outcome.success);
+        assert!(outcome.message.contains("stopped reporting"));
+        assert!(!busy.load(Ordering::Acquire), "abort releases the slot");
+        // With nothing active the abort is a no-op.
+        planner.abort_active("again", [0.1; ARM_DOF], now).await;
     }
 
     #[test]
@@ -805,18 +992,108 @@ mod tests {
 
     #[test]
     fn follow_tracks_the_command() {
-        let target = follow_target(
-            &Some(joint_cmd([0.2; ARM_DOF])),
-            [0.9; ARM_DOF],
-            &test_cfg(),
-        );
+        let mut planner = test_planner([0.9; ARM_DOF]);
+        let target = planner.follow_target(&Some(joint_cmd([0.2; ARM_DOF])));
         assert_eq!(target, [0.2; ARM_DOF]);
     }
 
     #[test]
     fn follow_holds_when_no_command() {
         let held = [0.3; ARM_DOF];
-        assert_eq!(follow_target(&None, held, &test_cfg()), held);
+        let mut planner = test_planner(held);
+        assert_eq!(planner.follow_target(&None), held);
+    }
+
+    #[test]
+    fn a_pose_command_moves_the_end_effector_toward_it() {
+        // The Cartesian Follow path: the target is a pose, and the planner is
+        // the only thing that knows the chain. One tick must close some of the
+        // gap without leaping to it.
+        let mut planner = pose_planner();
+        let start = planner.ee_pose_world(&POSE_TEST_Q);
+        let goal = Isometry3::from_parts(
+            (start.translation.vector + Vector3::new(0.05, 0.0, 0.0)).into(),
+            start.rotation,
+        );
+
+        let stepped = planner.follow_target(&Some(Upstream::Pose(goal)));
+        let moved = planner.ee_pose_world(&stepped);
+        let before = (goal.translation.vector - start.translation.vector).norm();
+        let after = (goal.translation.vector - moved.translation.vector).norm();
+        assert!(
+            after < before,
+            "the step must close the gap: {before} -> {after}"
+        );
+        let cfg = test_cfg();
+        let budget = cfg.ee.linear_m_s * cfg.cycle_period.as_secs_f64();
+        assert!(
+            after >= before - budget * 1.01,
+            "one tick may close at most its {budget} m budget: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn a_pose_step_respects_the_end_effector_speed_cap() {
+        // The per-tick budget is the linear EE cap * cycle_period. A pose a
+        // long way off must produce the same bounded step as a near one, so an
+        // operator's flick cannot become a lunge.
+        let mut planner = pose_planner();
+        let start = planner.ee_pose_world(&POSE_TEST_Q);
+        let far = Isometry3::from_parts(
+            (start.translation.vector + Vector3::new(5.0, 0.0, 0.0)).into(),
+            start.rotation,
+        );
+
+        let stepped = planner.follow_target(&Some(Upstream::Pose(far)));
+        let moved = planner.ee_pose_world(&stepped);
+        let travelled = (moved.translation.vector - start.translation.vector).norm();
+        let cfg = test_cfg();
+        let budget = cfg.ee.linear_m_s * cfg.cycle_period.as_secs_f64();
+        assert!(
+            travelled <= budget * 1.01,
+            "one tick travelled {travelled} m against a {budget} m budget"
+        );
+    }
+
+    #[test]
+    fn a_pose_step_respects_the_angular_speed_cap() {
+        let mut planner = pose_planner();
+        let start = planner.ee_pose_world(&POSE_TEST_Q);
+        let twisted = Isometry3::from_parts(
+            start.translation,
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 1.0) * start.rotation,
+        );
+
+        let stepped = planner.follow_target(&Some(Upstream::Pose(twisted)));
+        let moved = planner.ee_pose_world(&stepped);
+        let cfg = test_cfg();
+        let budget = cfg.ee.angular_rad_s * cfg.cycle_period.as_secs_f64();
+        let turned = moved.rotation.angle_to(&start.rotation);
+        assert!(
+            turned <= budget * 1.01,
+            "one tick turned {turned} rad against a {budget} rad budget"
+        );
+    }
+
+    #[test]
+    fn a_pose_command_holds_when_the_stream_stops() {
+        // Same deadman as the joint path: no message means hold, not drift.
+        // Step toward a pose off the held one and commit the governed result,
+        // as the coordinator does, so the hold is asserted mid-motion.
+        let mut planner = pose_planner();
+        let start = planner.ee_pose_world(&POSE_TEST_Q);
+        let goal = Isometry3::from_parts(
+            (start.translation.vector + Vector3::new(0.05, 0.0, 0.0)).into(),
+            start.rotation,
+        );
+        let stepped = planner.follow_target(&Some(Upstream::Pose(goal)));
+        assert_ne!(stepped, POSE_TEST_Q, "the step toward the pose must move");
+        planner.commit(stepped);
+        assert_eq!(
+            planner.follow_target(&None),
+            stepped,
+            "no message holds the setpoint where the last step left it"
+        );
     }
 
     #[test]
@@ -829,11 +1106,12 @@ mod tests {
         // handler performs the clear is covered by the live regression.
         let (tx, rx) = tokio::sync::watch::channel(None);
         let endpoint = [0.2; ARM_DOF];
+        let mut planner = test_planner(endpoint);
 
         // Streamed before the move: Follow would chase it.
         tx.send_replace(Some(joint_cmd([0.9; ARM_DOF])));
         assert_eq!(
-            follow_target(&rx.borrow(), endpoint, &test_cfg()),
+            planner.follow_target(&rx.borrow()),
             [0.9; ARM_DOF],
             "a live streamed command is chased"
         );
@@ -841,7 +1119,7 @@ mod tests {
         // The accepted move consumes it: Follow now holds at the move endpoint.
         tx.send_replace(None);
         assert_eq!(
-            follow_target(&rx.borrow(), endpoint, &test_cfg()),
+            planner.follow_target(&rx.borrow()),
             endpoint,
             "a consumed command leaves Follow on the move endpoint, not the stale stream"
         );
@@ -849,7 +1127,7 @@ mod tests {
         // A command that arrives after the move resumes following.
         tx.send_replace(Some(joint_cmd([0.4; ARM_DOF])));
         assert_eq!(
-            follow_target(&rx.borrow(), endpoint, &test_cfg()),
+            planner.follow_target(&rx.borrow()),
             [0.4; ARM_DOF],
             "a command after the move resumes following"
         );
