@@ -28,7 +28,7 @@ export RCLONE_S3_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY:?RCLONE_S3_SEC
 # ── Version manifest ──────────────────────────────────────────────────────────
 ISAAC_VERSION="5.1.0"    # mirrors nvcr.io/nvidia/isaac-sim upstream version
 MUJOCO_VERSION="3.10.0"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
-IMAGE_REV="19"           # bump when image content changes without an upstream version bump
+IMAGE_REV="20"           # bump when image content changes without an upstream version bump
 IMAGE_NAMESPACE="peppybot"  # Docker Hub namespace these base images are pushed to
 
 # Target platforms. MuJoCo ships wheels for both arches; Isaac Sim is amd64 only.
