@@ -83,8 +83,10 @@ class IsaacActuatorCtrl:
         kps = self._params.get("kp") or []
         kds = self._params.get("kd") or []
         efforts = self._params.get("max_efforts") or []
-        if not joint_names and not kps and not kds:
-            return  # no gains configured
+        if not kps and not kds:
+            # No gains configured (the gainless finger controllers): the USD
+            # drive values stay.
+            return
         if not (len(joint_names) == len(kps) == len(kds)):
             raise ValueError(
                 f"gain config mismatch: {len(joint_names)} joint_names, "
