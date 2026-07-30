@@ -28,7 +28,7 @@ export RCLONE_S3_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY:?RCLONE_S3_SEC
 # ── Version manifest ──────────────────────────────────────────────────────────
 ISAAC_VERSION="5.1.0"    # mirrors nvcr.io/nvidia/isaac-sim upstream version
 MUJOCO_VERSION="3.10.0"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
-IMAGE_REV="18"           # bump when image content changes without an upstream version bump
+IMAGE_REV="19"           # bump when image content changes without an upstream version bump
 IMAGE_NAMESPACE="peppybot"  # Docker Hub namespace these base images are pushed to
 
 # Target platforms. MuJoCo ships wheels for both arches; Isaac Sim is amd64 only.
@@ -155,5 +155,8 @@ echo "==> Done."
 echo "    Pushed and synced:"
 echo "      ${ISAAC_IMAGE}   (${ISAAC_PLATFORMS})"
 echo "      ${MUJOCO_IMAGE}   (${MUJOCO_PLATFORMS})"
-echo "    Commit the updated apptainer.def files, then run:"
-echo "    peppy node build openarm_robot_initializer_mujoco:v1 (and _isaac)"
+echo "    Commit the updated apptainer.def files, then restage + rebuild each sim"
+echo "    node. A bare 'peppy node build' reuses the snapshot staged by the last"
+echo "    'peppy node add', which predates the From: restamp above:"
+echo "      (cd \"${NODES_DIR}/openarm_sim_mujoco\" && peppy node add . -sb)"
+echo "      (cd \"${NODES_DIR}/openarm_sim_isaac\" && peppy node add . -sb)"
