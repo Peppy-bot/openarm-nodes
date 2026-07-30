@@ -1481,32 +1481,47 @@ max={} us | over budget {over}/{}",
         }
     }
 
-    /// The v2 description places a fully-splayed finger inside the torso proxy
-    /// at home, so an operator who opens the grippers with the arms down starts
-    /// overlapping. Whether that overlap is real is a question for the URDF's
-    /// finger travel; what must hold here is that the governor never makes it a
-    /// trap. If this setup assertion ever fails, the description changed and
-    /// the escape below is what needs re-confirming, not the number.
+    /// An operator who opens the grippers with the arms down and tucked drives a
+    /// fully-splayed finger into the torso proxy. What must hold is that the
+    /// governor never makes that overlap a trap: two independent escapes work.
+    ///
+    /// The overlap is *constructed* rather than read off a fixed pose. How deep
+    /// any given configuration sits inside the proxy depends on how tightly the
+    /// collision meshes are fitted, which is a property of the model and not of
+    /// this invariant, so the test bisects to a definite overlap and proves the
+    /// escapes from there. Pinning a pose instead makes this test silently stop
+    /// exercising its own escapes the day the fit changes.
     #[test]
-    fn v2_wide_grippers_at_home_overlap_the_torso_and_the_operator_still_gets_out() {
+    fn a_wide_gripper_overlapping_the_torso_is_never_a_trap() {
         let mut g = v2_governor(true);
         let wide = GovState::new(home(), ArmPair::new(1.0, 1.0));
-        let d0 = distance(&mut g, &wide);
+        // Tucking the shoulders swings the splayed fingers into the torso; stop
+        // short of the depth where a whole link, not a finger, becomes nearest.
+        let tucked = GovState::new(
+            {
+                let mut arms = home();
+                arms.left[1] = 0.1;
+                arms.right[1] = 0.1;
+                arms
+            },
+            ArmPair::new(1.0, 1.0),
+        );
+        let overlapped = config_at_distance(&mut g, &wide, &tucked, -0.003);
+        let d0 = distance(&mut g, &overlapped);
         assert!(
             d0 < 0.0,
-            "setup: v2 home with both grippers wide should overlap, got {d0:+.6}"
+            "setup: the constructed pose should overlap, got {d0:+.6}"
         );
-        let pair = g.proximity(&wide).expect("a nearest pair at home");
+        let pair = g.proximity(&overlapped).expect("a nearest pair");
+        let names = format!("{} <-> {}", pair.link_a, pair.link_b);
         assert!(
-            pair.link_a.contains("body") || pair.link_b.contains("body"),
-            "setup: the overlap should be a finger against the torso, got {} <-> {}",
-            pair.link_a,
-            pair.link_b
+            names.contains("body") && names.contains("ee_link"),
+            "setup: the overlap should be a finger against the torso, got {names}"
         );
 
         // Closing the grippers is the direct way out, and it must not be refused.
         let rate = g.max_gripper_rate_frac_s();
-        let mut q = wide;
+        let mut q = overlapped;
         for _ in 0..200 {
             let cand = GovState::new(
                 q.arms,
@@ -1523,7 +1538,7 @@ max={} us | over budget {over}/{}",
         );
 
         // So is swinging the arms out with the grippers left wide.
-        let mut q = wide;
+        let mut q = overlapped;
         let mut out = home();
         out.left[1] = -0.6;
         out.right[1] = 0.6;
