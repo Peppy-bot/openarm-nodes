@@ -2,59 +2,37 @@
   peppy_schema: "repository/v1",
   nodes: {
     openarm_arm: {
-      v1: {
-        path: "openarm_arm/peppy.json5"
-      }
+      v1: "openarm_arm/peppy.json5"
     },
     openarm_arm_sim: {
-      v1: {
-        path: "openarm_arm_sim/peppy.json5"
-      }
+      v1: "openarm_arm_sim/peppy.json5"
     },
     openarm_backbone: {
-      v1: {
-        path: "openarm_backbone/peppy.json5"
-      }
+      v1: "openarm_backbone/peppy.json5"
     },
     openarm_commander: {
-      v1: {
-        path: "openarm_commander/peppy.json5"
-      }
+      v1: "openarm_commander/peppy.json5"
     },
     openarm_gripper: {
-      v1: {
-        path: "openarm_gripper/peppy.json5"
-      }
+      v1: "openarm_gripper/peppy.json5"
     },
     openarm_gripper_sim: {
-      v1: {
-        path: "openarm_gripper_sim/peppy.json5"
-      }
+      v1: "openarm_gripper_sim/peppy.json5"
     },
     openarm_gripper_v2: {
-      v1: {
-        path: "openarm_gripper_v2/peppy.json5"
-      }
+      v1: "openarm_gripper_v2/peppy.json5"
     },
     openarm_ker: {
-      v1: {
-        path: "openarm_ker/peppy.json5"
-      }
+      v1: "openarm_ker/peppy.json5"
     },
     openarm_robot_initializer: {
-      v1: {
-        path: "openarm_robot_initializer/peppy.json5"
-      }
+      v1: "openarm_robot_initializer/peppy.json5"
     },
     openarm_sim_isaac: {
-      v1: {
-        path: "openarm_sim_isaac/peppy.json5"
-      }
+      v1: "openarm_sim_isaac/peppy.json5"
     },
     openarm_sim_mujoco: {
-      v1: {
-        path: "openarm_sim_mujoco/peppy.json5"
-      }
+      v1: "openarm_sim_mujoco/peppy.json5"
     }
   }
 }
