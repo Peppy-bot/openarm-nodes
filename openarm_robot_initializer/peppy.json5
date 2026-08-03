@@ -1,9 +1,8 @@
-// Real-hardware robot_initializer: aggregates the per-component
-// openarm_hardware_ready signals from both arms and grippers and exposes the
-// robot-level is_ready backbone gates on. Returns ready:true only once every
-// bound component has enabled its motors and started serving. Implements
-// openarm_robot_initializer:v1 alongside the _mujoco / _isaac siblings, which
-// gate on scene load instead.
+// Aggregates the per-component openarm_hardware_ready signals from both arms
+// and grippers into the robot-level is_ready the backbone gates on. Returns
+// ready:true only once every bound component reports ready. Engine-agnostic:
+// the hardware drivers and the sim bridge nodes implement the same per-limb
+// contract, so one initializer serves every backend.
 {
   peppy_schema: "node/v1",
   manifest: {
