@@ -33,17 +33,18 @@ ws/
 
 ## 2. Start the daemon and register the repos
 
-The daemon builds, runs, and connects every node. Registering the repos is what lets it resolve nodes and contracts by name. The launcher depends on this, so don't skip it on a fresh machine.
+The daemon builds, runs, and connects every node. Registering the repos is what lets it resolve nodes, contracts, and launchers by name. The launcher depends on this, so don't skip it on a fresh machine.
 
 ```sh
 peppy service serve &
 
 peppy repo add /path/to/ws/contracts-hub
+peppy repo add /path/to/ws/launchers-hub
 peppy repo add /path/to/ws/openarm-nodes
 peppy repo refresh
 ```
 
-`peppy repo refresh` walks the registered repos and ends with a summary like `Repository refresh complete. N node(s), M contract(s) found.` You can double-check what got registered with `peppy repo list`.
+`peppy repo refresh` walks the registered repos and ends with a summary like `Repository refresh complete. N node(s), M launcher(s), K contract(s) found.` You can double-check what got registered with `peppy repo list`.
 
 ## 3. Build the nodes
 
@@ -90,7 +91,7 @@ Every node you added should show `Stage: Ready`. If one is stuck at an earlier s
 ## 4. Launch the stack
 
 ```sh
-peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
+peppy stack launch openarm_v2_teleop_mujoco
 ```
 
 The launcher starts all seven instances in dependency order (sim first, then arms and grippers, then backbone, then the UI) and wires them together. Once it prints `Launch complete`:

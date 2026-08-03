@@ -27,7 +27,7 @@ Swap in `openarm_robot_initializer_isaac` or `openarm_robot_initializer` (real) 
 Every declared slot must be bound when an instance starts, and the sim variants and the arm/gripper bridge nodes consume from each other (the sim reads their passthrough streams on the per-side `left/right_arm_cmd` and `left/right_gripper_cmd` slots, the bridges read the sim's state streams), so the stack can only start through a launcher, which plans and binds all instances together. The same goes for the real variant, whose four `hardware_ready` slots the launcher binds to the driver instances. The launchers in [launchers-hub/openarm](https://github.com/Peppy-bot/launchers-hub/tree/main/openarm) do exactly that; the [top-level README](../README.md) walks through the whole sequence:
 
 ```sh
-peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
+peppy stack launch openarm_v2_teleop_mujoco
 ```
 
 MuJoCo runs headless and renders to your browser at **http://localhost:8080**. Isaac runs headless and streams over WebRTC; connect with the [Isaac Sim livestream client](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/installation/manual_livestream_clients.html). If you want a native window on the same machine instead, set `headless: false` in the sim instance's `arguments` in the launcher.

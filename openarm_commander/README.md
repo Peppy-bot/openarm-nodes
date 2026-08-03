@@ -47,7 +47,7 @@ It needs a running backbone, so the usual way is through a launcher; the
 [top-level README](../README.md) has the complete sequence:
 
 ```sh
-peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
+peppy stack launch openarm_v2_teleop_mujoco
 ```
 
 You can also run it alone against an already-running stack. Every declared slot
