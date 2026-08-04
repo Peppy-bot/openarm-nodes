@@ -14,10 +14,10 @@
       pairings: [
         // The exclusive control conversation with ONE backbone instance:
         // streamed opening setpoints in, measured aperture back, both scoped
-        // to the pair (no gripper_id demux). Optional: the gripper boots
-        // unpaired (moves still work via backbone goals) and is paired at
-        // the backbone's start.
-        { name: "gripper_link", tag: "v1", role: "follower", link_id: "backbone", optional: true },
+        // to the pair (no gripper_id demux). Paired at the backbone's start;
+        // a deployment that leaves it vacant boots the gripper unpaired and
+        // moves still work via backbone goals.
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "backbone" },
       ],
     },
   },

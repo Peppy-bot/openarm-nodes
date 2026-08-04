@@ -19,9 +19,10 @@
       pairings: [
         // The exclusive command loop with the backbone: governed setpoints stream in
         // and the measured state streams back, both scoped to the pair (no
-        // arm_id demux). Optional: the arm boots and holds with no backbone paired,
-        // and the pair is established at the backbone's start (launcher `links:`).
-        { name: "joint_link", tag: "v1", role: "follower", link_id: "backbone", optional: true },
+        // arm_id demux). Established at the backbone's start (launcher
+        // `links:`); a deployment that leaves it vacant boots the arm holding
+        // with no backbone paired.
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "backbone" },
       ],
     },
   },
