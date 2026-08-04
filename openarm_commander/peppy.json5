@@ -32,11 +32,11 @@
         { name: "gripper_link", tag: "v1", role: "leader", link_id: "left_gripper", optional: true },
         { name: "gripper_link", tag: "v1", role: "leader", link_id: "right_gripper", optional: true },
       ],
+      // Live readouts: observe each backbone<->follower pairing's state
+      // back-channel (positions for the sliders, gripper opening and effort
+      // ceiling for the aperture and effort controls). Observing works in
+      // every deployment, including ones where another node commands.
       pairing_observers: [
-        // Live readouts: observe each backbone<->follower pairing's state
-        // back-channel (positions for the sliders, gripper opening and effort
-        // ceiling for the aperture and effort controls). Observing works in
-        // every deployment, including ones where another node commands.
         { name: "joint_link", tag: "v1", role: "follower", link_id: "observed_left_arm" },
         { name: "joint_link", tag: "v1", role: "follower", link_id: "observed_right_arm" },
         { name: "gripper_link", tag: "v1", role: "follower", link_id: "observed_left_gripper" },
