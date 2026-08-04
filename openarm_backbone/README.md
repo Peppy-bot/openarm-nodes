@@ -163,8 +163,9 @@ parameters (`d_stop`, `d_safe`, `collision_governor_enabled`,
 `max_ee_velocity_m_s`) are required launcher arguments with no node defaults,
 and the commander's `governor_control` stream retunes them live. All eight
 pairing slots (four toward the leading node, four toward the followers) are
-optional and established by the launcher; publishing on an unpaired slot is a
-legal no-op, so partial deployments and monitors boot cleanly.
+established by the launcher, which pairs each one or defers it. Publishing on
+a deferred slot is a legal no-op, so partial deployments and monitors boot
+cleanly.
 
 ## Build, run, test
 

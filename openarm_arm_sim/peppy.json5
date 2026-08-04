@@ -20,8 +20,9 @@
     depends_on: {
       pairings: [
         // The exclusive command loop with the backbone, identical to the real
-        // arm's slot: optional, established at the backbone's start.
-        { name: "joint_link", tag: "v1", role: "follower", link_id: "backbone", optional: true },
+        // arm's slot: established at the backbone's start, deferred by a
+        // deployment that runs this relay with no backbone.
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "backbone" },
         // The same pairing toward the sim engine's matching limb slot: this
         // relay leads, the engine follows. Required: a relay without an engine
         // is a misconfiguration, so the launch fails loudly instead.

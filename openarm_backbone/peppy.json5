@@ -21,32 +21,34 @@
         // The exclusive command loop with the one leading node (panel or
         // KER), one slot per driven limb: the backbone plays the follower
         // role, consumes the raw setpoint stream each slot carries, governs it,
-        // and relays that limb's measured state back up the same slot. Optional:
-        // ungoverned deployments and monitors boot with these unbound.
-        { name: "joint_link", tag: "v1", role: "follower", link_id: "leader_left_arm", optional: true },
-        { name: "joint_link", tag: "v1", role: "follower", link_id: "leader_right_arm", optional: true },
-        { name: "gripper_link", tag: "v1", role: "follower", link_id: "leader_left_gripper", optional: true },
-        { name: "gripper_link", tag: "v1", role: "follower", link_id: "leader_right_gripper", optional: true },
+        // and relays that limb's measured state back up the same slot.
+        // Ungoverned deployments and monitors defer these and boot with them
+        // unpaired.
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "leader_left_arm" },
+        { name: "joint_link", tag: "v1", role: "follower", link_id: "leader_right_arm" },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "leader_left_gripper" },
+        { name: "gripper_link", tag: "v1", role: "follower", link_id: "leader_right_gripper" },
         // The exclusive command loop with each arm: the backbone plays the leader
         // role, streams the governed joint setpoint down each slot's
         // joint_setpoints, and reads that arm's measured state back on the slot's
         // joint_states (the governor's d_now and the trajectory anchor); the slot
         // scopes both directions, so no arm_id demux and no other producer can
-        // drive an arm or pose as its state. Optional like the gripper slots
-        // below, established at this instance's start (launcher `links:`).
-        { name: "joint_link", tag: "v1", role: "leader", link_id: "left_arm_link", optional: true },
-        { name: "joint_link", tag: "v1", role: "leader", link_id: "right_arm_link", optional: true },
+        // drive an arm or pose as its state. Established at this instance's
+        // start (launcher `links:`), and deferrable like the gripper slots
+        // below.
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "left_arm_link" },
+        { name: "joint_link", tag: "v1", role: "leader", link_id: "right_arm_link" },
         // The exclusive command loop with each gripper: the backbone plays the
         // leader role, streams the governed opening down each slot's
         // gripper_setpoints, and reads that gripper's measured aperture back on
         // the slot's gripper_states; the slot scopes both directions, so no
         // gripper_id demux and no other producer can pose as the fingers.
-        // Optional: the backbone boots with either gripper unpaired (that side's
-        // governed openings go nowhere and no aperture arrives, so streaming
-        // stays gated) and each pair is established at this instance's start
-        // (launcher `links:`).
-        { name: "gripper_link", tag: "v1", role: "leader", link_id: "left_gripper_link", optional: true },
-        { name: "gripper_link", tag: "v1", role: "leader", link_id: "right_gripper_link", optional: true }
+        // Each pair is established at this instance's start (launcher
+        // `links:`). A deployment that defers either slot boots the backbone
+        // with that gripper unpaired: that side's governed openings go
+        // nowhere and no aperture arrives, so streaming stays gated.
+        { name: "gripper_link", tag: "v1", role: "leader", link_id: "left_gripper_link" },
+        { name: "gripper_link", tag: "v1", role: "leader", link_id: "right_gripper_link" }
       ]
     }
   },
