@@ -36,7 +36,6 @@ class SimLauncher:
         self._io = io
         self._state_rate_hz = state_rate_hz
         self._timeline = None
-        self._world = None
         self._extension: Optional[IsaacBridgeExtension] = None
 
     def run(self) -> None:
@@ -76,11 +75,9 @@ class SimLauncher:
         logger.info("Default dome light added to stage")
 
     def _warmup(self) -> None:
-        from omni.isaac.core import World  # pylint: disable=E0401
-
-        self._world = World()
         for _ in range(_WARMUP_STEPS):
             self._sim_app.update()
+
 
     def _start_timeline(self) -> None:
         import omni.timeline
