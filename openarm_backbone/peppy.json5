@@ -5,6 +5,10 @@
 // itself; emits collision_status; and drives each arm and each gripper over its
 // own downstream pairing (leader role): governed setpoints stream down each
 // pair and the measured state streams back on it. See src/main.rs.
+//
+// Every end-effector pose here, commanded or reported, is the gripper's grasp
+// point: on the jaw closing axis midway between the pads, not the wrist flange
+// they mount on. Commanding an object's centre puts the pads around it.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -95,13 +99,13 @@
             request_message_format: {
               // Which arm (0 = left, 1 = right).
               arm_id: "u8",
-              // Target end-effector position in the world frame: x, y, z (m).
+              // Target grasp-point position in the world frame: x, y, z (m).
               position: {
                 $type: "array",
                 $items: "f64",
                 $length: 3
               },
-              // Target end-effector orientation, quaternion [x, y, z, w].
+              // Target grasp-point orientation, quaternion [x, y, z, w].
               orientation: {
                 $type: "array",
                 $items: "f64",
@@ -116,13 +120,13 @@
             response_message_format: {
               success: "bool",
               message: "string",
-              // Measured end-effector position when the action ended: x, y, z (m).
+              // Measured grasp-point position when the action ended: x, y, z (m).
               final_position: {
                 $type: "array",
                 $items: "f64",
                 $length: 3
               },
-              // Measured end-effector orientation, quaternion [x, y, z, w].
+              // Measured grasp-point orientation, quaternion [x, y, z, w].
               final_orientation: {
                 $type: "array",
                 $items: "f64",

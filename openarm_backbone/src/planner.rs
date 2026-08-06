@@ -765,7 +765,7 @@ mod tests {
         // boundary singularity. A power-up pose with the elbow below it must seed at the
         // limit, not off it.
         let version = openarm_description::HardwareVersion::V1;
-        let model = crate::arm_model(version, version.base_link(openarm_description::Side::Left))
+        let model = crate::arm_model(version, openarm_description::Side::Left)
             .expect("build left arm from bundled URDF");
         let limits = model.limits();
         let cfg = PlanConfig {
