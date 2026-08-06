@@ -1211,8 +1211,7 @@ max={} us | over budget {over}/{}",
         {
             let version = openarm_description::HardwareVersion::V2;
             let mut arm =
-                crate::arm_model(version, version.base_link(openarm_description::Side::Left))
-                    .expect("arm model");
+                crate::arm_model(version, openarm_description::Side::Left).expect("arm model");
             let q = [0.1, -0.2, 0.3, 0.5, 0.1, -0.1, 0.2];
             time_us(
                 "planner: jacobian at measured",

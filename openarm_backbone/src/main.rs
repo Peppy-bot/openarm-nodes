@@ -53,20 +53,21 @@ where
     });
 }
 
-/// Build one arm model from the embedded OpenArm description, with the elbow
-/// singularity margin applied. The description carries no solver dep and exports the
-/// margin as a constant; applying it here is the single site the backbone imposes it, so the
-/// model's `limits()` carry it for IK seeding, trajectory sizing, and the chase clamp.
+/// Build one side's arm model from the embedded OpenArm description: the elbow
+/// singularity margin applied, and the URDF's tcp frame mounted so every pose the
+/// backbone solves, reports, or caps the speed of is at the gripper's grasp point.
+/// This is the single site the backbone imposes either, so the model's `limits()`
+/// carry the margin for IK seeding, trajectory sizing and the chase clamp.
 pub(crate) fn arm_model(
     version: HardwareVersion,
-    base_link: &str,
+    side: openarm_description::Side,
 ) -> std::result::Result<srs_model::Arm, srs_model::SrsError> {
-    Ok(
-        srs_model::Arm::from_urdf(version.urdf(), base_link)?.with_lower_floor(
+    srs_model::Arm::from_urdf(version.urdf(), version.base_link(side))?
+        .with_lower_floor(
             version.elbow_joint_index(),
             version.elbow_singularity_floor_rad(),
-        ),
-    )
+        )
+        .with_tool_link(version.tcp_link(side))
 }
 
 fn main() -> Result<()> {
@@ -132,15 +133,17 @@ fn main() -> Result<()> {
 
         // Two arm models (FK/IK/Jacobian/limits, with the elbow singularity margin)
         // and the bimanual collision model, all from the embedded OpenArm description.
-        // The per-side chain base link is a fact of the generation's URDF, resolved from
-        // the description rather than configured, so a v2 launch cannot inherit a v1 name.
+        // The per-side chain base and tcp links are facts of the generation's URDF,
+        // resolved from the description rather than configured, so a v2 launch cannot
+        // inherit a v1 name. The collision model walks the same chains and takes the
+        // base links directly.
         let left_base = hardware_version.base_link(openarm_description::Side::Left);
         let right_base = hardware_version.base_link(openarm_description::Side::Right);
-        let left_model = arm_model(hardware_version, left_base)
-            .unwrap_or_else(|e| panic!("build left arm model from base '{left_base}': {e}"));
-        let right_model = arm_model(hardware_version, right_base)
-            .unwrap_or_else(|e| panic!("build right arm model from base '{right_base}': {e}"));
-        info!("arm models loaded (left '{left_base}', right '{right_base}')");
+        let left_model = arm_model(hardware_version, openarm_description::Side::Left)
+            .unwrap_or_else(|e| panic!("build left arm model: {e}"));
+        let right_model = arm_model(hardware_version, openarm_description::Side::Right)
+            .unwrap_or_else(|e| panic!("build right arm model: {e}"));
+        info!("arm models loaded");
 
         // The collision model needs the URDF string (joint limits are irrelevant to it,
         // so no margin) and the meshes on disk; the file-based builder reads the meshes

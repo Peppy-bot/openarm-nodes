@@ -120,7 +120,12 @@ field pose.
 | `move_arm` | `arm_id`, world pose (position m + quaternion `[x, y, z, w]`), `duration_s` | non-finite, degenerate quaternion, negative duration, side busy |
 | `move_gripper` | `gripper_id`, opening fraction in [0, 1], `max_effort` | non-finite, out of range, negative effort cap, side busy |
 
-`arm_id`/`gripper_id`: 0 = left, 1 = right. One move per side at a time (a
+`arm_id`/`gripper_id`: 0 = left, 1 = right. Every world pose here, commanded or
+reported, is the gripper's **grasp point** (midway between the pads on the jaw
+closing axis, `+z` out of the gripper), not the wrist flange they mount on:
+`openarm_description` carries the offset per generation and `arm_model` builds
+the model with it, so the pose solved for, the pose reported, and the point the
+EE speed cap applies to are one frame. One move per side at a time (a
 single-flight busy slot whose release rides a drop guard, so no terminal can
 leak it). `move_arm` plans the quietest tier that works: a held-elbow line, a
 steered-elbow line, or the guarded servo (a damped resolved-rate law that can

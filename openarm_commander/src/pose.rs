@@ -514,8 +514,10 @@ fn orientation_step(current: &Pose, desired: &Pose, cap_rad: f64) -> Option<Vect
 }
 
 /// Build one arm model from the generation's embedded description, with the elbow
-/// singularity floor applied (mirrors `openarm_backbone`'s `arm_model`). A bad base
-/// link aborts bringup, matching how the backbone fails.
+/// singularity floor applied and the URDF's tcp frame mounted (mirrors
+/// `openarm_backbone`'s `arm_model`, so the panel's poses and the backbone's are the
+/// same frame). A bad base link or tcp link aborts bringup, matching how the
+/// backbone fails.
 fn build_arm(version: HardwareVersion, side: Side) -> Arm {
     let base = version.base_link(side.description());
     Arm::from_urdf(version.urdf(), base)
@@ -524,6 +526,8 @@ fn build_arm(version: HardwareVersion, side: Side) -> Arm {
             version.elbow_joint_index(),
             version.elbow_singularity_floor_rad(),
         )
+        .with_tool_link(version.tcp_link(side.description()))
+        .unwrap_or_else(|e| panic!("mount the {} gripper tcp frame: {e}", side.label()))
 }
 
 /// Per-joint velocity limits (rad/s) for `side`, j1..j7, from the bundled URDF:
@@ -566,17 +570,26 @@ pub fn quat_angle(a: [f64; 4], b: [f64; 4]) -> f64 {
     qa.angle_to(&qb)
 }
 
-/// Grid-sample FK over the joint limits and return the world-frame EE bounding box
-/// `[[min, max]; 3]` (x, y, z), padded with a small margin. Runs once per side at
-/// construction to size the panel's position sliders to the actual reachable envelope,
-/// so the bounds are correct per generation rather than hardcoded.
+/// How far each world axis can be driven: `[[min, max]; 3]` (x, y, z) over every
+/// in-limit configuration, so each bound is the best case for that axis with the
+/// other two free. Runs once per side at construction to size the panel's position
+/// sliders per generation rather than hardcoding them.
+///
+/// A grid coarse enough to afford (`N^7` poses) lands near the extremes but not on
+/// them, so each of the six is refined by projected gradient ascent: the Jacobian's
+/// linear rows are exactly the gradient of position with respect to the joints, and
+/// the search space is a box, so stepping along the gradient and clamping converges
+/// on the true extreme. The grid supplies the start, which keeps the ascent out of
+/// the local maxima a single arbitrary start would find.
+///
+/// These bound reach, they do not map it: a target inside the box needs all three
+/// axes together, so the backbone's IK can still refuse one.
 fn workspace_aabb(arm: &mut Arm) -> [[f64; 2]; 3] {
-    const N: usize = 4;
-    const MARGIN_M: f64 = 0.02;
+    const N: usize = 3;
     let lims = arm.limits();
     let ranges: [(f64, f64); ARM_DOF] = std::array::from_fn(|i| (lims[i].lo, lims[i].hi));
-    let mut lo = [f64::INFINITY; 3];
-    let mut hi = [f64::NEG_INFINITY; 3];
+    // Best grid pose per (axis, direction), as the ascent's start.
+    let mut best = [[(f64::NEG_INFINITY, [0.0; ARM_DOF]); 2]; 3];
     for idx in 0..N.pow(ARM_DOF as u32) {
         let mut rem = idx;
         let q: [f64; ARM_DOF] = std::array::from_fn(|j| {
@@ -588,11 +601,67 @@ fn workspace_aabb(arm: &mut Arm) -> [[f64; 2]; 3] {
         let base = arm.at(&q).ee_pose();
         let p = arm.world_pose(&base).translation.vector;
         for k in 0..3 {
-            lo[k] = lo[k].min(p[k]);
-            hi[k] = hi[k].max(p[k]);
+            for (d, sign) in [1.0_f64, -1.0].into_iter().enumerate() {
+                if sign * p[k] > best[k][d].0 {
+                    best[k][d] = (sign * p[k], q);
+                }
+            }
         }
     }
-    std::array::from_fn(|k| [lo[k] - MARGIN_M, hi[k] + MARGIN_M])
+    std::array::from_fn(|k| {
+        let hi = ascend(arm, &lims, best[k][0].1, k, 1.0);
+        let lo = ascend(arm, &lims, best[k][1].1, k, -1.0);
+        [lo, hi]
+    })
+}
+
+/// Push `q` along the joints that move world axis `axis` in `sign`'s direction,
+/// clamped into `limits`, and return the extreme reached. Backtracks the step
+/// whenever it overshoots, so it converges rather than oscillating at a bound.
+fn ascend(
+    arm: &mut Arm,
+    limits: &[srs_model::Limit; ARM_DOF],
+    start: [f64; ARM_DOF],
+    axis: usize,
+    sign: f64,
+) -> f64 {
+    // A step this small moves the end-effector well under a millimetre, which is
+    // finer than the slider it sizes; the floor ends the walk.
+    const STEP_FLOOR_RAD: f64 = 1e-4;
+    const MAX_ITERS: usize = 200;
+    let world_from_base = arm.base_from_world().inverse().rotation;
+    let mut q = start;
+    let mut step = 0.2_f64;
+    let value = |arm: &mut Arm, q: &[f64; ARM_DOF]| {
+        let base = arm.at(q).ee_pose();
+        sign * arm.world_pose(&base).translation.vector[axis]
+    };
+    let mut current = value(arm, &q);
+    for _ in 0..MAX_ITERS {
+        if step < STEP_FLOOR_RAD {
+            break;
+        }
+        let jacobian = arm.at(&q).jacobian();
+        let gradient: [f64; ARM_DOF] = std::array::from_fn(|j| {
+            let column = jacobian.column(j);
+            let linear = Vector3::new(column[0], column[1], column[2]);
+            sign * (world_from_base * linear)[axis]
+        });
+        let norm = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
+        if norm < f64::EPSILON {
+            break;
+        }
+        let candidate: [f64; ARM_DOF] = std::array::from_fn(|j| {
+            (q[j] + step * gradient[j] / norm).clamp(limits[j].lo, limits[j].hi)
+        });
+        let next = value(arm, &candidate);
+        if next > current {
+            (q, current) = (candidate, next);
+        } else {
+            step *= 0.5;
+        }
+    }
+    sign * current
 }
 
 #[cfg(test)]
@@ -616,6 +685,46 @@ mod tests {
             mode,
             desired,
             arm_angle,
+        }
+    }
+
+    #[test]
+    fn no_reachable_pose_falls_outside_the_bounds() {
+        // The bound the panel must not get wrong is the tight one: a slider that
+        // cannot dial a pose the arm can reach strands the operator. Sampling
+        // cannot prove the extremes are attained (the ascent attains them by
+        // construction, from a real in-limit configuration), but it does prove
+        // nothing reachable sits outside them. Walks a golden-ratio lattice rather
+        // than the grid the bounds were built from, so the poses are ones the
+        // construction never saw.
+        const GOLDEN: [f64; ARM_DOF] = [
+            0.618_033_988_75,
+            0.381_966_011_25,
+            0.236_067_977_5,
+            0.145_898_033_75,
+            0.090_169_943_75,
+            0.055_728_090_0,
+            0.034_441_853_75,
+        ];
+        let m = models();
+        for side in [Side::Left, Side::Right] {
+            let bounds = m.pos_bounds(side);
+            let limits = HardwareVersion::V2.joint_limits(side.description());
+            for step in 0..5000 {
+                let q: [f64; ARM_DOF] = std::array::from_fn(|i| {
+                    let t = (GOLDEN[i] * (step + 1) as f64).fract();
+                    limits[i][0] + t * (limits[i][1] - limits[i][0])
+                });
+                let p = m.ee_pose_world(side, &q);
+                for k in 0..3 {
+                    assert!(
+                        p[k] >= bounds[k][0] && p[k] <= bounds[k][1],
+                        "{side:?} axis {k}: reachable {} outside {:?}",
+                        p[k],
+                        bounds[k]
+                    );
+                }
+            }
         }
     }
 

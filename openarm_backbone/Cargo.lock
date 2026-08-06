@@ -243,7 +243,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 [[package]]
 name = "bimanual_collision_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#76e6372abc09058376d7ee6d2e733781afb8dbf2"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#3b9e8d21985d04dae5f9c462c4a561ee906cd7a4"
 dependencies = [
  "srs_model",
  "thiserror 2.0.18",
@@ -365,18 +365,18 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "capnp"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58ddce707ad9fb2ae92770523cd0e17a0cf34e79b66a9ca4db2dd993535fe718"
+checksum = "6ebfc0da565e747b1640e029bfbda72f61f39fcddfc8b465b4ae3f3e8b649f78"
 dependencies = [
  "embedded-io",
 ]
 
 [[package]]
 name = "capnpc"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13aea06b902f885cb0313b11e900e96cd57fef775e9e601a96e14e1d655f3cd3"
+checksum = "82ca16312ddb64529d31c8dc46148671c22e57b80134fa5f17811ad5a6a79492"
 dependencies = [
  "capnp",
 ]
@@ -550,7 +550,7 @@ dependencies = [
 [[package]]
 name = "control_core"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#76e6372abc09058376d7ee6d2e733781afb8dbf2"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#3b9e8d21985d04dae5f9c462c4a561ee906cd7a4"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",
@@ -888,7 +888,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1454,7 +1454,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -2215,7 +2215,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#76e6372abc09058376d7ee6d2e733781afb8dbf2"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#3b9e8d21985d04dae5f9c462c4a561ee906cd7a4"
 dependencies = [
  "urdf-rs",
 ]
@@ -2607,7 +2607,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2647,9 +2647,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2966,7 +2966,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3034,7 +3034,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3494,7 +3494,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#76e6372abc09058376d7ee6d2e733781afb8dbf2"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#3b9e8d21985d04dae5f9c462c4a561ee906cd7a4"
 dependencies = [
  "k",
  "thiserror 2.0.18",
@@ -3632,7 +3632,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4365,7 +4365,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

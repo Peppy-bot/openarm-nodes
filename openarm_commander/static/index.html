@@ -280,10 +280,14 @@ const JOINT_AXIS = 200 * PI / 180;
 // stays clear of the elbow singularity at 0 (which its lower limit excludes).
 const HOME_ELBOW_J4 = 0.1;
 // World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
-// `pose`/`pose_feedback`. Orientation (indices 3..5, euler) is not shown directly; the
-// arcball composes it on quaternions instead. Each slider's reachable band comes from
-// the snapshot's per-side `pos_bounds` (the arm's reachable envelope, computed per
-// generation), applied each frame like the joint limits, so v1 and v2 both work.
+// `pose`/`pose_feedback`. That pose is the gripper's grasp point (between the pads),
+// not the wrist it mounts on, so dialling an object's centre puts the pads around it.
+// Orientation (indices 3..5, euler) is not shown directly; the arcball composes it on
+// quaternions instead. Each slider's band comes from the snapshot's per-side
+// `pos_bounds`, applied each frame like the joint limits, so v1 and v2 both work. That
+// band is each axis's true limit with the other two at their best case, so a target
+// dialled inside it can still be refused by the backbone's IK: reaching a given x may
+// need a y and z the operator did not ask for.
 const POS_AXES = [
   {i: 0, label: 'x'},
   {i: 1, label: 'y'},
