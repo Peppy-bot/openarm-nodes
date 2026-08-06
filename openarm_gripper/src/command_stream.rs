@@ -36,7 +36,7 @@ pub async fn run(
             _ = token.cancelled() => return,
             received = subscription.next() => received,
         };
-        let (_producer, msg) = match received {
+        let (_peer, msg) = match received {
             Ok(Some(pair)) => pair,
             Ok(None) => return,
             Err(e) => {

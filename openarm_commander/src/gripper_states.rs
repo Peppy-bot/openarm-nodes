@@ -46,14 +46,14 @@ pub async fn run(
                 "observed_left_gripper",
                 Side::Left,
                 received.map(|pair| {
-                    pair.map(|(_producer, msg)| (msg.opening, msg.max_effort))
+                    pair.map(|(_source, msg)| (msg.opening, msg.max_effort))
                 }),
             ),
             received = right_subscription.next() => (
                 "observed_right_gripper",
                 Side::Right,
                 received.map(|pair| {
-                    pair.map(|(_producer, msg)| (msg.opening, msg.max_effort))
+                    pair.map(|(_source, msg)| (msg.opening, msg.max_effort))
                 }),
             ),
         };

@@ -47,12 +47,12 @@ pub async fn run(
             received = left_subscription.next() => (
                 "observed_left_arm",
                 Side::Left,
-                received.map(|pair| pair.map(|(_producer, msg)| msg.positions)),
+                received.map(|pair| pair.map(|(_source, msg)| msg.positions)),
             ),
             received = right_subscription.next() => (
                 "observed_right_arm",
                 Side::Right,
-                received.map(|pair| pair.map(|(_producer, msg)| msg.positions)),
+                received.map(|pair| pair.map(|(_source, msg)| msg.positions)),
             ),
         };
         let positions = match received {

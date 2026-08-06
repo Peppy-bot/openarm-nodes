@@ -111,7 +111,7 @@ class SimTopicIO:
                 logger.warning(f"{topic.LINK_ID} setpoint consume error: {exc}")
                 await asyncio.sleep(0.1)
                 continue
-            _producer, msg = pair
+            _peer, msg = pair
             # Drop a poisoned setpoint rather than writing NaN/Inf into the sim.
             if not all(math.isfinite(v) for v in msg.positions) or not all(
                 math.isfinite(v) for v in msg.velocities
@@ -138,7 +138,7 @@ class SimTopicIO:
                 logger.warning(f"{topic.LINK_ID} setpoint consume error: {exc}")
                 await asyncio.sleep(0.1)
                 continue
-            _producer, msg = pair
+            _peer, msg = pair
             if not math.isfinite(msg.opening):
                 logger.warning(f"dropping non-finite gripper setpoint on {topic.LINK_ID}")
                 continue
