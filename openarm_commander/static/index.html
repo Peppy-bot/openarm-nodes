@@ -965,18 +965,17 @@ function apply_snapshot(snap) {
         const [lo, hi] = a.limits[i];
         set_reachable(`${side}_j${i}`, lo, hi, -JOINT_AXIS, JOINT_AXIS, fmtRadAsDeg);
       }
-      // While disabled the slider mirrors the measured pose (you must enable to
-      // move), so the thumb shows where the arm is and enabling never jumps. While
-      // enabled it mirrors the streamed target, so a pose-field edit (solved to
-      // joints server-side) shows on the sliders too - except the joint the operator
-      // is actively dragging, which we must not fight.
+      // The slider mirrors the held target, so a pose-field edit (solved to
+      // joints server-side) shows on the sliders too - except the joint the
+      // operator is actively dragging, which we must not fight. The caret and
+      // the grey column carry the measured pose.
       // Freeze only the space being composed in actions mode; the other space keeps
       // tracking the setpoint, so a pose Execute's IK shows on the joint sliders (and
-      // a joint Execute's FK shows on the pose controls). Streaming-disabled shows
-      // measured so enabling never jumps; otherwise the sliders mirror the setpoint.
+      // a joint Execute's FK shows on the pose controls). The sliders mirror the
+      // setpoint; the caret and the grey column carry the measured pose.
       const composingJoints = uiMode === 'actions' && touched[side] === 'joints';
       if (!composingJoints && document.activeElement !== el) {
-        const src = (uiMode === 'streaming' && !on) ? a.feedback : a.joints;
+        const src = a.joints;
         if (src) {
           el.value = src[i];
           $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(src[i]);
@@ -1002,31 +1001,31 @@ function apply_snapshot(snap) {
       $(`${side}_p${i}_f`).textContent = a.pose_feedback ? fmt(a.pose_feedback[i]) : '---';
       const composingPose = uiMode === 'actions' && touched[side] === 'pose';
       if (!composingPose && document.activeElement !== el) {
-        const src = (uiMode === 'streaming' && !on) ? a.pose_feedback : a.pose;
+        const src = a.pose;
         if (src) { el.value = src[i]; $(`${side}_p${i}_t`).textContent = fmt(src[i]); }
       }
       place_caret(`${side}_p${i}`, a.pose_feedback ? a.pose_feedback[i] : null, posMin, posMax);
     }
-    // Orientation arcball: sync the target from the setpoint's orientation quaternion
-    // (or measured while streaming-disabled) unless composing orientation or mid-drag;
-    // render always, so the measured frame shows beneath the target.
+    // Orientation arcball: sync the target from the setpoint's orientation
+    // quaternion unless composing orientation or mid-drag; render always, so
+    // the measured frame shows beneath the target.
     const composingOrient = uiMode === 'actions' && touched[side] === 'pose';
     if (!composingOrient && arcballDrag.side !== side) {
-      const src = (uiMode === 'streaming' && !on) ? a.orientation_feedback : a.orientation;
+      const src = a.orientation;
       if (src) quatTargetCam[side] = qmul(VQ, src);
     }
     render_arcball(side);
 
-    // Elbow (arm angle): streaming-only. The slider shows the target psi (measured while
-    // streaming-disabled), the caret shows measured; disabled in actions, where the backbone
-    // plans the elbow for straight-line moves.
+    // Elbow (arm angle): streaming-only. The slider shows the target psi, the
+    // caret shows measured; disabled in actions, where the backbone plans the
+    // elbow for straight-line moves.
     const psiEl = $(`${side}_psi`);
     // Live slider in streaming; in actions drop the thumb (readonly-track) so it reads
     // as a current-position indicator (red tick only), not a dead slider.
     psiEl.disabled = uiMode !== 'streaming';
     psiEl.classList.toggle('readonly-track', uiMode !== 'streaming');
     if (document.activeElement !== psiEl) {
-      const src = (uiMode === 'streaming' && !on) ? a.arm_angle_feedback : a.arm_angle;
+      const src = a.arm_angle;
       if (src != null) { psiEl.value = src; $(`${side}_psi_t`).textContent = fmtRadAsDeg(src); }
     }
     $(`${side}_psi_f`).textContent = a.arm_angle_feedback != null ? fmtRadAsDeg(a.arm_angle_feedback) : '---';
@@ -1041,15 +1040,11 @@ function apply_snapshot(snap) {
     gs.classList.toggle('readonly-track', viewing);
     if (gs.min != g.min) gs.min = g.min;
     if (gs.max != g.max) gs.max = g.max;
-    // Streaming: while disabled the slider mirrors the measured opening so enabling
-    // never jumps. Actions: the slider holds the composed value the Execute fires.
-    // Gestures: it mirrors the played opening.
+    // The slider holds the commanded opening (the composed value an Execute
+    // fires in actions). Gestures: it mirrors the played opening.
     if (viewing) {
       gs.value = g.position;
       $(`${side}_gt`).textContent = g.position.toFixed(3);
-    } else if (uiMode === 'streaming' && !on && g.feedback != null) {
-      gs.value = g.feedback;
-      $(`${side}_gt`).textContent = g.feedback.toFixed(3);
     }
     $(`${side}_gf`).textContent = g.feedback != null
       ? g.feedback.toFixed(3)
