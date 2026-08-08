@@ -7,7 +7,7 @@
   peppy_schema: "node/v1",
   manifest: {
     name: "openarm_sim_isaac",
-    tag: "v1",
+    tag: "v6",
     depends_on: {
       pairings: [
         // The engine plays the follower role of every limb's pairing directly,
@@ -47,6 +47,7 @@
         "/run/user",
         "~/.cache/isaac-sim/kit/cache:/isaac-sim/kit/cache:rw",
         "~/.cache/isaac-sim/kit/data:/isaac-sim/kit/data:rw",
+        "~/.cache/isaac-sim-6/kit-logs:/isaac-sim/kit/logs:rw",
       ],
     },
     parameters: {

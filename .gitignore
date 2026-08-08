@@ -61,3 +61,23 @@ htmlcov/
 
 # Local git worktrees
 .worktrees/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Peppy / Isaac runtime
+*.sif
+*.log
+.peppy/
+
+# Local caches
+.cache/
+
+# Editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
