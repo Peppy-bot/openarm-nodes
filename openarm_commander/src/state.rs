@@ -148,6 +148,37 @@ impl GripperTarget {
     }
 }
 
+/// Dataset recorder panel state. `available` is resolved once at startup from
+/// the recorder slot's bound producers (the slot is zero_or_more, so a
+/// deployment without a recorder hides the panel); `episode` is `Some` while a
+/// record goal is in flight.
+#[derive(Clone, Debug)]
+pub struct RecorderState {
+    pub available: bool,
+    pub episode: Option<RecordingEpisode>,
+    // A finish_session call is in flight (finalize + mirror of the current
+    // dataset); gates the panel's Finish button.
+    pub finishing: bool,
+}
+
+/// One in-flight record_episode goal: the live frame count from its feedback
+/// stream and the token that stops it (cancel = stop and save).
+#[derive(Clone, Debug)]
+pub struct RecordingEpisode {
+    pub frames: u64,
+    pub stop: tokio_util::sync::CancellationToken,
+}
+
+impl RecorderState {
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            episode: None,
+            finishing: false,
+        }
+    }
+}
+
 /// A gesture in flight: the baked trajectory plus where playback is. `Arc`
 /// keeps the per-tick playback advance cheap (each step re-clones the handle,
 /// never the trajectory).
@@ -210,6 +241,9 @@ pub struct UiState {
     // n/a) once that receipt time ages past the readout staleness window, so a dead
     // backbone does not leave the last distance latched on the panel.
     pub proximity: Option<Proximity>,
+    // The dataset recorder panel; hidden entirely when the deployment binds no
+    // recorder instance.
+    pub recorder: RecorderState,
     pub status: String,
 }
 
@@ -264,6 +298,7 @@ impl UiState {
             max_ee_velocity_m_s,
             joint_jog_acceleration_rad_s2,
             proximity: None,
+            recorder: RecorderState::unavailable(),
             status: "ready".to_string(),
         }
     }

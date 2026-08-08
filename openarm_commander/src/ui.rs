@@ -174,7 +174,9 @@ async fn ws_handle(mut socket: WebSocket, app: AppState) {
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<Command>(text.as_str()) {
                     Ok(cmd) => { let _ = app.command_tx.send(UiMsg::Command(cmd)).await; }
-                    Err(e) => warn!(error = %e, payload = %text, "ws: bad command"),
+                    // Payload withheld: it carries operator free text (task
+                    // names) and arbitrary bytes from the wire.
+                    Err(e) => warn!(error = %e, payload_bytes = text.len(), "ws: bad command"),
                 },
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Err(e)) => { warn!(error = %e, "ws: recv"); break; }
@@ -253,7 +255,22 @@ struct Snapshot {
     gestures: Vec<GestureView>,
     // The gesture in flight, if any.
     gesture: Option<GestureStatusView>,
+    // The dataset recorder panel; null when the deployment binds no recorder
+    // (the browser hides the panel entirely).
+    recorder: Option<RecorderView>,
     status: String,
+}
+
+#[derive(Serialize)]
+struct RecorderView {
+    recording: bool,
+    // finish_session in flight (finalize + mirror); gates the Finish button.
+    finishing: bool,
+    // Stop was requested and the episode is encoding its videos; the goal
+    // stays in flight (and `recording` true) until the save lands.
+    saving: bool,
+    // Frames written to the in-flight episode; 0 between episodes.
+    frames: u64,
 }
 
 #[derive(Serialize)]
@@ -362,6 +379,16 @@ impl Snapshot {
             d_stop: s.d_stop,
             d_safe: s.d_safe,
             max_ee_velocity_m_s: s.max_ee_velocity_m_s,
+            recorder: s.recorder.available.then(|| RecorderView {
+                recording: s.recorder.episode.is_some(),
+                finishing: s.recorder.finishing,
+                saving: s
+                    .recorder
+                    .episode
+                    .as_ref()
+                    .is_some_and(|e| e.stop.is_cancelled()),
+                frames: s.recorder.episode.as_ref().map_or(0, |e| e.frames),
+            }),
             proximity: live_proximity(s, now).map(|p| ProximityView {
                 distance: p.distance,
                 link_a: p.link_a.clone(),
@@ -490,6 +517,16 @@ pub(crate) enum Command {
     },
     // Stop the playing gesture; the involved sides hold where they are.
     StopGesture,
+    // Start recording a dataset episode labeled with the operator's task text.
+    // Refused when no recorder is bound or an episode is already recording.
+    StartRecording {
+        task: String,
+    },
+    // End the in-flight episode with a save (the recorder's cancel semantics).
+    StopRecording,
+    // Finalize and mirror the current session's dataset and open a fresh one;
+    // the finished directory becomes replayable. Refused while recording.
+    FinishSession,
 }
 
 #[derive(Deserialize, Copy, Clone)]
