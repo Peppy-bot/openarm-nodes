@@ -213,6 +213,9 @@
     font: 12.5px/1.4 ui-monospace, 'SF Mono', Menlo, monospace;
     color: var(--ink-70);
   }
+  #record_btn.recording { background:#c0392b; color:#fff; border-color:#c0392b; }
+  #record_btn.saving, #finish_btn.saving { background:#e67e22; color:#fff; border-color:#e67e22; animation: record_saving 1.1s ease-in-out infinite; }
+  @keyframes record_saving { 50% { opacity: 0.55; } }
 </style>
 </head>
 <body>
@@ -261,6 +264,12 @@
       Max EE (m/s)
       <input type="number" id="gov_max_ee" step="0.05" min="0.01" style="width:5.5em;" onchange="send_governor_params()">
     </label>
+  </div>
+  <div class="row" id="record_row" style="display:none; justify-content:center; gap:10px; align-items:center;">
+    <input type="text" id="record_task" placeholder="task, e.g. pick up the cube" style="width:22em;">
+    <button id="record_btn" onclick="toggle_recording()">Record</button>
+    <button id="finish_btn" onclick="finish_session()">Finish session</button>
+    <span id="record_frames" style="font-weight:600;"></span>
   </div>
   <div class="row" style="justify-content:center;">
     <div id="proximity" style="font-weight:600; padding:4px 10px; border-radius:4px;">closest pair: n/a</div>
@@ -1085,7 +1094,43 @@ function apply_snapshot(snap) {
   reflect_governor_input('gov_d_safe', snap.d_safe);
   reflect_governor_input('gov_max_ee', snap.max_ee_velocity_m_s);
   update_proximity(snap);
+  update_recorder(snap);
   $('status').textContent = snap.status;
+}
+
+// The recorder panel: hidden when the deployment binds no recorder; while an
+// episode records, the button turns Stop and the live frame count shows.
+let recording = false;
+function update_recorder(snap) {
+  const row = $('record_row');
+  if (!snap.recorder) { row.style.display = 'none'; recording = false; return; }
+  row.style.display = '';
+  recording = snap.recorder.recording;
+  const saving = snap.recorder.saving;
+  const finishing = snap.recorder.finishing;
+  const finishBtn = $('finish_btn');
+  finishBtn.textContent = finishing ? 'Finishing\u2026' : 'Finish session';
+  finishBtn.disabled = recording || finishing;
+  finishBtn.classList.toggle('saving', finishing);
+  const btn = $('record_btn');
+  btn.textContent = saving ? 'Saving\u2026' : recording ? 'Stop' : 'Record';
+  btn.disabled = saving || finishing;
+  btn.classList.toggle('recording', recording && !saving);
+  btn.classList.toggle('saving', saving);
+  $('record_task').disabled = recording;
+  $('record_frames').textContent = saving
+    ? `encoding ${snap.recorder.frames} frames\u2026`
+    : recording ? `${snap.recorder.frames} frames` : '';
+}
+
+function finish_session() {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'finish_session'}));
+}
+
+function toggle_recording() {
+  if (!ws || ws.readyState !== 1) return;
+  if (recording) ws.send(JSON.stringify({cmd: 'stop_recording'}));
+  else ws.send(JSON.stringify({cmd: 'start_recording', task: $('record_task').value}));
 }
 
 // Closest self-collision pair: distance in mm + the two links, colored black

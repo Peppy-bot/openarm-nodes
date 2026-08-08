@@ -9,6 +9,7 @@ mod move_arm_joints;
 mod move_gripper;
 mod owner;
 mod pose;
+mod record;
 mod result_wait;
 mod state;
 mod ui;
