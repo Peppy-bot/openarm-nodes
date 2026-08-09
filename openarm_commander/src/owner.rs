@@ -29,13 +29,14 @@ use crate::pose::{
     joint_jog_tick,
 };
 use crate::state::{
-    ARM_DOF, ArmTarget, BySide, GesturePhase, GesturePlayback, Proximity, SIDES, Side, UiState,
+    ARM_DOF, ArmTarget, BySide, GesturePhase, GesturePlayback, Proximity, RecordingEpisode, SIDES,
+    Side, UiState,
 };
 use crate::ui::{
     Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, sane_duration,
     valid_governor_band,
 };
-use crate::{move_arm, move_arm_joints, move_gripper};
+use crate::{move_arm, move_arm_joints, move_gripper, record};
 
 /// The browser snapshot cadence (10 Hz); the command tick runs far faster, so the
 /// FK-heavy snapshot is built here rather than every tick.
@@ -73,6 +74,20 @@ pub enum Feedback {
     },
     GripperGoalDone {
         side: Side,
+        summary: String,
+    },
+    // Live frame count from the in-flight record_episode goal's feedback.
+    RecordProgress {
+        frames: u64,
+    },
+    // The record goal reached a terminal state; the summary names the saved
+    // (or discarded) episode.
+    RecordDone {
+        summary: String,
+    },
+    // finish_session answered; the summary names the finished session or the
+    // refusal reason.
+    SessionFinished {
         summary: String,
     },
 }
@@ -211,6 +226,7 @@ pub async fn run(
         feedback_tx,
         pending: BySide::new(None, None),
     };
+    owner.state.recorder.available = record::available(&owner.runner);
 
     // Publish the starting frame and snapshot before the first tick, so the publishers
     // and any already-connected browser see real state at once rather than after a tick.
@@ -557,6 +573,68 @@ impl Owner {
                 self.state
                     .set_status(format!("collision avoidance {}", on_off(enabled)));
             }
+            Command::StartRecording { task } => {
+                if !self.state.recorder.available {
+                    self.state.set_status("no recorder in this deployment");
+                    return;
+                }
+                if self.state.recorder.episode.is_some() {
+                    self.state.set_status("already recording");
+                    return;
+                }
+                if self.state.recorder.finishing {
+                    self.state
+                        .set_status("finishing the session; wait for it to complete");
+                    return;
+                }
+                let task = task.trim().to_string();
+                if task.is_empty() {
+                    self.state.set_status("name the task before recording");
+                    return;
+                }
+                let stop = GoalToken::new();
+                self.state.recorder.episode = Some(RecordingEpisode {
+                    frames: 0,
+                    stop: stop.clone(),
+                });
+                self.state.set_status(format!("recording '{task}'"));
+                record::spawn(
+                    self.runner.clone(),
+                    self.feedback_tx.clone(),
+                    self.token.clone(),
+                    stop,
+                    task,
+                );
+            }
+            Command::FinishSession => {
+                if !self.state.recorder.available {
+                    self.state.set_status("no recorder in this deployment");
+                    return;
+                }
+                if self.state.recorder.episode.is_some() {
+                    self.state
+                        .set_status("stop recording before finishing the session");
+                    return;
+                }
+                if self.state.recorder.finishing {
+                    self.state.set_status("already finishing");
+                    return;
+                }
+                self.state.recorder.finishing = true;
+                self.state
+                    .set_status("finishing session (finalize + mirror)");
+                record::spawn_finish(self.runner.clone(), self.feedback_tx.clone());
+            }
+            Command::StopRecording => match &self.state.recorder.episode {
+                Some(episode) if episode.stop.is_cancelled() => {
+                    self.state.set_status("still saving the episode");
+                }
+                Some(episode) => {
+                    episode.stop.cancel();
+                    self.state.set_status("stopping episode, saving");
+                }
+                None => self.state.set_status("not recording"),
+            },
             Command::SetGovernorParams {
                 d_stop,
                 d_safe,
@@ -615,6 +693,19 @@ impl Owner {
             }
             Feedback::GripperGoalDone { side, summary } => {
                 self.state.grippers[side].in_flight = false;
+                self.state.set_status(summary);
+            }
+            Feedback::RecordProgress { frames } => {
+                if let Some(episode) = &mut self.state.recorder.episode {
+                    episode.frames = frames;
+                }
+            }
+            Feedback::RecordDone { summary } => {
+                self.state.recorder.episode = None;
+                self.state.set_status(summary);
+            }
+            Feedback::SessionFinished { summary } => {
+                self.state.recorder.finishing = false;
                 self.state.set_status(summary);
             }
         }

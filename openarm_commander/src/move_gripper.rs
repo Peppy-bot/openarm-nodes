@@ -64,9 +64,7 @@ async fn run(
     {
         Ok(handle) if handle.accepted => handle,
         Ok(handle) => {
-            let reason = handle
-                .reason
-                .unwrap_or_else(|| "no reason given".into());
+            let reason = handle.reason.unwrap_or_else(|| "no reason given".into());
             finalize(
                 &feedback,
                 side,

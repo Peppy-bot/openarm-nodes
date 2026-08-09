@@ -395,7 +395,7 @@ mod tests {
     ];
 
     fn v2_right_arm() -> Arm {
-        crate::arm_model(HardwareVersion::V2, "openarm_right_base_link")
+        crate::arm_model(HardwareVersion::V2, openarm_description::Side::Right)
             .expect("bundled v2 URDF builds")
     }
 
@@ -409,6 +409,22 @@ mod tests {
                 quat_xyzw[2],
             )),
         )
+    }
+
+    /// A field-recorded pose, in the chain-tip frame it was captured in, re-expressed
+    /// at the tool the planner solves for. The recorded numbers stay verbatim and the
+    /// arm runs the motion that was reported, which is what makes these field cases
+    /// regressions rather than arbitrary coordinates. Reads the model's own mounted
+    /// tool, so the conversion follows the description.
+    fn recorded_tip_pose(model: &Arm, position: [f64; 3], quat_xyzw: [f64; 4]) -> Isometry3<f64> {
+        world_pose(position, quat_xyzw) * model.tool()
+    }
+
+    /// World-frame chain-tip pose at `q`: the frame the field readouts below are
+    /// recorded in.
+    fn tip_world(model: &mut Arm, q: &JointVec) -> Isometry3<f64> {
+        let tip = model.at(q).tip_pose();
+        model.world_pose(&tip)
     }
 
     const TEST_EE_CAP_M_S: f64 = 0.5;
@@ -489,11 +505,13 @@ mod tests {
     #[test]
     fn cross_body_pull_runs_the_guarded_servo() {
         let mut model = v2_right_arm();
-        let start = world_pose(
+        let start = recorded_tip_pose(
+            &model,
             [0.0715597403410507, -0.179708420505458, 0.448631054180598],
             REPRO_QUAT,
         );
-        let end = world_pose(
+        let end = recorded_tip_pose(
+            &model,
             [-0.178440259658949, -0.179708420505458, 0.448631054180598],
             REPRO_QUAT,
         );
@@ -524,12 +542,13 @@ mod tests {
     #[test]
     fn pull_from_ready_to_x_minus_02_reaches_via_servo() {
         let mut model = v2_right_arm();
-        let start = {
-            let ee = model.at(&READY).ee_pose();
-            model.world_pose(&ee)
-        };
-        let mut end = start;
-        end.translation.vector.x = -0.2;
+        // The recorded pull is a tip coordinate, so -0.2 is placed there and carried
+        // to the tool: the same physical motion, in the frame commanded.
+        let start_tip = tip_world(&mut model, &READY);
+        let mut end_tip = start_tip;
+        end_tip.translation.vector.x = -0.2;
+        let tool = model.tool();
+        let (start, end) = (start_tip * tool, end_tip * tool);
         let plan = plan_cartesian(&mut model, &start, &end, READY, &v2_limits(), 2.0)
             .expect("the pull must be reachable, as streaming proves live");
         if let CartesianPlan::Servo { duration_s } = plan {
@@ -610,6 +629,11 @@ mod tests {
     // as progress. Exercises the law directly with a large in-place
     // reorientation, where reference advance and position shrink both go quiet
     // while the wrist is still turning.
+    //
+    // In place means about the grasp point, so the wrist orbits it rather than
+    // spinning where it is, and from Ready the elbow reaches its singularity floor
+    // beyond ~0.8 rad. This turns as far as that posture allows; the servo path
+    // under test is the same one either side of that bound.
     #[test]
     fn pure_reorientation_converges_in_the_servo_law() {
         let mut model = v2_right_arm();
@@ -618,7 +642,7 @@ mod tests {
             model.world_pose(&ee)
         };
         let mut end = start;
-        end.rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 1.2) * end.rotation;
+        end.rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.7) * end.rotation;
         run_servo_to_convergence(&mut model, &start, &end, READY);
     }
 
@@ -630,11 +654,13 @@ mod tests {
     #[test]
     fn small_nudge_after_a_servo_move_stays_a_quiet_line() {
         let mut model = v2_right_arm();
-        let start = world_pose(
+        let start = recorded_tip_pose(
+            &model,
             [0.0715597403410507, -0.179708420505458, 0.448631054180598],
             REPRO_QUAT,
         );
-        let end = world_pose(
+        let end = recorded_tip_pose(
+            &model,
             [-0.178440259658949, -0.179708420505458, 0.448631054180598],
             REPRO_QUAT,
         );
@@ -806,7 +832,7 @@ mod tests {
 
     fn left_arm() -> Arm {
         let version = openarm_description::HardwareVersion::V1;
-        crate::arm_model(version, version.base_link(openarm_description::Side::Left))
+        crate::arm_model(version, openarm_description::Side::Left)
             .expect("build left arm from bundled URDF")
     }
 
@@ -1043,15 +1069,15 @@ mod tests {
     fn steered_elbow_tier_engages_on_a_graze() {
         let mut model = v2_right_arm();
         let seed = READY;
-        let start = {
-            let ee = model.at(&seed).ee_pose();
-            model.world_pose(&ee)
-        };
-
-        let mut end = start;
-        end.translation.vector.x = 0.0325;
-        end.translation.vector.y = -0.3125;
-        end.translation.vector.z = 0.6900;
+        // The graze is a tip coordinate, so the target is placed there and carried to
+        // the tool: the same line through the same near-singular posture.
+        let start_tip = tip_world(&mut model, &seed);
+        let mut end_tip = start_tip;
+        end_tip.translation.vector.x = 0.0325;
+        end_tip.translation.vector.y = -0.3125;
+        end_tip.translation.vector.z = 0.6900;
+        let tool = model.tool();
+        let (start, end) = (start_tip * tool, end_tip * tool);
 
         // Held elbow alone cannot track this straight line...
         assert!(
