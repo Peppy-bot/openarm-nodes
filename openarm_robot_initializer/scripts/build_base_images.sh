@@ -26,9 +26,10 @@ export RCLONE_S3_ACCESS_KEY_ID="${RCLONE_S3_ACCESS_KEY_ID:?RCLONE_S3_ACCESS_KEY_
 export RCLONE_S3_SECRET_ACCESS_KEY="${RCLONE_S3_SECRET_ACCESS_KEY:?RCLONE_S3_SECRET_ACCESS_KEY must be set}"
 
 # ── Version manifest ──────────────────────────────────────────────────────────
-ISAAC_VERSION="5.1.0"    # mirrors nvcr.io/nvidia/isaac-sim upstream version
+ISAAC_VERSION="6.0.1"    # mirrors nvcr.io/nvidia/isaac-sim upstream version
 MUJOCO_VERSION="3.10.0"  # mirrors mujoco PyPI version (requirements.mujoco.txt)
-IMAGE_REV="20"           # bump when image content changes without an upstream version bump
+ISAAC_IMAGE_REV="1"      # bump when Isaac image content changes without an upstream version bump
+MUJOCO_IMAGE_REV="20"      # existing MuJoCo image revision
 IMAGE_NAMESPACE="peppybot"  # Docker Hub namespace these base images are pushed to
 
 # Target platforms. MuJoCo ships wheels for both arches; Isaac Sim is amd64 only.
@@ -37,10 +38,28 @@ ISAAC_PLATFORMS="linux/amd64"
 BUILDX_BUILDER="peppy-multiarch"
 # ─────────────────────────────────────────────────────────────────────────────
 
+BUILD_ISAAC=1
+BUILD_MUJOCO=1
+
+case "${1:-}" in
+    --isaac-only)
+        BUILD_MUJOCO=0
+        ;;
+    --mujoco-only)
+        BUILD_ISAAC=0
+        ;;
+    "")
+        ;;
+    *)
+        echo "Usage: $0 [--isaac-only|--mujoco-only]" >&2
+        exit 2
+        ;;
+esac
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-ISAAC_IMAGE="${IMAGE_NAMESPACE}/openarm-isaac-sim:${ISAAC_VERSION}-${IMAGE_REV}"
-MUJOCO_IMAGE="${IMAGE_NAMESPACE}/openarm-mujoco-sim:${MUJOCO_VERSION}-${IMAGE_REV}"
+ISAAC_IMAGE="${IMAGE_NAMESPACE}/openarm-isaac-sim:${ISAAC_VERSION}-${ISAAC_IMAGE_REV}"
+MUJOCO_IMAGE="${IMAGE_NAMESPACE}/openarm-mujoco-sim:${MUJOCO_VERSION}-${MUJOCO_IMAGE_REV}"
 
 # ── buildx + cross-arch emulation setup ───────────────────────────────────────
 # Multi-arch builds need a docker-container driver builder; the default "docker"
@@ -96,32 +115,40 @@ for platform in ${ISAAC_PLATFORMS//,/ } ${MUJOCO_PLATFORMS//,/ }; do
 done
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "==> Building + pushing Isaac base image (${ISAAC_IMAGE}) [${ISAAC_PLATFORMS}]..."
-docker buildx build \
-    --builder "${BUILDX_BUILDER}" \
-    --platform "${ISAAC_PLATFORMS}" \
-    --allow network.host \
-    --network=host \
-    --secret id=rclone_key,env=RCLONE_S3_ACCESS_KEY_ID \
-    --secret id=rclone_secret,env=RCLONE_S3_SECRET_ACCESS_KEY \
-    --build-arg ISAAC_VERSION="${ISAAC_VERSION}" \
-    -t "${ISAAC_IMAGE}" \
-    -f "${REPO_ROOT}/scripts/Dockerfile.isaac" \
-    --push \
-    "${REPO_ROOT}"
+if (( BUILD_ISAAC )); then
+    echo "==> Building + pushing Isaac base image (${ISAAC_IMAGE}) [${ISAAC_PLATFORMS}]..."
+    docker buildx build \
+        --builder "${BUILDX_BUILDER}" \
+        --platform "${ISAAC_PLATFORMS}" \
+        --allow network.host \
+        --network=host \
+        --secret id=rclone_key,env=RCLONE_S3_ACCESS_KEY_ID \
+        --secret id=rclone_secret,env=RCLONE_S3_SECRET_ACCESS_KEY \
+        --build-arg ISAAC_VERSION="${ISAAC_VERSION}" \
+        -t "${ISAAC_IMAGE}" \
+        -f "${REPO_ROOT}/scripts/Dockerfile.isaac" \
+        --push \
+        "${REPO_ROOT}"
+else
+    echo "==> Skipping Isaac base image build."
+fi
 
-echo "==> Building + pushing MuJoCo base image (${MUJOCO_IMAGE}) [${MUJOCO_PLATFORMS}]..."
-docker buildx build \
-    --builder "${BUILDX_BUILDER}" \
-    --platform "${MUJOCO_PLATFORMS}" \
-    --allow network.host \
-    --network=host \
-    --secret id=rclone_key,env=RCLONE_S3_ACCESS_KEY_ID \
-    --secret id=rclone_secret,env=RCLONE_S3_SECRET_ACCESS_KEY \
-    -t "${MUJOCO_IMAGE}" \
-    -f "${REPO_ROOT}/scripts/Dockerfile.mujoco" \
-    --push \
-    "${REPO_ROOT}"
+if (( BUILD_MUJOCO )); then
+    echo "==> Building + pushing MuJoCo base image (${MUJOCO_IMAGE}) [${MUJOCO_PLATFORMS}]..."
+    docker buildx build \
+        --builder "${BUILDX_BUILDER}" \
+        --platform "${MUJOCO_PLATFORMS}" \
+        --allow network.host \
+        --network=host \
+        --secret id=rclone_key,env=RCLONE_S3_ACCESS_KEY_ID \
+        --secret id=rclone_secret,env=RCLONE_S3_SECRET_ACCESS_KEY \
+        -t "${MUJOCO_IMAGE}" \
+        -f "${REPO_ROOT}/scripts/Dockerfile.mujoco" \
+        --push \
+        "${REPO_ROOT}"
+else
+    echo "==> Skipping MuJoCo base image build."
+fi
 
 # ── Sync sim node apptainer.def From: tags ────────────────────────────────────
 # This manifest owns the base image tags; the sibling sim nodes track it here
