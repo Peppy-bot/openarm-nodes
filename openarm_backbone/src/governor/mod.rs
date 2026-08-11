@@ -1033,6 +1033,39 @@ mod tests {
         );
     }
 
+    // The band is entered at whatever the always-on speed limiters allow, which
+    // is well above the in-band allowance, so the floor has to hold for an
+    // approach that arrives fast: the ramp shapes the crossing and the exact
+    // scan is what guarantees it. The chase here is an order of magnitude
+    // quicker than the one above.
+    #[test]
+    fn a_fast_approach_into_the_band_still_holds_the_floor() {
+        let mut g = governor(true);
+        let target = wrists_inward(1.5);
+        let mut q = at(home());
+        let mut crossed_fast = false;
+        for _ in 0..250 {
+            let prev = q;
+            let d_prev = distance(&mut g, &prev);
+            let cand = at(chase(&prev.arms, &target, 0.25));
+            q = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
+            let d = distance(&mut g, &q);
+            // What makes this a fast entry rather than a slower rerun: the tick
+            // that crosses d_safe closes faster than the in-band allowance.
+            crossed_fast |=
+                d_prev > D_SAFE && d < D_SAFE && (d_prev - d) / DT > APPROACH_VELOCITY_AT_SAFE_M_S;
+            assert!(d >= D_STOP, "barrier breached: d={d:+.5}");
+            assert!(
+                segment_min(&mut g, &prev, &q, 64) >= D_STOP - 1e-3,
+                "the prev->governed path dipped below the stop"
+            );
+        }
+        assert!(
+            crossed_fast,
+            "never crossed d_safe faster than the in-band allowance"
+        );
+    }
+
     /// Deterministic pseudo-random configurations, so a walk that finds
     /// something can be replayed from its seed.
     struct Lcg(u64);

@@ -121,8 +121,8 @@ field pose.
 | `move_arm_joints` | `arm_id`, 7 joint positions (rad), `duration_s` | non-finite, negative duration, out of joint limits, side busy |
 | `move_arm` | `arm_id`, world pose (position m + quaternion `[x, y, z, w]`), `duration_s` | non-finite, degenerate quaternion, negative duration, side busy |
 | `move_gripper` | `gripper_id`, opening fraction in [0, 1], `max_effort` | non-finite, out of range, negative effort cap, side busy |
-| `move_to_ready` | `duration_s` (the postures contract; both arms to the Ready posture) | non-finite, negative duration, either arm busy |
-| `move_to_home` | `duration_s` (the postures contract; both arms to the Home rest) | non-finite, negative duration, either arm busy |
+| `move_to_ready` | `duration_s` (the postures contract; both arms to the Ready posture) | non-finite, negative duration, over 600 s, either arm busy |
+| `move_to_home` | `duration_s` (the postures contract; both arms to the Home rest) | non-finite, negative duration, over 600 s, either arm busy |
 
 `arm_id`/`gripper_id`: 0 = left, 1 = right. Every world pose here, commanded or
 reported, is the gripper's **grasp point** (midway between the pads on the jaw
@@ -180,8 +180,10 @@ streams is read and the arms never move.
 rotation of streamed poses and the servo reference; unlike the linear cap it
 is launch-time only, not retuned by the live speed control. All ten pairing slots (six toward the
 leading node, four toward the followers) are optional and established by the
-launcher; publishing on an unpaired slot is a legal no-op, so partial
-deployments and monitors boot cleanly.
+launcher: each one either names a peer, from this instance's `links` or the
+peer's own, or is declared `{ vacant: "<why>" }`, and a slot left unmentioned
+by both ends fails launch validation. Publishing on a vacant slot is a legal
+no-op, so partial deployments and monitors boot cleanly.
 
 ## Build, run, test
 
