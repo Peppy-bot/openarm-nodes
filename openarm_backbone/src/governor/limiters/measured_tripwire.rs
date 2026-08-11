@@ -157,7 +157,7 @@ impl Limiter for MeasuredTripwire<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ARM_DOF;
+    use crate::types::ARM_DOF;
 
     use super::super::super::{GOV_DOF, LEFT_GRIPPER, RIGHT_GRIPPER};
     use super::*;

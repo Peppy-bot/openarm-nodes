@@ -4,7 +4,7 @@ use srs_model::nalgebra::{Isometry3, Translation3};
 use srs_model::{Arm, ArmAnglePolicy};
 
 use crate::servo::EeCaps;
-use crate::{ARM_DOF, JointVec};
+use crate::types::{ARM_DOF, JointVec};
 
 /// Quintic minimum-jerk trajectory in joint space.
 pub struct JointTrajectory {

@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use srs_model::nalgebra::Isometry3;
 
-use crate::JointVec;
+use crate::types::JointVec;
 
 /// Which upstream slot kind this instance follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

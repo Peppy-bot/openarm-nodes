@@ -36,8 +36,9 @@ use bimanual_collision_model::BimanualCollisionModel;
 use srs_model::Jacobian;
 use tracing::{info, warn};
 
+use crate::arm_pair::ArmPair;
 use crate::torso::{TORSO_BODY, torso_regions};
-use crate::{ARM_DOF, ArmPair, JointVec};
+use crate::types::{ARM_DOF, JointVec};
 
 mod barrier;
 mod limiters;

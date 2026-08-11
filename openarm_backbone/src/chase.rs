@@ -7,7 +7,7 @@
 
 use srs_model::Limit;
 
-use crate::{ARM_DOF, JointVec};
+use crate::types::{ARM_DOF, JointVec};
 
 /// Advance `from` one tick toward `target`, moving at most `rate * dt`. A
 /// target within reach lands on it exactly.

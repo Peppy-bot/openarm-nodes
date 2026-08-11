@@ -26,11 +26,8 @@ mod trajectory;
 mod types;
 mod upstream;
 
-pub(crate) use arm_pair::ArmPair;
-pub(crate) use types::{
-    ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out, pose_from_wire,
-    world_pose_arrays,
-};
+use crate::arm_pair::ArmPair;
+use crate::types::{JointVec, Side};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

@@ -25,8 +25,8 @@ use peppygen::paired_topics::{
 use tokio::sync::watch;
 use tracing::{error, warn};
 
+use crate::types::{JointVec, Side, pose_from_wire};
 use crate::upstream::Upstream;
-use crate::{JointVec, Side, pose_from_wire};
 
 /// At most one dropped-message warning per stream (and one build/stamp error
 /// per publisher) in this window, so a misrouted producer or a stalled clock
@@ -80,7 +80,7 @@ pub(crate) fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
 
 /// Parses one paired arm's inbound joint_states payload. This backbone drives
 /// fixed 7-joint arms whose followers always measure velocity, so a message
-/// must carry exactly [`crate::ARM_DOF`] positions with matching velocities,
+/// must carry exactly [`crate::types::ARM_DOF`] positions with matching velocities,
 /// all finite; the generic contract's empty-velocities form is deliberately
 /// rejected here rather than half-accepted.
 fn parse_joint_state(positions: Vec<f64>, velocities: Vec<f64>) -> Result<ArmState, &'static str> {
@@ -103,7 +103,7 @@ fn parse_joint_state(positions: Vec<f64>, velocities: Vec<f64>) -> Result<ArmSta
     })
 }
 
-/// Parses one commanded arm setpoint: exactly [`crate::ARM_DOF`] finite
+/// Parses one commanded arm setpoint: exactly [`crate::types::ARM_DOF`] finite
 /// positions. The wire's velocities and efforts are not parsed: the backbone
 /// plans its own velocity shaping over the governed position stream.
 fn parse_joint_command(positions: Vec<f64>) -> Result<Upstream, &'static str> {
@@ -453,7 +453,7 @@ pub async fn run_governor_config_listener(
 mod tests {
     use super::*;
 
-    use crate::ARM_DOF;
+    use crate::types::ARM_DOF;
     use srs_model::nalgebra::{Isometry3, Vector3};
 
     #[test]

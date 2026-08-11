@@ -29,8 +29,9 @@ use peppylib::{Payload, TopicPublisher};
 use srs_model::nalgebra::Isometry3;
 use tracing::{error, warn};
 
+use crate::arm_pair::ArmPair;
 use crate::streams::{GripperState, warn_throttled};
-use crate::{ArmPair, JointVec, world_pose_arrays};
+use crate::types::{JointVec, world_pose_arrays};
 
 /// Pairing stamp from the daemon-resolved clock (sim time under a simulated
 /// clock), so consumers age samples on the same timeline they read. Errors

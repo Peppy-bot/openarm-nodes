@@ -13,9 +13,9 @@ use peppygen::{NodeRunner, Result};
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::Side;
 use crate::actions::claim;
 use crate::planner::{Goal, JointReply, ReadyOutcome, ReadyReply};
+use crate::types::Side;
 
 /// This crate's side in the description's vocabulary.
 fn model_side(side: Side) -> openarm_description::Side {

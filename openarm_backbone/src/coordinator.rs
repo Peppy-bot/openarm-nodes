@@ -25,14 +25,15 @@ use tracing::{error, info, warn};
 
 use control_core::{Pacer, filters::LowPassFilter};
 
+use crate::arm_pair::ArmPair;
 use crate::chase::rate_limited;
 use crate::governor::{GovState, Governor, Guard};
 use crate::liveness::{self, Admission, Liveness};
 use crate::planner::{self, BusyGuard, Goal, Planner};
 use crate::publish::Publishers;
 use crate::streams::{ArmState, GovernorConfig, GripperCommand, GripperState};
+use crate::types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 use crate::upstream::{Upstream, UpstreamMode};
-use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
 
 /// How long [`seed_all`] waits for an arm's first measured state before warning that
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an

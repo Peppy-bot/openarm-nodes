@@ -32,7 +32,7 @@ use srs_model::nalgebra::{Isometry3, Rotation3, Vector3};
 
 use crate::chase::rate_limited;
 use crate::trajectory::{PlanLimits, interpolate_pose};
-use crate::{ARM_DOF, JointVec};
+use crate::types::{ARM_DOF, JointVec};
 
 /// Damping for the damped-least-squares resolved-rate step (Chiaverini/Nakamura):
 /// heavy enough to stay bounded through singular postures, light enough not to

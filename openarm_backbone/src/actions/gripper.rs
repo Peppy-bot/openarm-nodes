@@ -15,9 +15,9 @@ use peppygen::{NodeRunner, Result};
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::Side;
 use crate::actions::claim;
 use crate::coordinator::GripperGoal;
+use crate::types::Side;
 
 /// Expose `move_gripper`: validate + claim, then hand the goal to the
 /// coordinator. The coordinator releases the busy slot when the move ends.

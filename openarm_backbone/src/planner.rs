@@ -31,8 +31,10 @@ use crate::trajectory::{
     ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory, PlanLimits,
     plan_cartesian, subdivided_blends,
 };
+use crate::types::{
+    ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out, world_pose_arrays,
+};
 use crate::upstream::Upstream;
-use crate::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out, world_pose_arrays};
 
 /// Slack the runtime per-tick Cartesian velocity check allows over the planned
 /// limit before aborting (mirrors the arm's backstop over the up-front plan,

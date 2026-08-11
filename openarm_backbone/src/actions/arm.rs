@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::planner::{Goal, JointReply};
-use crate::{ARM_DOF, JointVec, Side, pose_from_wire};
+use crate::types::{ARM_DOF, JointVec, Side, pose_from_wire};
 
 use crate::actions::claim;
 
