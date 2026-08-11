@@ -56,6 +56,7 @@ class MujocoActuatorCtrl:
                     name_to_id[joint_name] = i
                     joint_aliases += 1
             self._name_to_id = name_to_id
+            self._default_forcerange = self._model.actuator_forcerange.copy()
             self._apply_gains()
             self._apply_gravity_compensation()
             self._ready = True
@@ -139,6 +140,42 @@ class MujocoActuatorCtrl:
         self._ready = False
         self._name_to_id = {}
         self._kd_over_kp = {}
+
+    def require_force_limited(self, names: list[str]) -> None:
+        """Refuse fingers whose actuators cannot be force-capped: MuJoCo
+        honors a runtime forcerange write only for actuators compiled with
+        forcelimited set, so an uncheckable cap would silently do nothing."""
+        missing = sorted(n for n in names if n not in self._name_to_id)
+        if missing:
+            raise RuntimeError(f"force-capped actuators not in the model: {missing}")
+        unlimited = sorted(
+            n
+            for n in names
+            if not self._model.actuator_forcelimited[self._name_to_id[n]]
+        )
+        if unlimited:
+            raise RuntimeError(
+                f'actuators lack forcelimited="true", so a force cap would '
+                f"silently do nothing: {unlimited}"
+            )
+
+    def set_force_limit(self, names: list[str], limit: float) -> bool:
+        """Cap the named actuators' force range at +/-limit (engine units),
+        True once written. A non-positive limit restores each actuator's model
+        default, so an unset wire effort leaves the MJCF behaviour
+        untouched."""
+        if not self._ready:
+            return False
+        for name in names:
+            ctrl_id = self._name_to_id.get(name)
+            if ctrl_id is None:
+                logger.warning(f"unknown actuator '{name}' for force limit; dropped")
+                continue
+            if limit > 0:
+                self._model.actuator_forcerange[ctrl_id] = [-limit, limit]
+            else:
+                self._model.actuator_forcerange[ctrl_id] = self._default_forcerange[ctrl_id]
+        return True
 
     def write_targets(self, actuator_values: dict, velocity_values: dict | None = None) -> int:
         """Write each {name: value} pair into data.ctrl[ctrl_id[name]]. When a

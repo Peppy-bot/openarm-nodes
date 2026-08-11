@@ -139,14 +139,18 @@ class SimTopicIO:
                 await asyncio.sleep(0.1)
                 continue
             _peer, msg = pair
-            if not math.isfinite(msg.opening):
-                logger.warning(f"dropping non-finite gripper setpoint on {topic.LINK_ID}")
+            if not (
+                math.isfinite(msg.opening)
+                and math.isfinite(msg.max_effort)
+                and msg.max_effort >= 0.0
+            ):
+                logger.warning(f"dropping unusable gripper setpoint on {topic.LINK_ID}")
                 continue
-            # max_effort is ignored: the sim engine applies no grip-force cap
-            # and reports a 0 ceiling on its states.
+            # max_effort caps the finger actuator force in engine units; 0
+            # (unset on the wire) leaves the model's own force range.
             if self._gripper_cmd[side].get() is None:
                 logger.info(f"first gripper setpoint on {topic.LINK_ID}")
-            self._gripper_cmd[side].set(msg.opening)
+            self._gripper_cmd[side].set((msg.opening, msg.max_effort))
 
     # --- called from the physics thread ---
 
@@ -154,7 +158,7 @@ class SimTopicIO:
         slot = self._arm_cmd.get(arm_id)
         return slot.get() if slot is not None else None
 
-    def latest_gripper_command(self, gripper_id: int) -> Optional[float]:
+    def latest_gripper_command(self, gripper_id: int) -> Optional[tuple[float, float]]:
         slot = self._gripper_cmd.get(gripper_id)
         return slot.get() if slot is not None else None
 

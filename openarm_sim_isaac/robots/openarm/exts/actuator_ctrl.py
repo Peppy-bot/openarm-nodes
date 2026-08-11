@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 _ARTICULATION_NAME = "peppy_actuator_ctrl"
@@ -59,6 +61,10 @@ class IsaacActuatorCtrl:
                 return False
             self._apply_gains()
             self._apply_gravity_compensation()
+            # Post-gain ceilings, so a wire cap of 0 can restore them exactly.
+            self._default_max_efforts = np.asarray(
+                self._view.get_max_efforts()
+            ).reshape(-1)
             self._ready = True
         except Exception as exc:
             logger.error(
@@ -77,7 +83,6 @@ class IsaacActuatorCtrl:
         """Apply per-joint drive stiffness/damping (MIT kp/kd) and torque caps
         from config. Joints without configured gains keep the USD drive values.
         """
-        import numpy as np  # pylint: disable=E0401
 
         joint_names = self._params.get("joint_names") or self._joint_names
         kps = self._params.get("kp") or []
@@ -161,6 +166,28 @@ class IsaacActuatorCtrl:
                 compensated += 1
         logger.info(f"gravity compensation enabled on {compensated} robot links")
 
+    def set_force_limit(self, names: list[str], limit: float) -> bool:
+        """Cap the named joints' drive effort at `limit` (engine units),
+        True once written. A non-positive limit restores each joint's
+        setup-time ceiling, so an unset wire effort leaves the configured
+        drive untouched."""
+        if not self._ready or self._view is None:
+            return False
+        indices = [self._name_to_idx[n] for n in names if n in self._name_to_idx]
+        if len(indices) != len(names):
+            unknown = sorted(set(names) - set(self._name_to_idx))
+            logger.warning(f"force limit for unknown joints {unknown} dropped")
+        if not indices:
+            return False
+        if limit > 0:
+            efforts = [float(limit)] * len(indices)
+        else:
+            efforts = [float(self._default_max_efforts[i]) for i in indices]
+        self._view.set_max_efforts(
+            np.array([efforts]), joint_indices=np.array(indices)
+        )
+        return True
+
     def teardown(self) -> None:
         self._view = None
         self._ready = False
@@ -179,7 +206,6 @@ class IsaacActuatorCtrl:
             return 0
         velocities = velocity_values if isinstance(velocity_values, dict) else {}
         try:
-            import numpy as np  # pylint: disable=E0401
 
             indices: list[int] = []
             pos: list[float] = []

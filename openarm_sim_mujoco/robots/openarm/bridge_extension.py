@@ -58,6 +58,8 @@ class MujocoBridgeExtension:
         # Signed full-open travel per finger joint, read from the model at
         # setup; commanded opening fractions scale onto it.
         self._gripper_travels: dict[int, list[float]] = {}
+        # Last force limit written per gripper, so the cap is not re-sent per tick.
+        self._applied_effort: dict[int, float] = {}
 
         cfg = pyjson5.loads(_CONFIG_PATH.read_text())
         self._arms: list[dict] = cfg["arms"]
@@ -102,6 +104,9 @@ class MujocoBridgeExtension:
             )
         if not self._actuator.setup():
             raise RuntimeError("MujocoActuatorCtrl setup failed")
+        self._actuator.require_force_limited(
+            [f for g in self._grippers for f in g["fingers"]]
+        )
         for gripper in self._grippers:
             sensor = MujocoGripperSensor(
                 self._model, self._data, finger_joints=gripper["fingers"]
@@ -153,9 +158,16 @@ class MujocoBridgeExtension:
             self._actuator.write_targets(dict(zip(joints, positions)), velocity_values)
 
         for gripper in self._grippers:
-            opening = self._io.latest_gripper_command(gripper["gripper_id"])
-            if opening is None:
+            command = self._io.latest_gripper_command(gripper["gripper_id"])
+            if command is None:
                 continue
+            opening, max_effort = command
+            # Re-applied only on change: the cap is a model write, not a
+            # per-tick target.
+            if self._applied_effort.get(gripper["gripper_id"]) != max_effort:
+                # Recorded only once written, so a not-ready tick retries.
+                if self._actuator.set_force_limit(gripper["fingers"], max_effort):
+                    self._applied_effort[gripper["gripper_id"]] = max_effort
             # Map the opening fraction onto each finger's own signed travel, so
             # the same command drives prismatic (v1) and revolute (v2) fingers.
             travels = self._gripper_travels[gripper["gripper_id"]]
