@@ -694,9 +694,9 @@ async fn tick_arm(
     // A stale limb holds exactly where it was last governed. Advancing the
     // planner would walk the setpoint away from an arm nobody can see, and a
     // held setpoint needs no hand basis: there is no streamed motion to cap.
-    // A move in that darkness can neither progress nor be verified: fail it,
-    // and any queued goal, rather than parking them wedged (a parked ready
-    // share pins that arm's claim and wedges the ready action for good).
+    // A move in that darkness can neither progress nor be verified, so it and
+    // any queued goal fail here, freeing the claim each holds: a ready share
+    // that kept its claim would wedge the ready action for good.
     if admission == Admission::Stale {
         planner.abort_active(STALE_REFUSAL, measured_q, now).await;
         while let Ok(goal) = channels.goals.try_recv() {

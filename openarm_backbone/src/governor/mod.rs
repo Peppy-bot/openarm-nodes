@@ -813,11 +813,9 @@ mod tests {
 
     #[test]
     fn a_fast_approach_outside_the_band_is_not_throttled() {
-        // Past d_safe the barrier is not an active constraint: it shapes the
-        // approach inside the band and nowhere else. Global speed belongs to
-        // the speed limiters, which run in both modes, so capping it here would
-        // put the collision toggle in charge of a speed unrelated to collisions.
-        // The exact floor scan still backstops whatever this lets through.
+        // The band's outer edge is where the barrier stops shaping motion:
+        // past d_safe it is not an active constraint, and the exact floor scan
+        // is what backstops the steps it passes.
         let mut g = governor(true);
         let start = at(wrists_inward(0.50));
         let cand = at(wrists_inward(0.62));
