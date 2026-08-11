@@ -45,14 +45,43 @@ def main() -> None:
     robot_parser.add_argument("y", type=float)
     robot_parser.add_argument("z", type=float)
 
-    # scene
+    # built-in scene
     scene_parser = sub.add_parser("scene")
     scene_parser.add_argument(
         "scene_name",
         choices=["tabletop", "shelf_reach"],
     )
+    scene_parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Uniform scale for the built-in scene.",
+    )
 
-    # spawn
+    # arbitrary USD scene
+    scene_usd_parser = sub.add_parser("scene-usd")
+    scene_usd_parser.add_argument("path")
+    scene_usd_parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Uniform scale for the referenced USD scene.",
+    )
+
+    # Isaac asset-root scene
+    scene_isaac_parser = sub.add_parser("scene-isaac")
+    scene_isaac_parser.add_argument("path")
+    scene_isaac_parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Uniform scale for the Isaac asset scene.",
+    )
+
+    # remove the currently loaded runtime USD scene
+    sub.add_parser("clear-scene")
+
+    # spawn runtime object
     spawn_parser = sub.add_parser("spawn")
     spawn_parser.add_argument("name")
     spawn_parser.add_argument("path")
@@ -64,6 +93,41 @@ def main() -> None:
         type=float,
         default=1.0,
         help="Uniform object scale.",
+    )
+    spawn_parser.add_argument(
+        "--physics",
+        choices=["none", "static", "dynamic"],
+        default="none",
+        help="Physics mode for the spawned USD.",
+    )
+    spawn_parser.add_argument(
+        "--mass",
+        type=float,
+        default=0.1,
+        help="Mass in kg for dynamic physics.",
+    )
+
+    # spawn Isaac asset-root object
+    spawn_isaac_parser = sub.add_parser("spawn-isaac")
+    spawn_isaac_parser.add_argument("name")
+    spawn_isaac_parser.add_argument("path")
+    spawn_isaac_parser.add_argument("x", type=float)
+    spawn_isaac_parser.add_argument("y", type=float)
+    spawn_isaac_parser.add_argument("z", type=float)
+    spawn_isaac_parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+    )
+    spawn_isaac_parser.add_argument(
+        "--physics",
+        choices=["none", "static", "dynamic"],
+        default="none",
+    )
+    spawn_isaac_parser.add_argument(
+        "--mass",
+        type=float,
+        default=0.1,
     )
 
     # move
@@ -107,11 +171,32 @@ def main() -> None:
         if args.scene_name == "tabletop":
             command = {
                 "command": "load_tabletop_scene",
+                "scale": args.scale,
             }
         else:
             command = {
                 "command": "load_shelf_reach_scene",
+                "scale": args.scale,
             }
+
+    elif args.subcommand == "scene-usd":
+        command = {
+            "command": "load_usd_scene",
+            "path": args.path,
+            "scale": [args.scale, args.scale, args.scale],
+        }
+
+    elif args.subcommand == "scene-isaac":
+        command = {
+            "command": "load_isaac_scene",
+            "path": args.path,
+            "scale": [args.scale, args.scale, args.scale],
+        }
+
+    elif args.subcommand == "clear-scene":
+        command = {
+            "command": "clear_runtime_scene",
+        }
 
     elif args.subcommand == "spawn":
         command = {
@@ -120,6 +205,19 @@ def main() -> None:
             "path": args.path,
             "position": [args.x, args.y, args.z],
             "scale": [args.scale, args.scale, args.scale],
+            "physics": args.physics,
+            "mass": args.mass,
+        }
+
+    elif args.subcommand == "spawn-isaac":
+        command = {
+            "command": "spawn_isaac_asset",
+            "name": args.name,
+            "path": args.path,
+            "position": [args.x, args.y, args.z],
+            "scale": [args.scale, args.scale, args.scale],
+            "physics": args.physics,
+            "mass": args.mass,
         }
 
     elif args.subcommand == "move":

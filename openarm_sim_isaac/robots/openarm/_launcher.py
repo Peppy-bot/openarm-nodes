@@ -123,7 +123,7 @@ class SimLauncher:
 
         room_usd = (
             assets_root
-            + "/Isaac/Environments/Simple_Room/simple_room.usd"
+            # Simple Room disabled
         )
 
         logger.info(
@@ -132,7 +132,7 @@ class SimLauncher:
         )
 
         room_prim = stage.DefinePrim(
-            Sdf.Path("/World/Warehouse"),
+            Sdf.Path("/World/DisabledEnvironment"),
             "Xform",
         )
 
@@ -196,10 +196,22 @@ class SimLauncher:
             self._runtime_list_joints()
 
         elif cmd == "load_tabletop_scene":
-            self._runtime_load_tabletop_scene()
+            self._runtime_load_tabletop_scene(command)
 
         elif cmd == "load_shelf_reach_scene":
-            self._runtime_load_shelf_reach_scene()
+            self._runtime_load_shelf_reach_scene(command)
+
+        elif cmd == "load_usd_scene":
+            self._runtime_load_usd_scene(command)
+
+        elif cmd == "load_isaac_scene":
+            self._runtime_load_isaac_scene(command)
+
+        elif cmd == "spawn_isaac_asset":
+            self._runtime_spawn_isaac_asset(command)
+
+        elif cmd == "clear_runtime_scene":
+            self._runtime_clear_scene()
 
         else:
             raise ValueError(
@@ -1214,9 +1226,338 @@ class SimLauncher:
             shelf_forward_offset,
         )
 
+    def _runtime_apply_physics(
+        self,
+        root_prim,
+        mode: str,
+        mass: float = 0.1,
+    ) -> None:
+        """Apply static or dynamic physics to a referenced USD hierarchy."""
+
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        mode = str(mode).lower()
+
+        if mode == "none":
+            return
+
+        if mode not in ("static", "dynamic"):
+            raise ValueError(
+                "physics must be one of: none, static, dynamic"
+            )
+
+        collider_count = 0
+
+        for prim in Usd.PrimRange(root_prim):
+            if not prim.IsValid():
+                continue
+
+            # Apply collisions to actual geometry prims.
+            if prim.IsA(UsdGeom.Gprim):
+                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    collision_api = UsdPhysics.CollisionAPI.Apply(
+                        prim
+                    )
+                else:
+                    collision_api = UsdPhysics.CollisionAPI(
+                        prim
+                    )
+
+                collision_api.CreateCollisionEnabledAttr(
+                    True
+                )
+
+                collider_count += 1
+
+                # Meshes need an explicit collision representation.
+                if prim.IsA(UsdGeom.Mesh):
+                    if not prim.HasAPI(
+                        UsdPhysics.MeshCollisionAPI
+                    ):
+                        mesh_api = (
+                            UsdPhysics.MeshCollisionAPI.Apply(
+                                prim
+                            )
+                        )
+                    else:
+                        mesh_api = (
+                            UsdPhysics.MeshCollisionAPI(
+                                prim
+                            )
+                        )
+
+                    # Dynamic triangle meshes are generally unsuitable
+                    # as rigid-body colliders, so use a convex hull.
+                    # Static geometry can use its authored mesh directly.
+                    approximation = (
+                        "convexHull"
+                        if mode == "dynamic"
+                        else "none"
+                    )
+
+                    mesh_api.CreateApproximationAttr().Set(
+                        approximation
+                    )
+
+        if collider_count == 0:
+            logger.warning(
+                "No collision-capable geometry found below %s",
+                root_prim.GetPath(),
+            )
+
+        if mode == "dynamic":
+            if not root_prim.HasAPI(
+                UsdPhysics.RigidBodyAPI
+            ):
+                rigid_api = UsdPhysics.RigidBodyAPI.Apply(
+                    root_prim
+                )
+            else:
+                rigid_api = UsdPhysics.RigidBodyAPI(
+                    root_prim
+                )
+
+            rigid_api.CreateRigidBodyEnabledAttr(
+                True
+            )
+
+            if not root_prim.HasAPI(
+                UsdPhysics.MassAPI
+            ):
+                mass_api = UsdPhysics.MassAPI.Apply(
+                    root_prim
+                )
+            else:
+                mass_api = UsdPhysics.MassAPI(
+                    root_prim
+                )
+
+            mass_api.CreateMassAttr(
+                float(mass)
+            )
+
+        logger.info(
+            "Applied runtime physics: mode=%s mass=%s "
+            "colliders=%d root=%s",
+            mode,
+            mass,
+            collider_count,
+            root_prim.GetPath(),
+        )
+
+    def _runtime_clear_scene(self) -> None:
+        """Remove only the currently loaded runtime USD scene."""
+
+        import omni.usd
+
+        stage = omni.usd.get_context().get_stage()
+
+        scene_path = "/World/RuntimeScene"
+
+        if stage.GetPrimAtPath(scene_path).IsValid():
+            stage.RemovePrim(scene_path)
+
+            logger.info(
+                "Removed runtime scene %s",
+                scene_path,
+            )
+        else:
+            logger.info(
+                "No runtime scene to remove"
+            )
+
+    def _runtime_load_usd_scene(
+        self,
+        command: dict,
+    ) -> None:
+        """Replace the current runtime scene with an arbitrary USD."""
+
+        import omni.usd
+
+        from pxr import Gf, Sdf, UsdGeom
+
+        usd_path = str(
+            Path(command["path"])
+            .expanduser()
+            .resolve()
+        )
+
+        if not Path(usd_path).exists():
+            raise FileNotFoundError(
+                f"Runtime scene USD does not exist: {usd_path}"
+            )
+
+        scale = command.get(
+            "scale",
+            [1.0, 1.0, 1.0],
+        )
+
+        if len(scale) != 3:
+            raise ValueError(
+                "Runtime scene scale requires exactly 3 values"
+            )
+
+        stage = omni.usd.get_context().get_stage()
+
+        scene_path = "/World/RuntimeScene"
+
+        if stage.GetPrimAtPath(scene_path).IsValid():
+            stage.RemovePrim(scene_path)
+
+        prim = stage.DefinePrim(
+            Sdf.Path(scene_path),
+            "Xform",
+        )
+
+        prim.GetReferences().AddReference(
+            usd_path
+        )
+
+        xformable = UsdGeom.Xformable(
+            prim
+        )
+
+        scale_op = None
+
+        for op in xformable.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                scale_op = op
+                break
+
+        if scale_op is None:
+            scale_op = xformable.AddScaleOp()
+
+        scale_op.Set(
+            Gf.Vec3f(
+                float(scale[0]),
+                float(scale[1]),
+                float(scale[2]),
+            )
+        )
+
+        logger.info(
+            "Loaded runtime USD scene %s at scale %s",
+            usd_path,
+            scale,
+        )
+
+    def _resolve_isaac_asset_path(
+        self,
+        relative_path: str,
+    ) -> str:
+        """Resolve an Isaac/... asset path against Isaac Sim's asset root."""
+
+        from isaacsim.storage.native import get_assets_root_path
+
+        assets_root = get_assets_root_path()
+
+        if not assets_root:
+            raise RuntimeError(
+                "Isaac asset root could not be resolved"
+            )
+
+        relative_path = str(relative_path).lstrip("/")
+
+        full_path = (
+            assets_root.rstrip("/")
+            + "/"
+            + relative_path
+        )
+
+        logger.info(
+            "Resolved Isaac asset: %s -> %s",
+            relative_path,
+            full_path,
+        )
+
+        return full_path
+
+    def _runtime_load_isaac_scene(
+        self,
+        command: dict,
+    ) -> None:
+        """Load a scene from NVIDIA's configured Isaac asset root."""
+
+        import omni.usd
+
+        from pxr import Gf, Sdf, UsdGeom
+
+        usd_path = self._resolve_isaac_asset_path(
+            command["path"]
+        )
+
+        scale = command.get(
+            "scale",
+            [1.0, 1.0, 1.0],
+        )
+
+        stage = omni.usd.get_context().get_stage()
+
+        scene_path = "/World/RuntimeScene"
+
+        if stage.GetPrimAtPath(scene_path).IsValid():
+            stage.RemovePrim(scene_path)
+
+        prim = stage.DefinePrim(
+            Sdf.Path(scene_path),
+            "Xform",
+        )
+
+        prim.GetReferences().AddReference(
+            usd_path
+        )
+
+        xformable = UsdGeom.Xformable(
+            prim
+        )
+
+        scale_op = None
+
+        for op in xformable.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                scale_op = op
+                break
+
+        if scale_op is None:
+            scale_op = xformable.AddScaleOp()
+
+        scale_op.Set(
+            Gf.Vec3f(
+                float(scale[0]),
+                float(scale[1]),
+                float(scale[2]),
+            )
+        )
+
+        logger.info(
+            "Loaded Isaac scene %s at scale %s",
+            usd_path,
+            scale,
+        )
+
+    def _runtime_spawn_isaac_asset(
+        self,
+        command: dict,
+    ) -> None:
+        """Spawn an object directly from NVIDIA's Isaac asset root."""
+
+        resolved = dict(command)
+
+        resolved["path"] = self._resolve_isaac_asset_path(
+            command["path"]
+        )
+
+        resolved["command"] = "spawn_usd"
+
+        self._runtime_spawn_usd(
+            resolved,
+            allow_remote=True,
+        )
+
     def _runtime_spawn_usd(
         self,
         command: dict,
+        allow_remote: bool = False,
     ) -> None:
         import omni.usd
 
@@ -1228,13 +1569,16 @@ class SimLauncher:
 
         name = command["name"]
 
-        usd_path = str(
-            Path(
-                command["path"]
+        raw_path = str(command["path"])
+
+        if allow_remote:
+            usd_path = raw_path
+        else:
+            usd_path = str(
+                Path(raw_path)
+                .expanduser()
+                .resolve()
             )
-            .expanduser()
-            .resolve()
-        )
 
         position = command.get(
             "position",
@@ -1246,7 +1590,7 @@ class SimLauncher:
             [1.0, 1.0, 1.0],
         )
 
-        if not Path(usd_path).exists():
+        if not allow_remote and not Path(usd_path).exists():
             raise FileNotFoundError(
                 f"Runtime USD does not exist: {usd_path}"
             )
@@ -1338,6 +1682,24 @@ class SimLauncher:
                 float(scale[1]),
                 float(scale[2]),
             )
+        )
+
+        physics_mode = command.get(
+            "physics",
+            "none",
+        )
+
+        mass = float(
+            command.get(
+                "mass",
+                0.1,
+            )
+        )
+
+        self._runtime_apply_physics(
+            prim,
+            physics_mode,
+            mass,
         )
 
         logger.info(
