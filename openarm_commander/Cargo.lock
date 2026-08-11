@@ -2271,7 +2271,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fpostures#9826499bd7611fe38e9fd0b67056c864d484ecbd"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fpostures#95efac5c674e9e2ff552e4273e3c6a20f6b49fe6"
 dependencies = [
  "urdf-rs",
 ]
@@ -5314,3 +5314,7 @@ name = "zmij"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd2f034a4bebf216c9e4b7083603e024cf930873fd67830cfb083c9fa33129d9"
+
+[[patch.unused]]
+name = "peppy-config-model"
+version = "0.1.0"

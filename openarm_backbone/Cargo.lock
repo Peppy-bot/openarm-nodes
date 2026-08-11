@@ -2295,7 +2295,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fpostures#9826499bd7611fe38e9fd0b67056c864d484ecbd"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fpostures#95efac5c674e9e2ff552e4273e3c6a20f6b49fe6"
 dependencies = [
  "urdf-rs",
 ]
