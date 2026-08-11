@@ -52,6 +52,14 @@ pub(crate) const READY: BySide<[f64; ARM_DOF]> = BySide::new(
     openarm_description::ready(ModelSide::Right),
 );
 
+/// The Home park pose per side, from the same canonical postures: the elbow
+/// sits on the description's floor rather than the straight-arm singularity.
+/// The panel's Home Pose button and the backbone's move_to_home land here.
+pub(crate) const HOME: BySide<[f64; ARM_DOF]> = BySide::new(
+    openarm_description::home(ModelSide::Left),
+    openarm_description::home(ModelSide::Right),
+);
+
 // --------------------------- authoring types ---------------------------
 
 /// One authored joint keyframe: time (s), the seven joint targets, and an
