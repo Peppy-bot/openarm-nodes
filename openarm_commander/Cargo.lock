@@ -2271,7 +2271,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=feat%2Fpostures#95efac5c674e9e2ff552e4273e3c6a20f6b49fe6"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#bb5da56a3ff359a881bd963694b098bf47385c11"
 dependencies = [
  "urdf-rs",
 ]
@@ -3591,7 +3591,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#4cc24b602baa1c20bf70670c5ec689b185f4c45f"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#bb5da56a3ff359a881bd963694b098bf47385c11"
 dependencies = [
  "k",
  "thiserror 2.0.18",
