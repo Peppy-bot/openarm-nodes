@@ -91,6 +91,25 @@ class SimLauncher:
             server = viser.ViserServer(host=host, port=port)
             viewer = mjviser.Viewer(model, data, server=server, step_fn=_step_fn)
 
+            # Free joints are the scene props (every robot joint is driven);
+            # snapshot their spawn pose so the viewer button can restage the
+            # scene without touching the arms.
+            free_slices = [
+                (model.jnt_qposadr[j], model.jnt_dofadr[j])
+                for j in range(model.njnt)
+                if model.jnt_type[j] == _mujoco.mjtJoint.mjJNT_FREE
+            ]
+            spawn_qpos = [data.qpos[q : q + 7].copy() for q, _ in free_slices]
+            reset_requested = threading.Event()
+            if free_slices:
+                reset_button = server.gui.add_button("Reset scene objects")
+
+                @reset_button.on_click
+                def _(_event) -> None:
+                    # Viser callbacks run on server threads; the sim loop owns
+                    # the mj state, so only flag the request here.
+                    reset_requested.set()
+
             # viser sends batched position updates as delta messages only —
             # new/refreshing clients receive initial zero positions unless we
             # explicitly push current state on each connection.
@@ -113,6 +132,13 @@ class SimLauncher:
             _last_render = 0.0
             _last_phys_wall = time.monotonic()
             while not self._stop.is_set():
+                if reset_requested.is_set():
+                    reset_requested.clear()
+                    for (q, d), pose in zip(free_slices, spawn_qpos):
+                        data.qpos[q : q + 7] = pose
+                        data.qvel[d : d + 6] = 0.0
+                    _mujoco.mj_forward(model, data)
+                    logger.info("Scene objects reset to spawn poses")
                 now = time.monotonic()
                 # Step physics at real time, decoupled from render rate.
                 n = int((now - _last_phys_wall) / _dt)

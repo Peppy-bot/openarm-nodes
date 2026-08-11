@@ -25,21 +25,23 @@ use tracing::{error, info, warn};
 
 use control_core::{Pacer, filters::LowPassFilter};
 
+use crate::arm_pair::ArmPair;
 use crate::chase::rate_limited;
 use crate::governor::{GovState, Governor, Guard};
 use crate::liveness::{self, Admission, Liveness};
 use crate::planner::{self, BusyGuard, Goal, Planner};
 use crate::publish::Publishers;
-use crate::streams::{ArmState, GovernorConfig, GripperCommand, GripperState, JointCommand};
-use crate::{ARM_DOF, ArmPair, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+use crate::streams::{ArmState, GovernorConfig, GripperCommand, GripperState};
+use crate::types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+use crate::upstream::{Upstream, UpstreamMode};
 
 /// How long [`seed_all`] waits for an arm's first measured state before warning that
 /// the backbone is still blocked, so a silent arm is visible in the log instead of an
 /// indefinite quiet stall.
 const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 
-/// One arm's inbound channels into the coordinator: the commander's arm command
-/// stream, the commander's gripper opening command stream, the measured arm state,
+/// One arm's inbound channels into the coordinator: the leading node's arm
+/// command stream, its gripper opening command stream, the measured arm state,
 /// the measured gripper opening, the accepted-goal queues, and the single-flight
 /// busy flags (one for arm moves, one for gripper moves).
 ///
@@ -49,7 +51,7 @@ const SEED_WAIT_WARN_PERIOD: Duration = Duration::from_secs(2);
 /// fired cannot re-target the arm (or snap the grippers) when the move ends. The
 /// stream listener holds a clone of the same sender and fills it.
 pub struct ArmChannels {
-    pub command: watch::Sender<Option<JointCommand>>,
+    pub command: watch::Sender<Option<Upstream>>,
     pub gripper_command: watch::Sender<Option<GripperCommand>>,
     pub measured: watch::Receiver<Option<ArmState>>,
     pub gripper: watch::Receiver<Option<GripperState>>,
@@ -59,11 +61,12 @@ pub struct ArmChannels {
     pub gripper_busy: Arc<AtomicBool>,
 }
 
-/// The coordinator's run parameters. A *commander* that stops streaming simply
-/// leaves its last governed setpoint in place, which is a hold and needs no
-/// deadman. A *follower* that stops delivering is the opposite case and does
-/// have one, keyed to the control period rather than configured here (see
-/// [`crate::liveness`]).
+/// The coordinator's run parameters. A *leading node* that stops streaming gets
+/// no deadman: joints mode holds the last governed setpoint where it is, and
+/// pose mode keeps converging to the last received pose, rate-capped and
+/// governed (the planner documents that choice). A *follower* that stops
+/// delivering is the opposite case and does have one, keyed to the control
+/// period rather than configured here (see [`crate::liveness`]).
 pub struct RunConfig {
     pub cycle_period: Duration,
     /// Cutoff (Hz) for the low-pass on each published desired velocity. `dq` is a
@@ -71,6 +74,9 @@ pub struct RunConfig {
     /// by the control rate; filtering it keeps the arm's Kd term from buzzing on a noisy
     /// stream without touching the desired position.
     pub velocity_filter_cutoff_hz: f64,
+    /// Which upstream kind this instance follows. Joints mode has no pose_link
+    /// peer, so the upstream relay skips the per-tick FK and pose publish.
+    pub upstream_mode: UpstreamMode,
 }
 
 /// An accepted `move_gripper` goal handed to the coordinator, which executes it
@@ -132,6 +138,7 @@ pub async fn run(
     let RunConfig {
         cycle_period,
         velocity_filter_cutoff_hz,
+        upstream_mode,
     } = config;
     let publishers = Publishers::declare(&runner).await?;
 
@@ -223,7 +230,7 @@ pub async fn run(
         .await;
 
         // Resolve each gripper's target for this tick: an in-flight move owns the
-        // opening; otherwise the latest commander command drives it; otherwise the
+        // opening; otherwise the latest leader command drives it; otherwise the
         // side idles (never commanded, or unpaired), silent on the wire with the
         // governed opening re-anchored on the measured grippers.
         let targets = ArmPair::new(
@@ -311,7 +318,15 @@ pub async fn run(
             }
         }
 
-        relay_upstream(&publishers, &channels, arm_admission, gripper_admission).await;
+        relay_upstream(
+            &publishers,
+            &channels,
+            &mut planners,
+            arm_admission,
+            gripper_admission,
+            upstream_mode,
+        )
+        .await;
 
         // Operator proximity readout (rate-limited): the nearest checked pair's
         // signed distance and link names, live regardless of the governor state,
@@ -340,8 +355,8 @@ pub async fn run(
 
 /// Wipe the streamed command of any side running a discrete move.
 ///
-/// A setpoint still in flight when the move was fired (the commander streams at
-/// the control rate, so one is almost always queued) would otherwise survive in
+/// A setpoint still in flight when the move was fired (the leading node streams
+/// at the control rate, so one is almost always queued) would otherwise survive in
 /// the watch and re-target the arm, or snap the grippers, the moment the move ends
 /// and Follow resumes. Streaming and discrete moves are mutually exclusive per
 /// side, so this never drops a command the operator still wants.
@@ -363,7 +378,8 @@ fn apply_controls(governor: &mut Governor, planners: &mut ArmPair<Planner>, cfg:
     governor.set_enabled(cfg.enabled);
     governor.set_band(cfg.d_stop, cfg.d_safe);
     // The cap lives twice by design: the governor limits streamed hands with
-    // it, the planners budget planned moves against it at admission.
+    // it, the planners budget planned moves at admission and step streamed
+    // poses with it.
     governor.set_ee_cap(cfg.max_ee_velocity_m_s);
     planners.left.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
     planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
@@ -496,18 +512,20 @@ fn measured_config(
     )
 }
 
-/// Relay every limb's measured state up its leader pairing slot (a legal no-op
-/// while unpaired), so the leading node sees the same back-channel a follower
-/// gives the backbone. A stale side's arm relay goes silent with its setpoint
-/// stream: republishing a frozen measurement under a fresh stamp would show
+/// Relay every limb's measured state up its leader pairing slot, so the
+/// leading node sees the same back-channel a follower gives the backbone. A
+/// stale side's arm relay goes silent with its setpoint stream:
+/// republishing a frozen measurement under a fresh stamp would show
 /// the leading node a live-looking limb the backbone has stopped vouching
 /// for. Each watch is read out before its send, so no borrow guard is held
 /// across an await.
 async fn relay_upstream(
     publishers: &Publishers,
     channels: &ArmPair<ArmChannels>,
+    planners: &mut ArmPair<Planner>,
     arm_admission: ArmPair<Admission>,
     gripper_admission: ArmPair<Admission>,
+    upstream_mode: UpstreamMode,
 ) {
     // A stale side reads as nothing to relay, whatever the measurement is.
     fn live<T>(admission: Admission, read: impl FnOnce() -> Option<T>) -> Option<T> {
@@ -521,12 +539,28 @@ async fn relay_upstream(
         live(gripper_admission.left, || *channels.left.gripper.borrow()),
         live(gripper_admission.right, || *channels.right.gripper.borrow()),
     );
-    for (wire, measured) in [
-        (&publishers.arm_states.left, arms.left),
-        (&publishers.arm_states.right, arms.right),
+    // In pose mode the arm back-channel also carries the same measurement as
+    // the end-effector pose, FK'd here; joints mode has no pose_link peer, so
+    // that work is skipped.
+    for (wire, pose_wire, planner, measured) in [
+        (
+            &publishers.arm_states.left,
+            &publishers.arm_pose_states.left,
+            &mut planners.left,
+            arms.left,
+        ),
+        (
+            &publishers.arm_states.right,
+            &publishers.arm_pose_states.right,
+            &mut planners.right,
+            arms.right,
+        ),
     ] {
         if let Some(m) = measured {
             wire.send(&m.positions, &m.velocities).await;
+            if upstream_mode == UpstreamMode::Pose {
+                pose_wire.send(&planner.ee_pose_world(&m.positions)).await;
+            }
         }
     }
     for (wire, measured) in [
@@ -545,6 +579,9 @@ struct Shutdown;
 
 /// Reason completing every goal refused while the followers are still silent.
 const SEED_REFUSAL: &str = "the follower has not reported its first state yet";
+
+/// Refusal for goals reaching an arm whose follower stream has gone stale.
+const STALE_REFUSAL: &str = "the follower stopped reporting";
 
 /// Wait for both arms' first measured states and both grippers' first
 /// gripper fractions, then seed each planner's held setpoint from its measured pose
@@ -601,11 +638,10 @@ async fn seed_all(
 /// Refuse one arm goal during the seed wait, reporting the measured pose when
 /// one already arrived and releasing the goal's busy claim.
 async fn refuse_seed_arm_goal(goal: Goal, channels: &ArmChannels, planner: &mut Planner) {
-    if let Some(m) = *channels.measured.borrow() {
-        planner.seed_from_measured(m.positions);
-    }
+    let measured = *channels.measured.borrow();
     let _release = BusyGuard(channels.busy.clone());
-    goal.refuse(SEED_REFUSAL, planner).await;
+    let reported = measured.map_or_else(|| planner.setpoint(), |m| m.positions);
+    goal.refuse(SEED_REFUSAL, reported, planner).await;
 }
 
 /// Refuse one gripper goal during the seed wait, reporting the measured
@@ -644,7 +680,7 @@ async fn wait_for_first<T>(
 
 /// Advance one arm's planner to its candidate setpoint for this tick: anchor on the
 /// measured pose (or the held setpoint if no measurement yet), feed the latest
-/// commander command, and admit any pending move goal.
+/// leader command, and admit any pending move goal.
 async fn tick_arm(
     channels: &mut ArmChannels,
     planner: &mut Planner,
@@ -658,7 +694,15 @@ async fn tick_arm(
     // A stale limb holds exactly where it was last governed. Advancing the
     // planner would walk the setpoint away from an arm nobody can see, and a
     // held setpoint needs no hand basis: there is no streamed motion to cap.
+    // A move in that darkness can neither progress nor be verified, so it and
+    // any queued goal fail here, freeing the claim each holds: a ready share
+    // that kept its claim would wedge the ready action for good.
     if admission == Admission::Stale {
+        planner.abort_active(STALE_REFUSAL, measured_q, now).await;
+        while let Ok(goal) = channels.goals.try_recv() {
+            let _release = BusyGuard(channels.busy.clone());
+            goal.refuse(STALE_REFUSAL, measured_q, planner).await;
+        }
         return planner::Tick {
             candidate: planner.setpoint(),
             streamed_hand: None,
@@ -672,7 +716,8 @@ async fn tick_arm(
         warn!("arm follower stream recovered; re-anchoring on the measured pose");
         planner.seed_from_measured(measured_q);
     }
-    let command = channels.command.borrow().clone();
+    // Read out so no watch borrow guard is held across the await below.
+    let command = *channels.command.borrow();
     planner
         .tick(
             measured_q,
@@ -775,7 +820,7 @@ struct GripperTarget {
 }
 
 /// The side's target for this tick: an in-flight backbone-executed
-/// move owns it; otherwise the commander's streamed command drives it;
+/// move owns it; otherwise the leading node's streamed command drives it;
 /// otherwise `None` (idle: before any command, or on an unpaired side).
 fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<GripperTarget> {
     if let Some(m) = mv {
@@ -787,7 +832,7 @@ fn gripper_target(mv: &Option<GripperMove>, channels: &ArmChannels) -> Option<Gr
     follow_gripper_target(&channels.gripper_command.borrow().clone())
 }
 
-/// Resolve the streamed target: the latest commander command with its opening
+/// Resolve the streamed target: the latest leader command with its opening
 /// clamped into `[0, 1]`, or `None` when none has arrived. The stream is
 /// paired to one producer, so there is nothing to arbitrate; a stopped
 /// producer just leaves the last opening in place, held by the gripper.
@@ -979,5 +1024,76 @@ mod tests {
             governed += step;
         }
         assert!((governed - target).abs() <= GRIPPER_LANDED_FRAC);
+    }
+
+    #[tokio::test]
+    async fn a_stale_tick_refuses_queued_goals_instead_of_parking_them() {
+        use crate::planner::{JointReply, PlanConfig, ReadyOutcome, ReadyReply};
+        use crate::servo::EeCaps;
+
+        let version = openarm_description::HardwareVersion::V1;
+        let model = crate::arm_model(version, openarm_description::Side::Left)
+            .expect("build arm from the bundled URDF");
+        let limits = model.limits();
+        let mut planner = Planner::new(
+            Side::Left,
+            model,
+            PlanConfig {
+                cycle_period: Duration::from_millis(10),
+                max_joint_velocity_rad_s: [10.0; ARM_DOF],
+                ee: EeCaps {
+                    linear_m_s: 1.0,
+                    angular_rad_s: 0.8,
+                },
+                limits,
+            },
+        );
+        let held = [0.0, -0.8, 0.0, 1.2, 0.0, 0.0, 0.0];
+        planner.commit(held);
+
+        let (command, _command_rx) = watch::channel(None);
+        let (gripper_command, _gripper_command_rx) = watch::channel(None);
+        let (_measured_tx, measured) = watch::channel(None);
+        let (_gripper_tx, gripper) = watch::channel(None);
+        let (goal_tx, goals) = mpsc::channel(2);
+        let (_gripper_goal_tx, gripper_goals) = mpsc::channel(1);
+        let busy = Arc::new(AtomicBool::new(true)); // claimed at accept
+        let mut channels = ArmChannels {
+            command,
+            gripper_command,
+            measured,
+            gripper,
+            goals,
+            busy: busy.clone(),
+            gripper_goals,
+            gripper_busy: Arc::new(AtomicBool::new(false)),
+        };
+        let (done_tx, mut done_rx) = mpsc::channel::<ReadyOutcome>(1);
+        goal_tx
+            .send(Goal::Joint {
+                target: held,
+                duration_s: 1.0,
+                reply: JointReply::Ready(ReadyReply {
+                    done_tx,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                }),
+            })
+            .await
+            .expect("queue the goal");
+
+        let tick = tick_arm(
+            &mut channels,
+            &mut planner,
+            Admission::Stale,
+            Instant::now(),
+        )
+        .await;
+
+        let outcome = done_rx.recv().await.expect("a refused goal must report");
+        assert!(!outcome.success);
+        assert!(outcome.message.contains("stopped reporting"));
+        assert!(!busy.load(Ordering::Acquire), "refusal releases the claim");
+        assert_eq!(tick.candidate, planner.setpoint(), "a stale side holds");
+        assert!(tick.streamed_hand.is_none(), "a stale side streams nothing");
     }
 }

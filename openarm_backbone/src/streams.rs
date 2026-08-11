@@ -18,13 +18,15 @@ use std::time::{Duration, Instant};
 use peppygen::NodeRunner;
 use peppygen::consumed_topics::collision_ctrl::governor_control as collision_ctrl_governor_control;
 use peppygen::paired_topics::{
-    leader_left_arm, leader_left_gripper, leader_right_arm, leader_right_gripper, left_arm_link,
-    left_gripper_link, right_arm_link, right_gripper_link,
+    leader_left_arm, leader_left_arm_pose, leader_left_gripper, leader_right_arm,
+    leader_right_arm_pose, leader_right_gripper, left_arm_link, left_gripper_link, right_arm_link,
+    right_gripper_link,
 };
 use tokio::sync::watch;
 use tracing::{error, warn};
 
-use crate::{JointVec, Side};
+use crate::types::{JointVec, Side, pose_from_wire};
+use crate::upstream::Upstream;
 
 /// At most one dropped-message warning per stream (and one build/stamp error
 /// per publisher) in this window, so a misrouted producer or a stalled clock
@@ -35,15 +37,6 @@ pub(crate) const THROTTLED_WARN_PERIOD: Duration = Duration::from_secs(1);
 /// subscription cannot spin the listener at full CPU or flood the log at the stream
 /// rate. Transient errors still recover; a genuinely dead stream just idles.
 const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
-
-/// The latest commanded joint setpoint for one arm, kept by the arm command
-/// listener and read each tick by the planner's Follow. The command stream is
-/// paired to one producer, so the latest message is simply the one to chase;
-/// the wire's velocities/efforts are ignored (the backbone shapes its own).
-#[derive(Clone, Debug, PartialEq)]
-pub struct JointCommand {
-    pub positions: JointVec,
-}
 
 /// The latest commanded opening for one gripper, fed by the upstream
 /// pairing's `gripper_setpoints`: the raw wire opening fraction, clamped into
@@ -87,7 +80,7 @@ pub(crate) fn warn_throttled(last: &mut Option<Instant>, emit: impl FnOnce()) {
 
 /// Parses one paired arm's inbound joint_states payload. This backbone drives
 /// fixed 7-joint arms whose followers always measure velocity, so a message
-/// must carry exactly [`crate::ARM_DOF`] positions with matching velocities,
+/// must carry exactly [`crate::types::ARM_DOF`] positions with matching velocities,
 /// all finite; the generic contract's empty-velocities form is deliberately
 /// rejected here rather than half-accepted.
 fn parse_joint_state(positions: Vec<f64>, velocities: Vec<f64>) -> Result<ArmState, &'static str> {
@@ -110,10 +103,10 @@ fn parse_joint_state(positions: Vec<f64>, velocities: Vec<f64>) -> Result<ArmSta
     })
 }
 
-/// Parses one commanded arm setpoint: exactly [`crate::ARM_DOF`] finite
+/// Parses one commanded arm setpoint: exactly [`crate::types::ARM_DOF`] finite
 /// positions. The wire's velocities and efforts are not parsed: the backbone
 /// plans its own velocity shaping over the governed position stream.
-fn parse_joint_command(positions: Vec<f64>) -> Result<JointCommand, &'static str> {
+fn parse_joint_command(positions: Vec<f64>) -> Result<Upstream, &'static str> {
     let finite = positions.iter().all(|v| v.is_finite());
     let Ok(positions) = JointVec::try_from(positions) else {
         return Err("a non-arm joint count");
@@ -121,7 +114,13 @@ fn parse_joint_command(positions: Vec<f64>) -> Result<JointCommand, &'static str
     if !finite {
         return Err("non-finite values");
     }
-    Ok(JointCommand { positions })
+    Ok(Upstream::Joints(positions))
+}
+
+/// Parses one commanded end-effector pose through the shared wire decoder
+/// ([`pose_from_wire`]): finite components, quaternion normalized or refused.
+fn parse_pose_command(position: [f64; 3], orientation: [f64; 4]) -> Result<Upstream, &'static str> {
+    pose_from_wire(position, orientation).map(Upstream::Pose)
 }
 
 /// Parses one commanded gripper setpoint: finite fields, a non-negative effort
@@ -212,6 +211,45 @@ async fn accept<Raw, Parsed>(
     true
 }
 
+/// Receive both arms' upstream pose streams forever, keeping the latest
+/// well-formed pose per side. The Cartesian mirror of
+/// [`run_joint_command_listener`]; `upstream_mode` spawns exactly one of the
+/// two.
+pub async fn run_pose_command_listener(
+    runner: Arc<NodeRunner>,
+    latest: [watch::Sender<Option<Upstream>>; 2],
+) {
+    const WHAT: &str = "upstream pose_setpoints";
+    let Some((mut left, mut right)) = subscribe_pair(
+        WHAT,
+        leader_left_arm_pose::pose_setpoints::subscribe(&runner),
+        leader_right_arm_pose::pose_setpoints::subscribe(&runner),
+    )
+    .await
+    else {
+        return;
+    };
+    let mut warned = None;
+    loop {
+        let (side, received) = tokio::select! {
+            r = left.next() => (Side::Left, r.map(|m| m.map(|(_, msg)| (msg.position, msg.orientation)))),
+            r = right.next() => (Side::Right, r.map(|m| m.map(|(_, msg)| (msg.position, msg.orientation)))),
+        };
+        let applied = accept(
+            WHAT,
+            side,
+            received,
+            |(position, orientation)| parse_pose_command(position, orientation),
+            &latest,
+            &mut warned,
+        )
+        .await;
+        if !applied {
+            return;
+        }
+    }
+}
+
 /// Receive both upstream arm setpoint streams forever (the leading node's
 /// joint_link command direction), keeping the latest well-formed message per
 /// side. The slot IS the side (a pairing delivers only its one peer), so there
@@ -219,7 +257,7 @@ async fn accept<Raw, Parsed>(
 /// stays queued in its own subscription, so neither side can starve the other.
 pub async fn run_joint_command_listener(
     runner: Arc<NodeRunner>,
-    latest: [watch::Sender<Option<JointCommand>>; 2],
+    latest: [watch::Sender<Option<Upstream>>; 2],
 ) {
     const WHAT: &str = "upstream joint_setpoints";
     let Some((mut left, mut right)) = subscribe_pair(
@@ -415,7 +453,8 @@ pub async fn run_governor_config_listener(
 mod tests {
     use super::*;
 
-    use crate::ARM_DOF;
+    use crate::types::ARM_DOF;
+    use srs_model::nalgebra::{Isometry3, Vector3};
 
     #[test]
     fn joint_state_requires_arm_dof_positions_with_matching_velocities() {
@@ -454,6 +493,56 @@ mod tests {
         );
     }
 
+    /// Extract the pose from an `Upstream` the parser was expected to accept.
+    fn parsed_pose(
+        position: [f64; 3],
+        orientation: [f64; 4],
+    ) -> Result<Isometry3<f64>, &'static str> {
+        match parse_pose_command(position, orientation)? {
+            Upstream::Pose(pose) => Ok(pose),
+            Upstream::Joints(_) => panic!("the pose parser produced a joint command"),
+        }
+    }
+
+    #[test]
+    fn pose_command_reads_the_wire_as_scalar_last() {
+        // A quarter turn about +Z, written the way the wire writes it. Reading
+        // it scalar-first instead would silently produce a different attitude,
+        // so pin the recovered axis and angle rather than the four components.
+        let half = std::f64::consts::FRAC_PI_4;
+        let pose = parsed_pose([0.4, -0.1, 0.3], [0.0, 0.0, half.sin(), half.cos()]).unwrap();
+        assert_eq!(pose.translation.vector, Vector3::new(0.4, -0.1, 0.3));
+        let (axis, angle) = pose.rotation.axis_angle().unwrap();
+        assert!((angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        assert!((axis.into_inner() - Vector3::z()).norm() < 1e-12);
+    }
+
+    #[test]
+    fn pose_command_normalizes_a_non_unit_quaternion() {
+        // Four independent floats reach us; only unit ones name a rotation.
+        let pose = parsed_pose([0.0; 3], [0.0, 0.0, 0.0, 5.0]).unwrap();
+        assert!((pose.rotation.quaternion().norm() - 1.0).abs() < 1e-12);
+        assert!(pose.rotation.angle() < 1e-12);
+    }
+
+    #[test]
+    fn pose_command_rejects_the_shapes_the_governor_could_not_survive() {
+        // A non-finite component reaching the governor faults the whole tick,
+        // and a zero quaternion names no rotation to substitute for.
+        assert_eq!(
+            parse_pose_command([f64::NAN, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+            Err("non-finite values")
+        );
+        assert_eq!(
+            parse_pose_command([0.0; 3], [0.0, f64::INFINITY, 0.0, 1.0]),
+            Err("non-finite values")
+        );
+        assert_eq!(
+            parse_pose_command([0.0; 3], [0.0, 0.0, 0.0, 0.0]),
+            Err("an unnormalizable orientation")
+        );
+    }
+
     #[test]
     fn gripper_state_clamps_into_the_contract_range() {
         assert_eq!(parse_gripper_state(0.5, 0.0, 0.0).unwrap().fraction, 0.5);
@@ -476,8 +565,10 @@ mod tests {
 
     #[test]
     fn joint_command_requires_arm_dof_finite_positions() {
-        let command = parse_joint_command(vec![0.2; ARM_DOF]).unwrap();
-        assert_eq!(command.positions, [0.2; ARM_DOF]);
+        assert_eq!(
+            parse_joint_command(vec![0.2; ARM_DOF]),
+            Ok(Upstream::Joints([0.2; ARM_DOF]))
+        );
         assert!(parse_joint_command(vec![0.2; ARM_DOF - 1]).is_err());
         let mut positions = vec![0.2; ARM_DOF];
         positions[0] = f64::NAN;

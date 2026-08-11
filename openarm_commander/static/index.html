@@ -285,9 +285,6 @@ const GRIPPER_MAX = 1;
 // +-200deg exactly spans the widest joint on both hardware generations, so all
 // rows align and the grayed ends mark each joint's own limits.
 const JOINT_AXIS = 200 * PI / 180;
-// Home is all zeros except the elbow (j4), held at a small positive angle so it
-// stays clear of the elbow singularity at 0 (which its lower limit excludes).
-const HOME_ELBOW_J4 = 0.1;
 // World-frame position controls: x/y/z sliders bound to indices 0..2 of the arm view's
 // `pose`/`pose_feedback`. That pose is the gripper's grasp point (between the pads),
 // not the wrist it mounts on, so dialling an object's centre puts the pads around it.
@@ -746,15 +743,17 @@ function toggle_enable(side) {
 
 function reset_arm(side) {
   // Home parks the arm: disable so the stream stops, then drive to the home pose
-  // (zeros, elbow held off the singularity) as a discrete, time-bounded move. The
-  // jaw closes alongside as its own discrete goal; the backbone governs the arm
-  // and the opening together, so the close rides the same collision-governed
-  // descent and an open jaw never parks splayed against the torso.
+  // as a discrete, time-bounded move. The pose comes from the snapshot (its one
+  // definition lives server-side, shared with move_to_home). The jaw closes
+  // alongside as its own discrete goal; the backbone governs the arm and the
+  // opening together, so the close rides the same collision-governed descent and
+  // an open jaw never parks splayed against the torso.
+  const preset = latestSnap && latestSnap[`${side}_arm`].home;
+  if (!preset) return;
   if (enabled[side] && ws && ws.readyState === 1) ws.send(JSON.stringify({cmd: 'set_enabled', side, on: false}));
   for (let i = 0; i < ARM_DOF; i++) {
-    const v = i === 3 ? HOME_ELBOW_J4 : 0;
-    $(`${side}_j${i}`).value = v;
-    $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(v);
+    $(`${side}_j${i}`).value = preset[i];
+    $(`${side}_j${i}_t`).textContent = fmtRadAsDeg(preset[i]);
   }
   touched[side] = 'joints';
   fire_arm(side, arm_duration(side));

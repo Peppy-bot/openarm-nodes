@@ -67,6 +67,8 @@ class IsaacBridgeExtension:
         # Signed full-open travel per finger joint, read from the articulation's
         # DOF limits at setup; commanded opening fractions scale onto it.
         self._gripper_travels: dict[int, list[float]] = {}
+        # Last force limit written per gripper, so the cap is not re-sent per tick.
+        self._applied_effort: dict[int, float] = {}
         self._telemetry_period_s = 1.0 / state_rate_hz
         self._last_publish_s = 0.0
 
@@ -195,9 +197,18 @@ class IsaacBridgeExtension:
             )
 
         for gripper in self._grippers:
-            opening = self._io.latest_gripper_command(gripper["gripper_id"])
-            if opening is None:
+            command = self._io.latest_gripper_command(gripper["gripper_id"])
+            if command is None:
                 continue
+            opening, max_effort = command
+            # Re-applied only on change: the ceiling write is a model-wide
+            # articulation call, not a per-tick target.
+            if self._applied_effort.get(gripper["gripper_id"]) != max_effort:
+                # Recorded only once written, so a not-ready tick retries.
+                if self._gripper_actuators[gripper["gripper_id"]].set_force_limit(
+                    gripper["fingers"], max_effort
+                ):
+                    self._applied_effort[gripper["gripper_id"]] = max_effort
             # Map the opening fraction onto each finger's own signed travel, so
             # the same command drives prismatic (v1) and revolute (v2) fingers.
             travels = self._gripper_travels[gripper["gripper_id"]]

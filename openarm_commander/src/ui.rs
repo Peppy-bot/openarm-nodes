@@ -309,6 +309,9 @@ struct ArmView {
     // The side's Ready pose, the single definition the gesture library anchors
     // on; the browser's Ready Pose button fires these joints.
     ready: [f64; ARM_DOF],
+    // The side's Home pose, from the same canonical postures; the browser's
+    // Home Pose button fires these joints.
+    home: [f64; ARM_DOF],
     // World-frame x/y/z reachable bounds [[min, max]; 3]; the browser bounds its
     // position sliders with these (per generation, from the arm's FK envelope).
     pos_bounds: [[f64; 2]; 3],
@@ -416,6 +419,7 @@ fn arm_view(a: &ArmTarget, side: Side, models: &ArmModels) -> ArmView {
         in_flight: a.in_flight,
         limits: *joint_limits().arm(side),
         ready: crate::gestures::READY[side],
+        home: crate::gestures::HOME[side],
         pos_bounds: models.pos_bounds(side),
         pose: models.ee_pose_world(side, &a.joints),
         pose_feedback: a.last_feedback.map(|fb| models.ee_pose_world(side, &fb)),

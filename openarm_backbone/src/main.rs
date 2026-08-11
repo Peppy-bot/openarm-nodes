@@ -1,10 +1,11 @@
 //! openarm_backbone - bimanual coordinator. It owns all arm motion: it
-//! consumes the commander's joint stream and exposes the joint / Cartesian move
-//! actions, generates the trajectories, runs the self-collision governor over
-//! both arms together, and streams the governed per-arm setpoints the arms
-//! follow. Grippers run through the backbone the same way: the commander's gripper
-//! stream and move_gripper goals both feed the coordinator, the grippers ride
-//! the same governed configuration as the arm joints (a gripper cannot open its
+//! consumes the leading node's joint or pose stream (per `upstream_mode`) and
+//! exposes the joint / Cartesian move actions, generates the trajectories,
+//! runs the self-collision governor over both arms together, and streams the
+//! governed per-arm setpoints the arms follow. Grippers run through the
+//! backbone the same way: the leading node's gripper stream and move_gripper
+//! goals both feed the coordinator, the grippers ride the same governed
+//! configuration as the arm joints (a gripper cannot open its
 //! fingers into the other arm), and the governed opening streams to each
 //! gripper over its gripper_link pairing slot. The governor is URDF-based, so
 //! it runs identically for the sim and the real arms.
@@ -23,15 +24,17 @@ mod streams;
 mod torso;
 mod trajectory;
 mod types;
+mod upstream;
 
-pub(crate) use arm_pair::ArmPair;
-pub(crate) use types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+use crate::arm_pair::ArmPair;
+use crate::types::{JointVec, Side};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use openarm_description::HardwareVersion;
+use peppygen::consumed_topics::collision_ctrl::governor_control;
 use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -39,6 +42,8 @@ use tracing::{error, info};
 
 use coordinator::ArmChannels;
 use planner::{PlanConfig, Planner};
+use servo::EeCaps;
+use upstream::UpstreamMode;
 
 /// Spawn a never-returning inbound listener into the backbone's supervised task set,
 /// adapting its `()` output to the set's `Result` so its exit trips the
@@ -100,6 +105,11 @@ fn main() -> Result<()> {
             params.max_ee_velocity_m_s.is_finite() && params.max_ee_velocity_m_s > 0.0,
             "max_ee_velocity_m_s must be a positive finite number"
         );
+        assert!(
+            params.max_ee_angular_velocity_rad_s.is_finite()
+                && params.max_ee_angular_velocity_rad_s > 0.0,
+            "max_ee_angular_velocity_rad_s must be a positive finite number"
+        );
         // Enforce the documented contract: the cutoff must sit below the control loop's
         // Nyquist frequency, or the low-pass does not attenuate (and above it is
         // meaningless). A hard bound at Nyquist; the node default sits well under it.
@@ -116,11 +126,18 @@ fn main() -> Result<()> {
         // (reusing the governor's own predicate) so a bad launcher value fails at
         // bringup with a clear message rather than deep inside model construction.
         assert!(
-            governor::valid_band(params.d_stop, params.d_safe),
-            "collision band invalid: require 0 < d_stop ({}) < d_safe ({}), both finite",
-            params.d_stop,
-            params.d_safe
+            governor::valid_band(params.d_stop_m, params.d_safe_m),
+            "collision band invalid: require 0 < d_stop_m ({}) < d_safe_m ({}), both finite",
+            params.d_stop_m,
+            params.d_safe_m
         );
+        // Governor controls are optional and exclusive: zero producers leaves
+        // the launch-time band standing, more than one is a mis-wired launch.
+        // At most one producer is the slot's zero_or_one cardinality: an
+        // over-bound launch is rejected at validation, never seen here.
+        if governor_control::bound_producer(&node_runner).is_none() {
+            info!("no governor_control producer bound; the launch-time band stands");
+        }
 
         let cycle_period = Duration::from_micros(1_000_000 / params.control_rate_hz as u64);
 
@@ -130,6 +147,14 @@ fn main() -> Result<()> {
             .hardware_version
             .parse()
             .unwrap_or_else(|e| panic!("{e}"));
+
+        // Which upstream command kind this instance follows; parsed once, and
+        // only that kind's listener is spawned below.
+        let upstream_mode: UpstreamMode = params
+            .upstream_mode
+            .parse()
+            .unwrap_or_else(|e: String| panic!("{e}"));
+        info!("following upstream {upstream_mode} commands");
 
         // Two arm models (FK/IK/Jacobian/limits, with the elbow singularity margin)
         // and the bimanual collision model, all from the embedded OpenArm description.
@@ -168,8 +193,8 @@ fn main() -> Result<()> {
             meshes_dir,
             left_base,
             right_base,
-            params.d_stop,
-            params.d_safe,
+            params.d_stop_m,
+            params.d_safe_m,
             max_joint_velocity_rad_s
                 .iter()
                 .copied()
@@ -179,9 +204,9 @@ fn main() -> Result<()> {
         )
         .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));
         info!(
-            "self-collision governor ready (d_stop={} d_safe={} default {})",
-            params.d_stop,
-            params.d_safe,
+            "self-collision governor ready (d_stop_m={} d_safe_m={} default {})",
+            params.d_stop_m,
+            params.d_safe_m,
             if params.collision_governor_enabled {
                 "ENABLED"
             } else {
@@ -204,7 +229,10 @@ fn main() -> Result<()> {
         let plan_cfg = |limits| PlanConfig {
             cycle_period,
             max_joint_velocity_rad_s,
-            max_ee_velocity_m_s: params.max_ee_velocity_m_s,
+            ee: EeCaps {
+                linear_m_s: params.max_ee_velocity_m_s,
+                angular_rad_s: params.max_ee_angular_velocity_rad_s,
+            },
             limits,
         };
         let planners = ArmPair::new(
@@ -239,8 +267,8 @@ fn main() -> Result<()> {
         ];
         let (config_tx, config_rx) = watch::channel(streams::GovernorConfig {
             enabled: params.collision_governor_enabled,
-            d_stop: params.d_stop,
-            d_safe: params.d_safe,
+            d_stop: params.d_stop_m,
+            d_safe: params.d_safe_m,
             max_ee_velocity_m_s: params.max_ee_velocity_m_s,
         });
 
@@ -288,6 +316,7 @@ fn main() -> Result<()> {
                 coordinator::RunConfig {
                     cycle_period,
                     velocity_filter_cutoff_hz: params.velocity_filter_cutoff_hz,
+                    upstream_mode,
                 },
                 token.clone(),
             ));
@@ -298,6 +327,16 @@ fn main() -> Result<()> {
                 [left_limits, right_limits],
             ));
             set.spawn(actions::arm::run_move_arm(
+                runner.clone(),
+                [goal_tx0.clone(), goal_tx1.clone()],
+                [goal_busy[0].clone(), goal_busy[1].clone()],
+            ));
+            set.spawn(actions::postures::run_move_to_ready(
+                runner.clone(),
+                [goal_tx0.clone(), goal_tx1.clone()],
+                [goal_busy[0].clone(), goal_busy[1].clone()],
+            ));
+            set.spawn(actions::postures::run_move_to_home(
                 runner.clone(),
                 [goal_tx0, goal_tx1],
                 [goal_busy[0].clone(), goal_busy[1].clone()],
@@ -313,10 +352,18 @@ fn main() -> Result<()> {
             // so a listener that dies takes the node down instead of leaving the
             // coordinator streaming on stale measured state or governor controls while
             // the node still reports healthy.
-            spawn_listener(
-                &mut set,
-                streams::run_joint_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]),
-            );
+            // Exactly one upstream listener; the other slot kind is never
+            // subscribed.
+            match upstream_mode {
+                UpstreamMode::Joints => spawn_listener(
+                    &mut set,
+                    streams::run_joint_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]),
+                ),
+                UpstreamMode::Pose => spawn_listener(
+                    &mut set,
+                    streams::run_pose_command_listener(runner.clone(), [cmd_tx0, cmd_tx1]),
+                ),
+            }
             spawn_listener(
                 &mut set,
                 streams::run_gripper_command_listener(runner.clone(), [gripcmd_tx0, gripcmd_tx1]),

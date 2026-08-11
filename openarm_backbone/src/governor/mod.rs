@@ -36,8 +36,9 @@ use bimanual_collision_model::BimanualCollisionModel;
 use srs_model::Jacobian;
 use tracing::{info, warn};
 
+use crate::arm_pair::ArmPair;
 use crate::torso::{TORSO_BODY, torso_regions};
-use crate::{ARM_DOF, ArmPair, JointVec};
+use crate::types::{ARM_DOF, JointVec};
 
 mod barrier;
 mod limiters;
@@ -811,6 +812,26 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_approach_outside_the_band_is_not_throttled() {
+        // The band's outer edge is where the barrier stops shaping motion:
+        // past d_safe it is not an active constraint, and the exact floor scan
+        // is what backstops the steps it passes.
+        let mut g = governor(true);
+        let start = at(wrists_inward(0.50));
+        let cand = at(wrists_inward(0.62));
+        let d_start = distance(&mut g, &start);
+        assert!(d_start > D_SAFE, "the step must start outside the band");
+        let closing = d_start - distance(&mut g, &cand);
+        assert!(
+            closing / DT > APPROACH_VELOCITY_AT_SAFE_M_S,
+            "the step must close faster than the in-band allowance or it proves \
+             nothing: closed {closing:.4} m in {DT} s"
+        );
+        assert_eq!(g.govern(&start, &cand, &start, NO_HANDS, DT), cand);
+        assert_eq!(g.guard(), Guard::Clear, "outside the band reads clear");
+    }
+
+    #[test]
     fn separating_motion_always_passes() {
         let mut g = governor(true);
         // Drive just into the band, then step back toward home: separating motion
@@ -1009,6 +1030,39 @@ mod tests {
         assert!(
             distance(&mut g, &q) < D_STOP + 4e-3,
             "did not settle near the stop distance"
+        );
+    }
+
+    // The band is entered at whatever the always-on speed limiters allow, which
+    // is well above the in-band allowance, so the floor has to hold for an
+    // approach that arrives fast: the ramp shapes the crossing and the exact
+    // scan is what guarantees it. The chase here is an order of magnitude
+    // quicker than the one above.
+    #[test]
+    fn a_fast_approach_into_the_band_still_holds_the_floor() {
+        let mut g = governor(true);
+        let target = wrists_inward(1.5);
+        let mut q = at(home());
+        let mut crossed_fast = false;
+        for _ in 0..250 {
+            let prev = q;
+            let d_prev = distance(&mut g, &prev);
+            let cand = at(chase(&prev.arms, &target, 0.25));
+            q = g.govern(&prev, &cand, &prev, NO_HANDS, DT);
+            let d = distance(&mut g, &q);
+            // What makes this a fast entry rather than a slower rerun: the tick
+            // that crosses d_safe closes faster than the in-band allowance.
+            crossed_fast |=
+                d_prev > D_SAFE && d < D_SAFE && (d_prev - d) / DT > APPROACH_VELOCITY_AT_SAFE_M_S;
+            assert!(d >= D_STOP, "barrier breached: d={d:+.5}");
+            assert!(
+                segment_min(&mut g, &prev, &q, 64) >= D_STOP - 1e-3,
+                "the prev->governed path dipped below the stop"
+            );
+        }
+        assert!(
+            crossed_fast,
+            "never crossed d_safe faster than the in-band allowance"
         );
     }
 

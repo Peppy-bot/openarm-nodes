@@ -1,8 +1,57 @@
 //! Shared primitives for the bimanual backbone: arm DOF, the joint vector, the
-//! arm side identifier, and the runtime motion-timeout rule.
+//! arm side identifier, the world-pose wire decomposition, and the runtime
+//! motion-timeout rule.
 
-/// Degrees of freedom of one arm.
-pub const ARM_DOF: usize = 7;
+use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
+
+/// Degrees of freedom of one arm, from the description that also supplies the
+/// URDF the governor and planner run against.
+pub const ARM_DOF: usize = openarm_description::ARM_DOF;
+
+/// Norm floor for [`pose_from_wire`]: a quaternion at or below it is refused
+/// as naming no rotation at all.
+const QUATERNION_MIN_NORM: f64 = 1e-6;
+
+/// Decompose a world-frame pose into the wire `(position, quaternion)` arrays:
+/// scalar-last `[x, y, z, w]` out of nalgebra's scalar-first, the outbound
+/// mirror of [`pose_from_wire`].
+pub fn world_pose_arrays(pose: &Isometry3<f64>) -> ([f64; 3], [f64; 4]) {
+    let t = pose.translation.vector;
+    let r = pose.rotation;
+    ([t.x, t.y, t.z], [r.i, r.j, r.k, r.w])
+}
+
+/// Parse a world-frame pose off the wire: three finite position components
+/// and a finite, normalizable quaternion. Normalized rather than trusted (the
+/// wire is four independent floats); a zero-length one is refused rather than
+/// read as identity.
+pub fn pose_from_wire(
+    position: [f64; 3],
+    orientation: [f64; 4],
+) -> Result<Isometry3<f64>, &'static str> {
+    if !position
+        .iter()
+        .chain(orientation.iter())
+        .all(|v| v.is_finite())
+    {
+        return Err("non-finite values");
+    }
+    // The wire is scalar-last [x, y, z, w]; nalgebra's Quaternion is
+    // scalar-first, and mixing the two is a silent 90-degree class of error.
+    let quaternion = Quaternion::new(
+        orientation[3],
+        orientation[0],
+        orientation[1],
+        orientation[2],
+    );
+    let Some(rotation) = UnitQuaternion::try_new(quaternion, QUATERNION_MIN_NORM) else {
+        return Err("an unnormalizable orientation");
+    };
+    Ok(Isometry3::from_parts(
+        Translation3::new(position[0], position[1], position[2]),
+        rotation,
+    ))
+}
 
 /// Grace multiple over a move's nominal duration before the runtime declares it
 /// stuck and fails the goal. The nominal proves the unobstructed motion's
@@ -69,6 +118,20 @@ impl Side {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the outbound wire ordering to the inbound one: a scalar-first slip
+    // on either side breaks the round trip.
+    #[test]
+    fn wire_arrays_round_trip_through_pose_from_wire() {
+        let pose = Isometry3::from_parts(
+            Translation3::new(0.2, -0.4, 0.9),
+            UnitQuaternion::from_euler_angles(0.3, -0.5, 1.1),
+        );
+        let (position, orientation) = world_pose_arrays(&pose);
+        let rebuilt = pose_from_wire(position, orientation).expect("round trip");
+        assert!((rebuilt.translation.vector - pose.translation.vector).norm() < 1e-12);
+        assert!(rebuilt.rotation.angle_to(&pose.rotation) < 1e-12);
+    }
 
     // The timeout scales with the move's nominal duration, not a flat ceiling:
     // an 8 s nominal tolerates up to 16 s (2x), a 1 s nominal only 2 s.
