@@ -301,9 +301,12 @@ pub fn plan_cartesian(
     ];
     // The EE speed cap is not enforced per tick on the move path (unlike Follow), so
     // size the duration to respect it up front alongside the joint limits: a short
-    // requested duration must not drive the hand past the linear EE cap.
-    let ee_ratio =
+    // requested duration must not drive the hand past either EE cap. Both axes
+    // count, since a pure reorientation covers no distance at all.
+    let travel_ratio =
         (end.translation.vector - start.translation.vector).norm() / limits.ee.linear_m_s;
+    let turn_ratio = (end.rotation * start.rotation.inverse()).angle() / limits.ee.angular_rad_s;
+    let ee_ratio = travel_ratio.max(turn_ratio);
     for (policy, steer_elbow) in tiers {
         let Some(walk) = walk_line(
             model,
@@ -1114,5 +1117,32 @@ mod tests {
         else {
             panic!("expected a steered-elbow line");
         };
+    }
+
+    // A pure reorientation covers no distance, so only the angular cap can size
+    // it: with the linear term alone a short request would spin the hand as fast
+    // as the joint limits allow.
+    #[test]
+    fn a_pure_reorientation_is_sized_by_the_angular_cap() {
+        let mut model = v2_right_arm();
+        let seed = READY;
+        let start = tip_world(&mut model, &seed) * model.tool();
+        let turn_rad = 0.6;
+        let end = start
+            * Isometry3::from_parts(
+                Translation3::identity(),
+                UnitQuaternion::from_axis_angle(&Vector3::z_axis(), turn_rad),
+            );
+
+        let Some(CartesianPlan::Line { duration_s, .. }) =
+            plan_cartesian(&mut model, &start, &end, seed, &v2_limits(), 0.1)
+        else {
+            panic!("expected a line for a pure reorientation");
+        };
+        let peak_rad_s = QUINTIC_PEAK_VELOCITY * turn_rad / duration_s;
+        assert!(
+            peak_rad_s <= TEST_EE_CAP_RAD_S + 1e-9,
+            "peak {peak_rad_s} rad/s exceeds the {TEST_EE_CAP_RAD_S} rad/s cap over {duration_s}s"
+        );
     }
 }
