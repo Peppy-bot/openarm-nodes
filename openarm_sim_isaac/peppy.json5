@@ -47,6 +47,7 @@
         "/run/user",
         "~/.cache/isaac-sim/kit/cache:/isaac-sim/kit/cache:rw",
         "~/.cache/isaac-sim/kit/data:/isaac-sim/kit/data:rw",
+        "~/.cache/isaac-sim-6/kit-logs:/isaac-sim/kit/logs:rw",
       ],
     },
     parameters: {

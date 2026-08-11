@@ -2,6 +2,7 @@
 """Isaac Sim launch script for the openarm sim engine node."""
 
 # pylint: disable=C0413
+
 from __future__ import annotations
 
 import asyncio
@@ -14,26 +15,49 @@ from pathlib import Path
 
 from peppylib.runtime import NodeBuilder
 
+
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", force=True
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    force=True,
 )
+
 logger = logging.getLogger(__name__)
 
+
 _ASSETS_DIR = Path(
-    os.environ.get("PEPPY_ROBOT_ASSETS_DIR", str(Path(__file__).parent / "assets"))
+    os.environ.get(
+        "PEPPY_ROBOT_ASSETS_DIR",
+        str(Path(__file__).parent / "assets"),
+    )
 )
+
+
 def _version(hardware_version: str) -> str:
     version = hardware_version.lower()
+
     if version not in ("v1", "v2"):
-        raise ValueError(f"hardware_version must be v1 or v2, got {hardware_version!r}")
+        raise ValueError(
+            "hardware_version must be v1 or v2, "
+            f"got {hardware_version!r}"
+        )
+
     return version
 
 
 def _scene_path(hardware_version: str) -> Path:
-    # The v1 and v2 scenes are separate USD files (openarm_bimanual_v1.usd /
-    # _v2.usd) in the base image's assets dir. A missing scene fails loudly at
-    # load rather than silently simulating the other geometry.
-    return _ASSETS_DIR / f"openarm_bimanual_{_version(hardware_version)}.usd"
+    # The v1 and v2 scenes are separate USD files:
+    #
+    # openarm_bimanual_v1.usd
+    # openarm_bimanual_v2.usd
+    #
+    # A missing scene fails loudly rather than silently
+    # simulating a different hardware version.
+
+    return (
+        _ASSETS_DIR
+        / f"openarm_bimanual_{_version(hardware_version)}.usd"
+    )
 
 
 _ROBOTS_DIR = Path(__file__).resolve().parents[1]
@@ -44,12 +68,13 @@ _stop = threading.Event()
 
 @dataclass
 class _SimHandoff:
-    """The node loop resolves these and hands them to the main-thread sim loop.
+    """Resolved Peppy parameters passed to the Isaac main thread.
 
-    SimulationApp must be constructed on the main thread before any omni.*
-    import, but its headless flag comes from the node parameters, which are only
-    available once the node runner calls setup(). The node thread stashes the
-    resolved IO + params here and flips `ready` so main() can proceed.
+    SimulationApp must be constructed on the main thread before
+    importing omni.* modules.
+
+    The Peppy node thread resolves the node parameters and IO first,
+    stores them here, then signals the main thread to continue.
     """
 
     io: object
@@ -63,13 +88,22 @@ _handoff_ready = threading.Event()
 
 
 async def setup(params, node_runner) -> list:
-    # Typed peppygen pub/sub lives on this loop; declare publishers and start the
-    # command-consume tasks before the sim thread starts reading from them.
-    sys.path.insert(0, str(_ROBOTS_DIR))
+    """Set up Peppy IO and hand resolved parameters to Isaac."""
+
+    sys.path.insert(
+        0,
+        str(_ROBOTS_DIR),
+    )
+
     from sim_topics import SimTopicIO
 
     loop = asyncio.get_running_loop()
-    io = SimTopicIO(node_runner, loop)
+
+    io = SimTopicIO(
+        node_runner,
+        loop,
+    )
+
     await io.start()
 
     _handoff["value"] = _SimHandoff(
@@ -78,59 +112,155 @@ async def setup(params, node_runner) -> list:
         headless=params.headless,
         hardware_version=params.hardware_version,
     )
+
     _handoff_ready.set()
 
     async def _shutdown_hook() -> None:
-        # Drive the Isaac main-thread sim loop to exit inside the runtime grace
-        # window; SimLauncher's finally bounds extension.shutdown(), then cancel
-        # the consume tasks.
+        # Tell the Isaac main-thread simulation loop to exit,
+        # then stop Peppy topic IO.
+
         _stop.set()
         await io.stop()
 
-    node_runner.on_shutdown(_shutdown_hook)
+    node_runner.on_shutdown(
+        _shutdown_hook
+    )
 
     return []
 
 
 def _run_node_builder() -> None:
-    # NodeBuilder.run returns when peppylib's shutdown service cancels its
-    # tasks. Flip _stop so the main-thread sim loop can exit; without this
-    # the asyncio side tears down cleanly but Isaac keeps spinning forever.
+    """Run the Peppy node runtime in its own thread."""
+
     try:
-        NodeBuilder().run(setup)
+        NodeBuilder().run(
+            setup
+        )
+
     finally:
         _stop.set()
 
 
 def main() -> None:
-    threading.Thread(target=_run_node_builder, daemon=True).start()
-    if not _handoff_ready.wait(timeout=30):
-        raise RuntimeError("node parameters not resolved within 30s")
+    """Launch Peppy and Isaac Sim."""
+
+    threading.Thread(
+        target=_run_node_builder,
+        daemon=True,
+    ).start()
+
+    if not _handoff_ready.wait(
+        timeout=30
+    ):
+        raise RuntimeError(
+            "node parameters not resolved within 30s"
+        )
+
     handoff = _handoff["value"]
 
-    # SimulationApp must initialise before any omni.* import. Its headless flag
-    # comes from the resolved node parameters; the renderer is a container-level
-    # knob.
+    # --------------------------------------------------------------
+    # WebRTC configuration
+    # --------------------------------------------------------------
+    #
+    # Do NOT hard-code the host IP here.
+    #
+    # Example:
+    #
+    #   export PEPPY_ISAAC_PUBLIC_IP=<YOUR_HOST_IP>
+    #
+    # Optional:
+    #
+    #   export PEPPY_ISAAC_SIGNAL_PORT=49100
+    #   export PEPPY_ISAAC_STREAM_PORT=47998
+    #
+    # 127.0.0.1 is useful when the streaming client is running
+    # on the same host.
+
+    public_ip = os.environ.get(
+        "PEPPY_ISAAC_PUBLIC_IP",
+        "127.0.0.1",
+    )
+
+    signal_port = os.environ.get(
+        "PEPPY_ISAAC_SIGNAL_PORT",
+        "49100",
+    )
+
+    stream_port = os.environ.get(
+        "PEPPY_ISAAC_STREAM_PORT",
+        "47998",
+    )
+
+    if handoff.headless:
+        logger.info(
+            "WebRTC streaming configuration: "
+            "publicIp=%s signalPort=%s streamPort=%s",
+            public_ip,
+            signal_port,
+            stream_port,
+        )
+
+        sys.argv.extend(
+            [
+                (
+                    "--/exts/omni.kit.livestream.app/"
+                    "primaryStream/publicIp="
+                    f"{public_ip}"
+                ),
+                (
+                    "--/exts/omni.kit.livestream.app/"
+                    "primaryStream/signalPort="
+                    f"{signal_port}"
+                ),
+                (
+                    "--/exts/omni.kit.livestream.app/"
+                    "primaryStream/streamPort="
+                    f"{stream_port}"
+                ),
+            ]
+        )
+
+    # SimulationApp must be imported only after all launch arguments
+    # have been prepared.
+
     from isaacsim import SimulationApp
 
     launch_config = {
         "headless": handoff.headless,
-        "renderer": os.environ.get("PEPPY_ISAAC_RENDERER", "RayTracedLighting"),
+        "renderer": "PathTracing",
+        "width": 1920,
+        "height": 1080,
+        "samples_per_pixel_per_frame": 8,
+        "denoiser": True,
+        "max_bounces": 4,
     }
+
     if handoff.headless:
         simulation_app = SimulationApp(
             launch_config,
-            experience="/isaac-sim/apps/isaacsim.exp.full.streaming.kit",
+            experience=(
+                "/isaac-sim/apps/"
+                "isaacsim.exp.full.streaming.kit"
+            ),
         )
-    else:
-        simulation_app = SimulationApp(launch_config)
 
-    sys.path.insert(0, str(_ROBOTS_DIR))
+    else:
+        simulation_app = SimulationApp(
+            launch_config
+        )
+
+    sys.path.insert(
+        0,
+        str(_ROBOTS_DIR),
+    )
+
     from _launcher import SimLauncher
 
     SimLauncher(
         simulation_app,
-        _scene_path(handoff.hardware_version),
+        _scene_path(
+            handoff.hardware_version
+        ),
         _ready,
         _stop,
         handoff.io,
