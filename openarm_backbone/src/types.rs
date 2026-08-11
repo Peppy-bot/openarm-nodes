@@ -4,8 +4,9 @@
 
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 
-/// Degrees of freedom of one arm.
-pub const ARM_DOF: usize = 7;
+/// Degrees of freedom of one arm, from the description that also supplies the
+/// URDF the governor and planner run against.
+pub const ARM_DOF: usize = openarm_description::ARM_DOF;
 
 /// Norm floor for [`pose_from_wire`]: a quaternion at or below it is refused
 /// as naming no rotation at all.

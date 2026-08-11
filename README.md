@@ -93,8 +93,13 @@ Every node you added should show `Stage: Ready`. If one is stuck at an earlier s
 
 ## 4. Launch the stack
 
+The launcher names the engine, so pick the one matching the nodes built above:
+
 ```sh
+# MuJoCo
 peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
+# Isaac
+peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_isaac.json5
 ```
 
 The launcher starts the instances in dependency order (sim first, then arms and grippers, then backbone, then the UI) and wires them together. Once it prints `Launch complete`:
@@ -133,7 +138,7 @@ peppy node add /path/to/ws/openarm-nodes/<node> -sb --force --idle-timeout 1800
 The sim keeps loading after `Launch complete`, and Isaac can take a minute. Watch its log until the world is up:
 
 ```sh
-peppy node info openarm_sim_mujoco:v1
+peppy node info openarm_sim_mujoco:v1   # or openarm_sim_isaac:v1
 ```
 
 **A move finishes with "reached (target clamped to joint limits)"**
