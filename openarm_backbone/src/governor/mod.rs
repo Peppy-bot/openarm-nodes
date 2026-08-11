@@ -812,6 +812,28 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_approach_outside_the_band_is_not_throttled() {
+        // Past d_safe the barrier is not an active constraint: it shapes the
+        // approach inside the band and nowhere else. Global speed belongs to
+        // the speed limiters, which run in both modes, so capping it here would
+        // put the collision toggle in charge of a speed unrelated to collisions.
+        // The exact floor scan still backstops whatever this lets through.
+        let mut g = governor(true);
+        let start = at(wrists_inward(0.50));
+        let cand = at(wrists_inward(0.62));
+        let d_start = distance(&mut g, &start);
+        assert!(d_start > D_SAFE, "the step must start outside the band");
+        let closing = d_start - distance(&mut g, &cand);
+        assert!(
+            closing / DT > APPROACH_VELOCITY_AT_SAFE_M_S,
+            "the step must close faster than the in-band allowance or it proves \
+             nothing: closed {closing:.4} m in {DT} s"
+        );
+        assert_eq!(g.govern(&start, &cand, &start, NO_HANDS, DT), cand);
+        assert_eq!(g.guard(), Guard::Clear, "outside the band reads clear");
+    }
+
+    #[test]
     fn separating_motion_always_passes() {
         let mut g = governor(true);
         // Drive just into the band, then step back toward home: separating motion

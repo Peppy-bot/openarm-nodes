@@ -80,7 +80,11 @@ impl Governor {
     }
 
     /// Permitted closing speed (m/s) at signed surface distance `d`: zero at or
-    /// under `d_stop`, the full approach at or over `d_safe`, linear between.
+    /// under `d_stop`, ramping linearly to the full approach at `d_safe`, and
+    /// unbounded beyond it. Outside the band the barrier is not an active
+    /// constraint: bounding the approach there would make the collision toggle
+    /// govern a global speed that has nothing to do with collisions, which is
+    /// the speed limiters' job, and they run in both modes.
     ///
     /// Inside an actual overlap this is a recovery budget rather than an
     /// approach one. Leaving it at zero there makes the projection itself the
@@ -92,7 +96,7 @@ impl Governor {
         } else if d <= self.d_stop {
             0.0
         } else if d >= self.d_safe {
-            APPROACH_VELOCITY_AT_SAFE_M_S
+            f64::INFINITY
         } else {
             APPROACH_VELOCITY_AT_SAFE_M_S * (d - self.d_stop) / (self.d_safe - self.d_stop)
         }
