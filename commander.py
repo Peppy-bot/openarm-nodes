@@ -57,7 +57,6 @@ def main() -> None:
         default=1.0,
         help="Uniform scale for the built-in scene.",
     )
-
     # arbitrary USD scene
     scene_usd_parser = sub.add_parser("scene-usd")
     scene_usd_parser.add_argument("path")
