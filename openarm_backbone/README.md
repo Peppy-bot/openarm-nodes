@@ -174,8 +174,8 @@ parameters (`d_stop_m`, `d_safe_m`, `collision_governor_enabled`,
 and the commander's `governor_control` stream retunes them live.
 `upstream_mode` is likewise required: `"joints"` follows the joint_link
 leader slots, `"pose"` the pose_link ones, and only the named kind is
-subscribed. A paired slot of the other kind would never be read, so bringup
-refuses it and names every offending slot.
+subscribed. Link the leader into the slots that kind names, or nothing it
+streams is read and the arms never move.
 `max_ee_angular_velocity_rad_s`, required like the linear cap, caps the
 rotation of streamed poses and the servo reference; unlike the linear cap it
 is launch-time only, not retuned by the live speed control. All ten pairing slots (six toward the

@@ -35,13 +35,10 @@ use std::time::Duration;
 
 use openarm_description::HardwareVersion;
 use peppygen::consumed_topics::collision_ctrl::governor_control;
-use peppygen::paired_topics::{
-    leader_left_arm, leader_left_arm_pose, leader_right_arm, leader_right_arm_pose,
-};
-use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
+use peppygen::{NodeBuilder, Parameters, Result};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use coordinator::ArmChannels;
 use planner::{PlanConfig, Planner};
@@ -59,69 +56,6 @@ where
         listener.await;
         Ok(())
     });
-}
-
-/// The upstream slots `mode` leaves unread that are nonetheless paired:
-/// exactly one kind is subscribed, so a leader linked to the other kind
-/// would stream into a slot this instance never reads.
-fn unfollowed_pairings(
-    mode: UpstreamMode,
-    pose: [bool; 2],
-    joints: [bool; 2],
-) -> Vec<&'static str> {
-    let (paired, slots) = match mode {
-        UpstreamMode::Joints => (pose, ["leader_left_arm_pose", "leader_right_arm_pose"]),
-        UpstreamMode::Pose => (joints, ["leader_left_arm", "leader_right_arm"]),
-    };
-    slots
-        .into_iter()
-        .zip(paired)
-        .filter_map(|(slot, is_paired)| is_paired.then_some(slot))
-        .collect()
-}
-
-/// Refuse to run with a paired upstream slot of the kind `mode` does not
-/// follow: the leader would stream into a slot this instance never reads,
-/// invisibly to the operator. Unknown pairing state only warns; a launch
-/// wiring error must not hide behind a transient read failure either way.
-fn refuse_unfollowed_upstream_slots(runner: &NodeRunner, mode: UpstreamMode) {
-    fn is_paired<T>(slot: Result<Option<T>>, name: &str) -> bool {
-        match slot {
-            Ok(pairing) => pairing.is_some(),
-            Err(e) => {
-                warn!("{name} pairing state unknown: {e}");
-                false
-            }
-        }
-    }
-    let pose = [
-        is_paired(
-            leader_left_arm_pose::pose_setpoints::paired(runner),
-            "leader_left_arm_pose",
-        ),
-        is_paired(
-            leader_right_arm_pose::pose_setpoints::paired(runner),
-            "leader_right_arm_pose",
-        ),
-    ];
-    let joints = [
-        is_paired(
-            leader_left_arm::joint_setpoints::paired(runner),
-            "leader_left_arm",
-        ),
-        is_paired(
-            leader_right_arm::joint_setpoints::paired(runner),
-            "leader_right_arm",
-        ),
-    ];
-    let unfollowed = unfollowed_pairings(mode, pose, joints);
-    if !unfollowed.is_empty() {
-        for slot in &unfollowed {
-            error!("{slot} is paired, but upstream_mode={mode} never reads it");
-        }
-        error!("refusing to run miswired");
-        std::process::exit(1);
-    }
 }
 
 /// Build one side's arm model from the embedded OpenArm description: the elbow
@@ -368,7 +302,6 @@ fn main() -> Result<()> {
         let goal_busy = [busy[0].clone(), busy[1].clone()];
         tokio::spawn(async move {
             startup::wait_until_ready(&runner, &token).await;
-            refuse_unfollowed_upstream_slots(&runner, upstream_mode);
 
             // The coordination loop (owns the governor, both planners, the channels;
             // streams governed setpoints once both arms report) and the action
@@ -467,31 +400,4 @@ fn main() -> Result<()> {
 
         Ok(())
     })
-}
-
-#[cfg(test)]
-mod upstream_mode_tests {
-    use super::*;
-
-    #[test]
-    fn a_pose_pairing_under_joints_mode_is_refused() {
-        assert_eq!(
-            unfollowed_pairings(UpstreamMode::Joints, [true, false], [true, true]),
-            vec!["leader_left_arm_pose"]
-        );
-    }
-
-    #[test]
-    fn a_joint_pairing_under_pose_mode_is_refused() {
-        assert_eq!(
-            unfollowed_pairings(UpstreamMode::Pose, [false, false], [false, true]),
-            vec!["leader_right_arm"]
-        );
-    }
-
-    #[test]
-    fn wiring_matching_the_mode_passes() {
-        assert!(unfollowed_pairings(UpstreamMode::Pose, [true, true], [false, false]).is_empty());
-        assert!(unfollowed_pairings(UpstreamMode::Joints, [false, false], [true, true]).is_empty());
-    }
 }
