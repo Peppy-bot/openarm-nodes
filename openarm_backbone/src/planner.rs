@@ -49,20 +49,37 @@ pub struct PlanConfig {
     pub limits: [Limit; ARM_DOF],
 }
 
+/// How a joint move ended, reported to a ready-move aggregation.
+pub struct ReadyOutcome {
+    pub success: bool,
+    pub message: String,
+}
+
+/// One arm's share of a whole-robot ready move: where its terminal reports,
+/// and the cancel flag the admission task flips on the action's cancel.
+pub struct ReadyReply {
+    pub done_tx: mpsc::Sender<ReadyOutcome>,
+    pub cancelled: Arc<AtomicBool>,
+}
+
 /// Where a joint move reports its terminal: the move_arm_joints action goal
-/// that carried it, boxed because the goal context is large.
+/// that carried it (boxed: the goal context dwarfs the other variant), or one
+/// arm's share of a move_to_ready goal.
 pub enum JointReply {
     MoveArmJoints(Box<move_arm_joints::GoalContext>),
+    Ready(ReadyReply),
 }
 
 impl JointReply {
     fn is_cancelled(&self) -> bool {
         match self {
             Self::MoveArmJoints(ctx) => ctx.is_cancelled(),
+            Self::Ready(r) => r.cancelled.load(Ordering::Acquire),
         }
     }
 
-    /// Report the terminal, keeping the action's distinct cancelled completion.
+    /// Report the terminal. The ready share folds `Cancelled` into a failed
+    /// outcome; the joint action keeps its distinct cancelled completion.
     async fn finish(
         self,
         side: &'static str,
@@ -86,6 +103,15 @@ impl JointReply {
                 };
                 if let Err(e) = result {
                     error!("{side}: move_arm_joints complete: {e}");
+                }
+            }
+            Self::Ready(r) => {
+                let outcome = ReadyOutcome {
+                    success,
+                    message: format!("{side}: {message}"),
+                };
+                if r.done_tx.send(outcome).await.is_err() {
+                    error!("{side}: ready outcome aggregation closed");
                 }
             }
         }
@@ -879,6 +905,43 @@ mod tests {
         let mut planner = Planner::new(Side::Left, model, cfg);
         planner.commit(POSE_TEST_Q);
         planner
+    }
+
+    #[tokio::test]
+    async fn aborting_the_active_move_fails_it_and_frees_the_busy_slot() {
+        let mut planner = test_planner([0.0; ARM_DOF]);
+        let (done_tx, mut done_rx) = mpsc::channel(1);
+        let (goal_tx, mut goals) = mpsc::channel(1);
+        let busy = Arc::new(AtomicBool::new(true)); // claimed at accept
+        goal_tx
+            .send(Goal::Joint {
+                target: [0.5; ARM_DOF],
+                duration_s: 1.0,
+                reply: JointReply::Ready(ReadyReply {
+                    done_tx,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                }),
+            })
+            .await
+            .expect("queue the goal");
+        let now = Instant::now();
+        planner
+            .tick([0.0; ARM_DOF], None, &mut goals, &busy, now)
+            .await;
+        assert!(
+            busy.load(Ordering::Acquire),
+            "move in flight holds the slot"
+        );
+
+        planner
+            .abort_active("the follower stopped reporting", [0.1; ARM_DOF], now)
+            .await;
+        let outcome = done_rx.recv().await.expect("aborted move must report");
+        assert!(!outcome.success);
+        assert!(outcome.message.contains("stopped reporting"));
+        assert!(!busy.load(Ordering::Acquire), "abort releases the slot");
+        // With nothing active the abort is a no-op.
+        planner.abort_active("again", [0.1; ARM_DOF], now).await;
     }
 
     #[test]

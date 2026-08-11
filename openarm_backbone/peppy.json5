@@ -18,6 +18,11 @@
   manifest: {
     name: "openarm_backbone",
     tag: "v1",
+    implements: [
+      // The whole-robot posture moves: both arms to Ready or Home through
+      // the same admission and planner path as move_arm_joints.
+      { name: "postures", tag: "v1", link_id: "postures" },
+    ],
     depends_on: {
       contracts: [
         { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_init" },
@@ -74,6 +79,9 @@
       // that return a result, distinct from the streamed setpoints on the
       // upstream pairing slots.
       exposes: [
+        // The postures contract's actions; formats come from the contract.
+        { link_id: "postures", name: "move_to_ready" },
+        { link_id: "postures", name: "move_to_home" },
         {
           name: "move_arm_joints",
           goal_service: {

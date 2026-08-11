@@ -1024,4 +1024,75 @@ mod tests {
         }
         assert!((governed - target).abs() <= GRIPPER_LANDED_FRAC);
     }
+
+    #[tokio::test]
+    async fn a_stale_tick_refuses_queued_goals_instead_of_parking_them() {
+        use crate::planner::{JointReply, PlanConfig, ReadyOutcome, ReadyReply};
+        use crate::servo::EeCaps;
+
+        let version = openarm_description::HardwareVersion::V1;
+        let model = crate::arm_model(version, openarm_description::Side::Left)
+            .expect("build arm from the bundled URDF");
+        let limits = model.limits();
+        let mut planner = Planner::new(
+            Side::Left,
+            model,
+            PlanConfig {
+                cycle_period: Duration::from_millis(10),
+                max_joint_velocity_rad_s: [10.0; ARM_DOF],
+                ee: EeCaps {
+                    linear_m_s: 1.0,
+                    angular_rad_s: 0.8,
+                },
+                limits,
+            },
+        );
+        let held = [0.0, -0.8, 0.0, 1.2, 0.0, 0.0, 0.0];
+        planner.commit(held);
+
+        let (command, _command_rx) = watch::channel(None);
+        let (gripper_command, _gripper_command_rx) = watch::channel(None);
+        let (_measured_tx, measured) = watch::channel(None);
+        let (_gripper_tx, gripper) = watch::channel(None);
+        let (goal_tx, goals) = mpsc::channel(2);
+        let (_gripper_goal_tx, gripper_goals) = mpsc::channel(1);
+        let busy = Arc::new(AtomicBool::new(true)); // claimed at accept
+        let mut channels = ArmChannels {
+            command,
+            gripper_command,
+            measured,
+            gripper,
+            goals,
+            busy: busy.clone(),
+            gripper_goals,
+            gripper_busy: Arc::new(AtomicBool::new(false)),
+        };
+        let (done_tx, mut done_rx) = mpsc::channel::<ReadyOutcome>(1);
+        goal_tx
+            .send(Goal::Joint {
+                target: held,
+                duration_s: 1.0,
+                reply: JointReply::Ready(ReadyReply {
+                    done_tx,
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                }),
+            })
+            .await
+            .expect("queue the goal");
+
+        let tick = tick_arm(
+            &mut channels,
+            &mut planner,
+            Admission::Stale,
+            Instant::now(),
+        )
+        .await;
+
+        let outcome = done_rx.recv().await.expect("a refused goal must report");
+        assert!(!outcome.success);
+        assert!(outcome.message.contains("stopped reporting"));
+        assert!(!busy.load(Ordering::Acquire), "refusal releases the claim");
+        assert_eq!(tick.candidate, planner.setpoint(), "a stale side holds");
+        assert!(tick.streamed_hand.is_none(), "a stale side streams nothing");
+    }
 }

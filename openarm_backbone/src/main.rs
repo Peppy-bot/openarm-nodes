@@ -401,6 +401,16 @@ fn main() -> Result<()> {
                 [goal_tx0.clone(), goal_tx1.clone()],
                 [goal_busy[0].clone(), goal_busy[1].clone()],
             ));
+            set.spawn(actions::postures::run_move_to_ready(
+                runner.clone(),
+                [goal_tx0.clone(), goal_tx1.clone()],
+                [goal_busy[0].clone(), goal_busy[1].clone()],
+            ));
+            set.spawn(actions::postures::run_move_to_home(
+                runner.clone(),
+                [goal_tx0, goal_tx1],
+                [goal_busy[0].clone(), goal_busy[1].clone()],
+            ));
             set.spawn(actions::gripper::run_move_gripper(
                 runner.clone(),
                 [grip_goal_tx0, grip_goal_tx1],
