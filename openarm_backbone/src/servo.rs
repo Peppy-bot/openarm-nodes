@@ -27,27 +27,18 @@
 use std::time::Duration;
 
 use control_core::filters::ButterworthFilter;
-use srs_model::Arm;
+use control_core::servo::{ORIENTATION_TOLERANCE_RAD, POSITION_TOLERANCE_M};
 use srs_model::nalgebra::{Isometry3, Rotation3, Vector3};
+use srs_model::{Arm, DEFAULT_DLS_LAMBDA};
 
 use crate::chase::rate_limited;
 use crate::trajectory::{PlanLimits, interpolate_pose};
 use crate::types::{ARM_DOF, JointVec};
 
-/// Damping for the damped-least-squares resolved-rate step (Chiaverini/Nakamura):
-/// heavy enough to stay bounded through singular postures, light enough not to
-/// visibly lag the reference. No MoveIt analogue (MoveIt uses no damping); 0.05 is
-/// the streaming jog's field-proven value, shared with it via [`Arm::rate_step`].
-const DLS_LAMBDA: f64 = 0.05;
 /// The reference stops walking while the arm is farther than this from it, so a
 /// wall crossing is ground through instead of the reference running away. Bespoke
 /// to the leashed-reference law; no MoveIt analogue.
 const LEASH_M: f64 = 0.05;
-/// A goal counts as reached within this position / orientation slack: MoveIt Servo's
-/// `pose_tracking.linear_tolerance` / `angular_tolerance` defaults, shared with the
-/// streaming jog's convergence thresholds.
-const POS_CONVERGED_M: f64 = 1e-3;
-const ROT_CONVERGED_RAD: f64 = 1e-2;
 /// Hard ceiling on a servo move. The plan-time rollout runs at most this long; a
 /// goal that has not converged by then is taken as unreachable and rejected, and
 /// the runtime aborts a move still going past it (the rare case where the
@@ -90,7 +81,7 @@ pub fn rate_step_toward(
     dt_s: f64,
 ) -> JointVec {
     let dp_world = target.translation.vector - ee.translation.vector;
-    let dp_world = if dp_world.norm() > POS_CONVERGED_M {
+    let dp_world = if dp_world.norm() > POSITION_TOLERANCE_M {
         dp_world * (caps.linear_m_s * dt_s / dp_world.norm()).min(1.0)
     } else {
         Vector3::zeros()
@@ -106,7 +97,7 @@ pub fn rate_step_toward(
         dw_world,
         max_joint_velocity_rad_s,
         dt_s,
-        DLS_LAMBDA,
+        DEFAULT_DLS_LAMBDA,
     )
 }
 
@@ -173,8 +164,8 @@ impl ServoState {
         let goal_pos_err = (self.end.translation.vector - ee.translation.vector).norm();
         let goal_rot_err = ee.rotation.angle_to(&self.end.rotation);
         if self.reference_s >= 1.0
-            && goal_pos_err < POS_CONVERGED_M
-            && goal_rot_err < ROT_CONVERGED_RAD
+            && goal_pos_err < POSITION_TOLERANCE_M
+            && goal_rot_err < ORIENTATION_TOLERANCE_RAD
         {
             return ServoStep::Converged(*q);
         }
@@ -184,7 +175,7 @@ impl ServoState {
         let line_len = (self.end.translation.vector - self.start.translation.vector).norm();
         let reference = interpolate_pose(&self.start, &self.end, self.reference_s);
         let ref_pos_err = (reference.translation.vector - ee.translation.vector).norm();
-        if line_len < POS_CONVERGED_M {
+        if line_len < POSITION_TOLERANCE_M {
             self.reference_s = 1.0;
         } else if ref_pos_err < LEASH_M {
             self.reference_s = (self.reference_s + caps.linear_m_s * dt_s / line_len).min(1.0);

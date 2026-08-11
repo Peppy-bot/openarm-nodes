@@ -23,7 +23,8 @@ use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use control_core::{Pacer, filters::LowPassFilter};
+use control_core::filters::LowPassFilter;
+use control_core::pacer::Pacer;
 
 use crate::arm_pair::ArmPair;
 use crate::chase::rate_limited;
