@@ -8,16 +8,18 @@ engine-agnostic: the same binary drives hardware, MuJoCo, and Isaac, because
 the launcher decides what pairs into each slot.
 
 ```text
-             leader_left_arm . leader_right_arm . leader_left_gripper . leader_right_gripper
- (streams in)     joint_setpoints    |    gripper_setpoints      [pairing slots, leading node]
-                        v            v
+        leader_left_arm . leader_right_arm             [joints mode]
+        leader_left_arm_pose . leader_right_arm_pose   [pose mode; pose_states back up]
+        leader_left_gripper . leader_right_gripper     [either mode]
+ (streams in)  joint_ or pose_setpoints  |  gripper_setpoints  [pairing slots, leading node]
+                           v             v
  collision_ctrl --> +--------------------------------+ --> collision_status (readout topic)
  (governor_control) |          coordinator           |
-                    |  planners --> GOVERNOR --> pub |
- move_arm[_joints]  |  (per arm)    (16 DOF)         |
- move_gripper ----> +--------------------------------+
-                        v            v
-                  joint_setpoints    |    gripper_setpoints    [pairing slots, follower side]
+ move_arm[_joints]  |  planners --> GOVERNOR --> pub |
+ move_gripper ----> |  (per arm)    (16 DOF)         |
+                    +--------------------------------+
+                           v             v
+                  joint_setpoints        |    gripper_setpoints  [pairing slots, follower side]
  (streams out) left_arm_link . right_arm_link . left_gripper_link . right_gripper_link
                         ^    joint_states / gripper_states (measured, relayed back up)
 ```
@@ -144,7 +146,8 @@ failure of the move machinery).
 |---|---|---|
 | `main.rs` | bringup: params, models, channels, task supervision | first task exit is fatal; the daemon restarts a clean process |
 | `startup.rs` | the robot_initializer gate | nothing streams before the robot is ready |
-| `streams.rs` | every subscription + parse-at-the-boundary types (`JointCommand`, `GripperCommand`, `ArmState`, `GripperState`) | one receive policy (`subscribe_pair` + `accept`); a malformed message is dropped with a reason, never driven |
+| `streams.rs` | every subscription + parse-at-the-boundary types (`GripperCommand`, `ArmState`, `GripperState`) | one receive policy (`subscribe_pair` + `accept`); a malformed message is dropped with a reason, never driven |
+| `upstream.rs` | `UpstreamMode` (which upstream slot kind is followed) + `Upstream` (the parsed joint or pose command) | one command authority per arm is unrepresentable, not checked per tick |
 | `publish.rs` | every publisher (`Publishers`), one stamp/build/publish/log path | peppy vocabulary: a publisher on a slot; "wire" means the transport encoding only |
 | `coordinator.rs` | the tick, gripper move execution, the upstream relay | IO orchestration; its seam with the safety core is exactly one `govern` call, which is why the governor is not folded into it |
 | `liveness.rs` | follower admission (`Live` / `Reanchor` / `Stale`) | delivery-cadence policy for the coordinator, independent of any message type |
@@ -164,12 +167,19 @@ failure of the move machinery).
 ## Parameters and links
 
 See `peppy.json5` for the full commented list. The operational governor
-parameters (`d_stop`, `d_safe`, `collision_governor_enabled`,
+parameters (`d_stop_m`, `d_safe_m`, `collision_governor_enabled`,
 `max_ee_velocity_m_s`) are required launcher arguments with no node defaults,
-and the commander's `governor_control` stream retunes them live. All eight
-pairing slots (four toward the leading node, four toward the followers) are
-optional and established by the launcher; publishing on an unpaired slot is a
-legal no-op, so partial deployments and monitors boot cleanly.
+and the commander's `governor_control` stream retunes them live.
+`upstream_mode` is likewise required: `"joints"` follows the joint_link
+leader slots, `"pose"` the pose_link ones, and only the named kind is
+subscribed. A paired slot of the other kind would never be read, so bringup
+refuses it and names every offending slot.
+`max_ee_angular_velocity_rad_s`, required like the linear cap, caps the
+rotation of streamed poses and the servo reference; unlike the linear cap it
+is launch-time only, not retuned by the live speed control. All ten pairing slots (six toward the
+leading node, four toward the followers) are optional and established by the
+launcher; publishing on an unpaired slot is a legal no-op, so partial
+deployments and monitors boot cleanly.
 
 ## Build, run, test
 

@@ -11,12 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use peppygen::exposed_actions::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
 use srs_model::Limit;
-use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion};
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::planner::Goal;
-use crate::{ARM_DOF, JointVec, Side};
+use crate::planner::{Goal, JointReply};
+use crate::{ARM_DOF, JointVec, Side, pose_from_wire};
 
 use crate::actions::claim;
 
@@ -71,7 +70,7 @@ pub async fn run_move_arm_joints(
             .send(Goal::Joint {
                 target,
                 duration_s,
-                ctx,
+                reply: JointReply::MoveArmJoints(Box::new(ctx)),
             })
             .await
             .is_err()
@@ -98,19 +97,10 @@ pub async fn run_move_arm(
                 let Some(idx) = Side::from_arm_id(d.arm_id).map(Side::index) else {
                     return Ok(move_arm::GoalDecision::reject("arm_id out of range"));
                 };
-                let finite = d
-                    .position
-                    .iter()
-                    .chain(d.orientation.iter())
-                    .all(|v| v.is_finite());
-                if !finite {
-                    return Ok(move_arm::GoalDecision::reject("non-finite pose"));
-                }
-                let quat_norm = d.orientation.iter().map(|v| v * v).sum::<f64>().sqrt();
-                if quat_norm < 1e-6 {
-                    return Ok(move_arm::GoalDecision::reject(
-                        "degenerate orientation quaternion",
-                    ));
+                if let Err(reason) = pose_from_wire(d.position, d.orientation) {
+                    return Ok(move_arm::GoalDecision::reject(format!(
+                        "goal pose has {reason}"
+                    )));
                 }
                 if !(d.duration_s.is_finite() && d.duration_s >= 0.0) {
                     return Ok(move_arm::GoalDecision::reject("invalid duration"));
@@ -127,13 +117,14 @@ pub async fn run_move_arm(
         let idx = Side::from_arm_id(ctx.request().data.arm_id)
             .map(Side::index)
             .expect("validated on accept");
-        let target = pose_from_arrays(ctx.request().data.position, ctx.request().data.orientation);
+        let target = pose_from_wire(ctx.request().data.position, ctx.request().data.orientation)
+            .expect("validated on accept");
         let duration_s = ctx.request().data.duration_s;
         if goal_txs[idx]
             .send(Goal::Cartesian {
                 target,
                 duration_s,
-                ctx,
+                ctx: Box::new(ctx),
             })
             .await
             .is_err()
@@ -143,11 +134,4 @@ pub async fn run_move_arm(
             return Ok(());
         }
     }
-}
-
-/// Build a world-frame isometry from the wire arrays: position `[x, y, z]`
-/// and quaternion `[x, y, z, w]` (normalized; validated non-degenerate above).
-fn pose_from_arrays(p: [f64; 3], q: [f64; 4]) -> Isometry3<f64> {
-    let rotation = UnitQuaternion::from_quaternion(Quaternion::new(q[3], q[0], q[1], q[2]));
-    Isometry3::from_parts(Translation3::new(p[0], p[1], p[2]), rotation)
 }
