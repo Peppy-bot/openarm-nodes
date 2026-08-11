@@ -18,9 +18,10 @@ class IsaacGripperSensor:
         self._finger_indices: list[int] = []
         self._resolved_names: list[str] = []
         self._ready: bool = False
-        # One-shot guard — the force-read fallback fires every physics step
-        # when broken; warn once instead of spamming at step rate.
+        # One-shot guards, both read on the first force sample: the fallback
+        # and the layout note fire every physics step otherwise.
         self._force_warning_logged: bool = False
+        self._force_layout_logged: bool = False
 
     def setup(self) -> bool:
         """Initialise the Articulation and resolve finger joint indices."""
