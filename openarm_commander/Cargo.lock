@@ -593,6 +593,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "control_core"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#99b79f6e08107c6e74e15ed0109ee6ddc844d2f9"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1496,7 +1506,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2255,6 +2265,7 @@ name = "openarm_commander"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "control_core",
  "openarm_description",
  "peppygen",
  "peppylib",
@@ -2271,7 +2282,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#bb5da56a3ff359a881bd963694b098bf47385c11"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#99b79f6e08107c6e74e15ed0109ee6ddc844d2f9"
 dependencies = [
  "urdf-rs",
 ]
@@ -2663,7 +2674,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2703,7 +2714,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -3591,7 +3602,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#bb5da56a3ff359a881bd963694b098bf47385c11"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#99b79f6e08107c6e74e15ed0109ee6ddc844d2f9"
 dependencies = [
  "k",
  "thiserror 2.0.18",

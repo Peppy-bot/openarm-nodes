@@ -13,7 +13,7 @@ use peppygen::paired_topics::backbone;
 use tokio::sync::watch;
 use tracing::{error, warn};
 
-use control_core::Pacer;
+use control_core::pacer::Pacer;
 
 use crate::{ARM_DOF, JointVec};
 

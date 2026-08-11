@@ -21,7 +21,7 @@ use srs_model::Limit;
 use tokio::sync::oneshot;
 use tracing::{error, info};
 
-use control_core::Pacer;
+use control_core::pacer::Pacer;
 
 use crate::friction;
 use crate::stream::{GovernedSetpoint, StreamWiring};

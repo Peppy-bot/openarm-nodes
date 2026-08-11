@@ -11,9 +11,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use control_core::servo::{ORIENTATION_TOLERANCE_RAD, POSITION_TOLERANCE_M};
 use openarm_description::HardwareVersion;
 use srs_model::nalgebra::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3};
-use srs_model::{Arm, ArmAnglePolicy};
+use srs_model::{Arm, ArmAnglePolicy, DEFAULT_DLS_LAMBDA};
 
 use crate::state::{ARM_DOF, Side};
 
@@ -186,7 +187,7 @@ impl ArmModels {
                 dw_world,
                 self.velocity_limits(side),
                 dt_s,
-                DLS_LAMBDA,
+                DEFAULT_DLS_LAMBDA,
             )
         };
         let dx_world = match task {
@@ -263,9 +264,6 @@ const JOG_ROT_RATE_RAD_S: f64 = 1.5;
 /// Arm-angle (elbow swivel) jog rate (rad/s); fixed like the rotation rate, since the
 /// null-space motion has no operator speed knob.
 const ARM_ANGLE_RATE_RAD_S: f64 = 1.2;
-/// Damping for the resolved-rate steps: heavy enough to stay bounded through
-/// singular postures, light enough not to visibly lag a jog step.
-const DLS_LAMBDA: f64 = 0.05;
 
 /// A joint jog is converged once every joint is within this of the target and nearly
 /// stopped; the jog then lands exactly on the target and retires.
@@ -420,12 +418,6 @@ pub fn joint_jog_tick(
     }
 }
 
-/// Position / angle slack within which a pose component counts as arrived: MoveIt
-/// Servo's `pose_tracking.linear_tolerance` / `angular_tolerance` defaults (1 mm,
-/// ~0.57 degrees), shared with the backbone servo's convergence. Invisible on the
-/// panel, far above FK round-trip noise.
-const POS_CONVERGED_M: f64 = 1e-3;
-const ROT_CONVERGED_RAD: f64 = 1e-2;
 const ARM_ANGLE_CONVERGED_RAD: f64 = 2e-3;
 /// A resolved-rate step that achieves less than this fraction of its demanded
 /// motion is pinned by joint limits: the envelope boundary in free space.
@@ -491,7 +483,7 @@ fn position_step(current: &Pose, desired: &Pose, cap_m: f64) -> Option<Vector3<f
         desired[2] - current[2],
     );
     let dist = delta.norm();
-    if dist < POS_CONVERGED_M {
+    if dist < POSITION_TOLERANCE_M {
         return None;
     }
     Some(delta * (cap_m.min(dist) / dist))
@@ -506,7 +498,7 @@ fn orientation_step(current: &Pose, desired: &Pose, cap_rad: f64) -> Option<Vect
     let q_des = UnitQuaternion::from_euler_angles(desired[3], desired[4], desired[5]);
     let err = q_des * q_cur.inverse();
     let angle = err.angle();
-    if angle < ROT_CONVERGED_RAD {
+    if angle < ORIENTATION_TOLERANCE_RAD {
         return None;
     }
     let axis = err.axis()?;

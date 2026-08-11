@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use control_core::minimum_jerk::{quintic, velocity_limited_duration};
 use srs_model::nalgebra::{Isometry3, Translation3};
 use srs_model::{Arm, ArmAnglePolicy};
 
@@ -30,7 +31,11 @@ impl JointTrajectory {
             .zip(max_velocity_rad_s.iter())
             .map(|((s, e), v)| (e - s).abs() / v)
             .fold(0.0_f64, f64::max);
-        let secs = velocity_limited_duration(peak_ratio, requested_duration_secs);
+        // Both inputs are guaranteed upstream: the joint velocity limits are
+        // asserted finite and positive at boot, and a move's requested duration
+        // is refused at the action boundary unless it is finite and in range.
+        let secs = velocity_limited_duration(peak_ratio, requested_duration_secs)
+            .expect("velocity limits and requested duration are validated before planning");
         Self {
             start,
             end,
@@ -318,8 +323,10 @@ pub fn plan_cartesian(
         ) else {
             continue;
         };
+        // A budget that cannot size a duration cannot be planned as a line.
         let duration_s =
-            velocity_limited_duration(walk.peak_ratio.max(ee_ratio), requested_duration_secs);
+            velocity_limited_duration(walk.peak_ratio.max(ee_ratio), requested_duration_secs)
+                .ok()?;
         if duration_s <= duration_cap {
             return Some(CartesianPlan::Line {
                 duration_s,
@@ -331,35 +338,6 @@ pub fn plan_cartesian(
     // No line tracks: prove the servo law reaches the pose before accepting it.
     crate::servo::rollout(model, start, end, seed, limits)
         .map(|duration_s| CartesianPlan::Servo { duration_s })
-}
-
-// --- Shared blend / sizing helpers -----------------------------------------
-
-/// Peak normalised velocity of the quintic blend `s(τ)`: `ds/dτ` at τ = 0.5. On a
-/// quintic of duration `T`, the peak speed of a quantity changing by Δ over the
-/// blend is `QUINTIC_PEAK_VELOCITY · Δ / T`, which is how a move's duration is
-/// sized to velocity limits (see [`velocity_limited_duration`]).
-const QUINTIC_PEAK_VELOCITY: f64 = 1.875;
-
-/// Quintic minimum-jerk blend `s(τ)` and its derivative `ds/dτ`, for τ = t/T ∈
-/// [0,1]. `s` runs 0→1 with `s'(0) = s'(1) = 0` and `s''(0) = s''(1) = 0`, so a
-/// path blended by it starts and stops with zero velocity and zero acceleration,
-/// the smoothest profile that hits fixed boundary conditions. Shared by the
-/// joint-space and Cartesian trajectories so both blend identically.
-fn quintic(tau: f64) -> (f64, f64) {
-    let s = ((6.0 * tau - 15.0) * tau + 10.0) * tau * tau * tau;
-    let ds_dtau = ((30.0 * tau - 60.0) * tau + 30.0) * tau * tau;
-    (s, ds_dtau)
-}
-
-/// Smallest duration (s) that keeps a quintic-blended motion within its velocity
-/// limits, floored at `requested_secs` so a caller can ask for a slower move.
-/// `peak_velocity_ratio` is the largest `|Δ/Δs| / v_max` over the motion (change
-/// per unit blend parameter against that component's limit); the quintic's peak
-/// factor scales it to the minimum feasible `T`. Shared by the joint trajectory
-/// (ratio from joint deltas) and the Cartesian planner (ratio from the IK'd path).
-fn velocity_limited_duration(peak_velocity_ratio: f64, requested_secs: f64) -> f64 {
-    requested_secs.max(QUINTIC_PEAK_VELOCITY * peak_velocity_ratio)
 }
 
 /// Interpolate between two poses at blend parameter `s` ∈ [0,1]: position by a
@@ -387,6 +365,7 @@ pub(crate) fn interpolate_pose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use control_core::minimum_jerk::QUINTIC_PEAK_VELOCITY;
     use openarm_description::HardwareVersion;
     use srs_model::nalgebra::{Quaternion, Translation3};
 
@@ -820,18 +799,6 @@ mod tests {
         let half = Duration::from_secs_f64(traj.duration.as_secs_f64() / 2.0);
         let q = traj.sample(traj.motion_start + half);
         assert!(q.iter().all(|v| approx_eq(*v, 0.5)));
-    }
-
-    #[test]
-    fn quintic_blend_profile() {
-        // s runs 0 -> 1 with zero slope at both ends; peak slope QUINTIC_PEAK_VELOCITY
-        // at the midpoint. This is the velocity feedforward shape the sampler rides.
-        let (s0, d0) = quintic(0.0);
-        let (sh, dh) = quintic(0.5);
-        let (s1, d1) = quintic(1.0);
-        assert!(approx_eq(s0, 0.0) && approx_eq(d0, 0.0));
-        assert!(approx_eq(sh, 0.5) && approx_eq(dh, QUINTIC_PEAK_VELOCITY));
-        assert!(approx_eq(s1, 1.0) && approx_eq(d1, 0.0));
     }
 
     #[test]
