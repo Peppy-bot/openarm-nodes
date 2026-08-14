@@ -162,62 +162,70 @@ def main() -> None:
     # WebRTC configuration
     # --------------------------------------------------------------
     #
-    # Do NOT hard-code the host IP here.
+    # PEPPY_ISAAC_PUBLIC_IP is optional.
+    #
+    # Leave it unset to allow WebRTC/ICE to determine the address
+    # automatically. Set it explicitly only when the advertised
+    # address must be fixed, for example when connecting from
+    # another host.
     #
     # Example:
     #
     #   export PEPPY_ISAAC_PUBLIC_IP=<YOUR_HOST_IP>
     #
-    # Optional:
+    # Optional port overrides:
     #
     #   export PEPPY_ISAAC_SIGNAL_PORT=49100
     #   export PEPPY_ISAAC_STREAM_PORT=47998
-    #
-    # 127.0.0.1 is useful when the streaming client is running
-    # on the same host.
 
     public_ip = os.environ.get(
         "PEPPY_ISAAC_PUBLIC_IP",
-        "127.0.0.1",
-    )
+        "",
+    ).strip()
 
     signal_port = os.environ.get(
         "PEPPY_ISAAC_SIGNAL_PORT",
         "49100",
-    )
+    ).strip()
 
     stream_port = os.environ.get(
         "PEPPY_ISAAC_STREAM_PORT",
         "47998",
-    )
+    ).strip()
 
     if handoff.headless:
         logger.info(
             "WebRTC streaming configuration: "
             "publicIp=%s signalPort=%s streamPort=%s",
-            public_ip,
+            public_ip or "<auto>",
             signal_port,
             stream_port,
         )
 
-        sys.argv.extend(
-            [
+        streaming_args = [
+            (
+                "--/exts/omni.kit.livestream.app/"
+                "primaryStream/signalPort="
+                f"{signal_port}"
+            ),
+            (
+                "--/exts/omni.kit.livestream.app/"
+                "primaryStream/streamPort="
+                f"{stream_port}"
+            ),
+        ]
+
+        if public_ip:
+            streaming_args.append(
                 (
                     "--/exts/omni.kit.livestream.app/"
                     "primaryStream/publicIp="
                     f"{public_ip}"
-                ),
-                (
-                    "--/exts/omni.kit.livestream.app/"
-                    "primaryStream/signalPort="
-                    f"{signal_port}"
-                ),
-                (
-                    "--/exts/omni.kit.livestream.app/"
-                    "primaryStream/streamPort="
-                    f"{stream_port}"
-                ),
-            ]
+                )
+            )
+
+        sys.argv.extend(
+            streaming_args
         )
 
     # SimulationApp must be imported only after all launch arguments
@@ -230,9 +238,9 @@ def main() -> None:
         "renderer": "PathTracing",
         "width": 1920,
         "height": 1080,
-        "samples_per_pixel_per_frame": 8,
+        "samples_per_pixel_per_frame": 2,
         "denoiser": True,
-        "max_bounces": 4,
+        "max_bounces": 2,
     }
 
     if handoff.headless:

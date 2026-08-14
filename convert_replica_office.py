@@ -5,6 +5,7 @@ from pathlib import Path
 
 from isaacsim import SimulationApp
 
+
 simulation_app = SimulationApp({
     "headless": True,
 })
@@ -14,15 +15,17 @@ async def convert():
     import carb
     import omni.kit.asset_converter
 
-    src = Path(
-        "/home/bmaderobotics/Downloads/active-gs/"
-        "data/replica_v1/office_0/mesh.ply"
+    base_dir = (
+        Path.home()
+        / "Downloads"
+        / "active-gs"
+        / "data"
+        / "replica_v1"
+        / "office_0"
     )
 
-    dst = Path(
-        "/home/bmaderobotics/Downloads/active-gs/"
-        "data/replica_v1/office_0/office0.usd"
-    )
+    src = base_dir / "mesh.ply"
+    dst = base_dir / "office0.usd"
 
     print(f"Input : {src}")
     print(f"Output: {dst}")

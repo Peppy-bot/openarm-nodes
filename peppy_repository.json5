@@ -36,6 +36,11 @@
         path: "openarm_gripper_v2/peppy.json5"
       }
     },
+    openarm_isaac_webviewer: {
+      v1: {
+        path: "openarm_isaac_webviewer/peppy.json5"
+      }
+    },
     openarm_ker: {
       v1: {
         path: "openarm_ker/peppy.json5"

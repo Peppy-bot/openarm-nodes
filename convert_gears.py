@@ -5,6 +5,7 @@ from pathlib import Path
 
 from isaacsim import SimulationApp
 
+
 simulation_app = SimulationApp({
     "headless": True,
 })
@@ -14,13 +15,11 @@ async def convert_one(input_path: Path, output_path: Path):
     import carb
     import omni.kit.asset_converter
 
-    print(f"Converting:")
+    print("Converting:")
     print(f"  {input_path}")
     print(f"-> {output_path}")
 
-    context = (
-        omni.kit.asset_converter.AssetConverterContext()
-    )
+    context = omni.kit.asset_converter.AssetConverterContext()
 
     # OBJ dimensions are often exported in mm.
     # Keep original scale for now; we can scale when spawning.
@@ -30,9 +29,7 @@ async def convert_one(input_path: Path, output_path: Path):
     context.single_mesh = False
     context.smooth_normals = True
 
-    converter = (
-        omni.kit.asset_converter.get_instance()
-    )
+    converter = omni.kit.asset_converter.get_instance()
 
     task = converter.create_converter_task(
         str(input_path),
@@ -57,10 +54,14 @@ async def convert_one(input_path: Path, output_path: Path):
 
 
 async def main():
-    asset_dir = Path(
-        "/home/bmaderobotics/Downloads/"
-        "Simulation-scenes/simulation-scenes/"
-        "scenes/gear_assembly/assets"
+    asset_dir = (
+        Path.home()
+        / "Downloads"
+        / "Simulation-scenes"
+        / "simulation-scenes"
+        / "scenes"
+        / "gear_assembly"
+        / "assets"
     )
 
     await convert_one(
