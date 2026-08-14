@@ -127,27 +127,34 @@ fn stale_flags(passes_since_state: &[u32; ARM_DOF], stale_after_ticks: u32) -> [
 }
 
 /// Step each joint's health filter with this tick's decoded state. A stale
-/// joint, or one whose status carries no condition, is judged silent: the
-/// filter reports it as not reporting and carries the readings it was last
-/// measured at, so a joint that goes quiet at 96 C does not render as
-/// cold.
+/// joint, one whose status carries no condition, or one whose readings
+/// decode non-finite is judged silent: the filter reports it as not
+/// reporting and carries the readings it was last measured at, so a joint
+/// that goes quiet at 96 C does not render as cold. The non-finite case is
+/// judged rather than stepped because there is no measurement in it, and
+/// feeding it through would poison the sustained average.
 fn judge(
     filters: &mut [MotorHealthFilter; ARM_DOF],
     state: &ArmState,
     stale: &[bool; ARM_DOF],
     dt_s: f64,
 ) -> [MotorHealth; ARM_DOF] {
-    std::array::from_fn(|i| match state.statuses[i].condition() {
-        Some(condition) if !stale[i] => filters[i].step(
-            MotorSample {
-                torque_nm: state.torques[i],
-                driver_temp: DriverTempC(state.temps_mos_c[i]),
-                winding_temp: WindingTempC(state.temps_rotor_c[i]),
-                condition,
-            },
-            dt_s,
-        ),
-        _ => filters[i].silent(),
+    std::array::from_fn(|i| {
+        let measurable = state.torques[i].is_finite()
+            && state.temps_mos_c[i].is_finite()
+            && state.temps_rotor_c[i].is_finite();
+        match state.statuses[i].condition() {
+            Some(condition) if !stale[i] && measurable => filters[i].step(
+                MotorSample {
+                    torque_nm: state.torques[i],
+                    driver_temp: DriverTempC(state.temps_mos_c[i]),
+                    winding_temp: WindingTempC(state.temps_rotor_c[i]),
+                    condition,
+                },
+                dt_s,
+            ),
+            _ => filters[i].silent(),
+        }
     })
 }
 
@@ -547,6 +554,16 @@ mod tests {
         stale[2] = true;
         let reports = judge(&mut f, &live_state(), &stale, 0.01);
         assert_eq!(reports[2].level, HealthLevel::NotReporting);
+    }
+
+    #[test]
+    fn a_non_finite_reading_is_judged_silent_not_stepped() {
+        let mut f = filters();
+        let mut state = live_state();
+        state.torques[3] = f64::NAN;
+        let reports = judge(&mut f, &state, &[false; ARM_DOF], 0.01);
+        assert_eq!(reports[3].level, HealthLevel::NotReporting);
+        assert_eq!(reports[0].level, HealthLevel::Nominal);
     }
 
     #[test]

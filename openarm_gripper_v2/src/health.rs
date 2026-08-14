@@ -61,7 +61,10 @@ pub(crate) fn capture_stamp() -> Result<SystemTime, String> {
 /// One tick's health for the single gripper motor: the filter's report, fed
 /// from the cached driver state, or declared silent when the state is past
 /// the stale window (`stale_after` follow-loop receive passes; the follow
-/// loop is what runs `recv_all`) or the motor has yet to report.
+/// loop is what runs `recv_all`), the motor has yet to report, or a reading
+/// decodes non-finite. The non-finite case is judged rather than stepped
+/// because there is no measurement in it, and feeding it through would
+/// poison the sustained average.
 fn judge(
     state: &GripperState,
     filter: &mut MotorHealthFilter,
@@ -69,8 +72,10 @@ fn judge(
     dt_s: f64,
 ) -> MotorHealth {
     let stale = state.passes_since_state >= stale_after;
+    let measurable =
+        state.torque.is_finite() && state.temp_mos_c.is_finite() && state.temp_rotor_c.is_finite();
     match state.status.condition() {
-        Some(condition) if !stale => filter.step(
+        Some(condition) if !stale && measurable => filter.step(
             MotorSample {
                 torque_nm: state.torque,
                 driver_temp: DriverTempC(state.temp_mos_c),
@@ -345,6 +350,15 @@ mod tests {
             report.driver_temp.0.is_nan(),
             "nothing measured yet, so there is nothing to carry"
         );
+    }
+
+    #[test]
+    fn a_non_finite_reading_is_judged_silent_not_stepped() {
+        let mut f = filter();
+        let mut state = driving(0);
+        state.torque = f64::NAN;
+        let report = judge(&state, &mut f, 50, 0.2);
+        assert_eq!(report.level, HealthLevel::NotReporting);
     }
 
     #[test]
