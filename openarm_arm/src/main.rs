@@ -10,6 +10,7 @@
 
 mod control;
 mod friction;
+mod health;
 mod stream;
 
 use control::ControlConfig;
@@ -27,9 +28,9 @@ use tokio::sync::{oneshot, watch};
 use tracing::{error, info, warn};
 
 /// Degrees of freedom of the arm.
-pub const ARM_DOF: usize = 7;
+pub const ARM_DOF: usize = openarm_description::ARM_DOF;
 /// One joint-space vector (positions, velocities, or torques), j1..j7.
-pub type JointVec = [f64; ARM_DOF];
+pub use srs_model::JointVec;
 
 /// `arm_id` values (0 = left, 1 = right). The chain base link and joint limits come
 /// from the embedded description keyed by [`Side`] (the command loop itself is
@@ -47,6 +48,19 @@ fn side_for(arm_id: u8) -> Side {
             panic!("arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {other}")
         }
     }
+}
+
+/// The tick period for a whole-hertz rate, refused at startup when it
+/// rounds to zero, so a bad rate fails before the motors are energised and
+/// with its own name in the message.
+fn period_from_hz(rate_hz: u32, name: &str) -> Duration {
+    assert!(rate_hz > 0, "{name} must be > 0");
+    let period = Duration::from_micros(1_000_000 / u64::from(rate_hz));
+    assert!(
+        !period.is_zero(),
+        "{name} {rate_hz} rounds to a zero-microsecond period"
+    );
+    period
 }
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
@@ -80,11 +94,8 @@ fn main() -> Result<()> {
         let arm_id = params.arm_id;
         let can_interface = params.can_interface.clone();
 
-        // Rates feed `Duration::from_micros(1_000_000 / rate)`, so a rate above
-        // 1 MHz would round to a 0 µs period; no real deployment approaches that,
-        // so just guard against zero.
-        assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
-        assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        let cycle_period = period_from_hz(params.control_rate_hz, "control_rate_hz");
+        let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz");
         // Bounded so a config typo cannot park recv_all in a near-eternal
         // ppoll while it holds the CAN mutex the shutdown path needs.
         assert!(
@@ -136,23 +147,17 @@ fn main() -> Result<()> {
             info!("mount tree resolved: gravity/Coriolis evaluated in the world frame");
         }
 
-        let cfg = ControlConfig {
-            kp: [
-                params.kp1, params.kp2, params.kp3, params.kp4, params.kp5, params.kp6, params.kp7,
-            ],
-            kd: [
-                params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7,
-            ],
-            cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
-            recv_timeout_us: params.recv_timeout_us,
-            limits: model.limits(),
-        };
-
+        let kp = [
+            params.kp1, params.kp2, params.kp3, params.kp4, params.kp5, params.kp6, params.kp7,
+        ];
+        let kd = [
+            params.kd1, params.kd2, params.kd3, params.kd4, params.kd5, params.kd6, params.kd7,
+        ];
         info!(
             "config: arm_id={arm_id} ({side:?}) rate={}Hz recv_timeout={}us",
-            params.control_rate_hz, cfg.recv_timeout_us
+            params.control_rate_hz, params.recv_timeout_us
         );
-        info!("config: kp={:?} kd={:?}", cfg.kp, cfg.kd);
+        info!("config: kp={kp:?} kd={kd:?}");
 
         // Instance lock: crash if another instance with the same arm_id is
         // running. Held in the core-node datastore (released from the on_shutdown
@@ -199,18 +204,46 @@ fn main() -> Result<()> {
         // Arm motor lineup + CAN addressing are identical across generations; open()
         // registers them.
         info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-        let mut arm = ArmCan::open(&can_interface, ENABLE_FD).map_err(can_err)?;
-        // On failure past enable, best-effort disable before returning
-        // through the runtime's error path, which releases the instance lock.
-        if let Err(e) = bring_up(&mut arm).await {
-            if let Err(disable_err) = arm.disable_all() {
-                error!("disable after failed bringup: {disable_err}");
-            }
-            return Err(can_err(e));
-        }
-        info!("arm ready");
+        let arm = Arc::new(Mutex::new(
+            ArmCan::open(&can_interface, ENABLE_FD).map_err(can_err)?,
+        ));
 
-        let arm = Arc::new(Mutex::new(arm));
+        // Motor-disable hook, registered before the motors are ever enabled
+        // so every stop path disables them, including a cancellation that
+        // drops this setup future part way through bring-up. The control
+        // loop's own disable on a clean stop runs first and this is then a
+        // no-op on already-disabled motors.
+        {
+            let arm = arm.clone();
+            node_runner.on_shutdown(async move {
+                let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = a.disable_all() {
+                    error!("disable motors: {e}");
+                }
+            });
+        }
+
+        // Registers first: the reads are the slowest part of bring-up and ask
+        // the motors nothing but their own configuration, so doing them while
+        // the arm is still limp keeps it unenergised until the moment the
+        // control loop is ready to hold it.
+        let ratings = {
+            let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+            let ratings = health::resolve_ratings(&mut a, BRINGUP_RECV_US)
+                .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
+            bring_up(&mut a).map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
+            ratings
+        };
+        info!("arm ready (every motor confirmed enabled)");
+
+        let cfg = ControlConfig {
+            kp,
+            kd,
+            cycle_period,
+            recv_timeout_us: params.recv_timeout_us,
+            limits: model.limits(),
+            ratings,
+        };
 
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm_hardware_ready) to
@@ -238,21 +271,37 @@ fn main() -> Result<()> {
             });
         }
 
-        // Stream plumbing: the listener keeps the latest governed setpoint for the
-        // control loop, and the publisher emits the measured joint state at its
-        // own rate (the backbone consumes it).
+        // Stream plumbing: the listener keeps the latest governed setpoint for
+        // the control loop, and the publishers emit the measured joint state
+        // and the per-motor health at their own rates (the backbone consumes
+        // the state; any motor_health consumer the launcher wires gets the
+        // health).
         let (governed_tx, governed_rx) = watch::channel(None);
         let (measured_tx, measured_rx) = watch::channel(None);
+        let (health_tx, health_rx) = watch::channel(None);
         let listener = tokio::spawn(stream::run_governed_setpoint_listener(
             node_runner.clone(),
             governed_tx,
         ));
         let publisher = tokio::spawn(stream::run_state_publisher(
             node_runner.clone(),
-            Duration::from_micros(1_000_000 / params.state_rate_hz as u64),
+            state_period,
             measured_rx,
         ));
-        // Cancel the node the moment either stream task stops: a dead listener
+        // Names this arm on both the health and alert wires, so an alert
+        // and a health report about the same hardware match by name.
+        let source = match side {
+            Side::Left => "left arm",
+            Side::Right => "right arm",
+        }
+        .to_string();
+        let health_publisher = tokio::spawn(health::run_publisher(
+            node_runner.clone(),
+            source,
+            health_rx,
+            node_runner.cancellation_token().clone(),
+        ));
+        // Cancel the node the moment any stream task stops: a dead listener
         // or publisher would otherwise hold the arm silently while is_ready
         // stays true (same supervision as the sim followers). A stop before
         // the token was cancelled is the fault, not a reaction to shutdown,
@@ -263,6 +312,7 @@ fn main() -> Result<()> {
                 tokio::select! {
                     _ = listener => {}
                     _ = publisher => {}
+                    _ = health_publisher => {}
                 }
                 if !token.is_cancelled() {
                     error!("stream task exited unexpectedly");
@@ -274,12 +324,13 @@ fn main() -> Result<()> {
         let wiring = stream::StreamWiring {
             governed: governed_rx,
             measured: measured_tx,
+            health: health_tx,
         };
 
         // Single control task (the only motor writer): follows the governed
         // setpoint with in-process feedforward and a final limit clamp, and on
         // shutdown disables the motors.
-        control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx).await?;
+        control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx);
 
         // Motors enabled, initial state populated, control loop running: report
         // ready so the robot_initializer can release the gate.
@@ -299,12 +350,20 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Enable the motors, drain the enable replies, then solicit and decode one
-/// state pass so `get_state()` is real before the control loop's first tick.
-async fn bring_up(arm: &mut ArmCan) -> openarm_can::Result<()> {
-    arm.enable_all()?;
-    tokio::time::sleep(POST_ENABLE_SLEEP).await;
-    arm.drain(BRINGUP_RECV_US)?;
-    arm.refresh_all()?;
-    arm.recv_all(BRINGUP_RECV_US)
+/// Enable the motors, verifying each acknowledges torque authority and
+/// retrying stragglers; readiness is refused naming the motors that never
+/// confirm. Blocking, so a stop cannot land mid-sequence with the motors
+/// half enabled.
+fn bring_up(arm: &mut ArmCan) -> std::result::Result<(), openarm_can::EnableFailure> {
+    arm.enable_and_confirm(
+        openarm_can::ENABLE_ATTEMPTS,
+        POST_ENABLE_SLEEP,
+        BRINGUP_RECV_US,
+    )?;
+    // One whole state pass so `get_state()` is real before the control loop's
+    // first tick; the confirmation's own decode may be several hundred
+    // milliseconds old by now. A pass that stopped at the first gap between
+    // replies would leave the later joints reading as never-heard-from.
+    arm.refresh_state(BRINGUP_RECV_US)?;
+    Ok(())
 }
