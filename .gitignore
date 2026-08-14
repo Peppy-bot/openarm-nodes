@@ -61,3 +61,6 @@ htmlcov/
 
 # Local git worktrees
 .worktrees/
+
+# Local-only cargo overrides for validating against unpushed libs.
+.cargo/
