@@ -33,14 +33,16 @@ pub trait Subscription {
 
 /// Drive one subscription until shutdown: each received message is parsed
 /// into owner feedback or dropped with a reason, warned at most once per
-/// [`REJECT_WARN_PERIOD`]. Returns when the token cancels, the subscription
-/// ends, or the owner is gone.
+/// [`REJECT_WARN_PERIOD`]. The parser receives the sending producer, the
+/// transport-authenticated identity a bound-set topic attributes reports by.
+/// Returns when the token cancels, the subscription ends, or the owner is
+/// gone.
 pub async fn forward_parsed<S: Subscription>(
     topic: &'static str,
     token: CancellationToken,
     feedback: mpsc::Sender<Feedback>,
     mut subscription: S,
-    mut parse: impl FnMut(&S::Message) -> Result<Feedback, String>,
+    mut parse: impl FnMut(&ProducerRef, &S::Message) -> Result<Feedback, String>,
 ) {
     let mut reject_warn = Throttle::new(REJECT_WARN_PERIOD);
     loop {
@@ -48,7 +50,7 @@ pub async fn forward_parsed<S: Subscription>(
             _ = token.cancelled() => return,
             received = subscription.recv() => received,
         };
-        let (_producer, msg) = match received {
+        let (producer, msg) = match received {
             Ok(Some(pair)) => pair,
             Ok(None) => return,
             Err(e) => {
@@ -56,7 +58,7 @@ pub async fn forward_parsed<S: Subscription>(
                 continue;
             }
         };
-        match parse(&msg) {
+        match parse(&producer, &msg) {
             Ok(event) => {
                 if feedback.send(event).await.is_err() {
                     return; // the owner is gone; nothing left to report to

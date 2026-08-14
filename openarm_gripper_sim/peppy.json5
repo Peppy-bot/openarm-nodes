@@ -3,8 +3,8 @@
 // role exactly like the real gripper (opening setpoints and effort cap in,
 // measured opening/effort/ceiling back); toward the sim engine it plays the
 // leader role of the same pairing. Stamps pass through unchanged. One instance
-// per side; the slots carry the side for the control conversation, and
-// `gripper_id` names it only for the motor_health heartbeat.
+// per side; the slots carry the side for the control conversation, and the
+// health heartbeat is attributed to this instance by the transport.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -55,12 +55,6 @@
     language: "rust",
     container: {
       def_file: "apptainer.def"
-    },
-    parameters: {
-      // Which side this instance simulates (0 left, 1 right): names the
-      // source on its motor_health heartbeat. Required so a launcher cannot
-      // leave two instances reporting as the same side.
-      gripper_id: "u8",
     }
   }
 }

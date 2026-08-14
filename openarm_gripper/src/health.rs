@@ -103,7 +103,7 @@ fn fractions(state: &GripperState, ratings: Ratings) -> (f64, f64) {
 /// fault verdict the follow loop wrote there before cancelling the node.
 pub async fn run<M: Mode + Send + 'static>(
     runner: Arc<NodeRunner>,
-    source: String,
+    alert_source: String,
     gripper: Arc<Mutex<GripperCan<M>>>,
     ratings: Ratings,
     cycle_period: Duration,
@@ -119,7 +119,7 @@ pub async fn run<M: Mode + Send + 'static>(
     };
     let stale_after = drive::ticks_within(STATE_STALE_AFTER, cycle_period);
     let mut filter = MotorHealthFilter::new(ratings);
-    let mut raiser = AlertRaiser::new(vec![source.clone()]);
+    let mut raiser = AlertRaiser::new(vec![alert_source]);
     let mut ticker = tokio::time::interval(HEALTH_PERIOD);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut health_warn = LatchedWarn::new("motor_health publish");
@@ -149,7 +149,6 @@ pub async fn run<M: Mode + Send + 'static>(
 
         publish_report(
             &health_pub,
-            &source,
             &report,
             now_rated,
             now_peak,
@@ -171,15 +170,14 @@ pub async fn run<M: Mode + Send + 'static>(
 /// enable confirmation is supposed to make impossible.
 async fn publish_report(
     publisher: &peppylib::TopicPublisher,
-    source: &str,
     report: &MotorHealth,
     now_rated: f64,
     now_peak: f64,
     publish_warn: &mut LatchedWarn,
     readings_warn: &mut LatchedWarn,
 ) {
-    let built = capture_stamp()
-        .and_then(|stamp| build_health_message(stamp, source, report, now_rated, now_peak));
+    let built =
+        capture_stamp().and_then(|stamp| build_health_message(stamp, report, now_rated, now_peak));
     let (message, degraded) = match built {
         Ok(built) => built,
         Err(e) => return publish_warn.failure(&e),
@@ -246,7 +244,6 @@ async fn publish_due_alerts(
 /// the quiet motor.
 fn build_health_message(
     stamp: SystemTime,
-    source: &str,
     report: &MotorHealth,
     now_rated: f64,
     now_peak: f64,
@@ -259,15 +256,14 @@ fn build_health_message(
         report.winding_temp.0,
     ];
     let degraded = readings.iter().any(|v| !v.is_finite());
-    let [fraction, sustained, peak, driver, winding] = match degraded {
+    let [rated, sustained, peak, driver, winding] = match degraded {
         true => std::array::from_fn(|_| Vec::new()),
         false => readings.map(|v| vec![v]),
     };
     let payload = motor_health::build_message(
         stamp,
-        source.to_string(),
         vec![report.level.wire()],
-        fraction,
+        rated,
         sustained,
         peak,
         driver,
@@ -378,14 +374,9 @@ mod tests {
         let state = driving(0);
         let report = judge(&state, &mut f, 50, 0.2);
         let (now_rated, now_peak) = fractions(&state, datasheet_ratings());
-        let (_, degraded) = build_health_message(
-            SystemTime::UNIX_EPOCH,
-            "left gripper",
-            &report,
-            now_rated,
-            now_peak,
-        )
-        .expect("builds");
+        let (_, degraded) =
+            build_health_message(SystemTime::UNIX_EPOCH, &report, now_rated, now_peak)
+                .expect("builds");
         assert!(!degraded, "finite readings publish in full");
     }
 
@@ -396,8 +387,7 @@ mod tests {
         // vector empty, per the contract's not-sensed convention.
         let report = filter().silent();
         let (_, degraded) =
-            build_health_message(SystemTime::UNIX_EPOCH, "left gripper", &report, 0.0, 0.0)
-                .expect("still builds");
+            build_health_message(SystemTime::UNIX_EPOCH, &report, 0.0, 0.0).expect("still builds");
         assert!(degraded, "NaN readings must degrade, not refuse or encode");
         assert_eq!(
             report.level,

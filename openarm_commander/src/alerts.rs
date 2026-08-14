@@ -52,7 +52,9 @@ pub async fn run(
         subscription,
         // An unresolved daemon clock cannot certify a stamp's age, so the
         // alert drops on the same throttled-warn path as a malformed one.
-        |msg| parse_alert(msg, consumer::clock_now()?, Instant::now()).map(Feedback::Alert),
+        |_producer, msg| {
+            parse_alert(msg, consumer::clock_now()?, Instant::now()).map(Feedback::Alert)
+        },
     )
     .await;
 }

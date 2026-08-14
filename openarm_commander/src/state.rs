@@ -362,15 +362,15 @@ pub struct Alert {
 /// plus the readings behind it, each `None` when the producer senses nothing
 /// (a sim limb reports levels only).
 ///
-/// The torque fractions divide by different lines: `effort_fraction` and
-/// `effort_fraction_sustained` (the filtered value the level judges) are of
-/// the continuous thermal rating; `effort_fraction_peak` is of the effective
-/// peak, where 1.0 is the cutout line.
+/// The torque fractions divide by different lines: `effort_fraction_rated`
+/// and `effort_fraction_rated_sustained` (the filtered value the level
+/// judges) are of the continuous thermal rating; `effort_fraction_peak` is
+/// of the effective peak, where 1.0 is the cutout line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotorHealthReading {
     pub level: HealthLevel,
-    pub effort_fraction: Option<f64>,
-    pub effort_fraction_sustained: Option<f64>,
+    pub effort_fraction_rated: Option<f64>,
+    pub effort_fraction_rated_sustained: Option<f64>,
     pub effort_fraction_peak: Option<f64>,
     pub driver_temp_c: Option<f64>,
     pub winding_temp_c: Option<f64>,
@@ -565,8 +565,8 @@ mod tests {
     fn worst_reports_the_most_severe_motor() {
         let reading = |level| MotorHealthReading {
             level,
-            effort_fraction: None,
-            effort_fraction_sustained: None,
+            effort_fraction_rated: None,
+            effort_fraction_rated_sustained: None,
             effort_fraction_peak: None,
             driver_temp_c: None,
             winding_temp_c: None,

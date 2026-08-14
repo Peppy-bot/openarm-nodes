@@ -1243,8 +1243,8 @@ const SIDE_STATUS_TEXT = {not_wired: 'not wired', pending: 'pending', not_report
 function motor_tooltip(m) {
   const parts = [`${m.name}: ${m.level == null ? 'pending' : HEALTH_LABELS[m.level]}`];
   if (m.effort_fraction_peak != null) parts.push(`mech ${(m.effort_fraction_peak * 100).toFixed(0)}%`);
-  if (m.effort_fraction != null) parts.push(`thermal ${(m.effort_fraction * 100).toFixed(0)}%`);
-  if (m.effort_fraction_sustained != null) parts.push(`sustained ${(m.effort_fraction_sustained * 100).toFixed(0)}%`);
+  if (m.effort_fraction_rated != null) parts.push(`thermal ${(m.effort_fraction_rated * 100).toFixed(0)}%`);
+  if (m.effort_fraction_rated_sustained != null) parts.push(`sustained ${(m.effort_fraction_rated_sustained * 100).toFixed(0)}%`);
   if (m.driver_temp_c != null) parts.push(`driver ${m.driver_temp_c.toFixed(0)}°C`);
   if (m.winding_temp_c != null) parts.push(`winding ${m.winding_temp_c.toFixed(0)}°C`);
   return parts.join(', ');
@@ -1308,8 +1308,8 @@ function motor_row(m) {
       m.name,
       m.level == null ? 'pending' : HEALTH_LABELS[m.level],
       pct(m.effort_fraction_peak),
-      pct(m.effort_fraction),
-      pct(m.effort_fraction_sustained),
+      pct(m.effort_fraction_rated),
+      pct(m.effort_fraction_rated_sustained),
       deg(m.driver_temp_c),
       deg(m.winding_temp_c),
     ],

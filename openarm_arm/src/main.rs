@@ -288,16 +288,16 @@ fn main() -> Result<()> {
             state_period,
             measured_rx,
         ));
-        // Names this arm on both the health and alert wires, so an alert
-        // and a health report about the same hardware match by name.
-        let source = match side {
+        // Names this arm's motors on the alert wire: "left arm" extends to
+        // "left arm j2" per joint.
+        let alert_source = match side {
             Side::Left => "left arm",
             Side::Right => "right arm",
         }
         .to_string();
         let health_publisher = tokio::spawn(health::run_publisher(
             node_runner.clone(),
-            source,
+            alert_source,
             health_rx,
             node_runner.cancellation_token().clone(),
         ));

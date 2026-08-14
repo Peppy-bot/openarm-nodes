@@ -78,11 +78,10 @@ fn main() -> Result<()> {
 
         let gripper_id = params.gripper_id;
         // One parse of gripper_id: the label naming this gripper on the
-        // health and alert wires, and this side's signed opening direction
-        // (the two v2 grippers are mechanically mirrored). Exhaustive so a
-        // value outside the convention is refused rather than published as
-        // the wrong side.
-        let (health_source, motor_geometry) = match gripper_id {
+        // alert wire, and this side's signed opening direction (the two v2
+        // grippers are mechanically mirrored). Exhaustive so a value outside
+        // the convention is refused rather than published as the wrong side.
+        let (alert_source, motor_geometry) = match gripper_id {
             0 => ("left gripper", geometry::Geometry::LEFT),
             1 => ("right gripper", geometry::Geometry::RIGHT),
             other => {
@@ -239,7 +238,7 @@ fn main() -> Result<()> {
         // datasheet anyway.
         let health_task = tokio::spawn(health::run(
             node_runner.clone(),
-            health_source.to_string(),
+            alert_source.to_string(),
             gripper.clone(),
             v20::GRIPPER_MOTOR_TYPE
                 .ratings()

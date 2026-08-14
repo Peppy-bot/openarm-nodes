@@ -77,10 +77,10 @@ fn main() -> Result<()> {
         peppygen::clock::init(&node_runner).await?;
 
         let gripper_id = params.gripper_id;
-        // Names this gripper on the health and alert wires. Exhaustive so a
-        // value outside the convention is refused rather than published as
-        // the wrong side.
-        let health_source = match gripper_id {
+        // Names this gripper on the alert wire. Exhaustive so a value
+        // outside the convention is refused rather than published as the
+        // wrong side.
+        let alert_source = match gripper_id {
             0 => "left gripper",
             1 => "right gripper",
             other => {
@@ -222,7 +222,7 @@ fn main() -> Result<()> {
         // datasheet anyway.
         let health_task = tokio::spawn(health::run(
             node_runner.clone(),
-            health_source.to_string(),
+            alert_source.to_string(),
             gripper.clone(),
             v10::GRIPPER_MOTOR_TYPE
                 .ratings()

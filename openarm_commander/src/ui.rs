@@ -368,8 +368,8 @@ struct MotorRowView {
     name: String,
     // The wire level; null for a motor whose component is still pending.
     level: Option<u8>,
-    effort_fraction: Option<f64>,
-    effort_fraction_sustained: Option<f64>,
+    effort_fraction_rated: Option<f64>,
+    effort_fraction_rated_sustained: Option<f64>,
     effort_fraction_peak: Option<f64>,
     driver_temp_c: Option<f64>,
     winding_temp_c: Option<f64>,
@@ -577,8 +577,8 @@ fn component_rows<const MOTORS: usize>(
                 MotorRowView {
                     name: name(i),
                     level: Some(reading.level.wire()),
-                    effort_fraction: reading.effort_fraction,
-                    effort_fraction_sustained: reading.effort_fraction_sustained,
+                    effort_fraction_rated: reading.effort_fraction_rated,
+                    effort_fraction_rated_sustained: reading.effort_fraction_rated_sustained,
                     effort_fraction_peak: reading.effort_fraction_peak,
                     driver_temp_c: reading.driver_temp_c,
                     winding_temp_c: reading.winding_temp_c,
@@ -594,8 +594,8 @@ fn absent_row(name: String, level: Option<HealthLevel>) -> MotorRowView {
     MotorRowView {
         name,
         level: level.map(HealthLevel::wire),
-        effort_fraction: None,
-        effort_fraction_sustained: None,
+        effort_fraction_rated: None,
+        effort_fraction_rated_sustained: None,
         effort_fraction_peak: None,
         driver_temp_c: None,
         winding_temp_c: None,
@@ -874,8 +874,8 @@ mod tests {
     fn reading(level: HealthLevel) -> MotorHealthReading {
         MotorHealthReading {
             level,
-            effort_fraction: Some(0.4),
-            effort_fraction_sustained: Some(0.3),
+            effort_fraction_rated: Some(0.4),
+            effort_fraction_rated_sustained: Some(0.3),
             effort_fraction_peak: Some(0.2),
             driver_temp_c: Some(41.0),
             winding_temp_c: Some(37.0),
@@ -989,7 +989,7 @@ mod tests {
         assert_eq!(names, ["j1", "j2", "j3", "j4", "j5", "j6", "j7", "gripper"]);
         let gripper = &view.left.motors[ARM_DOF];
         assert_eq!(gripper.level, Some(HealthLevel::Warning.wire()));
-        assert_eq!(gripper.effort_fraction, Some(0.4));
+        assert_eq!(gripper.effort_fraction_rated, Some(0.4));
         assert_eq!(gripper.effort_fraction_peak, Some(0.2));
     }
 
@@ -1015,7 +1015,7 @@ mod tests {
         let gripper_row = &view.left.motors[ARM_DOF];
         assert_eq!(gripper_row.level, Some(HealthLevel::NotReporting.wire()));
         assert_eq!(
-            gripper_row.effort_fraction, None,
+            gripper_row.effort_fraction_rated, None,
             "a quiet component's stale readings do not render as current"
         );
     }
@@ -1150,9 +1150,9 @@ mod tests {
             keys(row),
             [
                 "driver_temp_c",
-                "effort_fraction",
                 "effort_fraction_peak",
-                "effort_fraction_sustained",
+                "effort_fraction_rated",
+                "effort_fraction_rated_sustained",
                 "level",
                 "name",
                 "winding_temp_c",

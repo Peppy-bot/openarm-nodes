@@ -146,11 +146,6 @@ async fn relay_states(
     }
 }
 
-/// The limb encoding shared with the real arm, so one launcher convention
-/// names a side across simulated and real stacks.
-const ARM_ID_LEFT: u8 = 0;
-const ARM_ID_RIGHT: u8 = 1;
-
 /// Emit the "present, not sensed" motor_health heartbeat: nominal levels and
 /// empty reading vectors, because the engine reports no effort or
 /// temperature for this limb.
@@ -162,7 +157,6 @@ const ARM_ID_RIGHT: u8 = 1;
 /// consumers age the last report out and name this producer dead.
 async fn publish_health(
     runner: Arc<NodeRunner>,
-    source: String,
     relayed: Arc<Mutex<Option<Instant>>>,
     token: CancellationToken,
 ) {
@@ -194,7 +188,6 @@ async fn publish_health(
             let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
             let msg = motor_health::build_message(
                 UNIX_EPOCH + Duration::from_nanos(ns),
-                source.clone(),
                 vec![0; ARM_DOF],
                 Vec::new(),
                 Vec::new(),
@@ -225,15 +218,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    NodeBuilder::new().run(|params: Parameters, node_runner| async move {
-        // Names this limb on the health wire: same 0 left / 1 right encoding
-        // as the real arm, refused at startup so a launcher typo cannot
-        // publish a source no consumer recognises.
-        assert!(
-            matches!(params.arm_id, ARM_ID_LEFT | ARM_ID_RIGHT),
-            "arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {}",
-            params.arm_id
-        );
+    NodeBuilder::new().run(|_params: Parameters, node_runner| async move {
         // Health stamps read the daemon-resolved clock (sim time under a
         // simulated clock), like every producer-side stamp in the stack.
         peppygen::clock::init(&node_runner).await?;
@@ -264,17 +249,8 @@ fn main() -> Result<()> {
         let setpoints = tokio::spawn(relay_setpoints(node_runner.clone(), token.clone()));
         let health_relayed = relayed.clone();
         let states = tokio::spawn(relay_states(node_runner.clone(), relayed, token.clone()));
-        // Names this limb on the health wire the way the real arm names
-        // itself. Exhaustive rather than an else, so a value the assert above
-        // does not cover cannot silently publish as the right arm.
-        let source = match params.arm_id {
-            ARM_ID_LEFT => "left arm",
-            ARM_ID_RIGHT => "right arm",
-            other => unreachable!("arm_id {other} was refused at startup"),
-        };
         let health = tokio::spawn(publish_health(
             node_runner.clone(),
-            source.to_string(),
             health_relayed,
             token.clone(),
         ));

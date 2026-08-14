@@ -37,7 +37,7 @@ const CLOCK_WARN_PERIOD: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy)]
 pub struct HealthSample {
     pub reports: [MotorHealth; ARM_DOF],
-    pub effort_fractions: [f64; ARM_DOF],
+    pub effort_fractions_rated: [f64; ARM_DOF],
     pub effort_fractions_peak: [f64; ARM_DOF],
     pub captured: SystemTime,
 }
@@ -85,12 +85,12 @@ impl Monitor {
         self.last_step = Some(now);
 
         let reports = judge(&mut self.filters, state, &stale, dt_s);
-        let (effort_fractions, effort_fractions_peak) = fractions(&self.ratings, state);
+        let (effort_fractions_rated, effort_fractions_peak) = fractions(&self.ratings, state);
         match capture_stamp() {
             Ok(captured) => {
                 wiring.health.send_replace(Some(HealthSample {
                     reports,
-                    effort_fractions,
+                    effort_fractions_rated,
                     effort_fractions_peak,
                     captured,
                 }));
@@ -175,7 +175,7 @@ fn fractions(ratings: &[Ratings; ARM_DOF], state: &ArmState) -> ([f64; ARM_DOF],
 /// cancelled.
 pub async fn run_publisher(
     runner: Arc<NodeRunner>,
-    source: String,
+    alert_source: String,
     mut health: watch::Receiver<Option<HealthSample>>,
     token: CancellationToken,
 ) {
@@ -191,7 +191,9 @@ pub async fn run_publisher(
         return; // control loop gone before any motor reported
     }
     let mut pacer = Pacer::new(HEALTH_PERIOD).expect("HEALTH_PERIOD is non-zero");
-    let sources = (1..=ARM_DOF).map(|j| format!("{source} j{j}")).collect();
+    let sources = (1..=ARM_DOF)
+        .map(|j| format!("{alert_source} j{j}"))
+        .collect();
     let mut raiser = AlertRaiser::new(sources);
     let mut health_warn = LatchedWarn::new("motor_health publish");
     let mut readings_warn = LatchedWarn::new("health readings");
@@ -209,14 +211,7 @@ pub async fn run_publisher(
         let frozen = last_published == Some(sample.captured) && !final_round;
         if !frozen {
             last_published = Some(sample.captured);
-            publish_report(
-                &publisher,
-                &source,
-                &sample,
-                &mut health_warn,
-                &mut readings_warn,
-            )
-            .await;
+            publish_report(&publisher, &sample, &mut health_warn, &mut readings_warn).await;
             publish_due_alerts(
                 &alert_publisher,
                 &mut raiser,
@@ -251,12 +246,11 @@ pub async fn run_publisher(
 /// enable confirmation is supposed to make impossible.
 async fn publish_report(
     publisher: &peppylib::TopicPublisher,
-    source: &str,
     sample: &HealthSample,
     publish_warn: &mut LatchedWarn,
     readings_warn: &mut LatchedWarn,
 ) {
-    let (message, degraded) = match build_health_message(source, sample) {
+    let (message, degraded) = match build_health_message(sample) {
         Ok(built) => built,
         Err(e) => return publish_warn.failure(&e),
     };
@@ -320,12 +314,9 @@ async fn publish_due_alerts(
 /// motor that never reported, which bring-up refuses) empties every reading
 /// vector rather than fabricating a number or silencing the six joints still
 /// measured. Their levels still name the quiet motor.
-fn build_health_message(
-    source: &str,
-    sample: &HealthSample,
-) -> Result<(peppylib::Payload, bool), String> {
+fn build_health_message(sample: &HealthSample) -> Result<(peppylib::Payload, bool), String> {
     let readings = [
-        sample.effort_fractions.to_vec(),
+        sample.effort_fractions_rated.to_vec(),
         sample.reports.map(|r| r.torque_fraction).to_vec(),
         sample.effort_fractions_peak.to_vec(),
         sample.reports.map(|r| r.driver_temp.0).to_vec(),
@@ -334,15 +325,14 @@ fn build_health_message(
     let degraded = readings
         .iter()
         .any(|values| values.iter().any(|v| !v.is_finite()));
-    let [fraction, sustained, peak, driver, winding] = match degraded {
+    let [rated, sustained, peak, driver, winding] = match degraded {
         true => std::array::from_fn(|_| Vec::new()),
         false => readings,
     };
     let payload = motor_health::build_message(
         sample.captured,
-        source.to_string(),
         sample.reports.iter().map(|r| r.level.wire()).collect(),
-        fraction,
+        rated,
         sustained,
         peak,
         driver,
@@ -600,14 +590,15 @@ mod tests {
         let mut f = filters();
         let state = live_state();
         let reports = judge(&mut f, &state, &[false; ARM_DOF], 0.01);
-        let (effort_fractions, effort_fractions_peak) = fractions(&datasheet_ratings(), &state);
+        let (effort_fractions_rated, effort_fractions_peak) =
+            fractions(&datasheet_ratings(), &state);
         let sample = HealthSample {
             reports,
-            effort_fractions,
+            effort_fractions_rated,
             effort_fractions_peak,
             captured: SystemTime::UNIX_EPOCH,
         };
-        let (_, degraded) = build_health_message("left arm", &sample).expect("builds");
+        let (_, degraded) = build_health_message(&sample).expect("builds");
         assert!(!degraded, "finite readings publish in full");
     }
 
@@ -620,11 +611,11 @@ mod tests {
         let reports: [MotorHealth; ARM_DOF] = std::array::from_fn(|i| f[i].silent());
         let sample = HealthSample {
             reports,
-            effort_fractions: [0.0; ARM_DOF],
+            effort_fractions_rated: [0.0; ARM_DOF],
             effort_fractions_peak: [0.0; ARM_DOF],
             captured: SystemTime::UNIX_EPOCH,
         };
-        let (_, degraded) = build_health_message("left arm", &sample).expect("still builds");
+        let (_, degraded) = build_health_message(&sample).expect("still builds");
         assert!(degraded, "NaN readings must degrade, not refuse or encode");
         assert!(
             reports.iter().all(|r| r.level == HealthLevel::NotReporting),
