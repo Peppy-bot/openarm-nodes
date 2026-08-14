@@ -1,0 +1,43 @@
+name: Twin files
+
+# openarm_gripper and openarm_gripper_v2 deliberately duplicate health.rs and
+# drive.rs: the two hardware revisions share one health and drive story, and a
+# fix that lands in only one twin silently forks it. This job fails any push
+# or pull request that lets the twins drift.
+on:
+  pull_request:
+  push:
+
+concurrency:
+  group: twin-files-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gripper-twins-identical:
+    name: openarm_gripper and openarm_gripper_v2 keep health.rs and drive.rs identical
+    runs-on: self-hosted
+    # The runners are shared, so a step that hangs holds one hostage. Nothing
+    # here legitimately takes minutes.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Nothing here pushes, so the job has no use for a writable
+          # credential sitting in .git/config for every later step to inherit.
+          persist-credentials: false
+
+      - name: Diff each twin pair, byte for byte
+        run: |
+          set -uo pipefail
+          status=0
+          for f in health.rs drive.rs; do
+            if ! diff -u "openarm_gripper/src/$f" "openarm_gripper_v2/src/$f"; then
+              echo "openarm_gripper/src/$f and openarm_gripper_v2/src/$f must stay identical" >&2
+              status=1
+            fi
+          done
+          exit "$status"

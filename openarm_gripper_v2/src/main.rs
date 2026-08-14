@@ -1,6 +1,8 @@
 mod command_stream;
+mod drive;
 mod follow;
 mod geometry;
+mod health;
 mod stream;
 
 use follow::ControlConfig;
@@ -8,6 +10,7 @@ use openarm_can::{GripperCan, PosForce, v20};
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
+use peppylib::runtime::CancellationToken;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +37,35 @@ fn can_err(e: openarm_can::CanError) -> peppygen::Error {
     peppygen::Error::Io(std::io::Error::other(e))
 }
 
+/// The tick period for a whole-hertz rate, refused at startup when it
+/// rounds to zero, so a bad rate fails before the motor is energised and
+/// with its own name in the message.
+fn period_from_hz(rate_hz: u32, name: &str) -> Duration {
+    assert!(rate_hz > 0, "{name} must be > 0");
+    let period = Duration::from_micros(1_000_000 / u64::from(rate_hz));
+    assert!(
+        !period.is_zero(),
+        "{name} {rate_hz} rounds to a zero-microsecond period"
+    );
+    period
+}
+
+/// Cancel the node when a supervised task exits while it should still be
+/// running. An unsupervised dead loop leaves the node reachable but inert;
+/// a dead follow loop is worse, because the health task would keep judging
+/// a frozen state cache. Watching the JoinHandle means a panic lands here
+/// too, not only a clean return.
+fn supervise(task: tokio::task::JoinHandle<()>, what: &'static str, token: CancellationToken) {
+    tokio::spawn(async move {
+        let _ = task.await;
+        if !token.is_cancelled() {
+            error!("{what} exited unexpectedly");
+            follow::HARD_FAULT.store(true, Ordering::SeqCst);
+        }
+        token.cancel();
+    });
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -45,18 +77,24 @@ fn main() -> Result<()> {
         peppygen::clock::init(&node_runner).await?;
 
         let gripper_id = params.gripper_id;
-        // Resolves this side's signed opening direction (the two v2 grippers are
-        // mechanically mirrored) and rejects an out-of-range id at bringup.
-        let motor_geometry = geometry::Geometry::from_gripper_id(gripper_id).unwrap_or_else(|| {
-            panic!("gripper_id must be 0 (left) or 1 (right), got {gripper_id}")
-        });
+        // One parse of gripper_id: the label naming this gripper on the
+        // health and alert wires, and this side's signed opening direction
+        // (the two v2 grippers are mechanically mirrored). Exhaustive so a
+        // value outside the convention is refused rather than published as
+        // the wrong side.
+        let (health_source, motor_geometry) = match gripper_id {
+            0 => ("left gripper", geometry::Geometry::LEFT),
+            1 => ("right gripper", geometry::Geometry::RIGHT),
+            other => {
+                return Err(peppygen::Error::Io(std::io::Error::other(format!(
+                    "gripper_id must be 0 (left) or 1 (right), got {other}"
+                ))));
+            }
+        };
         let can_interface = params.can_interface.clone();
 
-        // Rates feed `Duration::from_micros(1_000_000 / rate)`, so a rate above
-        // 1 MHz would round to a 0 µs period; no real deployment approaches that,
-        // so just guard against zero.
-        assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
-        assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
+        let cycle_period = period_from_hz(params.control_rate_hz, "control_rate_hz");
+        let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz");
         // Bounded so a config typo cannot park recv_all in a near-eternal
         // ppoll while it holds the CAN mutex the shutdown hook needs.
         assert!(
@@ -75,7 +113,7 @@ fn main() -> Result<()> {
         );
 
         let cfg = ControlConfig {
-            cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
+            cycle_period,
             recv_timeout_us: params.recv_timeout_us,
             geometry: motor_geometry,
             speed_rad_s: params.speed_rad_s,
@@ -156,48 +194,64 @@ fn main() -> Result<()> {
             });
         }
 
-        // Enable, settle, drain the enable replies so bring-up ACK frames
-        // aren't decoded as state, then return to closed (motor angle =
-        // 0.0 rad) before serving requests. Errors return through the
-        // runtime so the hooks above disable the motor and release the lock.
+        // Enable and verify the motor acknowledges torque authority, then
+        // return to closed (motor angle = 0.0 rad) before serving requests.
+        // Errors return through the runtime so the hooks above disable the
+        // motor and release the lock.
         gripper
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .enable_all()
-            .map_err(can_err)?;
-        tokio::time::sleep(POST_ENABLE_SLEEP).await;
+            .enable_and_confirm(
+                openarm_can::ENABLE_ATTEMPTS,
+                POST_ENABLE_SLEEP,
+                BRINGUP_RECV_US,
+            )
+            .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
         {
             let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
-            g.drain(BRINGUP_RECV_US).map_err(can_err)?;
             info!("returning to zero");
             g.set_position(0.0, cfg.speed_rad_s, cfg.force_limit_pu)
                 .map_err(can_err)?;
             g.recv_all(BRINGUP_RECV_US).map_err(can_err)?;
         }
-        info!("gripper ready");
+        info!("gripper ready (motor confirmed enabled)");
 
         // Always-on gripper_states publisher: reads the motor's cached state at
         // state_rate_hz and emits the opening. It issues no CAN traffic of its
         // own, so it never contends with the follow loop for the bus.
         let publisher = tokio::spawn(stream::run(
             node_runner.clone(),
-            params.state_rate_hz,
+            state_period,
             motor_geometry,
             geometry::effort_ceiling_nm(params.force_limit_pu),
             gripper.clone(),
             node_runner.cancellation_token().clone(),
         ));
-        {
-            let token = node_runner.cancellation_token().clone();
-            tokio::spawn(async move {
-                let _ = publisher.await;
-                if !token.is_cancelled() {
-                    error!("state publisher exited unexpectedly");
-                    follow::HARD_FAULT.store(true, Ordering::SeqCst);
-                }
-                token.cancel();
-            });
-        }
+        supervise(
+            publisher,
+            "state publisher",
+            node_runner.cancellation_token().clone(),
+        );
+
+        // Motor condition telemetry and operator alerts, off the same cached
+        // state. Datasheet ratings: the DM4310's configured trip derates
+        // above its datasheet peak, so the registers would resolve to the
+        // datasheet anyway.
+        let health_task = tokio::spawn(health::run(
+            node_runner.clone(),
+            health_source.to_string(),
+            gripper.clone(),
+            v20::GRIPPER_MOTOR_TYPE
+                .ratings()
+                .expect("the gripper motor has datasheet ratings"),
+            cfg.cycle_period,
+            node_runner.cancellation_token().clone(),
+        ));
+        supervise(
+            health_task,
+            "health publisher",
+            node_runner.cancellation_token().clone(),
+        );
 
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm_hardware_ready) to
@@ -229,27 +283,27 @@ fn main() -> Result<()> {
         // opening addressed to this gripper, the follow loop drives the motor
         // toward it.
         let (cmd_tx, cmd_rx) = watch::channel(None);
-        // Supervised: if the command consumer ever exits, whether a clean close
-        // on shutdown or an unexpected error, streamed openings are dead, so
-        // cancel the node to restart it rather than leaving it healthy but inert.
-        {
-            let runner = node_runner.clone();
-            let token = node_runner.cancellation_token().clone();
-            tokio::spawn(async move {
-                command_stream::run(runner, cmd_tx, token.clone()).await;
-                if !token.is_cancelled() {
-                    error!("command stream exited unexpectedly");
-                    follow::HARD_FAULT.store(true, Ordering::SeqCst);
-                }
-                token.cancel();
-            });
-        }
-        tokio::spawn(follow::run(
+        let commands = tokio::spawn(command_stream::run(
+            node_runner.clone(),
+            cmd_tx,
+            node_runner.cancellation_token().clone(),
+        ));
+        supervise(
+            commands,
+            "command stream",
+            node_runner.cancellation_token().clone(),
+        );
+        let follower = tokio::spawn(follow::run(
             gripper,
             cmd_rx,
             cfg,
             node_runner.cancellation_token().clone(),
         ));
+        supervise(
+            follower,
+            "follow loop",
+            node_runner.cancellation_token().clone(),
+        );
 
         // Motor enabled and follow loop running: report ready so the
         // robot_initializer can release the gate.

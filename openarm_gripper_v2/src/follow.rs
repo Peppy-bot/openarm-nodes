@@ -1,21 +1,24 @@
 // Ambient following of a streamed gripper opening fraction: drive the motor
 // toward the latest command; with none yet, hold (the motor's position mode
 // keeps its last setpoint, so we simply do not re-command). Either way the loop
-// refreshes the motor state every tick, so the always-on state publisher serves
-// a live reading rather than one frozen at bring-up until the first command
-// (the arm control loop reads state every tick the same way). The opening is
-// commanded directly; the motor's position mode eases to it.
+// receives and refreshes the motor state every tick, so the always-on state
+// publisher serves a live reading rather than one frozen at bring-up until the
+// first command (the arm control loop reads state every tick the same way).
+// The opening is commanded directly; the motor's position mode eases to it.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use control_core::motor_health::{NOT_DRIVING_ESCALATE_AFTER, STATE_STALE_AFTER};
 use openarm_can::{CanErrorThrottle, GripperCan, PosForce};
 use peppylib::runtime::CancellationToken;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
+use tracing::error;
 
 use crate::command_stream::GripperCommand;
+use crate::drive::{self, Verdict};
 use crate::geometry::{self, Geometry};
 
 /// Set when the loop stops on a hard fault, so main can exit non-zero after
@@ -47,6 +50,9 @@ pub async fn run(
     let mut ticker = tokio::time::interval(cfg.cycle_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut throttle = CanErrorThrottle::new();
+    let stale_after_ticks = drive::ticks_within(STATE_STALE_AFTER, cfg.cycle_period);
+    let escalate_after_ticks = drive::ticks_within(NOT_DRIVING_ESCALATE_AFTER, cfg.cycle_period);
+    let mut not_driving = 0u32;
 
     loop {
         tokio::select! {
@@ -59,8 +65,32 @@ pub async fn run(
         // unwrap_or_else: drive even if the mutex was poisoned by a panic
         // elsewhere, so a transient fault doesn't strand the follow loop.
         let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
+        // Receive first and unconditionally, consuming the replies solicited
+        // by the previous tick's refresh: the decode pass is what advances
+        // the silence count, on error passes included.
+        let received = g.recv_all(cfg.recv_timeout_us);
+        let state = g.get_state();
+        let silent = state.passes_since_state >= stale_after_ticks;
+        match drive::assess(state.status, silent, &mut not_driving, escalate_after_ticks) {
+            Verdict::Continue => {}
+            Verdict::Reenable => {
+                if let Err(e) = g.reenable() {
+                    error!("re-enable motor: {e}");
+                }
+            }
+            Verdict::HardFault(reason) => {
+                // The motor is already limp or unaccounted for, so stop the
+                // node without commanding this tick. The shutdown hook
+                // disables the motor, and is_ready drops via the latch.
+                error!("{reason}; stopping node");
+                HARD_FAULT.store(true, Ordering::SeqCst);
+                token.cancel();
+                return;
+            }
+        }
+
         // Command only when there is a target; refresh state every tick either way.
-        let tick = (|| {
+        let sent = (|| {
             if let Some(command) = command {
                 let target_motor_rad = cfg
                     .geometry
@@ -69,14 +99,13 @@ pub async fn run(
                     geometry::effort_to_torque_pu(command.max_effort, cfg.force_limit_pu);
                 g.set_position(target_motor_rad, cfg.speed_rad_s, torque_pu)?;
             }
-            g.refresh_all()?;
-            g.recv_all(cfg.recv_timeout_us)
+            g.refresh_all()
         })();
         // A driver fault costs this tick's frames, not the loop: the motor
         // holds its last commanded target, the next tick re-sends an absolute
         // command, and the disable that stopping would imply travels over the
         // same socket that just failed.
-        match tick {
+        match received.and(sent) {
             Ok(()) => throttle.success(CONTEXT),
             Err(e) => throttle.failure(CONTEXT, &e),
         }
