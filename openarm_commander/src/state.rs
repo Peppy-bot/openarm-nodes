@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::gestures::BakedGesture;
 use crate::pose::Jog;
 
-pub const ARM_DOF: usize = openarm_description::ARM_DOF;
+pub use control_core::motor_health::HealthLevel;
+pub use openarm_description::ARM_DOF;
 // The gripper axis is the unitless opening fraction (0 = closed, 1 = open);
 // this is only the startup default for the gripper target.
 pub const GRIPPER_CLOSED: f64 = 0.0;
@@ -244,7 +245,176 @@ pub struct UiState {
     // The dataset recorder panel; hidden entirely when the deployment binds no
     // recorder instance.
     pub recorder: RecorderState,
+    // Latest per-arm motor health: `None` until that side's first report and
+    // retained thereafter. The retained entry doubles as the has-ever-reported
+    // bit: one aged past its validity renders as not reporting, never as a
+    // fresh launch still inside its grace.
+    pub health: BySide<Option<ArmHealth>>,
+    // Latest per-gripper motor health, keyed, retained, and aged the same way.
+    pub gripper_health: BySide<Option<GripperHealth>>,
+    // When this state was created; the startup grace for components that have
+    // never reported counts from here.
+    pub created_at: Instant,
+    // Whether this deployment binds any producer to the motor_health slot.
+    // The slot is zero_or_more, so a stack that wired nothing receives
+    // nothing and would otherwise render exactly like a healthy robot with
+    // nothing to say. Resolved once at startup, as the recorder panel is.
+    pub health_bound: bool,
+    // Same question for the alerts slot, so an empty alert list can say
+    // "not wired" rather than implying all clear.
+    pub alerts_bound: bool,
+    // Active operator alerts, one per (source, kind); severity-0 messages
+    // remove theirs, and the view ages out entries whose producer went quiet.
+    pub alerts: Vec<Alert>,
     pub status: String,
+}
+
+/// How often a listener may warn about a producer it is rejecting: enough to
+/// notice a persistently malformed producer, not enough to bury the log at
+/// that producer's own rate.
+pub const REJECT_WARN_PERIOD: Duration = Duration::from_secs(1);
+
+/// The motor_health contract's producer cadence mandate: every producer
+/// reports each component at least this often.
+const HEALTH_REPORT_PERIOD: Duration = Duration::from_millis(500);
+
+/// The alerts contract's re-emit ceiling: a producer re-announces each
+/// active alert at least this often.
+const ALERT_REEMIT_PERIOD: Duration = Duration::from_millis(2000);
+
+/// Health reports age out three contract periods (1500 ms) after receipt:
+/// one missed report is transport jitter, three in a row is a producer gone
+/// quiet, and the panel falls to not-reporting rather than latching.
+pub const HEALTH_STALE_AFTER: Duration = HEALTH_REPORT_PERIOD.saturating_mul(3);
+
+/// Alerts age out three re-emit periods (6000 ms) after receipt, the same
+/// three-missed-periods patience as [`HEALTH_STALE_AFTER`].
+pub const ALERT_STALE_AFTER: Duration = ALERT_REEMIT_PERIOD.saturating_mul(3);
+
+/// Slack allowed between a wire stamp and this consumer's clock before the
+/// stamp counts as pre-aged. Producers stamp from the daemon-resolved clock
+/// this node also reads, so the allowance absorbs scheduling skew, not clock
+/// disagreement.
+pub const STAMP_SKEW_ALLOWANCE: Duration = Duration::from_millis(500);
+
+/// A report's receipt time plus the fixed window it stays renderable for:
+/// the one aging rule shared by health reports and alerts. Anything older
+/// than its window stopped being re-emitted and drops instead of latching.
+#[derive(Clone, Copy, Debug)]
+pub struct Validity {
+    received_at: Instant,
+    live_for: Duration,
+}
+
+impl Validity {
+    pub fn new(received_at: Instant, live_for: Duration) -> Self {
+        Self {
+            received_at,
+            live_for,
+        }
+    }
+
+    pub fn received_at(self) -> Instant {
+        self.received_at
+    }
+
+    pub fn is_live_at(self, now: Instant) -> bool {
+        now.duration_since(self.received_at) < self.live_for
+    }
+}
+
+/// Parse a wire stamp into a report's [`Validity`], rejecting a stamp already
+/// older than the aging window plus [`STAMP_SKEW_ALLOWANCE`] on the
+/// daemon-resolved clock both ends read. A consumer working through a backlog
+/// re-stamps queued reports as fresh at receipt; the stamp check refuses what is already older than the window.
+pub fn parse_stamped_validity(
+    stamp: SystemTime,
+    clock_now: SystemTime,
+    received_at: Instant,
+    live_for: Duration,
+) -> Result<Validity, String> {
+    // A stamp ahead of the clock reads as age zero: forward skew is not backlog.
+    let age = clock_now.duration_since(stamp).unwrap_or(Duration::ZERO);
+    if age > live_for + STAMP_SKEW_ALLOWANCE {
+        return Err(format!(
+            "stamp {} ms old is past its {} ms window",
+            age.as_millis(),
+            live_for.as_millis()
+        ));
+    }
+    Ok(Validity::new(received_at, live_for))
+}
+
+/// One operator alert, identified by (source, kind): the producer raises it
+/// with a non-zero severity, re-emits actives inside the contract's re-emit
+/// ceiling, and retires it with severity 0. One not re-emitted within
+/// [`ALERT_STALE_AFTER`] has a quiet producer and drops instead of latching.
+#[derive(Clone, Debug)]
+pub struct Alert {
+    pub source: String,
+    pub kind: String,
+    pub severity: u8,
+    pub message: String,
+    pub validity: Validity,
+}
+
+/// One motor's health as the panel renders it: the producer-evaluated level
+/// plus the readings behind it, each `None` when the producer senses nothing
+/// (a sim limb reports levels only).
+///
+/// The torque fractions divide by different lines: `effort_fraction` and
+/// `effort_fraction_sustained` (the filtered value the level judges) are of
+/// the continuous thermal rating; `effort_fraction_peak` is of the effective
+/// peak, where 1.0 is the cutout line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorHealthReading {
+    pub level: HealthLevel,
+    pub effort_fraction: Option<f64>,
+    pub effort_fraction_sustained: Option<f64>,
+    pub effort_fraction_peak: Option<f64>,
+    pub driver_temp_c: Option<f64>,
+    pub winding_temp_c: Option<f64>,
+}
+
+/// One component's parsed health report: a reading per motor (transposed from
+/// the wire's struct-of-arrays at the parse boundary) plus the receipt
+/// validity that ages it.
+#[derive(Clone, Debug)]
+pub struct HealthReport<const MOTORS: usize> {
+    pub readings: [MotorHealthReading; MOTORS],
+    pub validity: Validity,
+}
+
+/// A seven-joint arm's report.
+pub type ArmHealth = HealthReport<ARM_DOF>;
+/// A gripper's single-motor report.
+pub type GripperHealth = HealthReport<1>;
+
+impl<const MOTORS: usize> HealthReport<MOTORS> {
+    /// The most severe motor's level.
+    pub fn worst(&self) -> HealthLevel {
+        const {
+            assert!(MOTORS > 0, "a health report covers at least one motor");
+        }
+        self.readings
+            .iter()
+            .map(|reading| reading.level)
+            .max()
+            .expect("MOTORS > 0")
+    }
+}
+
+/// The wire severity as a [`HealthLevel`], `None` for an undefined encoding.
+/// The inverse of [`HealthLevel::wire`], which control_core does not provide.
+pub fn health_level_from_wire(wire: u8) -> Option<HealthLevel> {
+    match wire {
+        0 => Some(HealthLevel::Nominal),
+        1 => Some(HealthLevel::Warning),
+        2 => Some(HealthLevel::Critical),
+        3 => Some(HealthLevel::Fault),
+        4 => Some(HealthLevel::NotReporting),
+        _ => None,
+    }
 }
 
 /// The backbone's reported nearest checked pair: signed surface distance (m, positive
@@ -299,7 +469,27 @@ impl UiState {
             joint_jog_acceleration_rad_s2,
             proximity: None,
             recorder: RecorderState::unavailable(),
+            health: BySide::splat(None),
+            gripper_health: BySide::splat(None),
+            created_at: Instant::now(),
+            health_bound: false,
+            alerts_bound: false,
+            alerts: Vec::new(),
             status: "ready".to_string(),
+        }
+    }
+
+    /// Fold one received alert in: replace the (source, kind) entry, or
+    /// remove it on a severity-0 clear. Entries that outlived their validity
+    /// window are purged here too, keyed on the incoming receipt time, so the
+    /// list stays bounded even when sources vary.
+    pub fn apply_alert(&mut self, alert: Alert) {
+        self.alerts.retain(|a| {
+            let replaced = a.source == alert.source && a.kind == alert.kind;
+            !replaced && a.validity.is_live_at(alert.validity.received_at())
+        });
+        if alert.severity > 0 {
+            self.alerts.push(alert);
         }
     }
 
@@ -318,5 +508,75 @@ impl UiState {
     /// or a gesture is driving it.
     pub fn side_active(&self, side: Side) -> bool {
         self.enabled[side] || self.gesture_holds(side)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_defined_level_survives_the_wire_round_trip() {
+        // The browser indexes its colour and label tables by this number, so
+        // a gap here renders as an unlabelled motor.
+        for wire in 0..=4 {
+            assert_eq!(health_level_from_wire(wire).unwrap().wire(), wire);
+        }
+        assert!(health_level_from_wire(5).is_none());
+    }
+
+    #[test]
+    fn aging_windows_are_three_contract_periods() {
+        assert_eq!(HEALTH_STALE_AFTER, Duration::from_millis(1500));
+        assert_eq!(ALERT_STALE_AFTER, Duration::from_millis(6000));
+    }
+
+    #[test]
+    fn a_report_is_live_strictly_inside_its_window() {
+        let t0 = Instant::now();
+        let validity = Validity::new(t0, HEALTH_STALE_AFTER);
+        assert!(validity.is_live_at(t0));
+        assert!(validity.is_live_at(t0 + HEALTH_STALE_AFTER - Duration::from_millis(1)));
+        assert!(!validity.is_live_at(t0 + HEALTH_STALE_AFTER));
+    }
+
+    #[test]
+    fn a_pre_aged_stamp_rejects_and_a_fresh_or_future_one_parses() {
+        let clock = SystemTime::now();
+        let t0 = Instant::now();
+        let parse = |stamp| parse_stamped_validity(stamp, clock, t0, HEALTH_STALE_AFTER);
+        assert!(parse(clock).is_ok());
+        assert!(
+            parse(clock - (HEALTH_STALE_AFTER + STAMP_SKEW_ALLOWANCE)).is_ok(),
+            "exactly at the allowance still parses"
+        );
+        assert!(
+            parse(clock - (HEALTH_STALE_AFTER + STAMP_SKEW_ALLOWANCE + Duration::from_millis(1)))
+                .is_err(),
+            "a backlogged report must not be re-stamped fresh"
+        );
+        assert!(
+            parse(clock + Duration::from_secs(5)).is_ok(),
+            "forward skew is not backlog"
+        );
+    }
+
+    #[test]
+    fn worst_reports_the_most_severe_motor() {
+        let reading = |level| MotorHealthReading {
+            level,
+            effort_fraction: None,
+            effort_fraction_sustained: None,
+            effort_fraction_peak: None,
+            driver_temp_c: None,
+            winding_temp_c: None,
+        };
+        let mut readings = [reading(HealthLevel::Nominal); ARM_DOF];
+        readings[4] = reading(HealthLevel::Critical);
+        let report = HealthReport {
+            readings,
+            validity: Validity::new(Instant::now(), HEALTH_STALE_AFTER),
+        };
+        assert_eq!(report.worst(), HealthLevel::Critical);
     }
 }

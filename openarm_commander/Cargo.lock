@@ -595,7 +595,7 @@ dependencies = [
 [[package]]
 name = "control_core"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#99b79f6e08107c6e74e15ed0109ee6ddc844d2f9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#2a3fd5a3edbe5ae1d339ab1f4907c749834d472c"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",
@@ -2282,7 +2282,7 @@ dependencies = [
 [[package]]
 name = "openarm_description"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#99b79f6e08107c6e74e15ed0109ee6ddc844d2f9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#2a3fd5a3edbe5ae1d339ab1f4907c749834d472c"
 dependencies = [
  "urdf-rs",
 ]
@@ -3602,7 +3602,7 @@ dependencies = [
 [[package]]
 name = "srs_model"
 version = "0.1.0"
-source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#99b79f6e08107c6e74e15ed0109ee6ddc844d2f9"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#2a3fd5a3edbe5ae1d339ab1f4907c749834d472c"
 dependencies = [
  "k",
  "thiserror 2.0.18",
@@ -5325,7 +5325,3 @@ name = "zmij"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd2f034a4bebf216c9e4b7083603e024cf930873fd67830cfb083c9fa33129d9"
-
-[[patch.unused]]
-name = "peppy-config-model"
-version = "0.1.0"

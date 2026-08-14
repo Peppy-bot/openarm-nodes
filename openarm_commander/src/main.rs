@@ -1,9 +1,12 @@
+mod alerts;
 mod collision_status;
 mod command_stream;
+mod consumer;
 mod error;
 mod gestures;
 mod gripper_states;
 mod joint_states;
+mod motor_health;
 mod move_arm;
 mod move_arm_joints;
 mod move_gripper;
@@ -106,6 +109,16 @@ fn main() -> Result<()> {
             token.clone(),
         ));
         tokio::spawn(collision_status::run(
+            node_runner.clone(),
+            feedback_tx.clone(),
+            token.clone(),
+        ));
+        tokio::spawn(motor_health::run(
+            node_runner.clone(),
+            feedback_tx.clone(),
+            token.clone(),
+        ));
+        tokio::spawn(alerts::run(
             node_runner.clone(),
             feedback_tx.clone(),
             token.clone(),

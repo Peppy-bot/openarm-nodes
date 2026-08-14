@@ -27,7 +27,8 @@ use crate::gestures::Registry;
 use crate::owner::UiMsg;
 use crate::pose::{ArmModels, JogMode, Pose};
 use crate::state::{
-    ARM_DOF, ArmTarget, Disposition, GesturePhase, GripperTarget, Proximity, Side, UiState,
+    ARM_DOF, Alert, ArmTarget, Disposition, GesturePhase, GripperTarget, HealthLevel, HealthReport,
+    Proximity, Side, UiState,
 };
 
 const DEFAULT_PORT: u16 = 8765;
@@ -35,6 +36,12 @@ const DEFAULT_PORT: u16 = 8765;
 // long with no update (a dead backbone) so the panel falls back to n/a instead of
 // latching the last distance.
 const PROXIMITY_STALE_AFTER: Duration = Duration::from_millis(500);
+// A launch's producers need a beat to start reporting: until this long after
+// state creation, a health component that has never reported renders as
+// pending rather than raising a not-reporting problem, so a healthy launch
+// does not flash a false alarm.
+const STARTUP_GRACE: Duration = Duration::from_secs(3);
+
 const INDEX_HTML: &str = include_str!("../static/index.html");
 
 // Joint ranges from the generation's bundled URDF plus the unitless gripper
@@ -250,6 +257,14 @@ struct Snapshot {
     max_ee_velocity_m_s: f64,
     // Live nearest-pair proximity from the backbone (null until the first report).
     proximity: Option<ProximityView>,
+    // Motor health with severity fully computed server-side; the browser's
+    // chips, banner, and motors tables render it without re-deriving.
+    health: HealthPanelView,
+    // Active operator alerts, most severe first.
+    alerts: Vec<AlertView>,
+    // Whether anything is bound to the alerts slot; an empty list means "no
+    // active alerts" only when this is true.
+    alerts_bound: bool,
     // The baked gesture roster (name, label, involved sides); the browser builds
     // its buttons from this, so gestures live in exactly one place.
     gestures: Vec<GestureView>,
@@ -297,6 +312,67 @@ struct ProximityView {
     link_b: String,
     throttled: bool,
     stopped: bool,
+}
+
+#[derive(Serialize)]
+struct AlertView {
+    source: String,
+    // Alert severity: 1 warning, 2 critical, 3 fault (0 never renders; a
+    // clear removes its entry instead).
+    severity: u8,
+    message: String,
+}
+
+/// Everything the browser's health surfaces render: per-side per-motor rows,
+/// the combined severities, and the operator-facing problems.
+#[derive(Serialize)]
+struct HealthPanelView {
+    // Whether any producer is bound to the motor_health slot; false renders
+    // every surface as "not wired" rather than implying a healthy robot.
+    bound: bool,
+    // Worst wire level across both sides, grippers included; null when
+    // nothing is judged yet (unwired, or every component still pending).
+    worst: Option<u8>,
+    // Problems at critical and above (consumer-detected silence included),
+    // most severe first; the banner shows exactly these.
+    problems: Vec<ProblemView>,
+    left: SideHealthView,
+    right: SideHealthView,
+}
+
+#[derive(Serialize)]
+struct ProblemView {
+    side: &'static str,
+    // The wire level behind the problem; the banner colors on the first
+    // (most severe) entry.
+    level: u8,
+    text: String,
+}
+
+/// One side's health surfaces: its render state, the combined worst across
+/// arm joints and gripper, and one row per motor (j1..j7 then the gripper).
+#[derive(Serialize)]
+struct SideHealthView {
+    // "live" (rows are current), "pending" (nothing yet, inside the startup
+    // grace), "not_reporting" (bound but quiet), or "not_wired".
+    status: &'static str,
+    // Null while pending or unwired; a quiet side reads NotReporting.
+    worst: Option<u8>,
+    // Empty unless live.
+    motors: Vec<MotorRowView>,
+}
+
+/// One motor's table row, the same shape for arm joints and the gripper.
+#[derive(Serialize)]
+struct MotorRowView {
+    name: String,
+    // The wire level; null for a motor whose component is still pending.
+    level: Option<u8>,
+    effort_fraction: Option<f64>,
+    effort_fraction_sustained: Option<f64>,
+    effort_fraction_peak: Option<f64>,
+    driver_temp_c: Option<f64>,
+    winding_temp_c: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -399,6 +475,9 @@ impl Snapshot {
                 throttled: p.disposition == Disposition::Throttled,
                 stopped: p.disposition == Disposition::Stopped,
             }),
+            health: health_panel_view(s, now),
+            alerts: live_alerts(s, now),
+            alerts_bound: s.alerts_bound,
             status: s.status.clone(),
         }
     }
@@ -410,6 +489,192 @@ fn live_proximity(s: &UiState, now: Instant) -> Option<&Proximity> {
     s.proximity
         .as_ref()
         .filter(|p| now.duration_since(p.received_at) < PROXIMITY_STALE_AFTER)
+}
+
+/// The still-live alerts, most severe first (receipt order within a
+/// severity); entries whose producer stopped re-emitting age out.
+fn live_alerts(s: &UiState, now: Instant) -> Vec<AlertView> {
+    let mut live: Vec<&Alert> = s
+        .alerts
+        .iter()
+        .filter(|a| a.validity.is_live_at(now))
+        .collect();
+    live.sort_by_key(|a| std::cmp::Reverse(a.severity));
+    live.into_iter()
+        .map(|a| AlertView {
+            source: a.source.clone(),
+            severity: a.severity,
+            message: a.message.clone(),
+        })
+        .collect()
+}
+
+/// One health component's consumer-side condition at `now`.
+enum ComponentState<'a, const MOTORS: usize> {
+    /// A report inside its validity window.
+    Live(&'a HealthReport<MOTORS>),
+    /// Bound but nothing renderable: it reported once and aged out, or it
+    /// has never reported and the startup grace is spent.
+    NotReporting,
+    /// Never reported, still inside the startup grace.
+    Pending,
+}
+
+fn component_state<'a, const MOTORS: usize>(
+    stored: &'a Option<HealthReport<MOTORS>>,
+    now: Instant,
+    in_grace: bool,
+) -> ComponentState<'a, MOTORS> {
+    match stored {
+        Some(report) if report.validity.is_live_at(now) => ComponentState::Live(report),
+        Some(_) => ComponentState::NotReporting,
+        None if in_grace => ComponentState::Pending,
+        None => ComponentState::NotReporting,
+    }
+}
+
+/// A component's contribution to its side: the worst level it pins (`None`
+/// while pending) and the operator-facing problem it raises, if any. A live
+/// component raises its worst at critical and above; a quiet one raises
+/// not-reporting, which the level order ranks above every spoken condition.
+fn component_severity<const MOTORS: usize>(
+    state: &ComponentState<'_, MOTORS>,
+    side: Side,
+    part: &'static str,
+) -> (Option<HealthLevel>, Option<ProblemView>) {
+    match state {
+        ComponentState::Live(report) => {
+            let worst = report.worst();
+            let problem = (worst >= HealthLevel::Critical).then(|| ProblemView {
+                side: side.label(),
+                level: worst.wire(),
+                text: format!("{} {part} {}", side.label(), level_label(worst)),
+            });
+            (Some(worst), problem)
+        }
+        ComponentState::NotReporting => (
+            Some(HealthLevel::NotReporting),
+            Some(ProblemView {
+                side: side.label(),
+                level: HealthLevel::NotReporting.wire(),
+                text: format!("{} {part} not reporting", side.label()),
+            }),
+        ),
+        ComponentState::Pending => (None, None),
+    }
+}
+
+/// One row per motor of a component: live readings verbatim, a quiet
+/// component as not-reporting rows, a pending one as level-less rows.
+fn component_rows<const MOTORS: usize>(
+    state: &ComponentState<'_, MOTORS>,
+    name: impl Fn(usize) -> String,
+) -> Vec<MotorRowView> {
+    (0..MOTORS)
+        .map(|i| match state {
+            ComponentState::Live(report) => {
+                let reading = &report.readings[i];
+                MotorRowView {
+                    name: name(i),
+                    level: Some(reading.level.wire()),
+                    effort_fraction: reading.effort_fraction,
+                    effort_fraction_sustained: reading.effort_fraction_sustained,
+                    effort_fraction_peak: reading.effort_fraction_peak,
+                    driver_temp_c: reading.driver_temp_c,
+                    winding_temp_c: reading.winding_temp_c,
+                }
+            }
+            ComponentState::NotReporting => absent_row(name(i), Some(HealthLevel::NotReporting)),
+            ComponentState::Pending => absent_row(name(i), None),
+        })
+        .collect()
+}
+
+fn absent_row(name: String, level: Option<HealthLevel>) -> MotorRowView {
+    MotorRowView {
+        name,
+        level: level.map(HealthLevel::wire),
+        effort_fraction: None,
+        effort_fraction_sustained: None,
+        effort_fraction_peak: None,
+        driver_temp_c: None,
+        winding_temp_c: None,
+    }
+}
+
+/// Operator-facing name of a level, matching the browser's label table.
+fn level_label(level: HealthLevel) -> &'static str {
+    match level {
+        HealthLevel::Nominal => "nominal",
+        HealthLevel::Warning => "WARNING",
+        HealthLevel::Critical => "CRITICAL",
+        HealthLevel::Fault => "FAULT",
+        HealthLevel::NotReporting => "NOT REPORTING",
+    }
+}
+
+/// One side's view plus the problems its components raise. The side is live
+/// while either component is (the other renders as its own rows); with
+/// nothing live it reads not-reporting, or pending when no component has
+/// ever reported and the startup grace still runs.
+fn side_health_view(
+    s: &UiState,
+    side: Side,
+    now: Instant,
+    in_grace: bool,
+) -> (SideHealthView, Vec<ProblemView>) {
+    if !s.health_bound {
+        let view = SideHealthView {
+            status: "not_wired",
+            worst: None,
+            motors: Vec::new(),
+        };
+        return (view, Vec::new());
+    }
+    let arm = component_state(&s.health[side], now, in_grace);
+    let gripper = component_state(&s.gripper_health[side], now, in_grace);
+    let live = matches!(arm, ComponentState::Live(_)) || matches!(gripper, ComponentState::Live(_));
+    let (arm_worst, arm_problem) = component_severity(&arm, side, "arm");
+    let (gripper_worst, gripper_problem) = component_severity(&gripper, side, "gripper");
+    let worst = [arm_worst, gripper_worst].into_iter().flatten().max();
+    let motors = if live {
+        let mut rows = component_rows(&arm, |i| format!("j{}", i + 1));
+        rows.extend(component_rows(&gripper, |_| "gripper".to_string()));
+        rows
+    } else {
+        Vec::new()
+    };
+    let status = match (live, worst) {
+        (true, _) => "live",
+        (false, Some(_)) => "not_reporting",
+        (false, None) => "pending",
+    };
+    let view = SideHealthView {
+        status,
+        worst: worst.map(HealthLevel::wire),
+        motors,
+    };
+    (
+        view,
+        arm_problem.into_iter().chain(gripper_problem).collect(),
+    )
+}
+
+/// The health panel: both sides' views, the overall worst, and the problems
+/// list sorted most severe first (the banner colors on the first entry).
+fn health_panel_view(s: &UiState, now: Instant) -> HealthPanelView {
+    let in_grace = now.duration_since(s.created_at) < STARTUP_GRACE;
+    let (left, left_problems) = side_health_view(s, Side::Left, now, in_grace);
+    let (right, right_problems) = side_health_view(s, Side::Right, now, in_grace);
+    let mut problems: Vec<ProblemView> = left_problems.into_iter().chain(right_problems).collect();
+    problems.sort_by_key(|p| std::cmp::Reverse(p.level));
+    HealthPanelView {
+        bound: s.health_bound,
+        worst: [left.worst, right.worst].into_iter().flatten().max(),
+        problems,
+        left,
+        right,
+    }
 }
 
 fn arm_view(a: &ArmTarget, side: Side, models: &ArmModels) -> ArmView {
@@ -573,11 +838,335 @@ impl From<JogModeWire> for JogMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{
+        ArmHealth, GripperHealth, HEALTH_STALE_AFTER, MotorHealthReading, Validity,
+    };
 
     /// Tests have no main() to run init_limits, so resolve the v2 limits on
     /// first use; concurrent tests settle benignly through get_or_init.
     fn init_limits_for_tests() {
         LIMITS.get_or_init(|| JointLimits::resolve(HardwareVersion::V2));
+    }
+
+    fn ui_state() -> UiState {
+        UiState::new(true, 0.005, 0.02, 0.25, 10.0)
+    }
+
+    /// A state with health producers bound, as every wired deployment has.
+    fn bound_state() -> UiState {
+        let mut s = ui_state();
+        s.health_bound = true;
+        s
+    }
+
+    const TEST_VALID_FOR: Duration = Duration::from_secs(5);
+
+    fn alert(source: &str, severity: u8, received_at: Instant) -> Alert {
+        Alert {
+            source: source.to_string(),
+            kind: "motor_overload".to_string(),
+            severity,
+            message: "holding 93% of rated torque".to_string(),
+            validity: Validity::new(received_at, TEST_VALID_FOR),
+        }
+    }
+
+    fn reading(level: HealthLevel) -> MotorHealthReading {
+        MotorHealthReading {
+            level,
+            effort_fraction: Some(0.4),
+            effort_fraction_sustained: Some(0.3),
+            effort_fraction_peak: Some(0.2),
+            driver_temp_c: Some(41.0),
+            winding_temp_c: Some(37.0),
+        }
+    }
+
+    fn arm_health(levels: [HealthLevel; ARM_DOF], received_at: Instant) -> ArmHealth {
+        HealthReport {
+            readings: levels.map(reading),
+            validity: Validity::new(received_at, HEALTH_STALE_AFTER),
+        }
+    }
+
+    fn gripper_health(level: HealthLevel, received_at: Instant) -> GripperHealth {
+        HealthReport {
+            readings: [reading(level)],
+            validity: Validity::new(received_at, HEALTH_STALE_AFTER),
+        }
+    }
+
+    /// The problem texts, in banner order.
+    fn problem_texts(view: &HealthPanelView) -> Vec<&str> {
+        view.problems.iter().map(|p| p.text.as_str()).collect()
+    }
+
+    #[test]
+    fn alerts_upsert_by_identity_and_clear_on_severity_zero() {
+        let mut s = ui_state();
+        let t0 = Instant::now();
+        s.apply_alert(alert("left arm j2", 1, t0));
+        s.apply_alert(alert("left arm j2", 2, t0));
+        assert_eq!(s.alerts.len(), 1, "one entry per (source, kind)");
+        assert_eq!(s.alerts[0].severity, 2);
+        s.apply_alert(alert("left arm j2", 0, t0));
+        assert!(s.alerts.is_empty(), "severity 0 clears the entry");
+    }
+
+    #[test]
+    fn a_clear_for_an_unknown_alert_is_a_no_op() {
+        let mut s = ui_state();
+        let t0 = Instant::now();
+        s.apply_alert(alert("right arm j1", 2, t0));
+        s.apply_alert(alert("left arm j2", 0, t0));
+        assert_eq!(s.alerts.len(), 1, "an unknown clear removes nothing");
+        assert_eq!(s.alerts[0].source, "right arm j1");
+    }
+
+    #[test]
+    fn alerts_purge_entries_whose_producer_went_quiet() {
+        let mut s = ui_state();
+        let t0 = Instant::now();
+        s.apply_alert(alert("left arm j2", 1, t0));
+        s.apply_alert(alert("right arm j1", 2, t0 + TEST_VALID_FOR));
+        assert_eq!(s.alerts.len(), 1, "the quiet producer's entry is purged");
+        assert_eq!(s.alerts[0].source, "right arm j1");
+    }
+
+    #[test]
+    fn live_alerts_age_out_and_sort_most_severe_first() {
+        let mut s = ui_state();
+        let t0 = Instant::now();
+        s.apply_alert(alert("left arm j2", 1, t0));
+        s.apply_alert(alert("right arm j1", 3, t0));
+        let views = live_alerts(&s, t0 + Duration::from_secs(1));
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].source, "right arm j1", "most severe first");
+        assert_eq!(views[1].source, "left arm j2");
+        assert!(
+            live_alerts(&s, t0 + TEST_VALID_FOR).is_empty(),
+            "a quiet producer's alerts stop rendering"
+        );
+    }
+
+    #[test]
+    fn unwired_health_renders_not_wired_everywhere() {
+        let s = ui_state();
+        let view = health_panel_view(&s, s.created_at);
+        assert!(!view.bound);
+        assert_eq!(view.worst, None);
+        assert!(view.problems.is_empty());
+        assert_eq!(view.left.status, "not_wired");
+        assert_eq!(view.right.status, "not_wired");
+        assert!(view.left.motors.is_empty());
+    }
+
+    #[test]
+    fn per_side_worst_combines_gripper_severity() {
+        let mut s = bound_state();
+        let t0 = s.created_at;
+        s.health[Side::Left] = Some(arm_health([HealthLevel::Nominal; ARM_DOF], t0));
+        s.gripper_health[Side::Left] = Some(gripper_health(HealthLevel::Fault, t0));
+        let view = health_panel_view(&s, t0);
+        assert_eq!(view.left.status, "live");
+        assert_eq!(
+            view.left.worst,
+            Some(HealthLevel::Fault.wire()),
+            "a faulted gripper under a nominal arm is the side's worst"
+        );
+        assert_eq!(view.worst, Some(HealthLevel::Fault.wire()));
+        assert_eq!(problem_texts(&view)[0], "left gripper FAULT");
+    }
+
+    #[test]
+    fn side_rows_name_each_joint_then_the_gripper() {
+        let mut s = bound_state();
+        let t0 = s.created_at;
+        s.health[Side::Left] = Some(arm_health([HealthLevel::Nominal; ARM_DOF], t0));
+        s.gripper_health[Side::Left] = Some(gripper_health(HealthLevel::Warning, t0));
+        let view = health_panel_view(&s, t0);
+        let names: Vec<&str> = view.left.motors.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["j1", "j2", "j3", "j4", "j5", "j6", "j7", "gripper"]);
+        let gripper = &view.left.motors[ARM_DOF];
+        assert_eq!(gripper.level, Some(HealthLevel::Warning.wire()));
+        assert_eq!(gripper.effort_fraction, Some(0.4));
+        assert_eq!(gripper.effort_fraction_peak, Some(0.2));
+    }
+
+    #[test]
+    fn not_reporting_outranks_fault_at_the_side_level() {
+        let mut s = bound_state();
+        let t0 = s.created_at;
+        let mut levels = [HealthLevel::Nominal; ARM_DOF];
+        levels[3] = HealthLevel::Fault;
+        s.health[Side::Left] = Some(arm_health(levels, t0));
+        s.gripper_health[Side::Left] = Some(gripper_health(HealthLevel::Nominal, t0));
+        // The gripper's window expires while the arm keeps reporting.
+        let later = t0 + HEALTH_STALE_AFTER;
+        s.health[Side::Left] = Some(arm_health(levels, later));
+        let view = health_panel_view(&s, later);
+        assert_eq!(view.left.status, "live", "the arm still reports");
+        assert_eq!(view.left.worst, Some(HealthLevel::NotReporting.wire()));
+        assert_eq!(
+            problem_texts(&view),
+            ["left gripper not reporting", "left arm FAULT"],
+            "silence sorts above the spoken fault"
+        );
+        let gripper_row = &view.left.motors[ARM_DOF];
+        assert_eq!(gripper_row.level, Some(HealthLevel::NotReporting.wire()));
+        assert_eq!(
+            gripper_row.effort_fraction, None,
+            "a quiet component's stale readings do not render as current"
+        );
+    }
+
+    #[test]
+    fn within_grace_a_silent_launch_reads_pending_not_a_problem() {
+        let s = bound_state();
+        let view = health_panel_view(&s, s.created_at + STARTUP_GRACE - Duration::from_millis(1));
+        assert_eq!(view.left.status, "pending");
+        assert_eq!(view.right.status, "pending");
+        assert_eq!(view.worst, None);
+        assert!(
+            view.problems.is_empty(),
+            "a healthy launch must not flash a false alarm"
+        );
+    }
+
+    #[test]
+    fn bound_but_silent_past_grace_raises_not_reporting() {
+        let s = bound_state();
+        let view = health_panel_view(&s, s.created_at + STARTUP_GRACE);
+        assert_eq!(view.left.status, "not_reporting");
+        assert_eq!(view.left.worst, Some(HealthLevel::NotReporting.wire()));
+        assert_eq!(view.worst, Some(HealthLevel::NotReporting.wire()));
+        assert_eq!(
+            problem_texts(&view),
+            [
+                "left arm not reporting",
+                "left gripper not reporting",
+                "right arm not reporting",
+                "right gripper not reporting",
+            ]
+        );
+    }
+
+    #[test]
+    fn gripper_silence_after_first_report_is_a_problem_even_inside_grace() {
+        let mut s = bound_state();
+        let t0 = s.created_at;
+        s.gripper_health[Side::Left] = Some(gripper_health(HealthLevel::Nominal, t0));
+        // Its window expires before the startup grace does; having reported
+        // once, the gripper must escalate rather than vanish.
+        let now = t0 + HEALTH_STALE_AFTER;
+        assert!(now < t0 + STARTUP_GRACE, "the test must land inside grace");
+        let view = health_panel_view(&s, now);
+        assert_eq!(problem_texts(&view), ["left gripper not reporting"]);
+        assert_eq!(view.left.status, "not_reporting");
+        assert_eq!(
+            view.right.status, "pending",
+            "the never-reported side stays pending"
+        );
+    }
+
+    #[test]
+    fn health_ages_out_for_arm_and_gripper_instead_of_latching() {
+        let mut s = bound_state();
+        let t0 = s.created_at;
+        s.health[Side::Left] = Some(arm_health([HealthLevel::Nominal; ARM_DOF], t0));
+        s.gripper_health[Side::Left] = Some(gripper_health(HealthLevel::Nominal, t0));
+        let live = health_panel_view(&s, t0 + HEALTH_STALE_AFTER - Duration::from_millis(1));
+        assert_eq!(live.left.status, "live");
+        assert!(live.problems.is_empty());
+        let aged = health_panel_view(&s, t0 + HEALTH_STALE_AFTER);
+        assert_eq!(aged.left.status, "not_reporting");
+        assert_eq!(
+            problem_texts(&aged),
+            ["left arm not reporting", "left gripper not reporting"]
+        );
+    }
+
+    /// An object's key set, sorted so the pin is independent of map order.
+    fn keys(v: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn snapshot_serializes_the_keys_the_browser_reads() {
+        init_limits_for_tests();
+        let models = ArmModels::from_version(HardwareVersion::V2);
+        let registry = Registry::bake(&models);
+        let mut s = bound_state();
+        s.alerts_bound = true;
+        let t0 = s.created_at;
+        s.health[Side::Left] = Some(arm_health([HealthLevel::Nominal; ARM_DOF], t0));
+        s.gripper_health[Side::Left] = Some(gripper_health(HealthLevel::Fault, t0));
+        s.apply_alert(alert("left arm j2", 2, t0));
+        let json = build_snapshot_json(&s, t0, &models, &registry).unwrap();
+        let snap: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            keys(&snap),
+            [
+                "alerts",
+                "alerts_bound",
+                "collision_enabled",
+                "d_safe",
+                "d_stop",
+                "gesture",
+                "gestures",
+                "health",
+                "left_arm",
+                "left_enabled",
+                "left_gripper",
+                "max_ee_velocity_m_s",
+                "proximity",
+                "recorder",
+                "right_arm",
+                "right_enabled",
+                "right_gripper",
+                "status",
+            ]
+        );
+        let health = &snap["health"];
+        assert_eq!(
+            keys(health),
+            ["bound", "left", "problems", "right", "worst"]
+        );
+        assert_eq!(health["bound"], serde_json::json!(true));
+        assert_eq!(health["worst"], serde_json::json!(3));
+        assert_eq!(keys(&health["left"]), ["motors", "status", "worst"]);
+        assert_eq!(health["left"]["status"], "live");
+        assert_eq!(health["right"]["status"], "pending");
+        let row = &health["left"]["motors"][0];
+        assert_eq!(
+            keys(row),
+            [
+                "driver_temp_c",
+                "effort_fraction",
+                "effort_fraction_peak",
+                "effort_fraction_sustained",
+                "level",
+                "name",
+                "winding_temp_c",
+            ]
+        );
+        assert_eq!(row["name"], "j1");
+        assert_eq!(health["left"]["motors"][7]["name"], "gripper");
+        let problem = &health["problems"][0];
+        assert_eq!(keys(problem), ["level", "side", "text"]);
+        assert_eq!(problem["side"], "left");
+        assert_eq!(problem["level"], serde_json::json!(3));
+        assert_eq!(problem["text"], "left gripper FAULT");
+        let alert_view = &snap["alerts"][0];
+        assert_eq!(keys(alert_view), ["message", "severity", "source"]);
     }
 
     #[test]

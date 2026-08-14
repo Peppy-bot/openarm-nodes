@@ -22,7 +22,24 @@
     --ok: #2e7d4f;
     --warn: #a8741f;
     --err: #9b3535;
+    /* Severity scale, indexed by the wire level (0 nominal .. 4 not
+       reporting, purple: an unheard motor outranks a fault). */
+    --sev0: var(--ok);
+    --sev1: var(--warn);
+    --sev2: #e67e22;
+    --sev3: var(--err);
+    --sev4: #8e44ad;
   }
+  /* Elements carry data-sev, which resolves --sev for the classes below;
+     the script only sets classes and data-sev, never inline colors. */
+  [data-sev="0"] { --sev: var(--sev0); }
+  [data-sev="1"] { --sev: var(--sev1); }
+  [data-sev="2"] { --sev: var(--sev2); }
+  [data-sev="3"] { --sev: var(--sev3); }
+  [data-sev="4"] { --sev: var(--sev4); }
+  .sev-text { color: var(--sev); }
+  .sev-fill { background: var(--sev); color: var(--w); }
+  .dim { color: var(--ink-50); }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 28px 32px 36px;
@@ -213,6 +230,31 @@
     font: 12.5px/1.4 ui-monospace, 'SF Mono', Menlo, monospace;
     color: var(--ink-70);
   }
+
+  /* Health surfaces: the banner, the per-side chips, the alert lines, and
+     the Motors tab tables, all colored through the shared --sev scale. */
+  .health-banner {
+    text-align: center; font-weight: 700; padding: 8px 12px;
+    border-radius: 6px; margin-bottom: 12px;
+  }
+  .health-chip { font-weight: 600; padding: 2px 10px; border-radius: 4px; }
+  /* Critical and above (silence included) tints the chip background so it
+     reads at a walk-past glance. */
+  .health-chip:is([data-sev="2"], [data-sev="3"], [data-sev="4"]) { background: rgba(155, 53, 53, 0.12); }
+  .health-chip .dot { padding: 0 1px; }
+  .alert-line { font-weight: 600; padding: 2px 10px; border-radius: 4px; }
+  /* The Motors tab label tints at the overall worst level. */
+  #mode_motors[data-sev] { color: var(--sev); font-weight: 700; }
+  .motor-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .motor-table th, .motor-table td { text-align: right; padding: 3px 6px; border-top: 1px solid var(--ink-15); }
+  .motor-table thead th { border-top: none; font-size: 11px; color: var(--ink-50); font-weight: 500; }
+  .motor-table thead th.group { text-align: center; }
+  .motor-table tbody tr[data-sev] { color: var(--sev); }
+  .motors-note { color: var(--ink-50); padding: 8px 2px; }
+  /* A closed connection stops updating the tables; fade them rather than
+     let them read as current. */
+  .panel.stale { opacity: 0.45; }
+
   #record_btn.recording { background:#c0392b; color:#fff; border-color:#c0392b; }
   #record_btn.saving, #finish_btn.saving { background:#e67e22; color:#fff; border-color:#e67e22; animation: record_saving 1.1s ease-in-out infinite; }
   @keyframes record_saving { 50% { opacity: 0.55; } }
@@ -221,12 +263,20 @@
 <body>
   <h1>OpenArm Commander <span id="conn" class="conn closed">disconnected</span></h1>
 
+  <div id="health_banner" class="health-banner sev-fill" hidden></div>
+
   <div class="row" style="justify-content:center; margin-bottom:20px;">
     <div class="modeseg">
       <button class="seg on" id="mode_streaming" onclick="set_ui_mode('streaming')">Streaming</button>
       <button class="seg" id="mode_actions" onclick="set_ui_mode('actions')">Actions</button>
       <button class="seg" id="mode_gestures" onclick="set_ui_mode('gestures')">Gestures</button>
+      <button class="seg" id="mode_motors" onclick="set_ui_mode('motors')">Motors</button>
     </div>
+  </div>
+
+  <div class="row" id="motors_row" style="display:none;">
+    <div class="panel" id="left_motors"></div>
+    <div class="panel" id="right_motors"></div>
   </div>
 
   <div class="row" id="gesture_row" style="display:none; justify-content:center;">
@@ -239,15 +289,15 @@
     </div>
   </div>
 
-  <div class="row">
+  <div class="row" id="arm_row">
     <div class="panel" id="left_arm"></div>
     <div class="panel" id="right_arm"></div>
   </div>
-  <div class="row">
+  <div class="row" id="gripper_row">
     <div class="panel" id="left_gripper"></div>
     <div class="panel" id="right_gripper"></div>
   </div>
-  <div class="row" style="justify-content:center; gap:18px; align-items:center; flex-wrap:wrap;">
+  <div class="row" id="governor_row" style="justify-content:center; gap:18px; align-items:center; flex-wrap:wrap;">
     <label style="display:flex; align-items:center; gap:8px;">
       <input type="checkbox" id="collision_chk" onchange="set_collision(this.checked)" checked>
       Collision avoidance
@@ -271,9 +321,14 @@
     <button id="finish_btn" onclick="finish_session()">Finish session</button>
     <span id="record_frames" style="font-weight:600;"></span>
   </div>
-  <div class="row" style="justify-content:center;">
+  <div class="row" id="proximity_row" style="justify-content:center;">
     <div id="proximity" style="font-weight:600; padding:4px 10px; border-radius:4px;">closest pair: n/a</div>
   </div>
+  <div class="row" style="justify-content:center; gap:18px;">
+    <div id="health_left" class="health-chip dim">left arm health: n/a</div>
+    <div id="health_right" class="health-chip dim">right arm health: n/a</div>
+  </div>
+  <div id="alerts" style="display:flex; flex-direction:column; align-items:center; gap:2px;"></div>
   <div class="status" id="status">connecting…</div>
 
 <script>
@@ -308,7 +363,11 @@ let arcballDrag = { side: null, p0: null, start: null, pid: null };
 // composes a target and fires it as a discrete backbone move on Execute;
 // 'gestures' plays baked choreography from the server's library while the
 // per-arm controls become read-only viewers.
-const UI_MODES = ['streaming', 'actions', 'gestures'];
+const UI_MODES = ['streaming', 'actions', 'gestures', 'motors'];
+// Motors is a read-only readout, so it replaces the control surfaces rather
+// than sitting alongside them; alerts and the health summary stay on screen
+// in every mode.
+const CONTROL_ROWS = ['arm_row', 'gripper_row', 'governor_row', 'proximity_row'];
 let uiMode = 'streaming';
 // Which sides the playing gesture holds (from the snapshot); those sides'
 // Enable/Execute controls are disabled everywhere while it plays.
@@ -833,11 +892,25 @@ function execute_gripper(side) {
 // deadmen; actions additionally resets the composed spaces. The mode also gates
 // whether control input streams live (streaming) or is held for Execute (actions),
 // or is read-only (gestures).
+// Whether the deployment binds a recorder, so the row's two owners (the
+// snapshot and the mode) agree on one answer instead of overwriting each
+// other's display value every frame.
+let recorderBound = false;
+
+// The single owner of which rows are on screen.
+function refresh_row_visibility() {
+  const controls = uiMode !== 'motors';
+  for (const id of CONTROL_ROWS) $(id).style.display = controls ? '' : 'none';
+  $('motors_row').style.display = controls ? 'none' : '';
+  $('gesture_row').style.display = uiMode === 'gestures' ? '' : 'none';
+  $('record_row').style.display = controls && recorderBound ? '' : 'none';
+}
+
 function set_ui_mode(mode) {
   if (mode === uiMode) return;
   uiMode = mode;
   for (const m of UI_MODES) $(`mode_${m}`).classList.toggle('on', mode === m);
-  $('gesture_row').style.display = mode === 'gestures' ? '' : 'none';
+  refresh_row_visibility();
   if (mode !== 'streaming') {
     for (const side of ['left', 'right']) {
       if (enabled[side] && ws && ws.readyState === 1) {
@@ -1094,6 +1167,10 @@ function apply_snapshot(snap) {
   reflect_governor_input('gov_max_ee', snap.max_ee_velocity_m_s);
   update_proximity(snap);
   update_recorder(snap);
+  update_health_chips(snap);
+  update_health_attention(snap);
+  update_motors(snap);
+  update_alerts(snap);
   $('status').textContent = snap.status;
 }
 
@@ -1101,9 +1178,9 @@ function apply_snapshot(snap) {
 // episode records, the button turns Stop and the live frame count shows.
 let recording = false;
 function update_recorder(snap) {
-  const row = $('record_row');
-  if (!snap.recorder) { row.style.display = 'none'; recording = false; return; }
-  row.style.display = '';
+  recorderBound = Boolean(snap.recorder);
+  refresh_row_visibility();
+  if (!snap.recorder) { recording = false; return; }
   recording = snap.recorder.recording;
   const saving = snap.recorder.saving;
   const finishing = snap.recorder.finishing;
@@ -1130,6 +1207,197 @@ function toggle_recording() {
   if (!ws || ws.readyState !== 1) return;
   if (recording) ws.send(JSON.stringify({cmd: 'stop_recording'}));
   else ws.send(JSON.stringify({cmd: 'start_recording', task: $('record_task').value}));
+}
+
+// Active operator alerts, one line each, already sorted most severe first
+// server-side; each line colors through the shared --sev scale.
+function update_alerts(snap) {
+  const el = $('alerts');
+  el.replaceChildren();
+  if (!snap.alerts_bound) {
+    // An unwired slot can never raise anything; silence from it must not
+    // read as all clear.
+    const line = document.createElement('div');
+    line.className = 'dim';
+    line.textContent = 'alerts: not wired';
+    el.append(line);
+    return;
+  }
+  for (const a of snap.alerts) {
+    const line = document.createElement('div');
+    line.className = 'alert-line sev-fill';
+    line.dataset.sev = a.severity;
+    line.textContent = `${a.source}: ${a.message}`;
+    el.append(line);
+  }
+}
+
+// Level labels, indexed by the wire level the server sends; the last entry
+// is a motor nobody has heard from, which outranks a fault.
+const HEALTH_LABELS = ['nominal', 'WARNING', 'CRITICAL', 'FAULT', 'NOT REPORTING'];
+// Chip and panel wording for the non-live side states the server sends.
+const SIDE_STATUS_TEXT = {not_wired: 'not wired', pending: 'pending', not_reporting: 'not reporting'};
+
+// One tooltip per motor dot: its state plus whichever readings it senses,
+// labelled like the Motors table columns.
+function motor_tooltip(m) {
+  const parts = [`${m.name}: ${m.level == null ? 'pending' : HEALTH_LABELS[m.level]}`];
+  if (m.effort_fraction_peak != null) parts.push(`mech ${(m.effort_fraction_peak * 100).toFixed(0)}%`);
+  if (m.effort_fraction != null) parts.push(`thermal ${(m.effort_fraction * 100).toFixed(0)}%`);
+  if (m.effort_fraction_sustained != null) parts.push(`sustained ${(m.effort_fraction_sustained * 100).toFixed(0)}%`);
+  if (m.driver_temp_c != null) parts.push(`driver ${m.driver_temp_c.toFixed(0)}°C`);
+  if (m.winding_temp_c != null) parts.push(`winding ${m.winding_temp_c.toFixed(0)}°C`);
+  return parts.join(', ');
+}
+
+// The per-side health chips: one dot per motor (the diamond is the gripper)
+// colored by the server-sent level, with the side's worst label appended.
+// A non-live side renders the server's status word instead of dots.
+function update_health_chips(snap) {
+  for (const side of ['left', 'right']) {
+    const chip = $(`health_${side}`);
+    const view = snap.health[side];
+    if (view.status !== 'live') {
+      const quiet = view.status === 'not_reporting';
+      chip.className = quiet ? 'health-chip sev-text' : 'health-chip dim';
+      if (quiet) chip.dataset.sev = 4; else delete chip.dataset.sev;
+      chip.replaceChildren(`${side} arm health: ${SIDE_STATUS_TEXT[view.status]}`);
+      continue;
+    }
+    chip.className = 'health-chip' + (view.worst > 0 ? ' sev-text' : '');
+    if (view.worst > 0) chip.dataset.sev = view.worst; else delete chip.dataset.sev;
+    chip.replaceChildren(`${side} arm health: `);
+    for (const m of view.motors) {
+      const dot = document.createElement('span');
+      dot.textContent = m.name === 'gripper' ? '◆' : '●';
+      dot.className = 'dot' + (m.level == null ? ' dim' : ' sev-text');
+      if (m.level != null) dot.dataset.sev = m.level;
+      dot.title = motor_tooltip(m);
+      chip.append(dot);
+    }
+    if (view.worst > 0) chip.append(` ${HEALTH_LABELS[view.worst]}`);
+  }
+}
+
+// The walk-past surfaces, drawn from the server-computed severity: the
+// Motors tab label tints at the overall worst level, and the banner shows
+// the problems list (already sorted most severe first, so the banner colors
+// on the first entry).
+function update_health_attention(snap) {
+  const tab = $('mode_motors');
+  const worst = snap.health.worst;
+  if (worst != null && worst > 0) tab.dataset.sev = worst; else delete tab.dataset.sev;
+  const banner = $('health_banner');
+  const problems = snap.health.problems;
+  banner.hidden = !problems.length;
+  if (!problems.length) return;
+  banner.dataset.sev = problems[0].level;
+  banner.textContent = `${problems.map(p => p.text).join('; ')} (see Motors tab)`;
+}
+
+// One display row per motor, arm joint and gripper alike (the server sends
+// both as the same row shape). Rounding here rather than at draw time means
+// the redraw gate below fires only when a displayed digit moves, not on
+// every reading that jitters below it. Absent readings render '---'.
+function motor_row(m) {
+  const pct = v => v != null ? `${(v * 100).toFixed(0)}%` : '---';
+  const deg = v => v != null ? v.toFixed(0) : '---';
+  return {
+    sev: m.level,
+    cells: [
+      m.name,
+      m.level == null ? 'pending' : HEALTH_LABELS[m.level],
+      pct(m.effort_fraction_peak),
+      pct(m.effort_fraction),
+      pct(m.effort_fraction_sustained),
+      deg(m.driver_temp_c),
+      deg(m.winding_temp_c),
+    ],
+  };
+}
+
+// The Motors tab: rows and severity come from the server; a non-live side
+// shows its status note instead of a table.
+function update_motors(snap) {
+  for (const side of ['left', 'right']) {
+    const panel = $(`${side}_motors`);
+    panel.classList.remove('stale');
+    const view = snap.health[side];
+    const rows = view.motors.map(motor_row);
+    // Re-drawn a few times a second: rebuilding an unchanged table would
+    // drop the operator's selection every frame.
+    const readout = JSON.stringify({status: view.status, worst: view.worst, rows});
+    if (panel.dataset.readout === readout) continue;
+    panel.dataset.readout = readout;
+    panel.replaceChildren(
+      motor_head(side, view),
+      rows.length ? motor_table(rows) : motors_note(view.status),
+    );
+  }
+}
+
+// The panel head: the badge shows the side's worst label while live and the
+// status word otherwise, so an unwired panel says "not wired" and a
+// wired-but-quiet one "not reporting", matching the chips.
+function motor_head(side, view) {
+  const head = document.createElement('div');
+  head.className = 'panel-head';
+  const label = document.createElement('span');
+  label.textContent = `${side} arm motors`;
+  const badge = document.createElement('span');
+  badge.className = 'badge';
+  badge.textContent = view.status === 'live' ? HEALTH_LABELS[view.worst] : SIDE_STATUS_TEXT[view.status];
+  if (view.worst != null && view.worst > 0) {
+    badge.classList.add('sev-text');
+    badge.dataset.sev = view.worst;
+  }
+  head.append(label, badge);
+  return head;
+}
+
+function motors_note(status) {
+  const note = document.createElement('div');
+  note.className = 'motors-note';
+  note.textContent = {
+    not_wired: 'motor health not wired in this deployment',
+    pending: 'waiting for the first motor health report',
+    not_reporting: 'motor health not reporting',
+  }[status];
+  return note;
+}
+
+// The readings table under a two-row grouped header: torque spans its three
+// renderings of the same measurement, temperature its two probes, and the
+// torque units carry tooltips naming the line each divides by.
+function motor_table(rows) {
+  const table = document.createElement('table');
+  table.className = 'motor-table';
+  const th = (row, text, props) => {
+    const cell = document.createElement('th');
+    cell.textContent = text;
+    Object.assign(cell, props);
+    row.append(cell);
+  };
+  const thead = table.createTHead();
+  const groups = thead.insertRow();
+  th(groups, 'joint', {rowSpan: 2});
+  th(groups, 'state', {rowSpan: 2});
+  th(groups, 'torque', {colSpan: 3, className: 'group'});
+  th(groups, 'temperature', {colSpan: 2, className: 'group'});
+  const units = thead.insertRow();
+  th(units, '% mechanical rated', {title: "instantaneous torque over the datasheet peak (or the motor's configured trip, if lower); 100% is the cutout line"});
+  th(units, '% thermal rated', {title: 'instantaneous torque over the continuous (thermal) rating; above 100% the motor is on a time budget'});
+  th(units, '% sustained', {title: 'the filtered value the warning level judges (EWMA over seconds), against the thermal rating'});
+  th(units, 'driver °C');
+  th(units, 'winding °C');
+  const body = table.createTBody();
+  for (const row of rows) {
+    const tr = body.insertRow();
+    if (row.sev != null && row.sev > 0) tr.dataset.sev = row.sev;
+    if (row.sev == null) tr.className = 'dim';
+    for (const text of row.cells) tr.insertCell().textContent = text;
+  }
+  return table;
 }
 
 // Closest self-collision pair: distance in mm + the two links, colored black
@@ -1187,9 +1455,24 @@ function connect() {
     badge.textContent = 'idle';
     badge.className = 'badge';
     $('gesture_stop').disabled = true;
+    // Health would latch its last snapshot otherwise: gray the chips, drop
+    // the banner and alerts, and fade the motors tables until reconnect.
+    for (const side of ['left', 'right']) {
+      const chip = $(`health_${side}`);
+      chip.className = 'health-chip dim';
+      delete chip.dataset.sev;
+      chip.replaceChildren(`${side} arm health: disconnected`);
+      $(`${side}_motors`).classList.add('stale');
+    }
+    $('health_banner').hidden = true;
+    delete $('mode_motors').dataset.sev;
+    $('alerts').replaceChildren();
     setTimeout(connect, 1000);
   };
-  ws.onmessage = (e) => { try { apply_snapshot(JSON.parse(e.data)); } catch {} };
+  ws.onmessage = (e) => {
+    try { apply_snapshot(JSON.parse(e.data)); }
+    catch (err) { console.error('snapshot render failed', err); }
+  };
 }
 
 build_arm('left', 'left arm');
