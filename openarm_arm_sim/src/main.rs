@@ -5,10 +5,11 @@
 //! have with a real counterpart. Non-finite values are dropped rather than
 //! forwarded, the same guard every follower applies at ingestion.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use control_core::motor_health::{HEALTH_PERIOD, STATE_STALE_AFTER};
+use peppygen::emitted_topics::motor_health::motor_health;
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::paired_topics::{backbone, engine};
 use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
@@ -18,6 +19,9 @@ use tracing::{error, info, warn};
 /// Pause after a receive error before retrying, so a persistently broken
 /// subscription cannot hot-spin the relay or flood the log.
 const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Joints per arm: the length of the health `level` vector consumers expect.
+const ARM_DOF: usize = 7;
 
 fn all_finite(vecs: &[&[f64]]) -> bool {
     vecs.iter().all(|v| v.iter().all(|x| x.is_finite()))
@@ -79,9 +83,14 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
     }
 }
 
-/// Forward the engine's measured joint_states to the backbone, latching the
-/// component-ready flag on the first one: this limb's physics is live.
-async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: CancellationToken) {
+/// Forward the engine's measured joint_states to the backbone, recording the
+/// time of each relayed one in `relayed`: the first marks this limb's physics
+/// live, and recency is what lets the health heartbeat vouch for the limb.
+async fn relay_states(
+    runner: Arc<NodeRunner>,
+    relayed: Arc<Mutex<Option<Instant>>>,
+    token: CancellationToken,
+) {
     let mut sub = match engine::joint_states::subscribe(&runner).await {
         Ok(s) => s,
         Err(e) => return error!("engine joint_states subscribe: {e}"),
@@ -126,11 +135,82 @@ async fn relay_states(runner: Arc<NodeRunner>, ready: Arc<AtomicBool>, token: Ca
                     first = false;
                     info!("first state relayed to the backbone");
                 }
-                ready.store(true, Ordering::SeqCst);
+                *relayed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
             }
             Err(e) if !failing => {
                 failing = true;
                 warn!("joint_states publish failing, suppressing repeats: {e}");
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// The limb encoding shared with the real arm, so one launcher convention
+/// names a side across simulated and real stacks.
+const ARM_ID_LEFT: u8 = 0;
+const ARM_ID_RIGHT: u8 = 1;
+
+/// Emit the "present, not sensed" motor_health heartbeat: nominal levels and
+/// empty reading vectors, because the engine reports no effort or
+/// temperature for this limb.
+///
+/// Held while `relayed` is empty or stale. Nothing is known about the limb
+/// before the first engine state, and nothing current is known once states
+/// stop arriving, so vouching in either case would report a limb whose
+/// physics is absent as a healthy one. A held heartbeat is what lets
+/// consumers age the last report out and name this producer dead.
+async fn publish_health(
+    runner: Arc<NodeRunner>,
+    source: String,
+    relayed: Arc<Mutex<Option<Instant>>>,
+    token: CancellationToken,
+) {
+    let publisher = match motor_health::declare_publisher(&runner).await {
+        Ok(p) => p,
+        Err(e) => return error!("declare motor_health publisher: {e}"),
+    };
+    let mut ticker = tokio::time::interval(HEALTH_PERIOD);
+    // A starved task must resume at the cadence, not fire a catch-up burst
+    // of stamps that all claim to be the current condition.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failing = false;
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => return,
+            _ = ticker.tick() => {}
+        }
+        // Vouch only for a limb whose physics spoke recently; the doc above
+        // is the reasoning. The window is the same one every follower uses
+        // to call a motor silent.
+        let current = relayed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|at| at.elapsed() < STATE_STALE_AFTER);
+        if !current {
+            continue;
+        }
+        let result = async {
+            let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
+            let msg = motor_health::build_message(
+                UNIX_EPOCH + Duration::from_nanos(ns),
+                source.clone(),
+                vec![0; ARM_DOF],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .map_err(|e| e.to_string())?;
+            publisher.publish(msg).await.map_err(|e| e.to_string())
+        }
+        .await;
+        match result {
+            Ok(()) => failing = false,
+            Err(e) if !failing => {
+                failing = true;
+                warn!("motor_health publish failing, suppressing repeats: {e}");
             }
             Err(_) => {}
         }
@@ -145,19 +225,34 @@ fn main() -> Result<()> {
         )
         .init();
 
-    NodeBuilder::new().run(|_params: Parameters, node_runner| async move {
+    NodeBuilder::new().run(|params: Parameters, node_runner| async move {
+        // Names this limb on the health wire: same 0 left / 1 right encoding
+        // as the real arm, refused at startup so a launcher typo cannot
+        // publish a source no consumer recognises.
+        assert!(
+            matches!(params.arm_id, ARM_ID_LEFT | ARM_ID_RIGHT),
+            "arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {}",
+            params.arm_id
+        );
+        // Health stamps read the daemon-resolved clock (sim time under a
+        // simulated clock), like every producer-side stamp in the stack.
+        peppygen::clock::init(&node_runner).await?;
         let token = node_runner.cancellation_token().clone();
-        // Component readiness the robot_initializer aggregates: false until the
-        // first engine state has been relayed, exactly like the real follower's
-        // motors-enabled-and-serving gate.
-        let ready = Arc::new(AtomicBool::new(false));
+        // When the engine last relayed a state. Readiness latches on the
+        // first (like the real follower's motors-enabled-and-serving gate,
+        // and deliberately never unlatches: mid-session recovery is the
+        // runtime's restart, not a ready flap); the health heartbeat asks
+        // for recency.
+        let relayed: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
         {
             let runner = node_runner.clone();
-            let ready = ready.clone();
+            let relayed = relayed.clone();
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
-                        Ok(is_ready::Response::new(ready.load(Ordering::SeqCst)))
+                        Ok(is_ready::Response::new(
+                            relayed.lock().unwrap_or_else(|e| e.into_inner()).is_some(),
+                        ))
                     })
                     .await
                     {
@@ -167,13 +262,29 @@ fn main() -> Result<()> {
             });
         }
         let setpoints = tokio::spawn(relay_setpoints(node_runner.clone(), token.clone()));
-        let states = tokio::spawn(relay_states(node_runner.clone(), ready, token.clone()));
-        // A dead relay leg would hold its direction silently while the node
-        // reports healthy; cancel the node so the runtime restarts it.
+        let health_relayed = relayed.clone();
+        let states = tokio::spawn(relay_states(node_runner.clone(), relayed, token.clone()));
+        // Names this limb on the health wire the way the real arm names
+        // itself. Exhaustive rather than an else, so a value the assert above
+        // does not cover cannot silently publish as the right arm.
+        let source = match params.arm_id {
+            ARM_ID_LEFT => "left arm",
+            ARM_ID_RIGHT => "right arm",
+            other => unreachable!("arm_id {other} was refused at startup"),
+        };
+        let health = tokio::spawn(publish_health(
+            node_runner.clone(),
+            source.to_string(),
+            health_relayed,
+            token.clone(),
+        ));
+        // A dead relay leg or heartbeat would hold its part silently while
+        // the node reports healthy; cancel the node so the runtime restarts it.
         tokio::spawn(async move {
             tokio::select! {
                 _ = setpoints => {}
                 _ = states => {}
+                _ = health => {}
             }
             token.cancel();
         });
