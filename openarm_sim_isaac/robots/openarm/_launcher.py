@@ -40,6 +40,9 @@ class SimLauncher:
 
         self._runtime_robot = None
 
+        # Runtime-discovered NVIDIA Isaac prop catalogue.
+        self._isaac_assets = {}
+
         self._runtime_arm_targets = {
             "left": None,
             "right": None,
@@ -60,6 +63,11 @@ class SimLauncher:
             self._sim_app.reset_render_settings()
 
             self._setup_environment()
+
+            # Discover the NVIDIA Isaac props once during startup. The
+            # resulting catalogue is cached for the Peppy asset-list service.
+            self._isaac_assets = self._discover_isaac_props()
+
             self._warmup()
             self._start_timeline()
 
@@ -1471,6 +1479,175 @@ class SimLauncher:
         )
 
         return full_path
+
+    def _discover_isaac_props(self) -> dict:
+        """Discover USD assets recursively beneath ``Isaac/Props``.
+
+        The catalogue is built once during startup. Public callers use the
+        generated ``asset_id`` while the raw Isaac asset path remains private
+        to the simulation node.
+
+        Example asset ID::
+
+            props/ycb/axis_aligned/003_cracker_box
+
+        Internal Isaac path::
+
+            Isaac/Props/YCB/Axis_Aligned/003_cracker_box.usd
+        """
+
+        import omni.client
+
+        props_root = self._resolve_isaac_asset_path(
+            "Isaac/Props"
+        )
+
+        catalogue = {}
+
+        def walk(
+            remote_dir: str,
+            relative_dir: str,
+        ) -> None:
+            result, entries = omni.client.list(
+                remote_dir
+            )
+
+            if result != omni.client.Result.OK:
+                # A recursive probe can reach entries that are not
+                # directories. That is not fatal for catalogue discovery.
+                return
+
+            for entry in entries:
+                relative_name = getattr(
+                    entry,
+                    "relative_path",
+                    None,
+                )
+
+                if not relative_name:
+                    relative_name = getattr(
+                        entry,
+                        "path",
+                        None,
+                    )
+
+                if not relative_name:
+                    continue
+
+                relative_name = str(
+                    relative_name
+                ).strip("/")
+
+                if not relative_name:
+                    continue
+
+                child_remote = (
+                    remote_dir.rstrip("/")
+                    + "/"
+                    + relative_name
+                )
+
+                child_relative = (
+                    relative_dir.rstrip("/")
+                    + "/"
+                    + relative_name
+                ).strip("/")
+
+                lower_name = relative_name.lower()
+
+                if lower_name.endswith(
+                    (
+                        ".usd",
+                        ".usda",
+                        ".usdc",
+                    )
+                ):
+                    isaac_path = (
+                        "Isaac/Props/"
+                        + child_relative
+                    )
+
+                    asset_id = (
+                        "props/"
+                        + child_relative.rsplit(".", 1)[0]
+                    ).lower()
+
+                    asset_id = (
+                        asset_id
+                        .replace(" ", "_")
+                        .replace("\\", "/")
+                    )
+
+                    display_name = (
+                        relative_name.rsplit(".", 1)[0]
+                        .replace("_", " ")
+                        .replace("-", " ")
+                        .strip()
+                    )
+
+                    category = (
+                        child_relative.split("/", 1)[0]
+                        if "/" in child_relative
+                        else "Props"
+                    )
+
+                    catalogue[asset_id] = {
+                        "asset_id": asset_id,
+                        "display_name": display_name,
+                        "kind": "object",
+                        "path": isaac_path,
+                        "category": category,
+                    }
+
+                    continue
+
+                # Probe non-USD entries as possible directories. Ordinary
+                # files simply return a non-OK result and terminate here.
+                walk(
+                    child_remote,
+                    child_relative,
+                )
+
+        logger.info(
+            "Discovering Isaac props beneath %s",
+            props_root,
+        )
+
+        walk(
+            props_root,
+            "",
+        )
+
+        logger.info(
+            "Discovered %d Isaac prop assets",
+            len(catalogue),
+        )
+
+        # Log a small sample only; the full Props tree can be large.
+        for asset_id in list(sorted(catalogue))[:25]:
+            asset = catalogue[asset_id]
+
+            logger.info(
+                "Isaac asset: %s -> %s",
+                asset_id,
+                asset["path"],
+            )
+
+        if len(catalogue) > 25:
+            logger.info(
+                "... %d additional Isaac assets not shown",
+                len(catalogue) - 25,
+            )
+
+        return catalogue
+
+    def get_isaac_assets(self) -> dict:
+        """Return a defensive copy of the cached Isaac prop catalogue."""
+
+        return {
+            asset_id: dict(asset)
+            for asset_id, asset in self._isaac_assets.items()
+        }
 
     def _runtime_load_isaac_scene(
         self,
