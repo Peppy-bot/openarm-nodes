@@ -1513,8 +1513,11 @@ class SimLauncher:
             )
 
             if result != omni.client.Result.OK:
-                # A recursive probe can reach entries that are not
-                # directories. That is not fatal for catalogue discovery.
+                logger.debug(
+                    "Could not list Isaac asset directory %s: %s",
+                    remote_dir,
+                    result,
+                )
                 return
 
             for entry in entries:
@@ -1601,12 +1604,21 @@ class SimLauncher:
 
                     continue
 
-                # Probe non-USD entries as possible directories. Ordinary
-                # files simply return a non-OK result and terminate here.
-                walk(
-                    child_remote,
-                    child_relative,
+                # Recurse only into entries that can contain children.
+                flags = getattr(
+                    entry,
+                    "flags",
+                    0,
                 )
+
+                if (
+                    flags
+                    & omni.client.ItemFlags.CAN_HAVE_CHILDREN
+                ):
+                    walk(
+                        child_remote,
+                        child_relative,
+                    )
 
         logger.info(
             "Discovering Isaac props beneath %s",
