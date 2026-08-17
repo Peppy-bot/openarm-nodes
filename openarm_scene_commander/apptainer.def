@@ -7,6 +7,8 @@ From: peppybot/python-uv-base:latest
 
 %environment
     export PATH="/opt/openarm_scene_commander/.venv/bin:$PATH"
+    export PYTHONPATH="/opt/openarm_scene_commander/.peppy/libs/peppygen:/opt/openarm_scene_commander/.peppy/libs/peppylib:$PYTHONPATH"
+    export PEPPYGEN_OUTPUT_PATH="/opt/openarm_scene_commander/.peppy/libs/peppygen"
 
 %files
     . /opt/openarm_scene_commander
