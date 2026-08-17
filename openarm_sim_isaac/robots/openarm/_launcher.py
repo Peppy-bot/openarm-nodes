@@ -1558,6 +1558,13 @@ class SimLauncher:
 
                 lower_name = relative_name.lower()
 
+                # Ignore generated thumbnail assets.
+                if (
+                    "/.thumbs/" in ("/" + child_relative.lower() + "/")
+                    or child_relative.lower().startswith(".thumbs/")
+                ):
+                    continue
+
                 if lower_name.endswith(
                     (
                         ".usd",
