@@ -291,11 +291,11 @@ pub const HEALTH_STALE_AFTER: Duration = HEALTH_REPORT_PERIOD.saturating_mul(3);
 /// three-missed-periods patience as [`HEALTH_STALE_AFTER`].
 pub const ALERT_STALE_AFTER: Duration = ALERT_REEMIT_PERIOD.saturating_mul(3);
 
-/// Slack allowed between a wire stamp and this consumer's clock before the
-/// stamp counts as pre-aged. Producers stamp from the daemon-resolved clock
+/// Slack allowed between a wire timestamp and this consumer's clock before the
+/// timestamp counts as pre-aged. Producers timestamp from the daemon-resolved clock
 /// this node also reads, so the allowance absorbs scheduling skew, not clock
 /// disagreement.
-pub const STAMP_SKEW_ALLOWANCE: Duration = Duration::from_millis(500);
+pub const TIMESTAMP_SKEW_ALLOWANCE: Duration = Duration::from_millis(500);
 
 /// A report's receipt time plus the fixed window it stays renderable for:
 /// the one aging rule shared by health reports and alerts. Anything older
@@ -323,21 +323,21 @@ impl Validity {
     }
 }
 
-/// Parse a wire stamp into a report's [`Validity`], rejecting a stamp already
-/// older than the aging window plus [`STAMP_SKEW_ALLOWANCE`] on the
+/// Parse a wire timestamp into a report's [`Validity`], rejecting a timestamp already
+/// older than the aging window plus [`TIMESTAMP_SKEW_ALLOWANCE`] on the
 /// daemon-resolved clock both ends read. A consumer working through a backlog
-/// re-stamps queued reports as fresh at receipt; the stamp check refuses what is already older than the window.
-pub fn parse_stamped_validity(
-    stamp: SystemTime,
+/// re-stamps queued reports as fresh at receipt; the timestamp check refuses what is already older than the window.
+pub fn parse_timestamp_validity(
+    timestamp: SystemTime,
     clock_now: SystemTime,
     received_at: Instant,
     live_for: Duration,
 ) -> Result<Validity, String> {
-    // A stamp ahead of the clock reads as age zero: forward skew is not backlog.
-    let age = clock_now.duration_since(stamp).unwrap_or(Duration::ZERO);
-    if age > live_for + STAMP_SKEW_ALLOWANCE {
+    // A timestamp ahead of the clock reads as age zero: forward skew is not backlog.
+    let age = clock_now.duration_since(timestamp).unwrap_or(Duration::ZERO);
+    if age > live_for + TIMESTAMP_SKEW_ALLOWANCE {
         return Err(format!(
-            "stamp {} ms old is past its {} ms window",
+            "timestamp {} ms old is past its {} ms window",
             age.as_millis(),
             live_for.as_millis()
         ));
@@ -534,17 +534,17 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_aged_stamp_rejects_and_a_fresh_or_future_one_parses() {
+    fn a_pre_aged_timestamp_rejects_and_a_fresh_or_future_one_parses() {
         let clock = SystemTime::now();
         let t0 = Instant::now();
-        let parse = |stamp| parse_stamped_validity(stamp, clock, t0, HEALTH_STALE_AFTER);
+        let parse = |timestamp| parse_timestamp_validity(timestamp, clock, t0, HEALTH_STALE_AFTER);
         assert!(parse(clock).is_ok());
         assert!(
-            parse(clock - (HEALTH_STALE_AFTER + STAMP_SKEW_ALLOWANCE)).is_ok(),
+            parse(clock - (HEALTH_STALE_AFTER + TIMESTAMP_SKEW_ALLOWANCE)).is_ok(),
             "exactly at the allowance still parses"
         );
         assert!(
-            parse(clock - (HEALTH_STALE_AFTER + STAMP_SKEW_ALLOWANCE + Duration::from_millis(1)))
+            parse(clock - (HEALTH_STALE_AFTER + TIMESTAMP_SKEW_ALLOWANCE + Duration::from_millis(1)))
                 .is_err(),
             "a backlogged report must not be re-stamped fresh"
         );

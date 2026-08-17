@@ -18,7 +18,7 @@ use tracing::error;
 use crate::consumer;
 use crate::owner::Feedback;
 use crate::state::{
-    HEALTH_STALE_AFTER, HealthLevel, HealthReport, MotorHealthReading, Side, parse_stamped_validity,
+    HEALTH_STALE_AFTER, HealthLevel, HealthReport, MotorHealthReading, Side, parse_timestamp_validity,
 };
 
 /// Whether this deployment binds any motor_health producer.
@@ -50,7 +50,7 @@ pub async fn run(
         token,
         feedback,
         subscription,
-        // An unresolved daemon clock cannot certify a stamp's age, so the
+        // An unresolved daemon clock cannot certify a timestamp's age, so the
         // report drops on the same throttled-warn path as a malformed one.
         |producer, msg| parse_report(producer, msg, consumer::clock_now()?, Instant::now()),
     )
@@ -94,7 +94,7 @@ fn classify(instance: &str) -> Result<(Side, Kind), String> {
 /// Parse one wire report into the owner feedback it routes to: a producing
 /// instance this panel has a slot for, one level per motor of that component
 /// each a defined severity, reading vectors either absent (empty) or
-/// motor-count-length with finite values, and a stamp not already past the
+/// motor-count-length with finite values, and a timestamp not already past the
 /// aging window.
 ///
 /// The producing instance is the component, so a report from hardware this
@@ -129,7 +129,7 @@ fn parse_component<const MOTORS: usize>(
     clock_now: SystemTime,
     received_at: Instant,
 ) -> Result<HealthReport<MOTORS>, String> {
-    let validity = parse_stamped_validity(msg.stamp, clock_now, received_at, HEALTH_STALE_AFTER)?;
+    let validity = parse_timestamp_validity(msg.timestamp, clock_now, received_at, HEALTH_STALE_AFTER)?;
     let wire_levels: [u8; MOTORS] = msg
         .level
         .as_slice()
@@ -180,12 +180,12 @@ fn parse_reading_vector<const MOTORS: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ARM_DOF, ArmHealth, GripperHealth, STAMP_SKEW_ALLOWANCE};
+    use crate::state::{ARM_DOF, ArmHealth, GripperHealth, TIMESTAMP_SKEW_ALLOWANCE};
     use std::time::Duration;
 
     fn msg() -> motor_health::Message {
         motor_health::Message {
-            stamp: SystemTime::now(),
+            timestamp: SystemTime::now(),
             level: vec![0; ARM_DOF],
             effort_fraction_rated: (0..ARM_DOF).map(|i| 0.10 + 0.01 * i as f64).collect(),
             effort_fraction_rated_sustained: (0..ARM_DOF).map(|i| 0.20 + 0.01 * i as f64).collect(),
@@ -195,11 +195,11 @@ mod tests {
         }
     }
 
-    /// Parse from the named instance against a clock equal to the stamp, so
+    /// Parse from the named instance against a clock equal to the timestamp, so
     /// only routing and shape can fail.
     fn parse_fresh(instance: &str, msg: &motor_health::Message) -> Result<Feedback, String> {
         let producer = ProducerRef::new("core", instance);
-        parse_report(&producer, msg, msg.stamp, Instant::now())
+        parse_report(&producer, msg, msg.timestamp, Instant::now())
     }
 
     /// Unwrap an arm parse, panicking on any other routing.
@@ -332,11 +332,11 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_aged_stamp_rejects_the_report() {
+    fn a_pre_aged_timestamp_rejects_the_report() {
         // A backlogged consumer must not re-stamp a stale report as fresh.
         let m = msg();
         let producer = ProducerRef::new("core", "left_arm");
-        let just_inside = m.stamp + HEALTH_STALE_AFTER + STAMP_SKEW_ALLOWANCE;
+        let just_inside = m.timestamp + HEALTH_STALE_AFTER + TIMESTAMP_SKEW_ALLOWANCE;
         assert!(parse_report(&producer, &m, just_inside, Instant::now()).is_ok());
         let past = just_inside + Duration::from_millis(1);
         assert!(parse_report(&producer, &m, past, Instant::now()).is_err());
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn a_gripper_report_parses_as_its_single_motor() {
         let m = motor_health::Message {
-            stamp: SystemTime::now(),
+            timestamp: SystemTime::now(),
             level: vec![1],
             effort_fraction_rated: vec![0.4],
             effort_fraction_rated_sustained: vec![0.35],

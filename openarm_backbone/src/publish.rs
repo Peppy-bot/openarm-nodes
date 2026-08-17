@@ -33,10 +33,10 @@ use crate::arm_pair::ArmPair;
 use crate::streams::{GripperState, warn_throttled};
 use crate::types::{JointVec, world_pose_arrays};
 
-/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// Pairing timestamp from the daemon-resolved clock (sim time under a simulated
 /// clock), so consumers age samples on the same timeline they read. Errors
 /// until the clock delivers its first tick.
-fn pairing_stamp() -> Result<SystemTime, String> {
+fn pairing_timestamp() -> Result<SystemTime, String> {
     let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
     Ok(UNIX_EPOCH + Duration::from_nanos(ns))
 }
@@ -91,7 +91,7 @@ impl Publisher<JointBuild> {
     /// neither commands nor measures them, which the contract spells as an
     /// empty list rather than a vector of zeros.
     pub async fn send(&self, positions: &JointVec, velocities: &JointVec) {
-        self.emit(|stamp| (self.build)(stamp, positions.to_vec(), velocities.to_vec(), Vec::new()))
+        self.emit(|timestamp| (self.build)(timestamp, positions.to_vec(), velocities.to_vec(), Vec::new()))
             .await;
     }
 }
@@ -101,7 +101,7 @@ impl Publisher<OpeningBuild> {
     /// relay (`None` rides as the wire's 0: no preference, leaving the
     /// follower's configured ceiling in charge).
     pub async fn send(&self, opening: f64, max_effort: Option<f64>) {
-        self.emit(|stamp| (self.build)(stamp, opening, max_effort.unwrap_or(0.0)))
+        self.emit(|timestamp| (self.build)(timestamp, opening, max_effort.unwrap_or(0.0)))
             .await;
     }
 }
@@ -111,7 +111,7 @@ impl Publisher<PoseBuild> {
     /// Cartesian leader hold no kinematics of its own.
     pub async fn send(&self, pose: &Isometry3<f64>) {
         let (position, orientation) = world_pose_arrays(pose);
-        self.emit(|stamp| (self.build)(stamp, position, orientation))
+        self.emit(|timestamp| (self.build)(timestamp, position, orientation))
             .await;
     }
 }
@@ -119,9 +119,9 @@ impl Publisher<PoseBuild> {
 impl Publisher<ApertureBuild> {
     /// Relay one gripper's measured state as its follower reported it.
     pub async fn send(&self, measured: &GripperState) {
-        self.emit(|stamp| {
+        self.emit(|timestamp| {
             (self.build)(
-                stamp,
+                timestamp,
                 measured.fraction,
                 measured.effort,
                 measured.max_effort,
@@ -143,7 +143,7 @@ impl<Build> Publisher<Build> {
     /// not ticked) means the message was never formed. Neither is fatal: the
     /// next tick tries again.
     async fn emit(&self, build: impl FnOnce(SystemTime) -> peppygen::Result<Payload>) {
-        match pairing_stamp().and_then(|stamp| build(stamp).map_err(|e| e.to_string())) {
+        match pairing_timestamp().and_then(|timestamp| build(timestamp).map_err(|e| e.to_string())) {
             Ok(msg) => {
                 if let Err(e) = self.publisher.publish(msg).await {
                     self.log_throttled(|| warn!("{} publish: {e}", self.what));
@@ -171,7 +171,7 @@ pub struct Publishers {
     /// slot in pose mode (an unpaired slot is a no-op).
     pub arm_pose_states: ArmPair<Publisher<PoseBuild>>,
     /// The operator readout: an emitted topic rather than a pairing slot, and
-    /// the one message with no stamp of its own.
+    /// the one message with no timestamp of its own.
     status: TopicPublisher,
     /// The readout's failure throttle, matching the per-slot ones.
     status_error: Mutex<Option<Instant>>,

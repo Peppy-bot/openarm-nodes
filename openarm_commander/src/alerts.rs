@@ -17,7 +17,7 @@ use tracing::error;
 
 use crate::consumer;
 use crate::owner::Feedback;
-use crate::state::{ALERT_STALE_AFTER, Alert, parse_stamped_validity};
+use crate::state::{ALERT_STALE_AFTER, Alert, parse_timestamp_validity};
 
 /// The alert contract's severity ceiling: 0 clear, 1 warning, 2 critical,
 /// 3 fault.
@@ -52,7 +52,7 @@ pub async fn run(
         token,
         feedback,
         subscription,
-        // An unresolved daemon clock cannot certify a stamp's age, so the
+        // An unresolved daemon clock cannot certify a timestamp's age, so the
         // alert drops on the same throttled-warn path as a malformed one.
         |producer, msg| {
             parse_alert(producer, msg, consumer::clock_now()?, Instant::now()).map(Feedback::Alert)
@@ -62,7 +62,7 @@ pub async fn run(
 }
 
 /// Parse one wire alert: a non-empty identity, a defined severity, and a
-/// stamp not already past the aging window (a backlogged consumer must not
+/// timestamp not already past the aging window (a backlogged consumer must not
 /// re-stamp a stale alert as fresh). The producing instance becomes part of
 /// the alert's identity, scoping replaces and clears to their own producer.
 fn parse_alert(
@@ -83,19 +83,19 @@ fn parse_alert(
         kind: msg.kind.clone(),
         severity: msg.severity,
         message: msg.message.clone(),
-        validity: parse_stamped_validity(msg.stamp, clock_now, received_at, ALERT_STALE_AFTER)?,
+        validity: parse_timestamp_validity(msg.timestamp, clock_now, received_at, ALERT_STALE_AFTER)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::STAMP_SKEW_ALLOWANCE;
+    use crate::state::TIMESTAMP_SKEW_ALLOWANCE;
     use std::time::Duration;
 
     fn msg(severity: u8) -> alerts::Message {
         alerts::Message {
-            stamp: SystemTime::now(),
+            timestamp: SystemTime::now(),
             source: "left arm j2".to_string(),
             kind: "motor_overload".to_string(),
             severity,
@@ -103,10 +103,10 @@ mod tests {
         }
     }
 
-    /// Parse against a clock equal to the stamp, so only shape can fail.
+    /// Parse against a clock equal to the timestamp, so only shape can fail.
     fn parse_fresh(msg: &alerts::Message) -> Result<Alert, String> {
         let producer = ProducerRef::new("core", "left_arm_inst");
-        parse_alert(&producer, msg, msg.stamp, Instant::now())
+        parse_alert(&producer, msg, msg.timestamp, Instant::now())
     }
 
     #[test]
@@ -133,10 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_aged_stamp_rejects_the_alert() {
+    fn a_pre_aged_timestamp_rejects_the_alert() {
         let producer = ProducerRef::new("core", "left_arm_inst");
         let m = msg(2);
-        let just_inside = m.stamp + ALERT_STALE_AFTER + STAMP_SKEW_ALLOWANCE;
+        let just_inside = m.timestamp + ALERT_STALE_AFTER + TIMESTAMP_SKEW_ALLOWANCE;
         assert!(parse_alert(&producer, &m, just_inside, Instant::now()).is_ok());
         let past = just_inside + Duration::from_millis(1);
         assert!(parse_alert(&producer, &m, past, Instant::now()).is_err());

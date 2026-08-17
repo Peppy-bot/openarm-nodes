@@ -418,7 +418,7 @@ fn admit_arms(
 /// [`admit_arms`] over each gripper's own pairing.
 ///
 /// Gates the upstream relay only: a gripper that has stopped delivering must
-/// not have its last aperture republished under a fresh stamp, which would show
+/// not have its last aperture republished under a fresh timestamp, which would show
 /// the leading node a live-looking back-channel. The governed opening still
 /// streams down, because a held gripper holds where the operator put it rather
 /// than drifting away unseen the way an uncommanded arm does.
@@ -516,7 +516,7 @@ fn measured_config(
 /// Relay every limb's measured state up its leader pairing slot, so the
 /// leading node sees the same back-channel a follower gives the backbone. A
 /// stale side's arm relay goes silent with its setpoint stream:
-/// republishing a frozen measurement under a fresh stamp would show
+/// republishing a frozen measurement under a fresh timestamp would show
 /// the leading node a live-looking limb the backbone has stopped vouching
 /// for. Each watch is read out before its send, so no borrow guard is held
 /// across an await.

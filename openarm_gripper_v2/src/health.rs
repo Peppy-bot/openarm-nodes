@@ -50,10 +50,10 @@ impl LatchedWarn {
     }
 }
 
-/// Capture stamp from the daemon-resolved clock (sim time under a simulated
+/// Capture timestamp from the daemon-resolved clock (sim time under a simulated
 /// clock), so consumers age samples on the same timeline they read. Errors
 /// until the clock delivers its first tick.
-pub(crate) fn capture_stamp() -> Result<SystemTime, String> {
+pub(crate) fn capture_timestamp() -> Result<SystemTime, String> {
     let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
     Ok(UNIX_EPOCH + Duration::from_nanos(ns))
 }
@@ -141,12 +141,12 @@ pub async fn run<M: Mode + Send + 'static>(
             _ = ticker.tick() => {}
         }
         // One daemon-clock read per round serves both the filter interval
-        // and the published stamp, so the filter's timeline is the one the
-        // stamps are read on (sim time under a simulated clock). A backward
+        // and the published timestamp, so the filter's timeline is the one the
+        // timestamps are read on (sim time under a simulated clock). A backward
         // step falls back to the cadence; a paused clock yields dt 0, which
         // the filter takes as no elapsed time.
-        let stamp = match capture_stamp() {
-            Ok(stamp) => stamp,
+        let timestamp = match capture_timestamp() {
+            Ok(timestamp) => timestamp,
             Err(e) => {
                 health_warn.failure(&e);
                 if final_round {
@@ -156,10 +156,10 @@ pub async fn run<M: Mode + Send + 'static>(
             }
         };
         let dt_s = last_step
-            .and_then(|last| stamp.duration_since(last).ok())
+            .and_then(|last| timestamp.duration_since(last).ok())
             .unwrap_or(HEALTH_PERIOD)
             .as_secs_f64();
-        last_step = Some(stamp);
+        last_step = Some(timestamp);
         let state = gripper
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -169,7 +169,7 @@ pub async fn run<M: Mode + Send + 'static>(
 
         publish_report(
             &health_pub,
-            stamp,
+            timestamp,
             &report,
             now_rated,
             now_peak,
@@ -191,14 +191,14 @@ pub async fn run<M: Mode + Send + 'static>(
 /// enable confirmation is supposed to make impossible.
 async fn publish_report(
     publisher: &peppylib::TopicPublisher,
-    stamp: SystemTime,
+    timestamp: SystemTime,
     report: &MotorHealth,
     now_rated: f64,
     now_peak: f64,
     publish_warn: &mut LatchedWarn,
     readings_warn: &mut LatchedWarn,
 ) {
-    let built = build_health_message(stamp, report, now_rated, now_peak);
+    let built = build_health_message(timestamp, report, now_rated, now_peak);
     let (message, degraded) = match built {
         Ok(built) => built,
         Err(e) => return publish_warn.failure(&e),
@@ -229,7 +229,7 @@ async fn publish_due_alerts(
     for pending in &batch.items {
         let result = async {
             let msg = alerts::build_message(
-                capture_stamp()?,
+                capture_timestamp()?,
                 pending.alert.source.clone(),
                 MOTOR_ALERT_KIND.to_string(),
                 pending.alert.severity,
@@ -264,7 +264,7 @@ async fn publish_due_alerts(
 /// reading vector rather than fabricating a number. The level still names
 /// the quiet motor.
 fn build_health_message(
-    stamp: SystemTime,
+    timestamp: SystemTime,
     report: &MotorHealth,
     now_rated: f64,
     now_peak: f64,
@@ -282,7 +282,7 @@ fn build_health_message(
         false => readings.map(|v| vec![v]),
     };
     let payload = motor_health::build_message(
-        stamp,
+        timestamp,
         vec![report.level.wire()],
         rated,
         sustained,

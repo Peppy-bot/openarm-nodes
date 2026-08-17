@@ -18,7 +18,7 @@ use crate::state::REJECT_WARN_PERIOD;
 const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 /// The daemon-resolved time (sim time under a simulated clock), for judging
-/// a wire stamp's age on the timeline it was written from. Errs until the
+/// a wire timestamp's age on the timeline it was written from. Errs until the
 /// clock resolves (in sim mode, until the first tick is observed).
 pub fn clock_now() -> Result<SystemTime, String> {
     let ns = peppygen::clock::now_ns().map_err(|e| format!("daemon clock unavailable: {e}"))?;
