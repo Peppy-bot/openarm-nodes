@@ -24,14 +24,14 @@ use tracing::{error, info, warn};
 
 use crate::ARM_DOF;
 use crate::control::ticks_within;
-use crate::stream::{LatchedWarn, StreamWiring, capture_stamp};
+use crate::stream::{LatchedWarn, StreamWiring, capture_timestamp};
 
 /// How often the tick loop may repeat a clock-outage warning.
 const CLOCK_WARN_PERIOD: Duration = Duration::from_secs(1);
 
 /// One tick's health reports, the instantaneous effort fractions they were
 /// judged from (against the continuous rating and against the effective
-/// peak), and the clock reading they were taken at. The stamp travels with
+/// peak), and the clock reading they were taken at. The timestamp travels with
 /// them so the publisher can tell a fresh capture from one it already
 /// published.
 #[derive(Clone, Copy)]
@@ -86,7 +86,7 @@ impl Monitor {
 
         let reports = judge(&mut self.filters, state, &stale, dt_s);
         let (effort_fractions_rated, effort_fractions_peak) = fractions(&self.ratings, state);
-        match capture_stamp() {
+        match capture_timestamp() {
             Ok(captured) => {
                 wiring.health.send_replace(Some(HealthSample {
                     reports,
@@ -287,7 +287,7 @@ async fn publish_due_alerts(
     for pending in &batch.items {
         let result = async {
             let msg = alerts_topic::build_message(
-                capture_stamp()?,
+                capture_timestamp()?,
                 pending.alert.source.clone(),
                 MOTOR_ALERT_KIND.to_string(),
                 pending.alert.severity,

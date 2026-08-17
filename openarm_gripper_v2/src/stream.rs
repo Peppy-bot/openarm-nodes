@@ -16,7 +16,7 @@ use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
 use crate::geometry::Geometry;
-use crate::health::{LatchedWarn, capture_stamp};
+use crate::health::{LatchedWarn, capture_timestamp};
 
 pub async fn run(
     runner: Arc<NodeRunner>,
@@ -51,8 +51,8 @@ pub async fn run(
             warn!("gripper_states: skipping non-finite motor sample");
             continue;
         }
-        let peer_result = match capture_stamp().and_then(|stamp| {
-            backbone::gripper_states::build_message(stamp, opening, effort, effort_ceiling_nm)
+        let peer_result = match capture_timestamp().and_then(|timestamp| {
+            backbone::gripper_states::build_message(timestamp, opening, effort, effort_ceiling_nm)
                 .map_err(|e| e.to_string())
         }) {
             Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),

@@ -28,7 +28,7 @@ use tracing::{error, warn};
 use crate::types::{JointVec, Side, pose_from_wire};
 use crate::upstream::Upstream;
 
-/// At most one dropped-message warning per stream (and one build/stamp error
+/// At most one dropped-message warning per stream (and one build/timestamp error
 /// per publisher) in this window, so a misrouted producer or a stalled clock
 /// is visible in the log without flooding it at the stream rate.
 pub(crate) const THROTTLED_WARN_PERIOD: Duration = Duration::from_secs(1);

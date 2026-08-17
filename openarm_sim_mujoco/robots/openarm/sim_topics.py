@@ -74,7 +74,7 @@ class SimTopicIO:
         """Declare publishers and spawn the setpoint-consume loops. Runs on the
         node loop before the sim thread starts. Publishing while a slot is
         unpaired is a legal no-op, so bringup order never matters."""
-        # State stamps read the daemon-resolved clock, the same source every
+        # State timestamps read the daemon-resolved clock, the same source every
         # follower uses, so consumers age samples on one timeline.
         await clock.init(self._node_runner)
         for side, (_, states) in _ARM_SLOTS.items():

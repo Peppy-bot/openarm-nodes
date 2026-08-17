@@ -29,10 +29,10 @@ use tracing::{error, warn};
 use crate::owner::CommandFrame;
 use crate::state::Side;
 
-/// Pairing stamp from the daemon-resolved clock (sim time under a simulated
+/// Pairing timestamp from the daemon-resolved clock (sim time under a simulated
 /// clock), so the backbone ages setpoints on the same timeline it reads.
 /// Errors until the clock delivers its first tick.
-fn pairing_stamp() -> Result<SystemTime, String> {
+fn pairing_timestamp() -> Result<SystemTime, String> {
     let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
     Ok(UNIX_EPOCH + Duration::from_nanos(ns))
 }
@@ -119,8 +119,8 @@ pub async fn run(
             format!("{} arm", side.label()),
             move || {
                 let joints = arm_rx.borrow().arms[side]?;
-                Some(pairing_stamp().and_then(|stamp| {
-                    build_arm(stamp, joints.to_vec(), Vec::new(), Vec::new())
+                Some(pairing_timestamp().and_then(|timestamp| {
+                    build_arm(timestamp, joints.to_vec(), Vec::new(), Vec::new())
                         .map_err(|e| e.to_string())
                 }))
             },
@@ -135,8 +135,8 @@ pub async fn run(
             format!("{} gripper", side.label()),
             move || {
                 let frame = gripper_rx.borrow().grippers[side]?;
-                Some(pairing_stamp().and_then(|stamp| {
-                    build_gripper(stamp, frame.opening, frame.max_effort).map_err(|e| e.to_string())
+                Some(pairing_timestamp().and_then(|timestamp| {
+                    build_gripper(timestamp, frame.opening, frame.max_effort).map_err(|e| e.to_string())
                 }))
             },
         ));

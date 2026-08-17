@@ -51,10 +51,10 @@ impl LatchedWarn {
     }
 }
 
-/// Capture stamp from the daemon-resolved clock (sim time under a simulated
+/// Capture timestamp from the daemon-resolved clock (sim time under a simulated
 /// clock), so consumers age samples on the same timeline they read. Errors
 /// until the clock delivers its first tick.
-pub(crate) fn capture_stamp() -> Result<SystemTime, String> {
+pub(crate) fn capture_timestamp() -> Result<SystemTime, String> {
     let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
     Ok(UNIX_EPOCH + Duration::from_nanos(ns))
 }
@@ -200,7 +200,7 @@ pub async fn run_state_publisher(
         last_published = Some(m.captured);
         let peer_result = async {
             let joints = backbone::joint_states::build_message(
-                capture_stamp()?,
+                capture_timestamp()?,
                 m.positions.to_vec(),
                 m.velocities.to_vec(),
                 m.torques.to_vec(),
@@ -228,7 +228,7 @@ mod tests {
         efforts: Vec<f64>,
     ) -> backbone::joint_setpoints::Message {
         backbone::joint_setpoints::Message {
-            stamp: SystemTime::now(),
+            timestamp: SystemTime::now(),
             positions,
             velocities,
             efforts,

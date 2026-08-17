@@ -15,7 +15,7 @@ use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
 use crate::geometry;
-use crate::health::{LatchedWarn, capture_stamp};
+use crate::health::{LatchedWarn, capture_timestamp};
 
 pub async fn run(
     runner: Arc<NodeRunner>,
@@ -50,8 +50,8 @@ pub async fn run(
         // 0 ceiling (no effort control).
         let effort = 0.0;
         let max_effort = 0.0;
-        let peer_result = match capture_stamp().and_then(|stamp| {
-            backbone::gripper_states::build_message(stamp, opening, effort, max_effort)
+        let peer_result = match capture_timestamp().and_then(|timestamp| {
+            backbone::gripper_states::build_message(timestamp, opening, effort, max_effort)
                 .map_err(|e| e.to_string())
         }) {
             Ok(msg) => peer_pub.publish(msg).await.map_err(|e| e.to_string()),
