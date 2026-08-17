@@ -130,7 +130,7 @@ pub async fn run<M: Mode + Send + 'static>(
     let mut health_warn = LatchedWarn::new("motor_health publish");
     let mut readings_warn = LatchedWarn::new("health readings");
     let mut alert_warn = LatchedWarn::new("alert publish");
-    let mut last_step: Option<Instant> = None;
+    let mut last_step: Option<SystemTime> = None;
     let mut final_round = false;
     loop {
         // Biased so a cancelled token wins an already-due tick: shutdown
@@ -140,11 +140,26 @@ pub async fn run<M: Mode + Send + 'static>(
             _ = token.cancelled() => final_round = true,
             _ = ticker.tick() => {}
         }
-        let now = Instant::now();
+        // One daemon-clock read per round serves both the filter interval
+        // and the published stamp, so the filter's timeline is the one the
+        // stamps are read on (sim time under a simulated clock). A backward
+        // step falls back to the cadence; a paused clock yields dt 0, which
+        // the filter takes as no elapsed time.
+        let stamp = match capture_stamp() {
+            Ok(stamp) => stamp,
+            Err(e) => {
+                health_warn.failure(&e);
+                if final_round {
+                    return;
+                }
+                continue;
+            }
+        };
         let dt_s = last_step
-            .map_or(HEALTH_PERIOD, |last| now - last)
+            .and_then(|last| stamp.duration_since(last).ok())
+            .unwrap_or(HEALTH_PERIOD)
             .as_secs_f64();
-        last_step = Some(now);
+        last_step = Some(stamp);
         let state = gripper
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -154,6 +169,7 @@ pub async fn run<M: Mode + Send + 'static>(
 
         publish_report(
             &health_pub,
+            stamp,
             &report,
             now_rated,
             now_peak,
@@ -175,14 +191,14 @@ pub async fn run<M: Mode + Send + 'static>(
 /// enable confirmation is supposed to make impossible.
 async fn publish_report(
     publisher: &peppylib::TopicPublisher,
+    stamp: SystemTime,
     report: &MotorHealth,
     now_rated: f64,
     now_peak: f64,
     publish_warn: &mut LatchedWarn,
     readings_warn: &mut LatchedWarn,
 ) {
-    let built =
-        capture_stamp().and_then(|stamp| build_health_message(stamp, report, now_rated, now_peak));
+    let built = build_health_message(stamp, report, now_rated, now_peak);
     let (message, degraded) = match built {
         Ok(built) => built,
         Err(e) => return publish_warn.failure(&e),
