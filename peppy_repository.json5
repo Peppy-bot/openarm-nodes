@@ -51,6 +51,11 @@
         path: "openarm_robot_initializer/peppy.json5"
       }
     },
+    openarm_scene_commander: {
+      v1: {
+        path: "openarm_scene_commander/peppy.json5"
+      }
+    },
     openarm_sim_isaac: {
       v1: {
         path: "openarm_sim_isaac/peppy.json5"
