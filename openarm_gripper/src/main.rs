@@ -15,7 +15,7 @@ use peppylib::runtime::CancellationToken;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{error, info, warn};
 
 // Mirrors ROS2 v10_simple_hardware on_activate / on_deactivate sleep durations.
@@ -179,6 +179,17 @@ fn main() -> Result<()> {
             });
         }
 
+        // Datasheet ratings resolve before the motor is energised: an error
+        // return here still runs the hooks above, and no panic can strand an
+        // enabled motor. The DM4310's configured trip derates above its
+        // datasheet peak, so the registers would resolve to the datasheet
+        // anyway.
+        let ratings = v10::GRIPPER_MOTOR_TYPE.ratings().ok_or_else(|| {
+            peppygen::Error::Io(std::io::Error::other(
+                "no datasheet ratings for the gripper motor type",
+            ))
+        })?;
+
         // Enable and verify the motor acknowledges torque authority, then
         // return to closed (motor angle = 0.0 rad) before serving requests.
         // Errors return through the runtime so the hooks above disable the
@@ -217,19 +228,25 @@ fn main() -> Result<()> {
         );
 
         // Motor condition telemetry and operator alerts, off the same cached
-        // state. Datasheet ratings: the DM4310's configured trip derates
-        // above its datasheet peak, so the registers would resolve to the
-        // datasheet anyway.
-        let health_task = tokio::spawn(health::run(
-            node_runner.clone(),
-            alert_source.to_string(),
-            gripper.clone(),
-            v10::GRIPPER_MOTOR_TYPE
-                .ratings()
-                .expect("the gripper motor has datasheet ratings"),
-            cfg.cycle_period,
-            node_runner.cancellation_token().clone(),
-        ));
+        // state. The final flush round after cancellation is only awaited if
+        // a shutdown hook waits for it: the runtime awaits hooks, not plain
+        // tasks racing the token. Dropping the sender (return or panic)
+        // completes the receiver, so the hook cannot hang on a dead task.
+        let (health_done_tx, health_done_rx) = oneshot::channel::<()>();
+        let health_task = tokio::spawn({
+            let runner = node_runner.clone();
+            let alert_source = alert_source.to_string();
+            let gripper = gripper.clone();
+            let cycle_period = cfg.cycle_period;
+            let token = node_runner.cancellation_token().clone();
+            async move {
+                let _done = health_done_tx;
+                health::run(runner, alert_source, gripper, ratings, cycle_period, token).await;
+            }
+        });
+        node_runner.on_shutdown(async move {
+            let _ = health_done_rx.await;
+        });
         supervise(
             health_task,
             "health publisher",
