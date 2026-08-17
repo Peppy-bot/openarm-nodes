@@ -27,6 +27,11 @@ const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Tighter bound for shutdown lock removal so disable + drain + removal stays
 /// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Bound on the shutdown hook that awaits the health task's final flush.
+/// Hooks share one grace window and this one runs before the motor-disable
+/// hook, so an unbounded wait on a stalled publish would hold the motors
+/// energised until the force-kill deadline.
+const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Adapts a CAN failure into the runtime error type so bring-up failures
 /// return through the runtime's error path, which runs the shutdown hooks.
@@ -261,7 +266,12 @@ fn main() -> Result<()> {
             }
         });
         node_runner.on_shutdown(async move {
-            let _ = health_done_rx.await;
+            if tokio::time::timeout(HEALTH_FLUSH_TIMEOUT, health_done_rx)
+                .await
+                .is_err()
+            {
+                warn!("health flush missed its shutdown budget; disabling without it");
+            }
         });
         supervise(
             health_task,
