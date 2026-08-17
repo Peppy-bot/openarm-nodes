@@ -29,8 +29,8 @@ use crate::pose::{
     joint_jog_tick,
 };
 use crate::state::{
-    ARM_DOF, ArmTarget, BySide, GesturePhase, GesturePlayback, Proximity, RecordingEpisode, SIDES,
-    Side, UiState,
+    ARM_DOF, Alert, ArmHealth, ArmTarget, BySide, GesturePhase, GesturePlayback, GripperHealth,
+    Proximity, RecordingEpisode, SIDES, Side, UiState,
 };
 use crate::ui::{
     Command, build_snapshot_json, clamp_to_limits, ee_speed_floored, gripper_limits, sane_duration,
@@ -68,6 +68,17 @@ pub enum Feedback {
         max_effort: f64,
     },
     Proximity(Proximity),
+    // Boxed: seven readings dwarf every other variant, and this channel also
+    // carries the high-rate measured-state stream.
+    MotorHealth {
+        side: Side,
+        health: Box<ArmHealth>,
+    },
+    GripperMotorHealth {
+        side: Side,
+        health: GripperHealth,
+    },
+    Alert(Alert),
     ArmGoalDone {
         side: Side,
         summary: String,
@@ -227,6 +238,8 @@ pub async fn run(
         pending: BySide::new(None, None),
     };
     owner.state.recorder.available = record::available(&owner.runner);
+    owner.state.health_bound = crate::motor_health::available(&owner.runner);
+    owner.state.alerts_bound = crate::alerts::available(&owner.runner);
 
     // Publish the starting frame and snapshot before the first tick, so the publishers
     // and any already-connected browser see real state at once rather than after a tick.
@@ -680,6 +693,15 @@ impl Owner {
             }
             Feedback::Proximity(proximity) => {
                 self.state.proximity = Some(proximity);
+            }
+            Feedback::GripperMotorHealth { side, health } => {
+                self.state.gripper_health[side] = Some(health);
+            }
+            Feedback::MotorHealth { side, health } => {
+                self.state.health[side] = Some(*health);
+            }
+            Feedback::Alert(alert) => {
+                self.state.apply_alert(alert);
             }
             Feedback::ArmGoalDone { side, summary } => {
                 self.state.arms[side].in_flight = false;

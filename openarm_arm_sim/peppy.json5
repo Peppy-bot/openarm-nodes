@@ -4,8 +4,9 @@
 // sim engine it plays the leader role of the same pairing (setpoints down to
 // the engine's matching limb slot, the engine's measured state back up).
 // Stamps pass through unchanged, so consumers age samples on the original
-// capture time. One instance per limb; the slots carry the side, so there is
-// no id anywhere.
+// capture time. One instance per limb; the slots carry the side for the
+// command loop, and the health heartbeat is attributed to this instance by
+// the transport.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -16,6 +17,10 @@
       // the real follower: ready once the engine's first state has been
       // relayed (this limb's physics is live and serving).
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
+      // Same health surface as the real arm, published as "present, not
+      // sensed": nominal levels, empty reading vectors (the engine reports no
+      // effort or temperature).
+      { name: "motor_health", tag: "v1", link_id: "motor_health" },
     ],
     depends_on: {
       pairings: [
@@ -34,6 +39,7 @@
       emits: [
         { link_id: "backbone", name: "joint_states" },
         { link_id: "engine", name: "joint_setpoints" },
+        { link_id: "motor_health", name: "motor_health" },
       ],
       consumes: [
         { link_id: "backbone", name: "joint_setpoints" },
@@ -50,7 +56,6 @@
     language: "rust",
     container: {
       def_file: "apptainer.def"
-    },
-    parameters: {}
+    }
   }
 }

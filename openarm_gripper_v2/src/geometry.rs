@@ -3,7 +3,7 @@
 //! full open at a signed angle); the wire speaks the opening fraction
 //! (0 = closed, 1 = fully open). The two grippers are mechanically mirrored:
 //! the left motor opens toward a positive angle, the right toward a negative
-//! one, so the mapping is built per instance from its `gripper_id`.
+//! one, so each instance carries its side's mapping.
 
 use openarm_can::v20;
 
@@ -26,7 +26,8 @@ pub fn effort_to_torque_pu(max_effort_nm: Option<f64>, force_limit_pu: f64) -> f
     })
 }
 
-/// One instance's signed motor mapping, resolved from `gripper_id` at startup.
+/// One side's signed motor mapping; main resolves which side an instance
+/// drives from its `gripper_id` at startup.
 #[derive(Debug, Clone, Copy)]
 pub struct Geometry {
     /// Motor angle (rad) at full open; the closed end is 0. The magnitude is
@@ -36,17 +37,16 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    /// The mapping for one gripper instance: 0 (left) opens toward
-    /// `+GRIPPER_OPEN_RAD`, 1 (right) is mirrored and opens toward
-    /// `-GRIPPER_OPEN_RAD`. `None` for any other id.
-    pub fn from_gripper_id(gripper_id: u8) -> Option<Self> {
-        let open_rad = match gripper_id {
-            0 => v20::GRIPPER_OPEN_RAD,
-            1 => -v20::GRIPPER_OPEN_RAD,
-            _ => return None,
-        };
-        Some(Self { open_rad })
-    }
+    /// The left gripper's mapping: opens toward `+GRIPPER_OPEN_RAD`.
+    pub const LEFT: Self = Self {
+        open_rad: v20::GRIPPER_OPEN_RAD,
+    };
+
+    /// The right gripper's mapping, mechanically mirrored: opens toward
+    /// `-GRIPPER_OPEN_RAD`.
+    pub const RIGHT: Self = Self {
+        open_rad: -v20::GRIPPER_OPEN_RAD,
+    };
 
     /// Opening fraction (0 = closed, 1 = fully open) to signed motor radians.
     pub fn fraction_to_motor_rad(self, fraction: f64) -> f64 {
@@ -75,19 +75,17 @@ mod tests {
 
     #[test]
     fn sides_open_toward_mirrored_motor_angles() {
-        let left = Geometry::from_gripper_id(0).unwrap();
-        let right = Geometry::from_gripper_id(1).unwrap();
-        assert!(left.fraction_to_motor_rad(1.0) > 0.0);
-        assert!(right.fraction_to_motor_rad(1.0) < 0.0);
+        assert!(Geometry::LEFT.fraction_to_motor_rad(1.0) > 0.0);
+        assert!(Geometry::RIGHT.fraction_to_motor_rad(1.0) < 0.0);
         assert_eq!(
-            left.fraction_to_motor_rad(1.0),
-            -right.fraction_to_motor_rad(1.0)
+            Geometry::LEFT.fraction_to_motor_rad(1.0),
+            -Geometry::RIGHT.fraction_to_motor_rad(1.0)
         );
     }
 
     #[test]
     fn closed_is_zero_and_mapping_round_trips() {
-        for geometry in [0, 1].map(|id| Geometry::from_gripper_id(id).unwrap()) {
+        for geometry in [Geometry::LEFT, Geometry::RIGHT] {
             assert_eq!(geometry.fraction_to_motor_rad(0.0), 0.0);
             for fraction in [0.25, 0.5, 1.0] {
                 let back = geometry.motor_rad_to_fraction(geometry.fraction_to_motor_rad(fraction));
@@ -98,7 +96,7 @@ mod tests {
 
     #[test]
     fn measured_fraction_clamps_to_the_wire_range() {
-        for geometry in [0, 1].map(|id| Geometry::from_gripper_id(id).unwrap()) {
+        for geometry in [Geometry::LEFT, Geometry::RIGHT] {
             let open = geometry.fraction_to_motor_rad(1.0);
             assert_eq!(geometry.motor_rad_to_fraction(open * 1.2), 1.0);
             assert_eq!(geometry.motor_rad_to_fraction(open * -0.1), 0.0);
@@ -107,20 +105,13 @@ mod tests {
 
     #[test]
     fn effort_is_side_consistent_toward_open() {
-        let left = Geometry::from_gripper_id(0).unwrap();
-        let right = Geometry::from_gripper_id(1).unwrap();
         // The same physical torque toward open is positive on the left motor
         // and negative on the mirrored right motor; both wires report it
         // positive, and toward closed negative.
-        assert_eq!(left.motor_torque_to_effort(0.5), 0.5);
-        assert_eq!(right.motor_torque_to_effort(-0.5), 0.5);
-        assert_eq!(left.motor_torque_to_effort(-0.25), -0.25);
-        assert_eq!(right.motor_torque_to_effort(0.25), -0.25);
-    }
-
-    #[test]
-    fn out_of_range_ids_are_rejected() {
-        assert!(Geometry::from_gripper_id(2).is_none());
+        assert_eq!(Geometry::LEFT.motor_torque_to_effort(0.5), 0.5);
+        assert_eq!(Geometry::RIGHT.motor_torque_to_effort(-0.5), 0.5);
+        assert_eq!(Geometry::LEFT.motor_torque_to_effort(-0.25), -0.25);
+        assert_eq!(Geometry::RIGHT.motor_torque_to_effort(0.25), -0.25);
     }
 
     #[test]

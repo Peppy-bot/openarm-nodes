@@ -3,7 +3,8 @@
 // role exactly like the real gripper (opening setpoints and effort cap in,
 // measured opening/effort/ceiling back); toward the sim engine it plays the
 // leader role of the same pairing. Stamps pass through unchanged. One instance
-// per side; the slots carry the side, so there is no id anywhere.
+// per side; the slots carry the side for the control conversation, and the
+// health heartbeat is attributed to this instance by the transport.
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -14,6 +15,10 @@
       // the real follower: ready once the engine's first state has been
       // relayed (this limb's physics is live and serving).
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
+      // Same health surface as the real gripper, published as "present, not
+      // sensed": nominal level, empty reading vectors (the engine reports no
+      // effort or temperature).
+      { name: "motor_health", tag: "v1", link_id: "motor_health" },
     ],
     depends_on: {
       pairings: [
@@ -33,6 +38,7 @@
       emits: [
         { link_id: "backbone", name: "gripper_states" },
         { link_id: "engine", name: "gripper_setpoints" },
+        { link_id: "motor_health", name: "motor_health" },
       ],
       consumes: [
         { link_id: "backbone", name: "gripper_setpoints" },
@@ -49,7 +55,6 @@
     language: "rust",
     container: {
       def_file: "apptainer.def"
-    },
-    parameters: {}
+    }
   }
 }

@@ -25,6 +25,15 @@
         // panel hides the recording controls.
         { name: "lerobot_recorder", tag: "v1", link_id: "recorder", cardinality: "zero_or_more" }
       ],
+      contracts: [
+        // Per-motor health from every motor-bearing follower the launcher
+        // wires, demuxed by the report's source. Zero producers is legal: a
+        // stack without health producers just renders n/a.
+        { name: "motor_health", tag: "v1", link_id: "motor_health", cardinality: "zero_or_more" },
+        // Operator alerts from any producer the launcher wires; the panel
+        // renders them without knowing what any producer measures.
+        { name: "alert", tag: "v1", link_id: "alerts", cardinality: "zero_or_more" }
+      ],
       pairings: [
         // The exclusive command loop with the backbone, one slot per driven
         // limb: this panel plays the leader role and streams the operator's
@@ -88,6 +97,8 @@
       ],
       consumes: [
         { link_id: "backbone", name: "collision_status" },
+        { link_id: "motor_health", name: "motor_health" },
+        { link_id: "alerts", name: "alerts" },
         // The observed pairings' state back-channels.
         { link_id: "observed_left_arm", name: "joint_states" },
         { link_id: "observed_right_arm", name: "joint_states" },

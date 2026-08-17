@@ -1,6 +1,8 @@
 mod command_stream;
+mod drive;
 mod follow;
 mod geometry;
+mod health;
 mod stream;
 
 use follow::ControlConfig;
@@ -8,11 +10,12 @@ use openarm_can::{GripperCan, Mit, v10};
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeBuilder, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
+use peppylib::runtime::CancellationToken;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{error, info, warn};
 
 // Mirrors ROS2 v10_simple_hardware on_activate / on_deactivate sleep durations.
@@ -24,6 +27,12 @@ const DATASTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Tighter bound for shutdown lock removal so disable + drain + removal stays
 /// inside the default 5 s shutdown grace window.
 const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Bound on the shutdown hook that awaits the health task's final flush.
+/// Hooks share one grace window and this one runs before the motor-disable
+/// hook, so an unbounded wait on a stalled publish would hold the motors
+/// energised until the force-kill deadline. Sized well inside even the
+/// minimum 1 s grace window so the disable hook keeps most of the budget.
+const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Adapts a CAN failure into the runtime error type so bring-up failures
 /// return through the runtime's error path, which runs the shutdown hooks.
@@ -32,6 +41,35 @@ const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 /// shared crate can name its Error type.
 fn can_err(e: openarm_can::CanError) -> peppygen::Error {
     peppygen::Error::Io(std::io::Error::other(e))
+}
+
+/// The tick period for a whole-hertz rate, refused at startup when it
+/// rounds to zero, so a bad rate fails before the motor is energised and
+/// with its own name in the message.
+fn period_from_hz(rate_hz: u32, name: &str) -> Duration {
+    assert!(rate_hz > 0, "{name} must be > 0");
+    let period = Duration::from_micros(1_000_000 / u64::from(rate_hz));
+    assert!(
+        !period.is_zero(),
+        "{name} {rate_hz} rounds to a zero-microsecond period"
+    );
+    period
+}
+
+/// Cancel the node when a supervised task exits while it should still be
+/// running. An unsupervised dead loop leaves the node reachable but inert;
+/// a dead follow loop is worse, because the health task would keep judging
+/// a frozen state cache. Watching the JoinHandle means a panic lands here
+/// too, not only a clean return.
+fn supervise(task: tokio::task::JoinHandle<()>, what: &'static str, token: CancellationToken) {
+    tokio::spawn(async move {
+        let _ = task.await;
+        if !token.is_cancelled() {
+            error!("{what} exited unexpectedly");
+            follow::HARD_FAULT.store(true, Ordering::SeqCst);
+        }
+        token.cancel();
+    });
 }
 
 fn main() -> Result<()> {
@@ -45,23 +83,34 @@ fn main() -> Result<()> {
         peppygen::clock::init(&node_runner).await?;
 
         let gripper_id = params.gripper_id;
+        // Names this gripper on the alert wire. Exhaustive so a value
+        // outside the convention is refused rather than published as the
+        // wrong side.
+        let alert_source = match gripper_id {
+            0 => "left gripper",
+            1 => "right gripper",
+            other => {
+                return Err(peppygen::Error::Io(std::io::Error::other(format!(
+                    "gripper_id must be 0 (left) or 1 (right), got {other}"
+                ))));
+            }
+        };
         let can_interface = params.can_interface.clone();
 
-        // Rates feed `Duration::from_micros(1_000_000 / rate)`, so a rate above
-        // 1 MHz would round to a 0 µs period; no real deployment approaches that,
-        // so just guard against zero.
-        assert!(params.control_rate_hz > 0, "control_rate_hz must be > 0");
-        assert!(params.state_rate_hz > 0, "state_rate_hz must be > 0");
-        // Bounded so a config typo cannot park recv_all in a near-eternal
-        // ppoll while it holds the CAN mutex the shutdown hook needs.
+        let cycle_period = period_from_hz(params.control_rate_hz, "control_rate_hz");
+        let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz");
+        // Bounded so a config typo cannot park recv_all in a long ppoll
+        // while it holds the CAN mutex the shutdown hooks need: 100 ms keeps
+        // the whole hook sequence inside even the minimum 1 s grace window,
+        // and real configs run around 1 ms.
         assert!(
-            params.recv_timeout_us <= 1_000_000,
-            "recv_timeout_us must be at most 1_000_000 (1s), got {}",
+            params.recv_timeout_us <= 100_000,
+            "recv_timeout_us must be at most 100_000 (100 ms), got {}",
             params.recv_timeout_us
         );
 
         let cfg = ControlConfig {
-            cycle_period: Duration::from_micros(1_000_000 / params.control_rate_hz as u64),
+            cycle_period,
             recv_timeout_us: params.recv_timeout_us,
         };
 
@@ -138,46 +187,84 @@ fn main() -> Result<()> {
             });
         }
 
-        // Enable, settle, drain the enable replies so bring-up ACK frames
-        // aren't decoded as state, then return to closed (motor angle =
-        // 0.0 rad) before serving requests. Errors return through the
-        // runtime so the hooks above disable the motor and release the lock.
+        // Datasheet ratings resolve before the motor is energised: an error
+        // return here still runs the hooks above, and no panic can strand an
+        // enabled motor. The DM4310's configured trip derates above its
+        // datasheet peak, so the registers would resolve to the datasheet
+        // anyway.
+        let ratings = v10::GRIPPER_MOTOR_TYPE.ratings().ok_or_else(|| {
+            peppygen::Error::Io(std::io::Error::other(
+                "no datasheet ratings for the gripper motor type",
+            ))
+        })?;
+
+        // Enable and verify the motor acknowledges torque authority, then
+        // return to closed (motor angle = 0.0 rad) before serving requests.
+        // Errors return through the runtime so the hooks above disable the
+        // motor and release the lock.
         gripper
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .enable_all()
-            .map_err(can_err)?;
-        tokio::time::sleep(POST_ENABLE_SLEEP).await;
+            .enable_and_confirm(
+                openarm_can::ENABLE_ATTEMPTS,
+                POST_ENABLE_SLEEP,
+                BRINGUP_RECV_US,
+            )
+            .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
         {
             let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
-            g.drain(BRINGUP_RECV_US).map_err(can_err)?;
             info!("returning to zero");
             g.mit_control(follow::KP, follow::KD, 0.0, 0.0, 0.0)
                 .map_err(can_err)?;
             g.recv_all(BRINGUP_RECV_US).map_err(can_err)?;
         }
-        info!("gripper ready");
+        info!("gripper ready (motor confirmed enabled)");
 
         // Always-on gripper_states publisher: reads the motor's cached state at
         // state_rate_hz and emits the opening. It issues no CAN traffic of its
         // own, so it never contends with the follow loop for the bus.
         let publisher = tokio::spawn(stream::run(
             node_runner.clone(),
-            params.state_rate_hz,
+            state_period,
             gripper.clone(),
             node_runner.cancellation_token().clone(),
         ));
-        {
+        supervise(
+            publisher,
+            "state publisher",
+            node_runner.cancellation_token().clone(),
+        );
+
+        // Motor condition telemetry and operator alerts, off the same cached
+        // state. The final flush round after cancellation is only awaited if
+        // a shutdown hook waits for it: the runtime awaits hooks, not plain
+        // tasks racing the token. Dropping the sender (return or panic)
+        // completes the receiver, so the hook cannot hang on a dead task.
+        let (health_done_tx, health_done_rx) = oneshot::channel::<()>();
+        let health_task = tokio::spawn({
+            let runner = node_runner.clone();
+            let alert_source = alert_source.to_string();
+            let gripper = gripper.clone();
+            let cycle_period = cfg.cycle_period;
             let token = node_runner.cancellation_token().clone();
-            tokio::spawn(async move {
-                let _ = publisher.await;
-                if !token.is_cancelled() {
-                    error!("state publisher exited unexpectedly");
-                    follow::HARD_FAULT.store(true, Ordering::SeqCst);
-                }
-                token.cancel();
-            });
-        }
+            async move {
+                let _done = health_done_tx;
+                health::run(runner, alert_source, gripper, ratings, cycle_period, token).await;
+            }
+        });
+        node_runner.on_shutdown(async move {
+            if tokio::time::timeout(HEALTH_FLUSH_TIMEOUT, health_done_rx)
+                .await
+                .is_err()
+            {
+                warn!("health flush missed its shutdown budget; disabling without it");
+            }
+        });
+        supervise(
+            health_task,
+            "health publisher",
+            node_runner.cancellation_token().clone(),
+        );
 
         // is_ready service: false until bringup and control wiring complete, then
         // true. The real robot_initializer polls this (openarm_hardware_ready) to
@@ -209,30 +296,37 @@ fn main() -> Result<()> {
         // opening addressed to this gripper, the follow loop drives the motor
         // toward it.
         let (cmd_tx, cmd_rx) = watch::channel(None);
-        // Supervised: if the command consumer ever exits, whether a clean close
-        // on shutdown or an unexpected error, streamed openings are dead, so
-        // cancel the node to restart it rather than leaving it healthy but inert.
-        {
-            let runner = node_runner.clone();
-            let token = node_runner.cancellation_token().clone();
-            tokio::spawn(async move {
-                command_stream::run(runner, cmd_tx, token.clone()).await;
-                if !token.is_cancelled() {
-                    error!("command stream exited unexpectedly");
-                    follow::HARD_FAULT.store(true, Ordering::SeqCst);
-                }
-                token.cancel();
-            });
-        }
-        tokio::spawn(follow::run(
+        let commands = tokio::spawn(command_stream::run(
+            node_runner.clone(),
+            cmd_tx,
+            node_runner.cancellation_token().clone(),
+        ));
+        supervise(
+            commands,
+            "command stream",
+            node_runner.cancellation_token().clone(),
+        );
+        let (follow_started_tx, follow_started_rx) = oneshot::channel::<()>();
+        let follower = tokio::spawn(follow::run(
             gripper,
             cmd_rx,
             cfg,
             node_runner.cancellation_token().clone(),
+            follow_started_tx,
         ));
+        supervise(
+            follower,
+            "follow loop",
+            node_runner.cancellation_token().clone(),
+        );
 
-        // Motor enabled and follow loop running: report ready so the
-        // robot_initializer can release the gate.
+        // The ack arrives once the follow loop is actually running; a task
+        // that dies first drops the sender and the error return runs the
+        // disable hooks. Reporting ready any earlier would let the robot
+        // gate open on a spawned-but-dead controller.
+        follow_started_rx.await.map_err(|_| {
+            peppygen::Error::Io(std::io::Error::other("the follow loop never started"))
+        })?;
         ready.store(true, Ordering::SeqCst);
 
         Ok(())

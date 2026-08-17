@@ -14,6 +14,12 @@
       // Per-component readiness the real robot_initializer aggregates: ready once
       // motors are enabled and the control loop is serving.
       { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
+      // Per-motor health telemetry: severity, effort fraction, and
+      // temperatures, naming this arm as its source.
+      { name: "motor_health", tag: "v1", link_id: "motor_health" },
+      // Operator alerts: a motor running hot, overloaded, or faulted. Any
+      // alert consumer renders these without knowing this node exists.
+      { name: "alert", tag: "v1", link_id: "alerts" },
     ],
     depends_on: {
       pairings: [
@@ -30,6 +36,8 @@
       emits: [
         // The `backbone` pairing slot: the topic this role emits.
         { link_id: "backbone", name: "joint_states" },
+        { link_id: "motor_health", name: "motor_health" },
+        { link_id: "alerts", name: "alerts" },
       ],
       consumes: [
         // The counterpart role's topic on the same slot.
