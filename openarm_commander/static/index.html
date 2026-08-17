@@ -325,8 +325,8 @@
     <div id="proximity" style="font-weight:600; padding:4px 10px; border-radius:4px;">closest pair: n/a</div>
   </div>
   <div class="row" style="justify-content:center; gap:18px;">
-    <div id="health_left" class="health-chip dim">left arm health: n/a</div>
-    <div id="health_right" class="health-chip dim">right arm health: n/a</div>
+    <div id="health_left" class="health-chip dim">left health: n/a</div>
+    <div id="health_right" class="health-chip dim">right health: n/a</div>
   </div>
   <div id="alerts" style="display:flex; flex-direction:column; align-items:center; gap:2px;"></div>
   <div class="status" id="status">connecting…</div>
@@ -1261,12 +1261,12 @@ function update_health_chips(snap) {
       const quiet = view.status === 'not_reporting';
       chip.className = quiet ? 'health-chip sev-text' : 'health-chip dim';
       if (quiet) chip.dataset.sev = 4; else delete chip.dataset.sev;
-      chip.replaceChildren(`${side} arm health: ${SIDE_STATUS_TEXT[view.status]}`);
+      chip.replaceChildren(`${side} health: ${SIDE_STATUS_TEXT[view.status]}`);
       continue;
     }
     chip.className = 'health-chip' + (view.worst > 0 ? ' sev-text' : '');
     if (view.worst > 0) chip.dataset.sev = view.worst; else delete chip.dataset.sev;
-    chip.replaceChildren(`${side} arm health: `);
+    chip.replaceChildren(`${side} health: `);
     for (const m of view.motors) {
       const dot = document.createElement('span');
       dot.textContent = m.name === 'gripper' ? '◆' : '●';
@@ -1343,7 +1343,7 @@ function motor_head(side, view) {
   const head = document.createElement('div');
   head.className = 'panel-head';
   const label = document.createElement('span');
-  label.textContent = `${side} arm motors`;
+  label.textContent = `${side} motors`;
   const badge = document.createElement('span');
   badge.className = 'badge';
   badge.textContent = view.status === 'live' ? HEALTH_LABELS[view.worst] : SIDE_STATUS_TEXT[view.status];
@@ -1461,7 +1461,7 @@ function connect() {
       const chip = $(`health_${side}`);
       chip.className = 'health-chip dim';
       delete chip.dataset.sev;
-      chip.replaceChildren(`${side} arm health: disconnected`);
+      chip.replaceChildren(`${side} health: disconnected`);
       $(`${side}_motors`).classList.add('stale');
     }
     $('health_banner').hidden = true;
