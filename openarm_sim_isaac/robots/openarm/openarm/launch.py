@@ -78,6 +78,7 @@ class _SimHandoff:
     """
 
     io: object
+    scene_actions: object
     state_rate_hz: int
     headless: bool
     hardware_version: str
@@ -96,6 +97,7 @@ async def setup(params, node_runner) -> list:
     )
 
     from sim_topics import SimTopicIO
+    from scene_actions import SceneActionIO
 
     loop = asyncio.get_running_loop()
 
@@ -106,8 +108,16 @@ async def setup(params, node_runner) -> list:
 
     await io.start()
 
+    scene_actions = SceneActionIO(
+        node_runner,
+        loop,
+    )
+
+    await scene_actions.start()
+
     _handoff["value"] = _SimHandoff(
         io=io,
+        scene_actions=scene_actions,
         state_rate_hz=params.state_rate_hz,
         headless=params.headless,
         hardware_version=params.hardware_version,
@@ -120,6 +130,7 @@ async def setup(params, node_runner) -> list:
         # then stop Peppy topic IO.
 
         _stop.set()
+        await scene_actions.stop()
         await io.stop()
 
     node_runner.on_shutdown(
@@ -272,6 +283,7 @@ def main() -> None:
         _ready,
         _stop,
         handoff.io,
+        handoff.scene_actions,
         handoff.state_rate_hz,
     ).run()
 

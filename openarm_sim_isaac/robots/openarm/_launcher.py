@@ -26,6 +26,7 @@ class SimLauncher:
         ready: threading.Event,
         stop: threading.Event,
         io,
+        scene_actions,
         state_rate_hz: int,
     ) -> None:
         self._sim_app = sim_app
@@ -33,6 +34,7 @@ class SimLauncher:
         self._ready = ready
         self._stop = stop
         self._io = io
+        self._scene_actions = scene_actions
         self._state_rate_hz = state_rate_hz
 
         self._timeline = None
@@ -67,6 +69,10 @@ class SimLauncher:
             # Discover the NVIDIA Isaac props once during startup. The
             # resulting catalogue is cached for the Peppy asset-list service.
             self._isaac_assets = self._discover_isaac_props()
+
+            self._scene_actions.set_assets(
+                self._isaac_assets
+            )
 
             self._warmup()
             self._start_timeline()
