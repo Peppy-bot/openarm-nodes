@@ -226,13 +226,21 @@ fn main() -> Result<()> {
         // Registers first: the reads are the slowest part of bring-up and ask
         // the motors nothing but their own configuration, so doing them while
         // the arm is still limp keeps it unenergised until the moment the
-        // control loop is ready to hold it.
+        // control loop is ready to hold it. The CAN calls block, so the whole
+        // mutex-guarded sequence runs on a blocking thread rather than
+        // starving this worker.
         let ratings = {
-            let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
-            let ratings = health::resolve_ratings(&mut a, BRINGUP_RECV_US)
-                .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
-            bring_up(&mut a).map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
-            ratings
+            let arm = arm.clone();
+            tokio::task::spawn_blocking(move || -> std::result::Result<_, String> {
+                let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                let ratings =
+                    health::resolve_ratings(&mut a, BRINGUP_RECV_US).map_err(|e| e.to_string())?;
+                bring_up(&mut a).map_err(|e| e.to_string())?;
+                Ok(ratings)
+            })
+            .await
+            .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?
+            .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?
         };
         info!("arm ready (every motor confirmed enabled)");
 
@@ -295,12 +303,22 @@ fn main() -> Result<()> {
             Side::Right => "right arm",
         }
         .to_string();
-        let health_publisher = tokio::spawn(health::run_publisher(
-            node_runner.clone(),
-            alert_source,
-            health_rx,
-            node_runner.cancellation_token().clone(),
-        ));
+        // The final flush round after cancellation is only awaited if a
+        // shutdown hook waits for it: the runtime awaits hooks, not plain
+        // tasks racing the token. Dropping the sender (return or panic)
+        // completes the receiver, so the hook cannot hang on a dead task.
+        let (health_done_tx, health_done_rx) = oneshot::channel::<()>();
+        let health_publisher = tokio::spawn({
+            let runner = node_runner.clone();
+            let token = node_runner.cancellation_token().clone();
+            async move {
+                let _done = health_done_tx;
+                health::run_publisher(runner, alert_source, health_rx, token).await;
+            }
+        });
+        node_runner.on_shutdown(async move {
+            let _ = health_done_rx.await;
+        });
         // Cancel the node the moment any stream task stops: a dead listener
         // or publisher would otherwise hold the arm silently while is_ready
         // stays true (same supervision as the sim followers). A stop before
