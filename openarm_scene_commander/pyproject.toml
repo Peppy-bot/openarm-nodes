@@ -3,7 +3,9 @@ name = "openarm-scene-commander"
 version = "0.1.0"
 description = "Peppy web scene commander for OpenArm Isaac Sim"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pycapnp",
+]
 
 [build-system]
 requires = ["hatchling"]
