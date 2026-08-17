@@ -13,6 +13,10 @@ use tracing::{error, warn};
 use crate::owner::Feedback;
 use crate::state::REJECT_WARN_PERIOD;
 
+/// Pause after a receive error before retrying, so a persistently failing
+/// subscription cannot hot-spin its task or flood the log.
+const RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
 /// The daemon-resolved time (sim time under a simulated clock), for judging
 /// a wire stamp's age on the timeline it was written from. Errs until the
 /// clock resolves (in sim mode, until the first tick is observed).
@@ -55,6 +59,10 @@ pub async fn forward_parsed<S: Subscription>(
             Ok(None) => return,
             Err(e) => {
                 error!(error = %e, "{topic} receive");
+                tokio::select! {
+                    _ = token.cancelled() => return,
+                    _ = tokio::time::sleep(RECEIVE_ERROR_BACKOFF) => {}
+                }
                 continue;
             }
         };
