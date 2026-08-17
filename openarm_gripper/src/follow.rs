@@ -66,6 +66,12 @@ pub async fn run(
         // unwrap_or_else: drive even if the mutex was poisoned by a panic
         // elsewhere, so a transient fault doesn't strand the follow loop.
         let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
+        // Checked under the lock the disable hook shares: cancellation
+        // precedes the hooks, so a tick that passed the select before
+        // shutdown cannot issue CAN work the hook would then race.
+        if token.is_cancelled() {
+            return;
+        }
         // Receive first and unconditionally, consuming the replies solicited
         // by the previous tick's refresh: the decode pass is what advances
         // the silence count, on error passes included.

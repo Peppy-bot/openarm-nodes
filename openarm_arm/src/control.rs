@@ -126,7 +126,11 @@ async fn run_control(
     let escalate_after_ticks = ticks_within(NOT_DRIVING_ESCALATE_AFTER, cfg.cycle_period);
     let mut not_driving = [0u32; ARM_DOF];
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
-    // Readiness gates on this: the loop is entered, not merely spawned.
+    // Readiness gates on this: the loop is entered, not merely spawned, and
+    // never acknowledged into a shutdown already in progress.
+    if token.is_cancelled() {
+        return;
+    }
     let _ = started_tx.send(());
     loop {
         let (state, read) = read_state(&arm, cfg.recv_timeout_us);
@@ -147,7 +151,7 @@ async fn run_control(
             escalate_after_ticks,
         ) {
             Verdict::Continue => {}
-            Verdict::Reenable(_) => reenable_motors(&arm),
+            Verdict::Reenable(_) => reenable_motors(&arm, &token),
             Verdict::HardFault(reason) => {
                 // The faulted motor is already limp; six joints still driving
                 // gravity feedforward around it is unpredictable, so stop the
@@ -176,7 +180,7 @@ async fn run_control(
         // command, and the disable that stopping would imply travels over the
         // same socket that just failed. One verdict per tick, first error wins,
         // so a persistent fault logs as one throttled burst.
-        let sent = command(&arm, &cfg, &ff_tau, &q_des, &dq_des);
+        let sent = command(&arm, &cfg, &ff_tau, &q_des, &dq_des, &token);
         match read.and(sent) {
             Ok(()) => can_errors.success(CONTEXT),
             Err(e) => can_errors.failure(CONTEXT, &e),
@@ -297,8 +301,14 @@ pub(crate) fn ticks_within(window: Duration, cycle_period: Duration) -> u32 {
 /// Re-enable all motors after an unexpected Disabled report. Addressed to
 /// every motor: enable is idempotent, and one send covers every joint that
 /// is concurrently disabled.
-fn reenable_motors(arm: &Mutex<ArmCan>) {
+fn reenable_motors(arm: &Mutex<ArmCan>, token: &CancellationToken) {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+    // Checked under the lock the disable hook shares: cancellation precedes
+    // the hooks, so a blip recovery can never re-energise motors the hook
+    // just disabled.
+    if token.is_cancelled() {
+        return;
+    }
     if let Err(e) = a.enable_all() {
         error!("re-enable motors: {e}");
     }
@@ -323,8 +333,15 @@ fn command(
     ff_tau: &JointVec,
     q_des: &JointVec,
     dq_des: &JointVec,
+    token: &CancellationToken,
 ) -> openarm_can::Result<()> {
     let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+    // Checked under the lock the disable hook shares, so a tick straddling
+    // cancellation cannot command motors the hook is about to disable; the
+    // loop observes the token at its next select and stops.
+    if token.is_cancelled() {
+        return Ok(());
+    }
     a.mit_control(&cfg.kp, &cfg.kd, q_des, dq_des, ff_tau)
 }
 

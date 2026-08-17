@@ -100,11 +100,13 @@ fn main() -> Result<()> {
 
         let cycle_period = period_from_hz(params.control_rate_hz, "control_rate_hz");
         let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz");
-        // Bounded so a config typo cannot park recv_all in a near-eternal
-        // ppoll while it holds the CAN mutex the shutdown hook needs.
+        // Bounded so a config typo cannot park recv_all in a long ppoll
+        // while it holds the CAN mutex the shutdown hooks need: 100 ms keeps
+        // the whole hook sequence inside even the minimum 1 s grace window,
+        // and real configs run around 1 ms.
         assert!(
-            params.recv_timeout_us <= 1_000_000,
-            "recv_timeout_us must be at most 1_000_000 (1s), got {}",
+            params.recv_timeout_us <= 100_000,
+            "recv_timeout_us must be at most 100_000 (100 ms), got {}",
             params.recv_timeout_us
         );
 
