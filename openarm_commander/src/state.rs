@@ -409,19 +409,6 @@ impl<const MOTORS: usize> HealthReport<MOTORS> {
     }
 }
 
-/// The wire severity as a [`HealthLevel`], `None` for an undefined encoding.
-/// The inverse of [`HealthLevel::wire`], which control_core does not provide.
-pub fn health_level_from_wire(wire: u8) -> Option<HealthLevel> {
-    match wire {
-        0 => Some(HealthLevel::Nominal),
-        1 => Some(HealthLevel::Warning),
-        2 => Some(HealthLevel::Critical),
-        3 => Some(HealthLevel::Fault),
-        4 => Some(HealthLevel::NotReporting),
-        _ => None,
-    }
-}
-
 /// The backbone's reported nearest checked pair: signed surface distance (m, positive
 /// is clearance), the two link names, the governor's disposition of the commanded
 /// motion, and the local time it was received (for the readout's staleness check).
@@ -526,9 +513,9 @@ mod tests {
         // The browser indexes its colour and label tables by this number, so
         // a gap here renders as an unlabelled motor.
         for wire in 0..=4 {
-            assert_eq!(health_level_from_wire(wire).unwrap().wire(), wire);
+            assert_eq!(HealthLevel::from_wire(wire).unwrap().wire(), wire);
         }
-        assert!(health_level_from_wire(5).is_none());
+        assert!(HealthLevel::from_wire(5).is_none());
     }
 
     #[test]

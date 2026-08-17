@@ -18,8 +18,7 @@ use tracing::error;
 use crate::consumer;
 use crate::owner::Feedback;
 use crate::state::{
-    HEALTH_STALE_AFTER, HealthLevel, HealthReport, MotorHealthReading, Side,
-    health_level_from_wire, parse_stamped_validity,
+    HEALTH_STALE_AFTER, HealthLevel, HealthReport, MotorHealthReading, Side, parse_stamped_validity,
 };
 
 /// Whether this deployment binds any motor_health producer.
@@ -138,7 +137,7 @@ fn parse_component<const MOTORS: usize>(
         .map_err(|_| format!("expected {MOTORS} levels, got {}", msg.level.len()))?;
     let mut levels = [HealthLevel::Nominal; MOTORS];
     for (parsed, wire) in levels.iter_mut().zip(&wire_levels) {
-        *parsed = health_level_from_wire(*wire).ok_or_else(|| format!("undefined level {wire}"))?;
+        *parsed = HealthLevel::from_wire(*wire).ok_or_else(|| format!("undefined level {wire}"))?;
     }
     let vector = |values, name| parse_reading_vector::<MOTORS>(values, name);
     let effort_fraction_rated = vector(&msg.effort_fraction_rated, "effort_fraction_rated")?;
