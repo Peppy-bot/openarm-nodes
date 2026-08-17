@@ -72,6 +72,7 @@ pub fn spawn(
     model: srs_model::Arm,
     wiring: StreamWiring,
     shutdown_tx: oneshot::Sender<()>,
+    started_tx: oneshot::Sender<()>,
 ) {
     let token = runner.cancellation_token().clone();
     let control = tokio::spawn(run_control(
@@ -81,6 +82,7 @@ pub fn spawn(
         wiring,
         token.clone(),
         shutdown_tx,
+        started_tx,
     ));
     tokio::spawn(supervise(control, arm, token));
 }
@@ -115,6 +117,7 @@ async fn run_control(
     wiring: StreamWiring,
     token: CancellationToken,
     shutdown_tx: oneshot::Sender<()>,
+    started_tx: oneshot::Sender<()>,
 ) {
     let mut pacer =
         Pacer::new(cfg.cycle_period).expect("main asserts the period is non-zero before spawn");
@@ -123,6 +126,8 @@ async fn run_control(
     let escalate_after_ticks = ticks_within(NOT_DRIVING_ESCALATE_AFTER, cfg.cycle_period);
     let mut not_driving = [0u32; ARM_DOF];
     info!("control loop started (MIT follower of governed setpoints, in-process feedforward)");
+    // Readiness gates on this: the loop is entered, not merely spawned.
+    let _ = started_tx.send(());
     loop {
         let (state, read) = read_state(&arm, cfg.recv_timeout_us);
         let (q, qdot) = (state.positions, state.velocities);

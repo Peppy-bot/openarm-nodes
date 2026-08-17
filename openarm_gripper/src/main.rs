@@ -30,8 +30,9 @@ const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bound on the shutdown hook that awaits the health task's final flush.
 /// Hooks share one grace window and this one runs before the motor-disable
 /// hook, so an unbounded wait on a stalled publish would hold the motors
-/// energised until the force-kill deadline.
-const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+/// energised until the force-kill deadline. Sized well inside even the
+/// minimum 1 s grace window so the disable hook keeps most of the budget.
+const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Adapts a CAN failure into the runtime error type so bring-up failures
 /// return through the runtime's error path, which runs the shutdown hooks.
@@ -303,11 +304,13 @@ fn main() -> Result<()> {
             "command stream",
             node_runner.cancellation_token().clone(),
         );
+        let (follow_started_tx, follow_started_rx) = oneshot::channel::<()>();
         let follower = tokio::spawn(follow::run(
             gripper,
             cmd_rx,
             cfg,
             node_runner.cancellation_token().clone(),
+            follow_started_tx,
         ));
         supervise(
             follower,
@@ -315,8 +318,13 @@ fn main() -> Result<()> {
             node_runner.cancellation_token().clone(),
         );
 
-        // Motor enabled and follow loop running: report ready so the
-        // robot_initializer can release the gate.
+        // The ack arrives once the follow loop is actually running; a task
+        // that dies first drops the sender and the error return runs the
+        // disable hooks. Reporting ready any earlier would let the robot
+        // gate open on a spawned-but-dead controller.
+        follow_started_rx.await.map_err(|_| {
+            peppygen::Error::Io(std::io::Error::other("the follow loop never started"))
+        })?;
         ready.store(true, Ordering::SeqCst);
 
         Ok(())

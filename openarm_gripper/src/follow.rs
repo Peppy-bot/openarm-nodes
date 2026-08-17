@@ -13,7 +13,7 @@ use std::time::Duration;
 use control_core::motor_health::{NOT_DRIVING_ESCALATE_AFTER, STATE_STALE_AFTER};
 use openarm_can::{CanErrorThrottle, GripperCan, Mit};
 use peppylib::runtime::CancellationToken;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::time::MissedTickBehavior;
 use tracing::error;
 
@@ -44,7 +44,10 @@ pub async fn run(
     cmd: watch::Receiver<Option<GripperCommand>>,
     cfg: ControlConfig,
     token: CancellationToken,
+    started_tx: oneshot::Sender<()>,
 ) {
+    // Readiness gates on this: the loop is entered, not merely spawned.
+    let _ = started_tx.send(());
     let mut ticker = tokio::time::interval(cfg.cycle_period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut throttle = CanErrorThrottle::new();

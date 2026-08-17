@@ -74,8 +74,9 @@ const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Bound on the shutdown hook that awaits the health task's final flush.
 /// Hooks share one grace window and this one runs before the motor-disable
 /// hook, so an unbounded wait on a stalled publish would hold the motors
-/// energised until the force-kill deadline.
-const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+/// energised until the force-kill deadline. Sized well inside even the
+/// minimum 1 s grace window so the disable hook keeps most of the budget.
+const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 
 /// Adapts a CAN failure into the runtime error type so bring-up failures
 /// return through the runtime's error path, which runs the shutdown hooks.
@@ -236,8 +237,19 @@ fn main() -> Result<()> {
         // starving this worker.
         let ratings = {
             let arm = arm.clone();
+            let token = node_runner.cancellation_token().clone();
             tokio::task::spawn_blocking(move || -> std::result::Result<_, String> {
                 let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
+                // A cancellation that drops the setup future leaves this
+                // queued task to run detached, and spawn_blocking cannot be
+                // aborted. Cancellation precedes the shutdown hooks and the
+                // disable hook takes this same lock, so checking under the
+                // lock closes both orders: a post-shutdown start bails here
+                // before enabling, and a shutdown during bring-up disables
+                // after the enable completes.
+                if token.is_cancelled() {
+                    return Err("cancelled before bring-up".to_string());
+                }
                 let ratings =
                     health::resolve_ratings(&mut a, BRINGUP_RECV_US).map_err(|e| e.to_string())?;
                 bring_up(&mut a).map_err(|e| e.to_string())?;
@@ -358,10 +370,23 @@ fn main() -> Result<()> {
         // Single control task (the only motor writer): follows the governed
         // setpoint with in-process feedforward and a final limit clamp, and on
         // shutdown disables the motors.
-        control::spawn(&node_runner, arm.clone(), cfg, model, wiring, shutdown_tx);
-
-        // Motors enabled, initial state populated, control loop running: report
-        // ready so the robot_initializer can release the gate.
+        let (control_started_tx, control_started_rx) = oneshot::channel::<()>();
+        control::spawn(
+            &node_runner,
+            arm.clone(),
+            cfg,
+            model,
+            wiring,
+            shutdown_tx,
+            control_started_tx,
+        );
+        // The ack arrives once the control loop is actually running; a task
+        // that dies first drops the sender and the error return runs the
+        // disable hooks. Reporting ready any earlier would let the robot
+        // gate open on a spawned-but-dead controller.
+        control_started_rx.await.map_err(|_| {
+            peppygen::Error::Io(std::io::Error::other("the control loop never started"))
+        })?;
         ready.store(true, Ordering::SeqCst);
 
         Ok(())
