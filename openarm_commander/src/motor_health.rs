@@ -67,9 +67,9 @@ enum Kind {
 
 /// Which panel slot a producer's reports belong to, read from the instance
 /// name the launcher chose: the side from a "left"/"right" token and the
-/// kind from an "arm"/"gripper" token ("left_arm", "right_gripper"). A name
-/// carrying neither or both of either pair is refused by name rather than
-/// guessed at.
+/// kind from an "arm"/"grip" token ("left_arm_inst", "right_grip_inst",
+/// "left_gripper"). A name carrying neither or both of either pair is
+/// refused by name rather than guessed at.
 fn classify(instance: &str) -> Result<(Side, Kind), String> {
     let side = match (instance.contains("left"), instance.contains("right")) {
         (true, false) => Side::Left,
@@ -80,12 +80,12 @@ fn classify(instance: &str) -> Result<(Side, Kind), String> {
             ));
         }
     };
-    let kind = match (instance.contains("arm"), instance.contains("gripper")) {
+    let kind = match (instance.contains("arm"), instance.contains("grip")) {
         (true, false) => Kind::Arm,
         (false, true) => Kind::Gripper,
         _ => {
             return Err(format!(
-                "instance {instance:?} does not name exactly one of arm/gripper"
+                "instance {instance:?} does not name exactly one of arm/grip"
             ));
         }
     };
@@ -226,7 +226,16 @@ mod tests {
             (Side::Right, Kind::Gripper)
         );
         // Substring semantics: a decorated launcher name still classifies.
+        // The last two pin the openarm launcher family's instance ids.
         assert_eq!(classify("left_arm_v2").unwrap(), (Side::Left, Kind::Arm));
+        assert_eq!(
+            classify("right_arm_inst").unwrap(),
+            (Side::Right, Kind::Arm)
+        );
+        assert_eq!(
+            classify("left_grip_inst").unwrap(),
+            (Side::Left, Kind::Gripper)
+        );
     }
 
     #[test]
