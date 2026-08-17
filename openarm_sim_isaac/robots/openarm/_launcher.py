@@ -70,6 +70,40 @@ class SimLauncher:
             # resulting catalogue is cached for the Peppy asset-list service.
             self._isaac_assets = self._discover_isaac_props()
 
+            self._isaac_assets.update(
+                {
+                    "scene/simple_warehouse": {
+                        "asset_id": "scene/simple_warehouse",
+                        "display_name": "Simple Warehouse",
+                        "kind": "scene",
+                        "path": (
+                            "Isaac/Environments/Simple_Warehouse/"
+                            "warehouse.usd"
+                        ),
+                        "category": "Scenes",
+                    },
+                    "scene/full_warehouse": {
+                        "asset_id": "scene/full_warehouse",
+                        "display_name": "Full Warehouse",
+                        "kind": "scene",
+                        "path": (
+                            "Isaac/Environments/Simple_Warehouse/"
+                            "full_warehouse.usd"
+                        ),
+                        "category": "Scenes",
+                    },
+                    "scene/office": {
+                        "asset_id": "scene/office",
+                        "display_name": "Office",
+                        "kind": "scene",
+                        "path": (
+                            "Isaac/Environments/Office/office.usd"
+                        ),
+                        "category": "Scenes",
+                    },
+                }
+            )
+
             self._scene_actions.set_assets(
                 self._isaac_assets
             )
@@ -2047,6 +2081,11 @@ class SimLauncher:
                 # This deliberately happens in the Isaac simulation
                 # thread rather than the TCP listener thread.
                 self._runtime_commander.process_pending(
+                    self
+                )
+
+                # Execute Peppy scene actions on the Isaac thread.
+                self._scene_actions.process_pending(
                     self
                 )
 
