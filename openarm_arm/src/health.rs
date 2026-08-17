@@ -484,8 +484,9 @@ fn effective_ratings(joint: usize, over_current: Option<f64>, torque_max: Option
             joint + 1
         ),
         Some(trip) if effective.is_tightened() => info!(
-            "motor j{} trips at {trip:.1} Nm, below its {} Nm datasheet peak: warning against the lower one",
+            "motor j{} trips at {trip:.1} Nm: the margin-derated trip {:.1} Nm undercuts its {} Nm datasheet peak, warning against the derated one",
             joint + 1,
+            effective.ratings.peak_nm(),
             datasheet.peak_nm()
         ),
         Some(trip) if effective.trip_too_low => warn!(
