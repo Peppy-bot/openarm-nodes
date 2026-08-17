@@ -21,18 +21,13 @@ SERVICE_TIMEOUT_S = 10.0
 async def _fetch_assets(
     node_runner: NodeRunner,
 ) -> list:
-    producers = get_assets_list.bound_producers(
+    producer = get_assets_list.bound_producer(
         node_runner
     )
 
-    if not producers:
-        raise RuntimeError(
-            "No openarm_sim_isaac producer is bound"
-        )
-
     response = await get_assets_list.poll(
         node_runner,
-        producers[0],
+        producer,
         timeout=SERVICE_TIMEOUT_S,
     )
 
@@ -51,18 +46,13 @@ async def _fetch_assets(
 async def _fetch_objects(
     node_runner: NodeRunner,
 ) -> list:
-    producers = get_objects_list.bound_producers(
+    producer = get_objects_list.bound_producer(
         node_runner
     )
 
-    if not producers:
-        raise RuntimeError(
-            "No openarm_sim_isaac producer is bound"
-        )
-
     response = await get_objects_list.poll(
         node_runner,
-        producers[0],
+        producer,
         timeout=SERVICE_TIMEOUT_S,
     )
 
