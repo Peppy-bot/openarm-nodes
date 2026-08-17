@@ -6,7 +6,7 @@
 //! forwarded, the same guard every follower applies at ingestion.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use control_core::motor_health::{HEALTH_PERIOD, STATE_STALE_AFTER};
 use peppygen::emitted_topics::motor_health::motor_health;
@@ -84,11 +84,14 @@ async fn relay_setpoints(runner: Arc<NodeRunner>, token: CancellationToken) {
 }
 
 /// Forward the engine's measured joint_states to the backbone, recording the
-/// time of each relayed one in `relayed`: the first marks this limb's physics
+/// stamp of each relayed one in `relayed`: the first marks this limb's physics
 /// live, and recency is what lets the health heartbeat vouch for the limb.
+/// The stamp is the engine's daemon-clock capture time, the same clock the
+/// heartbeat stamps with, so the recency gate holds under a simulated clock
+/// that does not advance at wall rate.
 async fn relay_states(
     runner: Arc<NodeRunner>,
-    relayed: Arc<Mutex<Option<Instant>>>,
+    relayed: Arc<Mutex<Option<SystemTime>>>,
     token: CancellationToken,
 ) {
     let mut sub = match engine::joint_states::subscribe(&runner).await {
@@ -119,6 +122,7 @@ async fn relay_states(
             warn!("dropping non-finite joint_states");
             continue;
         }
+        let stamp = msg.stamp;
         let result = match backbone::joint_states::build_message(
             msg.stamp,
             msg.positions,
@@ -135,7 +139,7 @@ async fn relay_states(
                     first = false;
                     info!("first state relayed to the backbone");
                 }
-                *relayed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                *relayed.lock().unwrap_or_else(|e| e.into_inner()) = Some(stamp);
             }
             Err(e) if !failing => {
                 failing = true;
@@ -155,9 +159,11 @@ async fn relay_states(
 /// stop arriving, so vouching in either case would report a limb whose
 /// physics is absent as a healthy one. A held heartbeat is what lets
 /// consumers age the last report out and name this producer dead.
+/// Staleness is judged on the daemon clock, the base both the engine's
+/// stamps and this heartbeat's stamps come from.
 async fn publish_health(
     runner: Arc<NodeRunner>,
-    relayed: Arc<Mutex<Option<Instant>>>,
+    relayed: Arc<Mutex<Option<SystemTime>>>,
     token: CancellationToken,
 ) {
     let publisher = match motor_health::declare_publisher(&runner).await {
@@ -176,18 +182,32 @@ async fn publish_health(
         }
         // Vouch only for a limb whose physics spoke recently; the doc above
         // is the reasoning. The window is the same one every follower uses
-        // to call a motor silent.
+        // to call a motor silent. One clock read serves both the gate and
+        // the stamp, so the two cannot disagree.
+        let now = match peppygen::clock::now_ns() {
+            Ok(ns) => UNIX_EPOCH + Duration::from_nanos(ns),
+            Err(e) => {
+                if !failing {
+                    failing = true;
+                    warn!("motor_health held, clock not ready, suppressing repeats: {e}");
+                }
+                continue;
+            }
+        };
         let current = relayed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .is_some_and(|at| at.elapsed() < STATE_STALE_AFTER);
+            // A stamp ahead of `now` is fresher than now, not stale.
+            .is_some_and(|at| {
+                now.duration_since(at)
+                    .map_or(true, |age| age < STATE_STALE_AFTER)
+            });
         if !current {
             continue;
         }
         let result = async {
-            let ns = peppygen::clock::now_ns().map_err(|e| format!("clock not ready: {e}"))?;
             let msg = motor_health::build_message(
-                UNIX_EPOCH + Duration::from_nanos(ns),
+                now,
                 vec![0; ARM_DOF],
                 Vec::new(),
                 Vec::new(),
@@ -228,7 +248,7 @@ fn main() -> Result<()> {
         // and deliberately never unlatches: mid-session recovery is the
         // runtime's restart, not a ready flap); the health heartbeat asks
         // for recency.
-        let relayed: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+        let relayed: Arc<Mutex<Option<SystemTime>>> = Arc::new(Mutex::new(None));
         {
             let runner = node_runner.clone();
             let relayed = relayed.clone();
