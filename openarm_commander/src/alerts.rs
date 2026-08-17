@@ -1,7 +1,9 @@
 //! Operator alerts for the UI. Consumes every producer bound to the alerts
 //! slot (zero_or_more), validates each message, and hands it to the owner,
-//! which holds one alert per (source, kind) and drops it on a severity-0
-//! clear or when its producer stops re-emitting.
+//! which holds one alert per (producer, source, kind) and drops it on a
+//! severity-0 clear or when its producer stops re-emitting. The producer is
+//! the transport-authenticated instance, so no producer can replace or
+//! clear another's alert through the wire strings.
 
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -52,8 +54,8 @@ pub async fn run(
         subscription,
         // An unresolved daemon clock cannot certify a stamp's age, so the
         // alert drops on the same throttled-warn path as a malformed one.
-        |_producer, msg| {
-            parse_alert(msg, consumer::clock_now()?, Instant::now()).map(Feedback::Alert)
+        |producer, msg| {
+            parse_alert(producer, msg, consumer::clock_now()?, Instant::now()).map(Feedback::Alert)
         },
     )
     .await;
@@ -61,8 +63,10 @@ pub async fn run(
 
 /// Parse one wire alert: a non-empty identity, a defined severity, and a
 /// stamp not already past the aging window (a backlogged consumer must not
-/// re-stamp a stale alert as fresh).
+/// re-stamp a stale alert as fresh). The producing instance becomes part of
+/// the alert's identity, scoping replaces and clears to their own producer.
 fn parse_alert(
+    producer: &ProducerRef,
     msg: &alerts::Message,
     clock_now: SystemTime,
     received_at: Instant,
@@ -74,6 +78,7 @@ fn parse_alert(
         return Err(format!("undefined severity {}", msg.severity));
     }
     Ok(Alert {
+        producer: format!("{}/{}", producer.core_node, producer.instance_id),
         source: msg.source.clone(),
         kind: msg.kind.clone(),
         severity: msg.severity,
@@ -100,7 +105,8 @@ mod tests {
 
     /// Parse against a clock equal to the stamp, so only shape can fail.
     fn parse_fresh(msg: &alerts::Message) -> Result<Alert, String> {
-        parse_alert(msg, msg.stamp, Instant::now())
+        let producer = ProducerRef::new("core", "left_arm_inst");
+        parse_alert(&producer, msg, msg.stamp, Instant::now())
     }
 
     #[test]
@@ -108,6 +114,7 @@ mod tests {
         let raised = parse_fresh(&msg(2)).unwrap();
         assert_eq!(raised.severity, 2);
         assert_eq!(raised.source, "left arm j2");
+        assert_eq!(raised.producer, "core/left_arm_inst");
         let cleared = parse_fresh(&msg(0)).unwrap();
         assert_eq!(cleared.severity, 0);
     }
@@ -127,10 +134,11 @@ mod tests {
 
     #[test]
     fn a_pre_aged_stamp_rejects_the_alert() {
+        let producer = ProducerRef::new("core", "left_arm_inst");
         let m = msg(2);
         let just_inside = m.stamp + ALERT_STALE_AFTER + STAMP_SKEW_ALLOWANCE;
-        assert!(parse_alert(&m, just_inside, Instant::now()).is_ok());
+        assert!(parse_alert(&producer, &m, just_inside, Instant::now()).is_ok());
         let past = just_inside + Duration::from_millis(1);
-        assert!(parse_alert(&m, past, Instant::now()).is_err());
+        assert!(parse_alert(&producer, &m, past, Instant::now()).is_err());
     }
 }

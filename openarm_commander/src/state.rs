@@ -345,12 +345,17 @@ pub fn parse_stamped_validity(
     Ok(Validity::new(received_at, live_for))
 }
 
-/// One operator alert, identified by (source, kind): the producer raises it
-/// with a non-zero severity, re-emits actives inside the contract's re-emit
-/// ceiling, and retires it with severity 0. One not re-emitted within
-/// [`ALERT_STALE_AFTER`] has a quiet producer and drops instead of latching.
+/// One operator alert, identified by (producer, source, kind): the producer
+/// raises it with a non-zero severity, re-emits actives inside the
+/// contract's re-emit ceiling, and retires it with severity 0. One not
+/// re-emitted within [`ALERT_STALE_AFTER`] has a quiet producer and drops
+/// instead of latching. The producer is part of the identity because source
+/// and kind are wire strings: without it, one producer could replace or
+/// clear another's alert.
 #[derive(Clone, Debug)]
 pub struct Alert {
+    /// The transport-authenticated producing instance, not a wire string.
+    pub producer: String,
     pub source: String,
     pub kind: String,
     pub severity: u8,
@@ -479,13 +484,14 @@ impl UiState {
         }
     }
 
-    /// Fold one received alert in: replace the (source, kind) entry, or
-    /// remove it on a severity-0 clear. Entries that outlived their validity
-    /// window are purged here too, keyed on the incoming receipt time, so the
-    /// list stays bounded even when sources vary.
+    /// Fold one received alert in: replace the (producer, source, kind)
+    /// entry, or remove it on a severity-0 clear. Entries that outlived
+    /// their validity window are purged here too, keyed on the incoming
+    /// receipt time, so the list stays bounded even when sources vary.
     pub fn apply_alert(&mut self, alert: Alert) {
         self.alerts.retain(|a| {
-            let replaced = a.source == alert.source && a.kind == alert.kind;
+            let replaced =
+                a.producer == alert.producer && a.source == alert.source && a.kind == alert.kind;
             !replaced && a.validity.is_live_at(alert.validity.received_at())
         });
         if alert.severity > 0 {

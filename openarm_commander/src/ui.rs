@@ -862,7 +862,12 @@ mod tests {
     const TEST_VALID_FOR: Duration = Duration::from_secs(5);
 
     fn alert(source: &str, severity: u8, received_at: Instant) -> Alert {
+        alert_from("core/left_arm_inst", source, severity, received_at)
+    }
+
+    fn alert_from(producer: &str, source: &str, severity: u8, received_at: Instant) -> Alert {
         Alert {
+            producer: producer.to_string(),
             source: source.to_string(),
             kind: "motor_overload".to_string(),
             severity,
@@ -907,10 +912,23 @@ mod tests {
         let t0 = Instant::now();
         s.apply_alert(alert("left arm j2", 1, t0));
         s.apply_alert(alert("left arm j2", 2, t0));
-        assert_eq!(s.alerts.len(), 1, "one entry per (source, kind)");
+        assert_eq!(s.alerts.len(), 1, "one entry per (producer, source, kind)");
         assert_eq!(s.alerts[0].severity, 2);
         s.apply_alert(alert("left arm j2", 0, t0));
         assert!(s.alerts.is_empty(), "severity 0 clears the entry");
+    }
+
+    #[test]
+    fn a_producer_cannot_replace_or_clear_anothers_alert() {
+        let mut s = ui_state();
+        let t0 = Instant::now();
+        s.apply_alert(alert_from("core/left_arm_inst", "left arm j2", 2, t0));
+        s.apply_alert(alert_from("core/imposter", "left arm j2", 1, t0));
+        assert_eq!(s.alerts.len(), 2, "same wire strings, distinct producers");
+        s.apply_alert(alert_from("core/imposter", "left arm j2", 0, t0));
+        assert_eq!(s.alerts.len(), 1, "the clear removed only its own entry");
+        assert_eq!(s.alerts[0].producer, "core/left_arm_inst");
+        assert_eq!(s.alerts[0].severity, 2);
     }
 
     #[test]
