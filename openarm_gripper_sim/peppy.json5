@@ -14,7 +14,7 @@
       // Per-component readiness the robot_initializer aggregates, exactly like
       // the real follower: ready once the engine's first state has been
       // relayed (this limb's physics is live and serving).
-      { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
+      { name: "component_ready", tag: "v1", link_id: "ready" },
       // Same health surface as the real gripper, published as "present, not
       // sensed": nominal level, empty reading vectors (the engine reports no
       // effort or temperature).

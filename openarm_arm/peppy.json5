@@ -13,7 +13,7 @@
     implements: [
       // Per-component readiness the real robot_initializer aggregates: ready once
       // motors are enabled and the control loop is serving.
-      { name: "openarm_hardware_ready", tag: "v1", link_id: "ready" },
+      { name: "component_ready", tag: "v1", link_id: "ready" },
       // Per-motor health telemetry: severity, effort fraction, and
       // temperatures, naming this arm as its source.
       { name: "motor_health", tag: "v1", link_id: "motor_health" },
