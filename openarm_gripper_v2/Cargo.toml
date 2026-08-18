@@ -11,3 +11,6 @@ openarm_can = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch =
 control_core = { git = "https://github.com/Peppy-bot/public-peppy-libs", branch = "main", package = "control_core" }
 peppygen = { path = ".peppy/libs/peppygen" }
 peppylib = { path = ".peppy/libs/peppylib" }
+
+[dev-dependencies]
+peppygen = { path = ".peppy/libs/peppygen", features = ["testing"] }
