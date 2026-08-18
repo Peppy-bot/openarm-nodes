@@ -177,6 +177,12 @@ impl WsClient {
         }
     }
 
+    /// [`snapshot_until`](Self::snapshot_until) with no predicate: awaits
+    /// the panel's next snapshot as-is.
+    pub async fn next_snapshot(&mut self, deadline: Duration, what: &str) -> serde_json::Value {
+        self.snapshot_until(deadline, what, |_| true).await
+    }
+
     /// Reads owner snapshots (published at 10 Hz) until `predicate` holds,
     /// bounded by `deadline`. The loop is paced by the snapshot stream itself,
     /// never by sleeps; on expiry it panics with the last snapshot seen.

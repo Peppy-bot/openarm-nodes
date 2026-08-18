@@ -36,7 +36,7 @@ async fn panel_commands_drive_backbone_and_recorder() -> peppygen::Result<()> {
 
     let mut ws = helpers::WsClient::connect(PANEL_PORT).await;
     let first = ws
-        .snapshot_until(Duration::from_secs(10), "first snapshot", |_| true)
+        .next_snapshot(Duration::from_secs(10), "first snapshot")
         .await;
     assert!(
         first["recorder"].is_object(),

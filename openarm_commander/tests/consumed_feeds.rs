@@ -55,6 +55,34 @@ fn arm_health_msg() -> motor_health::Message {
     }
 }
 
+/// Re-publishes `publish` and takes one panel snapshot per pass until `done`
+/// holds, bounded by 10s and named by `what`: the panel re-renders on its own
+/// ~100 ms cadence, so each pass observes the latest publish without sleeping
+/// for it. Panics with the last snapshot seen on expiry.
+async fn republish_until<P, PFut>(
+    ws: &mut helpers::WsClient,
+    what: &str,
+    mut publish: P,
+    mut done: impl FnMut(&serde_json::Value) -> bool,
+) -> peppygen::Result<serde_json::Value>
+where
+    P: FnMut() -> PFut,
+    PFut: std::future::Future<Output = peppygen::Result<()>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        publish().await?;
+        let snapshot = ws.next_snapshot(Duration::from_secs(5), "snapshot pass").await;
+        if done(&snapshot) {
+            return Ok(snapshot);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}; last snapshot: {snapshot}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     helpers::set_panel_env(PANEL_PORT);
@@ -80,7 +108,7 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     // snapshot must already report both contract slots as wired.
     let mut ws = helpers::WsClient::connect(PANEL_PORT).await;
     let first = ws
-        .snapshot_until(Duration::from_secs(10), "first snapshot", |_| true)
+        .next_snapshot(Duration::from_secs(10), "first snapshot")
         .await;
     assert_eq!(first["health"]["bound"], true);
     assert_eq!(first["alerts_bound"], true);
@@ -88,25 +116,13 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     // collision_status -> proximity readout. The readout goes stale 500 ms
     // after the last report, so re-publish each snapshot pass (~100 ms), as
     // the backbone's ~20 Hz stream would.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let snapshot = loop {
-        mocks
-            .deps
-            .backbone
-            .collision_status
-            .publish(&proximity_msg())
-            .await?;
-        let snapshot = ws
-            .snapshot_until(Duration::from_secs(5), "snapshot pass", |_| true)
-            .await;
-        if !snapshot["proximity"].is_null() {
-            break snapshot;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "proximity never rendered; last snapshot: {snapshot}"
-        );
-    };
+    let snapshot = republish_until(
+        &mut ws,
+        "proximity never rendered",
+        || mocks.deps.backbone.collision_status.publish(&proximity_msg()),
+        |s| !s["proximity"].is_null(),
+    )
+    .await?;
     let proximity = &snapshot["proximity"];
     assert_eq!(proximity["distance"].as_f64(), Some(0.0123));
     assert_eq!(proximity["link_a"], "left_link4");
@@ -116,20 +132,13 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
 
     // alerts -> the alerts list, attributed and severity-tagged. Re-publish
     // with a fresh timestamp per pass so the entry cannot age out mid-poll.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let snapshot = loop {
-        mocks.deps.alerts[0].alerts.publish(&alert_msg()).await?;
-        let snapshot = ws
-            .snapshot_until(Duration::from_secs(5), "snapshot pass", |_| true)
-            .await;
-        if snapshot["alerts"].as_array().is_some_and(|a| !a.is_empty()) {
-            break snapshot;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the alert never rendered; last snapshot: {snapshot}"
-        );
-    };
+    let snapshot = republish_until(
+        &mut ws,
+        "the alert never rendered",
+        || mocks.deps.alerts[0].alerts.publish(&alert_msg()),
+        |s| s["alerts"].as_array().is_some_and(|a| !a.is_empty()),
+    )
+    .await?;
     let alert = &snapshot["alerts"][0];
     assert_eq!(alert["source"], "left arm j2");
     assert_eq!(alert["severity"], 2);
@@ -137,23 +146,13 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
 
     // motor_health, classifiable producer: reports from `left_arm_motors`
     // render the left side live with one row per motor.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let live = loop {
-        mocks.deps.motor_health[0]
-            .motor_health
-            .publish(&arm_health_msg())
-            .await?;
-        let snapshot = ws
-            .snapshot_until(Duration::from_secs(5), "left goes live", |_| true)
-            .await;
-        if snapshot["health"]["left"]["status"] == "live" {
-            break snapshot;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "left health never went live; last snapshot: {snapshot}"
-        );
-    };
+    let live = republish_until(
+        &mut ws,
+        "left health never went live",
+        || mocks.deps.motor_health[0].motor_health.publish(&arm_health_msg()),
+        |s| s["health"]["left"]["status"] == "live",
+    )
+    .await?;
     // A live side renders its arm rows plus the (silent) gripper component's
     // placeholder row: 7 + 1.
     assert_eq!(
@@ -174,7 +173,7 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
             .publish(&arm_health_msg())
             .await?;
         let snapshot = ws
-            .snapshot_until(Duration::from_secs(5), "snapshot pass", |_| true)
+            .next_snapshot(Duration::from_secs(5), "snapshot pass")
             .await;
         let status = snapshot["health"]["right"]["status"]
             .as_str()
