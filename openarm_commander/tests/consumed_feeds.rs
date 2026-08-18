@@ -3,10 +3,10 @@
 //! proximity readout, the alerts mock's alert must render in the alerts list,
 //! and both contract slots must report as bound.
 //!
-//! motor_health is bound too, but the node attributes reports by the producing
-//! instance's name (`classify` wants left/right + arm/grip tokens) and the
-//! harness pins the generated id `mock-motor_health-0`, so its reports are
-//! dropped at the parse boundary; the tail of this test pins that behavior.
+//! motor_health is bound with explicitly named mock producers: a
+//! classifiable identity renders its side live (the node attributes reports
+//! by producing-instance name — `classify` wants left/right + arm/grip
+//! tokens), and an unclassifiable one is dropped at the parse boundary.
 //!
 //! One booting test per binary: `ui::init_limits` is once-per-process.
 
@@ -41,8 +41,8 @@ fn alert_msg() -> alerts::Message {
     }
 }
 
-/// A well-formed 7-motor arm report; only its producer's instance name keeps
-/// it off the panel.
+/// A well-formed 7-motor arm report; whether it renders is decided purely by
+/// the producing instance's name.
 fn arm_health_msg() -> motor_health::Message {
     motor_health::Message {
         timestamp: SystemTime::now(),
@@ -61,7 +61,14 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     let (harness, mocks) = Harness::start_with(
         Config {
             parameters: Some(helpers::test_parameters()),
-            motor_health_instances: 1,
+            // The node attributes reports by producer instance name
+            // (`classify` wants exactly one of left/right and one of
+            // arm/grip): one mock wears a classifiable identity, one an
+            // unclassifiable one.
+            motor_health_instance_ids: vec![
+                "left_arm_motors".to_string(),
+                "mystery_motors".to_string(),
+            ],
             alerts_instances: 1,
             ..Config::default()
         },
@@ -128,30 +135,57 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     assert_eq!(alert["severity"], 2);
     assert_eq!(alert["message"], "holding 93% of rated torque");
 
-    // motor_health: bound, but the generated mock id `mock-motor_health-0`
-    // names neither a side nor a kind, so the node's classifier drops every
-    // report and no side may ever render live rows (bounded check across
-    // ~10 snapshot passes while reports keep arriving).
-    for _ in 0..10 {
+    // motor_health, classifiable producer: reports from `left_arm_motors`
+    // render the left side live with one row per motor.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let live = loop {
         mocks.deps.motor_health[0]
+            .motor_health
+            .publish(&arm_health_msg())
+            .await?;
+        let snapshot = ws
+            .snapshot_until(Duration::from_secs(5), "left goes live", |_| true)
+            .await;
+        if snapshot["health"]["left"]["status"] == "live" {
+            break snapshot;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "left health never went live; last snapshot: {snapshot}"
+        );
+    };
+    // A live side renders its arm rows plus the (silent) gripper component's
+    // placeholder row: 7 + 1.
+    assert_eq!(
+        live["health"]["left"]["motors"]
+            .as_array()
+            .expect("left motor rows")
+            .len(),
+        8,
+        "seven arm motor rows plus the gripper placeholder"
+    );
+
+    // motor_health, unclassifiable producer: `mystery_motors` names neither
+    // side, so its reports are dropped at the parse boundary and the right
+    // side must never render off them (bounded check across ~10 passes).
+    for _ in 0..10 {
+        mocks.deps.motor_health[1]
             .motor_health
             .publish(&arm_health_msg())
             .await?;
         let snapshot = ws
             .snapshot_until(Duration::from_secs(5), "snapshot pass", |_| true)
             .await;
-        for side in ["left", "right"] {
-            let status = snapshot["health"][side]["status"]
-                .as_str()
-                .expect("side status");
-            assert!(
-                status == "pending" || status == "not_reporting",
-                "{side} health must never go live off an unclassifiable producer, got {status}"
-            );
-            assert!(snapshot["health"][side]["motors"]
-                .as_array()
-                .is_some_and(Vec::is_empty));
-        }
+        let status = snapshot["health"]["right"]["status"]
+            .as_str()
+            .expect("right status");
+        assert!(
+            status == "pending" || status == "not_reporting",
+            "right health must never go live off an unclassifiable producer, got {status}"
+        );
+        assert!(snapshot["health"]["right"]["motors"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
     }
 
     harness.shutdown().await
