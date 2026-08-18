@@ -25,7 +25,7 @@
     ],
     depends_on: {
       contracts: [
-        { name: "openarm_robot_initializer", tag: "v1", link_id: "robot_init" },
+        { name: "robot_ready", tag: "v1", link_id: "robot_init" },
         // Runtime governor controls: an optional backbone feature, since not
         // every leader can produce them. A vacant slot leaves the launch-time
         // band standing.
