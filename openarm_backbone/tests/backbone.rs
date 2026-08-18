@@ -228,8 +228,8 @@ async fn start_ready_vacant(
     let (harness, mocks) = Harness::start_with(
         Config {
             parameters: Some(parameters),
-            instance_id: None,
             collision_ctrl_vacant: true,
+            ..Default::default()
         },
         openarm_backbone::setup,
     )
@@ -319,8 +319,8 @@ async fn move_arm_joints_streams_a_trajectory_the_arm_follows_to_the_target() ->
     let (harness, mocks) = Harness::start_with(
         Config {
             parameters: Some(params()),
-            instance_id: None,
             collision_ctrl_vacant: false,
+            ..Default::default()
         },
         openarm_backbone::setup,
     )

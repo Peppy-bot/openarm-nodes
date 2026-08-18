@@ -203,15 +203,19 @@ async fn ready_latches_on_first_state_and_health_flows_only_while_fresh() -> pep
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serves_ready_and_ingests_engine_states_without_backbone_peer() -> peppygen::Result<()> {
-    // The manifest marks the backbone slot optional, but the generated
-    // harness Config has no `backbone_vacant` knob (pairing slots are always
-    // pinned and mocked; only zero_or_one dependency and observer slots get
-    // vacancy flags), so a truly vacant boot is not expressible here. The
-    // closest reachable situation is the peer disappearing at boot: stop the
-    // backbone mock before driving anything, leaving the slot unpaired for
-    // the whole test.
-    let (mut harness, mocks) = Harness::start(openarm_arm_sim::setup).await?;
-    mocks.pairings.backbone.stop();
+    // The manifest marks the backbone slot optional: boot it truly unpaired.
+    // The peer pin is never seeded, so the node's own `paired()` stays None
+    // and its publishes into the slot are legal no-ops.
+    let config = peppygen::fixtures::harness::Config {
+        backbone_vacant: true,
+        ..Default::default()
+    };
+    let (mut harness, mocks) = Harness::start_with(config, openarm_arm_sim::setup).await?;
+    assert!(
+        peppygen::paired_topics::backbone::joint_states::paired(harness.node_runner())?
+            .is_none(),
+        "a vacant boot must leave the backbone slot unpaired"
+    );
 
     // The ready service answers with no backbone peer present: not ready yet.
     let response = is_ready::poll(&harness, Duration::from_secs(10)).await?;
