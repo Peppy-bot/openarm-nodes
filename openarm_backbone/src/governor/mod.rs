@@ -32,7 +32,7 @@
 //! modes and never touch the collision readout, so the toggle gates collision
 //! avoidance and nothing else.
 
-use bimanual_collision_model::BimanualCollisionModel;
+use bimanual_collision_model::{BimanualCollisionModel, Obstacle};
 use srs_model::Jacobian;
 use tracing::{info, warn};
 
@@ -58,6 +58,18 @@ const DUAL_DOF: usize = 2 * ARM_DOF;
 const GOV_DOF: usize = DUAL_DOF + 2;
 const LEFT_GRIPPER: usize = DUAL_DOF;
 const RIGHT_GRIPPER: usize = DUAL_DOF + 1;
+
+/// Most obstacles the governor carries at once. Each one is checked against
+/// every moving body on every tick, so the set is what an operator could
+/// otherwise grow the per-tick scan with.
+///
+/// Sized by measurement at the worst case, every obstacle sitting in the arms'
+/// path where the broadphase cannot reject it on its bounding sphere (ones it
+/// can reject cost almost nothing). `obstacle_tick_cost_report` reproduces it:
+/// a tick costing ~0.11 ms with none costs ~0.5 ms with four and ~0.8 to
+/// 1.0 ms with eight, so a full set still leaves a 100 Hz loop nine tenths of
+/// its 10 ms.
+pub(crate) const MAX_OBSTACLES: usize = 8;
 
 /// One governed configuration: both arms' joints and both grippers. The single
 /// state [`Governor::govern`] throttles, scans, and monitors, so every
@@ -291,6 +303,110 @@ impl Governor {
     /// candidate hold, which reports Stopped in either mode.
     pub fn guard(&self) -> Guard {
         self.guard
+    }
+
+    /// Put a fitted obstacle in the arms' way, refused unless the arms are
+    /// clear of it right now. An obstacle inserted at or inside `d_stop` holds
+    /// every closing command from its first tick, and one inserted over the
+    /// arms trips the measured-state monitor as well. Both are escapable, since
+    /// separating motion is never throttled and the monitor frees the side that
+    /// opens the gap, but neither is a workspace an operator asked to be put
+    /// in, so both are refused rather than entered. Returns the message to
+    /// report, carrying the clearance it was admitted at.
+    ///
+    /// The refusal stands whether or not avoidance is currently enabled: a
+    /// disabled governor still holds the obstacle, and switching avoidance on
+    /// is not the moment to discover the arms are inside one.
+    ///
+    /// Both configurations are weighed, because the stages that would freeze
+    /// the arms do not all read the same one: the barrier and the floor scan
+    /// key on `prev`, the last governed setpoint, while the measured-state
+    /// monitor keys on `measured`. An obstacle clear of one and not the other
+    /// is a hold either way, so admission takes the nearer of the two.
+    ///
+    /// A refusal leaves the model as it was, so a rejected insertion is not a
+    /// state the caller has to undo.
+    pub fn add_obstacle(
+        &mut self,
+        obstacle: Obstacle,
+        prev: &GovState,
+        measured: &GovState,
+    ) -> Result<String, String> {
+        let live = self.model.obstacle_count();
+        if live >= MAX_OBSTACLES {
+            return Err(format!(
+                "{live} obstacles is the most the governor carries; remove one first"
+            ));
+        }
+        let name = obstacle.name().to_string();
+        self.model
+            .add_obstacle(obstacle)
+            .map_err(|e| e.to_string())?;
+        let admitted = self.nearest_approach(&name, prev, measured).and_then(|d| {
+            if d > self.d_stop {
+                Ok(format!("'{name}' added, arms {d:+.4} m clear of it"))
+            } else {
+                Err(format!(
+                    "the arms are {d:+.4} m from '{name}', at or inside the {} m stop distance",
+                    self.d_stop
+                ))
+            }
+        });
+        match &admitted {
+            Ok(message) => info!("obstacle {message}"),
+            Err(reason) => {
+                self.model
+                    .remove_obstacle(&name)
+                    .expect("an obstacle just added is removable");
+                warn!("obstacle '{name}' refused: {reason}");
+            }
+        }
+        admitted
+    }
+
+    /// The smaller of an obstacle's clearances at the commanded and the
+    /// measured configuration, which is the one admission has to answer for.
+    fn nearest_approach(
+        &mut self,
+        name: &str,
+        prev: &GovState,
+        measured: &GovState,
+    ) -> Result<f64, String> {
+        [prev, measured]
+            .into_iter()
+            .map(|state| self.model.obstacle_clearance(name, &concat(state)))
+            .try_fold(f64::INFINITY, |nearest, d| {
+                d.map(|d| nearest.min(d))
+                    .map_err(|e| format!("could not measure the arms against '{name}': {e}"))
+            })
+    }
+
+    /// Take one obstacle back out. Errors on a name that is not a live
+    /// obstacle's, the robot's own geometry included. Returns the message to
+    /// report, composed here so the log and the caller cannot say different
+    /// things about the same change.
+    pub fn remove_obstacle(&mut self, name: &str) -> Result<String, String> {
+        self.model
+            .remove_obstacle(name)
+            .map_err(|e| e.to_string())?;
+        let message = format!("'{name}' removed");
+        info!("obstacle {message}");
+        Ok(message)
+    }
+
+    /// Take every obstacle back out, returning the message to report.
+    pub fn clear_obstacles(&mut self) -> String {
+        let removed = self.model.clear_obstacles();
+        let message = format!("{removed} obstacle(s) removed");
+        if removed > 0 {
+            info!("obstacle set cleared: {message}");
+        }
+        message
+    }
+
+    /// The obstacles in force, in the order they were added.
+    pub fn obstacle_names(&self) -> Vec<String> {
+        self.model.obstacle_names()
     }
 
     /// Retune the band at runtime (the operator's stop/safe controls). Rejects an
@@ -575,6 +691,7 @@ mod tests {
     use super::limiters::measured_tripwire::MONITOR_TRIP_FRACTION;
     use super::*;
     use crate::chase::rate_limited;
+    use crate::test_fixtures::{front_wall, obstacle, swallowing_box};
 
     /// Materialize a generation's bundled collision meshes so the file-based collision
     /// builder can fit hulls; the URDF itself comes from the same `HardwareVersion`.
@@ -1102,6 +1219,88 @@ mod tests {
     /// shipped 5 mm stop it is a 5% erosion, and it is the residue the scan's
     /// probe spacing buys back only by spending queries per tick.
     const SCAN_PATH_RESIDUE_M: f64 = 2.5e-4;
+
+    /// Thin slabs stacked across the reach of a forward elbow bend, so every
+    /// one of them sits where the broadphase cannot reject it cheaply. One
+    /// definition, so both halves of the report below measure the same
+    /// geometry.
+    fn stacked_slabs(count: usize) -> Vec<Obstacle> {
+        (0..count)
+            .map(|i| {
+                let base = 0.25 + i as f64 * 0.02;
+                obstacle(
+                    &format!("w{i}"),
+                    [base, -0.9, -0.2],
+                    [base + 0.01, 0.9, 1.2],
+                )
+            })
+            .collect()
+    }
+
+    /// What obstacles cost: a governed tick with a set resident, which is what
+    /// [`MAX_OBSTACLES`] is sized against, and a burst of insertions and
+    /// refusals, which is what the coordinator's drain rationale rests on.
+    /// Reported for the worst case, every obstacle sitting in the arms' path
+    /// where the broadphase cannot reject it on its bounding sphere. Run by
+    /// hand:
+    /// `cargo test --release obstacle_tick_cost_report -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement report, run by hand in release"]
+    fn obstacle_tick_cost_report() {
+        use std::time::Instant;
+
+        const TICKS: usize = 300;
+        for count in [0, MAX_OBSTACLES / 2, MAX_OBSTACLES] {
+            let mut g = governor(true);
+            for slab in stacked_slabs(count) {
+                g.add_obstacle(slab, &at(home()), &at(home()))
+                    .expect("stacked clear of the arms at home");
+            }
+            let target = into_the_wall();
+            let mut q = at(home());
+            let start = Instant::now();
+            for _ in 0..TICKS {
+                let cand = at(chase(&q.arms, &target, 0.02));
+                q = g.govern(&q, &cand, &q, NO_HANDS, DT);
+            }
+            let per_tick_us = start.elapsed().as_secs_f64() * 1e6 / TICKS as f64;
+            println!("TIMING {count} obstacles in the path: {per_tick_us:.0} us/tick");
+        }
+
+        // What a burst of requests costs the tick that drains it, which is what
+        // the coordinator's drain rationale rests on. Fitting is paid off the
+        // tick, so both bursts are fitted first and only the governor's own
+        // work is timed.
+        let slabs = stacked_slabs(MAX_OBSTACLES);
+        let mut g = governor(true);
+        let start = Instant::now();
+        for slab in slabs {
+            g.add_obstacle(slab, &at(home()), &at(home()))
+                .expect("clear of the arms");
+        }
+        println!(
+            "TIMING {MAX_OBSTACLES} insertions: {:.0} us total",
+            start.elapsed().as_secs_f64() * 1e6
+        );
+
+        // Refused for breach, not for the cap: the cap returns before the model
+        // is touched, so timing it would time nothing. This is what a refusal
+        // really costs, an insert plus a measurement at both configurations
+        // plus the rollback.
+        let swallowing: Vec<Obstacle> = (0..MAX_OBSTACLES)
+            .map(|i| swallowing_box(&format!("r{i}")))
+            .collect();
+        g.clear_obstacles();
+        let start = Instant::now();
+        for over_the_arms in swallowing {
+            g.add_obstacle(over_the_arms, &at(home()), &at(home()))
+                .expect_err("an obstacle over the arms is refused");
+        }
+        println!(
+            "TIMING {MAX_OBSTACLES} refusals: {:.0} us total",
+            start.elapsed().as_secs_f64() * 1e6
+        );
+    }
 
     /// Whether a faster control loop is affordable. A jog is a speed, so a
     /// shorter period means a shorter segment and fewer probes per tick, while
@@ -2579,5 +2778,206 @@ max={} us | over budget {over}/{}",
             prev,
             "the monitor froze the closing escape"
         );
+    }
+
+    /// Reaching for the front wall: the left elbow bends forward until the arm
+    /// would be well through it.
+    fn into_the_wall() -> ArmPair<JointVec> {
+        let mut target = home();
+        target.left[3] = 1.2;
+        target
+    }
+
+    /// Chase `target` under the governor for `ticks`, from home.
+    fn chase_under_governor(
+        g: &mut Governor,
+        target: &ArmPair<JointVec>,
+        ticks: usize,
+    ) -> GovState {
+        let mut q = at(home());
+        for _ in 0..ticks {
+            let cand = at(chase(&q.arms, target, 0.05));
+            q = g.govern(&q, &cand, &q, NO_HANDS, DT);
+        }
+        q
+    }
+
+    #[test]
+    fn an_obstacle_clear_of_the_arms_is_admitted() {
+        let mut g = governor(true);
+        g.add_obstacle(front_wall(), &at(home()), &at(home()))
+            .expect("the wall stands clear of the arms at home");
+        assert_eq!(g.obstacle_names(), ["wall"]);
+        // An admitted obstacle is a checked pair from that moment: the readout
+        // has to be able to name it, which is what makes it governable.
+        let mut reaching = home();
+        reaching.left[3] = 1.2;
+        let pair = g.proximity(&at(reaching)).expect("query");
+        assert!(
+            pair.link_a == "wall" || pair.link_b == "wall",
+            "the admitted wall is not being scanned: {} vs {}",
+            pair.link_a,
+            pair.link_b
+        );
+    }
+
+    #[test]
+    fn an_obstacle_over_the_arms_is_refused_and_leaves_no_trace() {
+        // Inserted around the whole robot, so the arms start inside it: the
+        // governor would hold every closing command and the measured-state
+        // monitor would trip, which is not a workspace an operator can leave.
+        let mut g = governor(true);
+        let err = g
+            .add_obstacle(
+                obstacle("swallows", [-2.0; 3], [2.0; 3]),
+                &at(home()),
+                &at(home()),
+            )
+            .expect_err("an obstacle over the arms must be refused");
+        assert!(err.contains("stop distance"), "{err}");
+        assert!(
+            g.obstacle_names().is_empty(),
+            "a refused obstacle must leave the model as it was"
+        );
+    }
+
+    #[test]
+    fn a_command_driving_into_an_obstacle_is_held_at_the_band() {
+        let mut g = governor(true);
+        g.add_obstacle(front_wall(), &at(home()), &at(home()))
+            .expect("clear");
+        let held = chase_under_governor(&mut g, &into_the_wall(), 200);
+        let pair = g.proximity(&held).expect("query");
+        assert!(
+            pair.link_a == "wall" || pair.link_b == "wall",
+            "setup: the wall must be what the arm ran into, got {} vs {}",
+            pair.link_a,
+            pair.link_b
+        );
+        assert!(
+            pair.distance >= D_STOP,
+            "the barrier let the arm through the wall: {:+.4}",
+            pair.distance
+        );
+        assert!(
+            held.arms.left[3] < 1.2,
+            "setup: the elbow should have been held short of its target"
+        );
+    }
+
+    #[test]
+    fn removing_an_obstacle_frees_the_command_it_was_holding() {
+        let mut g = governor(true);
+        g.add_obstacle(front_wall(), &at(home()), &at(home()))
+            .expect("clear");
+        let held = chase_under_governor(&mut g, &into_the_wall(), 200);
+        g.remove_obstacle("wall").expect("remove");
+        assert!(g.obstacle_names().is_empty());
+        let freed = chase_under_governor(&mut g, &into_the_wall(), 200);
+        assert!(
+            freed.arms.left[3] > held.arms.left[3],
+            "the elbow is still held at {:+.4} with the wall gone",
+            freed.arms.left[3]
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_be_measured_refuses_and_rolls_back() {
+        // The other refusal path: not "too close" but "could not tell", which
+        // has to leave the model exactly as it was just the same.
+        let mut g = governor(true);
+        let mut unmeasurable = at(home());
+        unmeasurable.arms.left[0] = f64::NAN;
+        let err = g
+            .add_obstacle(front_wall(), &at(home()), &unmeasurable)
+            .expect_err("a non-finite configuration cannot be weighed");
+        assert!(err.contains("could not measure"), "{err}");
+        assert!(
+            g.obstacle_names().is_empty(),
+            "a refused obstacle must leave the model as it was"
+        );
+    }
+
+    #[test]
+    fn the_admitted_clearance_is_the_nearer_of_the_two_configurations() {
+        // Reported from the min, not the max: the message is what an operator
+        // reads to decide whether the wall is where they meant to put it.
+        let mut g = governor(true);
+        let mut reaching = home();
+        reaching.left[3] = 0.6;
+        let far = g
+            .add_obstacle(front_wall(), &at(home()), &at(home()))
+            .expect("clear");
+        g.remove_obstacle("wall").expect("remove");
+        let nearer = g
+            .add_obstacle(front_wall(), &at(reaching), &at(home()))
+            .expect("still clear");
+        let clearance = |message: &str| -> f64 {
+            message
+                .split_whitespace()
+                .find_map(|w| w.parse::<f64>().ok())
+                .expect("the message reports a clearance")
+        };
+        assert!(
+            clearance(&nearer) < clearance(&far),
+            "reaching toward the wall must report the smaller clearance: \
+             {nearer} vs {far}"
+        );
+    }
+
+    #[test]
+    fn only_a_live_obstacle_can_be_removed() {
+        let mut g = governor(true);
+        for name in ["never_added", "openarm_left_link3"] {
+            assert!(
+                g.remove_obstacle(name).is_err(),
+                "'{name}' is not a live obstacle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_already_in_use_is_refused() {
+        let mut g = governor(true);
+        g.add_obstacle(front_wall(), &at(home()), &at(home()))
+            .expect("clear");
+        let err = g
+            .add_obstacle(front_wall(), &at(home()), &at(home()))
+            .expect_err("the name is taken");
+        assert!(err.contains("duplicate"), "{err}");
+        assert_eq!(g.obstacle_names(), ["wall"]);
+    }
+
+    #[test]
+    fn the_obstacle_set_is_capped() {
+        let mut g = governor(true);
+        // Stacked well clear of the arms, so only the cap can refuse one.
+        for i in 0..MAX_OBSTACLES {
+            let base = 2.0 + i as f64;
+            g.add_obstacle(
+                obstacle(
+                    &format!("wall{i}"),
+                    [base, 0.0, 0.0],
+                    [base + 0.5, 1.0, 1.0],
+                ),
+                &at(home()),
+                &at(home()),
+            )
+            .expect("clear of the arms");
+        }
+        let err = g
+            .add_obstacle(
+                obstacle("one_too_many", [99.0; 3], [99.5; 3]),
+                &at(home()),
+                &at(home()),
+            )
+            .expect_err("over the cap");
+        assert!(err.contains("most the governor carries"), "{err}");
+        assert_eq!(g.obstacle_names().len(), MAX_OBSTACLES);
+        assert_eq!(
+            g.clear_obstacles(),
+            format!("{MAX_OBSTACLES} obstacle(s) removed")
+        );
+        assert!(g.obstacle_names().is_empty());
     }
 }

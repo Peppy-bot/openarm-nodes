@@ -16,11 +16,14 @@ mod chase;
 mod coordinator;
 mod governor;
 mod liveness;
+mod obstacles;
 mod planner;
 mod publish;
 mod servo;
 mod startup;
 mod streams;
+#[cfg(test)]
+mod test_fixtures;
 mod torso;
 mod trajectory;
 mod types;
@@ -257,6 +260,12 @@ fn main() -> Result<()> {
         let (goal_tx1, goal_rx1) = mpsc::channel(1);
         let (grip_goal_tx0, grip_goal_rx0) = mpsc::channel(1);
         let (grip_goal_tx1, grip_goal_rx1) = mpsc::channel(1);
+        // Obstacle requests from the four services into the coordination loop,
+        // which owns the collision model. Deep enough that a handful of
+        // requests arriving inside one tick all land, shallow enough that a
+        // caller learns the loop is not draining rather than queueing behind
+        // an unbounded backlog.
+        let (obstacle_tx, obstacle_rx) = mpsc::channel(8);
         let busy = [
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
@@ -312,7 +321,10 @@ fn main() -> Result<()> {
                 governor,
                 planners,
                 channels,
-                config_rx,
+                coordinator::ControlChannels {
+                    governor_config: config_rx,
+                    obstacles: obstacle_rx,
+                },
                 coordinator::RunConfig {
                     cycle_period,
                     velocity_filter_cutoff_hz: params.velocity_filter_cutoff_hz,
@@ -345,6 +357,26 @@ fn main() -> Result<()> {
                 runner.clone(),
                 [grip_goal_tx0, grip_goal_tx1],
                 [gripper_busy[0].clone(), gripper_busy[1].clone()],
+            ));
+            set.spawn(obstacles::run_add_obstacle(
+                runner.clone(),
+                obstacle_tx.clone(),
+                token.clone(),
+            ));
+            set.spawn(obstacles::run_remove_obstacle(
+                runner.clone(),
+                obstacle_tx.clone(),
+                token.clone(),
+            ));
+            set.spawn(obstacles::run_clear_obstacles(
+                runner.clone(),
+                obstacle_tx.clone(),
+                token.clone(),
+            ));
+            set.spawn(obstacles::run_list_obstacles(
+                runner.clone(),
+                obstacle_tx,
+                token.clone(),
             ));
 
             // Inbound listeners buffer the latest message into the watch slots. They
