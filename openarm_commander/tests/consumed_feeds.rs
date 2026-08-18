@@ -119,7 +119,11 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     let snapshot = republish_until(
         &mut ws,
         "proximity never rendered",
-        || mocks.deps.backbone.collision_status.publish(&proximity_msg()),
+        || {
+            let msg = proximity_msg();
+            let publisher = &mocks.deps.backbone.collision_status;
+            async move { publisher.publish(&msg).await }
+        },
         |s| !s["proximity"].is_null(),
     )
     .await?;
@@ -135,7 +139,11 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     let snapshot = republish_until(
         &mut ws,
         "the alert never rendered",
-        || mocks.deps.alerts[0].alerts.publish(&alert_msg()),
+        || {
+            let msg = alert_msg();
+            let publisher = &mocks.deps.alerts[0].alerts;
+            async move { publisher.publish(&msg).await }
+        },
         |s| s["alerts"].as_array().is_some_and(|a| !a.is_empty()),
     )
     .await?;
@@ -149,7 +157,11 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
     let live = republish_until(
         &mut ws,
         "left health never went live",
-        || mocks.deps.motor_health[0].motor_health.publish(&arm_health_msg()),
+        || {
+            let msg = arm_health_msg();
+            let publisher = &mocks.deps.motor_health[0].motor_health;
+            async move { publisher.publish(&msg).await }
+        },
         |s| s["health"]["left"]["status"] == "live",
     )
     .await?;
