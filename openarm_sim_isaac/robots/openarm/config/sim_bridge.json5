@@ -33,6 +33,14 @@
     { gripper_id: 1, fingers: ["openarm_right_finger_joint1", "openarm_right_finger_joint2"] },
   ],
 
+  // Explicit PhysX finger drives. Without these the fingers can free-float
+  // when the arm moves if the imported USD has weak/default drive gains.
+  gripper_gains: {
+    kp: [80.0, 80.0],
+    kd: [2.0, 2.0],
+    max_efforts: [5.0, 5.0],
+  },
+
   // MIT servo gains (j1..j7) applied to each arm's PhysX joint drives so sim
   // dynamics match the real driver, plus the motor torque caps (DM8009/4340/4310)
   // applied as max_efforts. gravity_compensation mirrors the real driver's

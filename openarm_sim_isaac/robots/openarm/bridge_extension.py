@@ -74,12 +74,13 @@ class IsaacBridgeExtension:
         self._arms: list[dict] = cfg["arms"]
         self._grippers: list[dict] = cfg["grippers"]
         self._gains: dict = cfg.get("arm_gains", {})
+        self._gripper_gains: dict = cfg.get("gripper_gains", {})
 
         self._articulation = IsaacArticulation(_ROOT_ARTICULATION_PRIM)
         # One actuator controller per arm side: the MIT gains and torque caps
         # are applied to that side's PhysX drives at setup, and the side's
-        # commands are written through it. Fingers keep their USD drive defaults
-        # and are written through a gainless controller.
+        # commands are written through it. Finger joints use explicit PhysX
+        # position-drive gains so they hold their commanded opening in simulation.
         self._arm_actuators: dict[int, IsaacActuatorCtrl] = {
             arm["arm_id"]: IsaacActuatorCtrl(
                 _ROOT_ARTICULATION_PRIM,
@@ -92,6 +93,7 @@ class IsaacBridgeExtension:
             gripper["gripper_id"]: IsaacActuatorCtrl(
                 _ROOT_ARTICULATION_PRIM,
                 joint_names=gripper["fingers"],
+                params=self._gripper_actuator_params(gripper["fingers"]),
             )
             for gripper in self._grippers
         }
@@ -103,6 +105,15 @@ class IsaacBridgeExtension:
         }
         self._joint_index: dict[str, int] = {}
         self._ready: bool = False
+
+    def _gripper_actuator_params(self, joints: list[str]) -> dict:
+        gains = self._gripper_gains
+        return {
+            "joint_names": joints,
+            "kp": list(gains.get("kp", [])),
+            "kd": list(gains.get("kd", [])),
+            "max_efforts": list(gains.get("max_efforts", [])),
+        }
 
     def _actuator_params(self, joints: list[str]) -> dict:
         return {
