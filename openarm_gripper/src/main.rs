@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use peppygen::Result;
 
 fn main() -> Result<()> {

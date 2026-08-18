@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use peppygen::{NodeBuilder, Result};
 
 fn main() -> Result<()> {

@@ -3,6 +3,8 @@
 //! lives in `src/lib.rs` so the harness-driven integration tests can boot the
 //! same entry point in-process.
 
+#![forbid(unsafe_code)]
+
 use peppygen::Result;
 
 fn main() -> Result<()> {

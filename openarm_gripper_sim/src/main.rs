@@ -1,5 +1,7 @@
 //! Binary shell: tracing init plus the runtime boot of the library's `setup`.
 
+#![forbid(unsafe_code)]
+
 use peppygen::Result;
 
 fn main() -> Result<()> {
