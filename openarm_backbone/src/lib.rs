@@ -22,6 +22,7 @@ mod chase;
 mod coordinator;
 mod governor;
 mod liveness;
+mod motion;
 mod node;
 mod planner;
 mod publish;
