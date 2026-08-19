@@ -78,17 +78,18 @@
       // carries hundredths and truncates, so a smaller one would command a full stop.
       // Default matches enactic's reference (test_gripper_posforce).
       speed_rad_s: { $type: "f64", $default: 25.0 },
-      // POS_FORCE torque-current ceiling (per-unit, in [0.0001, 0.7] on the DM4310 both
-      // generations drive): the largest grip-force cap the gripper applies, read by the
-      // v2 command path. A commanded max_effort only lowers a tick's cap beneath it.
-      // Reported on gripper_states in N*m as the effort ceiling. The floor is the wire's
-      // resolution: anything the torque-current field truncates to zero would grip
-      // nothing while publishing the ceiling the gripper_link contract reserves for "no
-      // effort control". The ceiling is the motor's 7 N*m datasheet peak against that
-      // field's 10 N*m full scale, whose remainder is quantization headroom the hardware
-      // cannot deliver. Default matches enactic's reference; raise for a firmer grip. The
-      // v1 MIT mode carries no per-command force limit and reports a 0 ceiling.
-      force_limit_pu: { $type: "f64", $default: 0.15 },
+      // Largest grip force the gripper applies, N*m at the motor shaft, in [0.001, 7.0]
+      // on the DM4310 both generations drive. Read by the v2 command path; a commanded
+      // max_effort only lowers a tick's cap beneath it, and this is what gripper_states
+      // reports as the effort ceiling. The floor is the wire's resolution: anything the
+      // torque-current field truncates to zero would grip nothing while publishing the
+      // ceiling the gripper_link contract reserves for "no effort control". The bound is
+      // the motor's datasheet peak, which it may only produce in bursts; a grip that is
+      // held belongs at or below the 3.0 N*m continuous rating. Operational, so the
+      // launcher names it; the default is the motor's continuous rating, the strongest
+      // grip it can hold indefinitely. The v1 MIT mode carries no per-command force
+      // limit and reports a 0 ceiling.
+      max_effort_nm: { $type: "f64", $default: 3.0 },
       // Rate (Hz) of the always-on measured-state stream (`gripper_states`), in
       // 1..=1_000_000; consumers' needs vary too much for a default to be meaningful.
       state_rate_hz: "u32"

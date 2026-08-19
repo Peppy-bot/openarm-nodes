@@ -68,10 +68,13 @@ impl MaxEffortNm {
 pub struct PosForceLimits {
     /// Absolute speed limit (rad/s at the motor).
     speed_rad_s: f64,
-    /// Torque-current ceiling (per-unit, `0 < pu <= 1`): the largest
-    /// grip-force cap this instance applies. A streamed `max_effort` can only
-    /// lower a tick's cap beneath it.
-    force_limit_pu: f64,
+    /// Largest grip force this instance applies (N*m at the shaft). A
+    /// streamed `max_effort` can only lower a tick's cap beneath it.
+    max_effort_nm: f64,
+    /// The span the motor's per-unit torque-current field addresses (N*m at
+    /// the shaft), resolved once at startup so the single conversion to the
+    /// wire's units needs no motor lookup on the control loop.
+    full_scale_nm: f64,
 }
 
 /// The motor a gripper of this generation drives.
@@ -99,7 +102,7 @@ impl PosForceLimits {
     pub fn new(
         motor_type: MotorType,
         speed_rad_s: f64,
-        force_limit_pu: f64,
+        max_effort_nm: f64,
     ) -> Result<Self, String> {
         if !(speed_rad_s.is_finite()
             && (WIRE_MIN_SPEED_RAD_S..=WIRE_MAX_SPEED_RAD_S).contains(&speed_rad_s))
@@ -109,43 +112,41 @@ impl PosForceLimits {
                  the range the POS_FORCE speed field can express, got {speed_rad_s}"
             ));
         }
-        let ceiling_pu = deliverable_ceiling_pu(motor_type)?;
-        if !(force_limit_pu.is_finite()
-            && (WIRE_TORQUE_PU_TICK..=ceiling_pu).contains(&force_limit_pu))
-        {
+        let full_scale_nm = torque_full_scale_nm(motor_type);
+        let peak_nm = ratings_of(motor_type)?.peak_nm();
+        let smallest_nm = WIRE_TORQUE_PU_TICK * full_scale_nm;
+        if !(max_effort_nm.is_finite() && (smallest_nm..=peak_nm).contains(&max_effort_nm)) {
             return Err(format!(
-                "force_limit_pu must be in [{WIRE_TORQUE_PU_TICK}, {ceiling_pu:.4}], between the \
-                 smallest cap the POS_FORCE torque-current field can express and the {} N*m \
-                 datasheet peak of the {motor_type:?} against that field's {} N*m full scale, \
-                 got {force_limit_pu}",
-                ratings_of(motor_type)?.peak_nm(),
-                torque_full_scale_nm(motor_type),
+                "max_effort_nm must be in [{smallest_nm}, {peak_nm}] N*m at the shaft, between \
+                 the smallest cap the POS_FORCE torque-current field can express and the \
+                 datasheet peak of the {motor_type:?}, got {max_effort_nm}"
             ));
         }
         Ok(Self {
             speed_rad_s,
-            force_limit_pu,
+            max_effort_nm,
+            full_scale_nm,
         })
     }
 
-    /// The configured ceiling (N*m at the shaft) against the motor's wire
-    /// torque full scale. This is what reaches gripper_states; a streamed
-    /// max_effort lowers an individual tick's cap beneath it without
-    /// restating the ceiling.
-    fn effort_ceiling_nm(self, full_scale_nm: f64) -> f64 {
-        self.force_limit_pu * full_scale_nm
+    /// The configured ceiling (N*m at the shaft). This is what reaches
+    /// gripper_states; a streamed max_effort lowers an individual tick's cap
+    /// beneath it without restating the ceiling.
+    fn effort_ceiling_nm(self) -> f64 {
+        self.max_effort_nm
     }
 
-    /// A commanded cap as the POS_FORCE per-unit torque-current field,
-    /// bounded by the configured ceiling; no commanded preference means the
-    /// ceiling itself. Floored at one wire tick, because a positive commanded
-    /// cap that truncated to nothing would permit no grip force at all rather
-    /// than the small cap it asked for. Total: the result always lands in
-    /// `[WIRE_TORQUE_PU_TICK, force_limit_pu]` on either arm.
-    fn torque_pu(self, full_scale_nm: f64, max_effort: Option<MaxEffortNm>) -> f64 {
-        max_effort.map_or(self.force_limit_pu, |MaxEffortNm(nm)| {
-            (nm / full_scale_nm).clamp(WIRE_TORQUE_PU_TICK, self.force_limit_pu)
-        })
+    /// A commanded cap as the POS_FORCE per-unit torque-current field: the
+    /// one place shaft N*m becomes the wire's fraction. Bounded by the
+    /// configured ceiling; no commanded preference means the ceiling itself.
+    /// Floored at one wire tick, because a positive commanded cap that
+    /// truncated to nothing would permit no grip force at all rather than the
+    /// small cap it asked for.
+    fn torque_pu(self, max_effort: Option<MaxEffortNm>) -> f64 {
+        let capped_nm = max_effort.map_or(self.max_effort_nm, |MaxEffortNm(nm)| {
+            nm.min(self.max_effort_nm)
+        });
+        (capped_nm / self.full_scale_nm).max(WIRE_TORQUE_PU_TICK)
     }
 }
 
@@ -154,14 +155,6 @@ fn ratings_of(motor_type: MotorType) -> Result<Ratings, String> {
     motor_type
         .ratings()
         .ok_or_else(|| format!("no datasheet ratings for {motor_type:?}"))
-}
-
-/// The largest per-unit torque-current cap the motor can actually deliver.
-/// The field's full scale is quantization headroom, not an operating limit, so
-/// a ceiling above the datasheet peak would publish a grip force the hardware
-/// cannot reach and let a planner size a hold against it.
-fn deliverable_ceiling_pu(motor_type: MotorType) -> Result<f64, String> {
-    Ok(ratings_of(motor_type)?.peak_nm() / torque_full_scale_nm(motor_type))
 }
 
 /// The span the motor's per-unit torque-current field addresses (N*m at the
@@ -228,10 +221,6 @@ enum Drive {
     PosForce {
         can: GripperCan<PosForce>,
         limits: PosForceLimits,
-        /// The motor's wire torque full scale (N*m at the shaft): the span the
-        /// per-unit torque-current field addresses, read from the motor at
-        /// startup rather than restated, so a different motor rescales with it.
-        full_scale_nm: f64,
     },
 }
 
@@ -266,22 +255,16 @@ impl Gripper {
                 v10::GRIPPER_SEND_ID,
                 v10::GRIPPER_RECV_ID,
             )?),
-            HardwareVersion::V2 => {
-                // Resolved before the bus is opened, so it cannot strand a
-                // socket, and off the control loop, which must not panic.
-                let full_scale_nm = torque_full_scale_nm(v20::GRIPPER_MOTOR_TYPE);
-                Drive::PosForce {
-                    can: GripperCan::open_pos_force(
-                        can_interface,
-                        enable_fd,
-                        v20::GRIPPER_MOTOR_TYPE,
-                        v20::GRIPPER_SEND_ID,
-                        v20::GRIPPER_RECV_ID,
-                    )?,
-                    limits,
-                    full_scale_nm,
-                }
-            }
+            HardwareVersion::V2 => Drive::PosForce {
+                can: GripperCan::open_pos_force(
+                    can_interface,
+                    enable_fd,
+                    v20::GRIPPER_MOTOR_TYPE,
+                    v20::GRIPPER_SEND_ID,
+                    v20::GRIPPER_RECV_ID,
+                )?,
+                limits,
+            },
         };
         Ok(Self {
             drive,
@@ -310,15 +293,9 @@ impl Gripper {
         let motor_rad = self.geometry.fraction_to_motor_rad(opening.clamp(0.0, 1.0));
         match &mut self.drive {
             Drive::Mit(can) => can.mit_control(MIT_KP, MIT_KD, motor_rad, 0.0, 0.0),
-            Drive::PosForce {
-                can,
-                limits,
-                full_scale_nm,
-            } => can.set_position(
-                motor_rad,
-                limits.speed_rad_s,
-                limits.torque_pu(*full_scale_nm, max_effort),
-            ),
+            Drive::PosForce { can, limits } => {
+                can.set_position(motor_rad, limits.speed_rad_s, limits.torque_pu(max_effort))
+            }
         }
     }
 
@@ -335,16 +312,12 @@ impl Gripper {
                 effort: 0.0,
                 max_effort: 0.0,
             },
-            Drive::PosForce {
-                limits,
-                full_scale_nm,
-                ..
-            } => WireState {
+            Drive::PosForce { limits, .. } => WireState {
                 opening,
                 // Motor current-derived torque estimate (N*m at the shaft) in
                 // the opening frame: positive toward open on either side.
                 effort: self.geometry.motor_torque_to_effort(state.torque),
-                max_effort: limits.effort_ceiling_nm(*full_scale_nm),
+                max_effort: limits.effort_ceiling_nm(),
             },
         }
     }
@@ -408,8 +381,20 @@ mod tests {
     /// Both generations drive this motor.
     const MOTOR: MotorType = v20::GRIPPER_MOTOR_TYPE;
 
-    fn limits(speed_rad_s: f64, force_limit_pu: f64) -> PosForceLimits {
-        PosForceLimits::new(MOTOR, speed_rad_s, force_limit_pu).expect("valid limits")
+    fn limits(speed_rad_s: f64, max_effort_nm: f64) -> PosForceLimits {
+        PosForceLimits::new(MOTOR, speed_rad_s, max_effort_nm).expect("valid limits")
+    }
+
+    /// The motor's datasheet peak: the largest ceiling `new` accepts.
+    fn peak_nm() -> f64 {
+        ratings_of(MOTOR)
+            .expect("the gripper motor is rated")
+            .peak_nm()
+    }
+
+    /// The smallest ceiling the torque-current field can express, in N*m.
+    fn smallest_nm() -> f64 {
+        WIRE_TORQUE_PU_TICK * full_scale_nm()
     }
 
     fn cap(nm: f64) -> Option<MaxEffortNm> {
@@ -433,20 +418,19 @@ mod tests {
             WIRE_MAX_SPEED_RAD_S + 1.0,
         ] {
             assert!(
-                PosForceLimits::new(MOTOR, speed, 0.15).is_err(),
+                PosForceLimits::new(MOTOR, speed, 1.5).is_err(),
                 "speed {speed}"
             );
         }
-        for force in [-0.1, 1.1, 0.9, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for force in [-1.0, 11.0, 9.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(
                 PosForceLimits::new(MOTOR, 25.0, force).is_err(),
-                "force {force}"
+                "force {force} N*m"
             );
         }
         // The wire's own speed bounds are legal, as is the deliverable ceiling.
-        let ceiling = deliverable_ceiling_pu(MOTOR).expect("the gripper motor is rated");
-        assert!(PosForceLimits::new(MOTOR, WIRE_MAX_SPEED_RAD_S, ceiling).is_ok());
-        assert!(PosForceLimits::new(MOTOR, WIRE_MIN_SPEED_RAD_S, WIRE_TORQUE_PU_TICK).is_ok());
+        assert!(PosForceLimits::new(MOTOR, WIRE_MAX_SPEED_RAD_S, peak_nm()).is_ok());
+        assert!(PosForceLimits::new(MOTOR, WIRE_MIN_SPEED_RAD_S, smallest_nm()).is_ok());
     }
 
     #[test]
@@ -454,26 +438,20 @@ mod tests {
         // The torque-current field spans 10 N*m of quantization headroom, but
         // the DM4310's datasheet peak is 7 N*m, so the top 30% of the field
         // would advertise a grip force the hardware cannot reach.
-        let ceiling = deliverable_ceiling_pu(MOTOR).expect("the gripper motor is rated");
-        assert!(
-            (ceiling - 0.7).abs() < 1e-12,
-            "expected 7/10, got {ceiling}"
-        );
-        assert!(PosForceLimits::new(MOTOR, 25.0, 1.0).is_err());
-        assert!(PosForceLimits::new(MOTOR, 25.0, ceiling + 1e-9).is_err());
-        assert!(PosForceLimits::new(MOTOR, 25.0, ceiling).is_ok());
+        assert_eq!(full_scale_nm(), 10.0);
+        assert_eq!(peak_nm(), 7.0);
+        assert!(PosForceLimits::new(MOTOR, 25.0, full_scale_nm()).is_err());
+        assert!(PosForceLimits::new(MOTOR, 25.0, peak_nm() + 1e-9).is_err());
+        assert!(PosForceLimits::new(MOTOR, 25.0, peak_nm()).is_ok());
     }
 
     #[test]
-    fn the_deliverable_ceiling_never_exceeds_the_datasheet_peak() {
-        let ceiling = deliverable_ceiling_pu(MOTOR).expect("the gripper motor is rated");
-        let ceiling_nm = limits(25.0, ceiling).effort_ceiling_nm(full_scale_nm());
-        let peak_nm = ratings_of(MOTOR)
-            .expect("the gripper motor is rated")
-            .peak_nm();
+    fn the_published_ceiling_never_exceeds_the_datasheet_peak() {
+        let published = limits(25.0, peak_nm()).effort_ceiling_nm();
         assert!(
-            ceiling_nm <= peak_nm,
-            "published ceiling {ceiling_nm} N*m exceeds the {peak_nm} N*m peak"
+            published <= peak_nm(),
+            "published ceiling {published} N*m exceeds the {} N*m peak",
+            peak_nm()
         );
     }
 
@@ -490,15 +468,15 @@ mod tests {
         // Zero, and everything the torque-current field rounds down to zero,
         // would grip nothing while publishing the contract's "no effort
         // control". Likewise a speed the field rounds down to a full stop.
-        for force in [0.0, f64::MIN_POSITIVE, 5e-324, WIRE_TORQUE_PU_TICK / 2.0] {
+        for force in [0.0, f64::MIN_POSITIVE, 5e-324, smallest_nm() / 2.0] {
             assert!(
                 PosForceLimits::new(MOTOR, 25.0, force).is_err(),
-                "force {force}"
+                "force {force} N*m"
             );
         }
         for speed in [0.0, f64::MIN_POSITIVE, WIRE_MIN_SPEED_RAD_S / 2.0] {
             assert!(
-                PosForceLimits::new(MOTOR, speed, 0.15).is_err(),
+                PosForceLimits::new(MOTOR, speed, 1.5).is_err(),
                 "speed {speed}"
             );
         }
@@ -516,28 +494,27 @@ mod tests {
     }
 
     #[test]
-    fn effort_ceiling_scales_the_wire_full_scale() {
-        // 0.7 pu of a 10 N*m field is the DM4310's 7 N*m datasheet peak.
-        assert_eq!(limits(25.0, 0.7).effort_ceiling_nm(full_scale_nm()), 7.0);
-        assert_eq!(limits(25.0, 0.2).effort_ceiling_nm(full_scale_nm()), 2.0);
+    fn the_published_ceiling_is_the_configured_one() {
+        // No conversion on the way out: what the launcher names in N*m is
+        // exactly what gripper_states reports.
+        assert_eq!(limits(25.0, 7.0).effort_ceiling_nm(), 7.0);
+        assert_eq!(limits(25.0, 2.0).effort_ceiling_nm(), 2.0);
     }
 
     #[test]
     fn commanded_effort_converts_and_respects_the_ceiling() {
-        let limits = limits(25.0, 0.3);
-        let full_scale = full_scale_nm();
-        // No preference: the configured ceiling applies unchanged.
-        assert_eq!(limits.torque_pu(full_scale, None), 0.3);
-        // Within the ceiling: exact N*m to per-unit conversion.
-        assert_eq!(limits.torque_pu(full_scale, cap(1.5)), 0.15);
+        let limits = limits(25.0, 3.0);
+        // No preference: the configured ceiling applies, as its wire fraction.
+        assert_eq!(limits.torque_pu(None), 0.3);
+        // Within the ceiling: the one N*m to per-unit conversion.
+        assert_eq!(limits.torque_pu(cap(1.5)), 0.15);
         // Above the ceiling: the ceiling wins.
-        assert_eq!(limits.torque_pu(full_scale, cap(5.0)), 0.3);
+        assert_eq!(limits.torque_pu(cap(5.0)), 0.3);
     }
 
     #[test]
     fn every_reachable_torque_cap_survives_the_wire_encoding() {
-        let limits = limits(25.0, 0.3);
-        let full_scale = full_scale_nm();
+        let limits = limits(25.0, 3.0);
         // Spans the subnormal floor, the one-tick boundary, and saturation.
         for nm in [
             5e-324,
@@ -550,7 +527,7 @@ mod tests {
             1e9,
             f64::MAX,
         ] {
-            let pu = limits.torque_pu(full_scale, cap(nm));
+            let pu = limits.torque_pu(cap(nm));
             assert!(
                 (WIRE_TORQUE_PU_TICK..=1.0).contains(&pu),
                 "cap {nm} produced a torque {pu} outside the wire range"
@@ -561,6 +538,6 @@ mod tests {
             assert!(encoded > 0, "cap {nm} encoded as a cap of zero");
         }
         // No preference still means the configured ceiling, not a floor.
-        assert_eq!(limits.torque_pu(full_scale, None), 0.3);
+        assert_eq!(limits.torque_pu(None), 0.3);
     }
 }

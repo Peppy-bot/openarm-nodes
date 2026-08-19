@@ -147,7 +147,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     let limits = PosForceLimits::new(
         gripper_motor_type(hardware_version),
         params.speed_rad_s,
-        params.force_limit_pu,
+        params.max_effort_nm,
     )
     .map_err(node_err)?;
 
@@ -160,8 +160,8 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     );
     if hardware_version == HardwareVersion::V2 {
         info!(
-            "config: POS_FORCE speed={} rad/s grip-force ceiling={} pu",
-            params.speed_rad_s, params.force_limit_pu
+            "config: POS_FORCE speed={} rad/s grip-force ceiling={} N*m at the shaft",
+            params.speed_rad_s, params.max_effort_nm
         );
     }
 
