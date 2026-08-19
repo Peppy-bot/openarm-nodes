@@ -14,3 +14,6 @@ peppylib = { path = ".peppy/libs/peppylib" }
 [[bin]]
 name = "openarm_gripper_sim"
 path = "src/main.rs"
+
+[dev-dependencies]
+peppygen = { path = ".peppy/libs/peppygen", features = ["testing"] }

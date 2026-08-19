@@ -28,3 +28,6 @@ opt-level = 3
 
 [profile.dev.package.nalgebra]
 opt-level = 3
+
+[dev-dependencies]
+peppygen = { path = ".peppy/libs/peppygen", features = ["testing"] }
