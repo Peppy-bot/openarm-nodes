@@ -71,6 +71,13 @@ For Isaac, swap the engine node; the relays, initializer, backbone, and commande
 peppy node add /path/to/ws/openarm-nodes/openarm_sim_isaac -sb --idle-timeout 18000
 ```
 
+The `sim_cameras` launcher option, on either engine, additionally needs the camera relay nodes, which live in the separate [nodes-hub](https://github.com/Peppy-bot/nodes-hub) repo because nothing in them is OpenArm-specific:
+
+```sh
+peppy node add /path/to/ws/nodes-hub/sim_rgb_camera -sb --idle-timeout 1800
+peppy node add /path/to/ws/nodes-hub/sim_rgbd_camera -sb --idle-timeout 1800
+```
+
 Real robot:
 
 ```sh

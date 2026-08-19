@@ -1,0 +1,49 @@
+name: Twin files
+
+# openarm_sim_mujoco and openarm_sim_isaac differ only in how they drive their
+# simulator. The camera configuration, its parsing and wire conversion, and the
+# pairing transport are engine-agnostic, so they are duplicated byte for byte
+# rather than shared through a library the two engines' images would both have
+# to carry. A fix that lands in only one copy silently forks the engines, and
+# nothing else in the repository would catch it, so this job fails any push or
+# pull request that lets the pair drift.
+on:
+  pull_request:
+  push:
+
+concurrency:
+  group: twin-files-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sim-engine-twins-identical:
+    name: openarm_sim_mujoco and openarm_sim_isaac keep their shared camera and transport files identical
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Nothing here legitimately takes minutes; a hung step should fail fast
+    # rather than hold a runner for the default six hours.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Nothing here pushes, so the job has no use for a writable
+          # credential sitting in .git/config for every later step to inherit.
+          persist-credentials: false
+
+      - name: Diff each twin pair, byte for byte
+        run: |
+          set -uo pipefail
+          status=0
+          for f in robots/openarm/camera_common.py \
+                   robots/openarm/config/cameras.json5 \
+                   robots/openarm/sim_topics.py \
+                   tests/test_camera_common.py; do
+            if ! diff -u "openarm_sim_mujoco/$f" "openarm_sim_isaac/$f"; then
+              echo "openarm_sim_mujoco/$f and openarm_sim_isaac/$f must stay identical" >&2
+              status=1
+            fi
+          done
+          exit "$status"

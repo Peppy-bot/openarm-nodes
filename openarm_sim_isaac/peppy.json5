@@ -19,6 +19,14 @@
         { name: "joint_link", tag: "v1", role: "follower", link_id: "right_arm", optional: true },
         { name: "gripper_link", tag: "v1", role: "follower", link_id: "left_gripper", optional: true },
         { name: "gripper_link", tag: "v1", role: "follower", link_id: "right_gripper", optional: true },
+        // Robot-mounted cameras rendered from the live scene, one slot per
+        // camera (the slot is the camera, so no id demux). The engine plays the
+        // camera role; a per-camera relay presents the rgb/rgbd contract.
+        // Optional: slots stay unbound (and rendering stays off) outside record
+        // stacks; frames flow only when cameras_enabled is set.
+        { name: "sim_rgb_camera_link", tag: "v1", role: "camera", link_id: "wrist_left", optional: true },
+        { name: "sim_rgb_camera_link", tag: "v1", role: "camera", link_id: "wrist_right", optional: true },
+        { name: "sim_rgbd_camera_link", tag: "v1", role: "camera", link_id: "chest", optional: true },
       ],
     },
   },
@@ -29,6 +37,13 @@
         { link_id: "right_arm", name: "joint_states" },
         { link_id: "left_gripper", name: "gripper_states" },
         { link_id: "right_gripper", name: "gripper_states" },
+        { link_id: "wrist_left", name: "video_stream" },
+        { link_id: "wrist_left", name: "stream_info" },
+        { link_id: "wrist_right", name: "video_stream" },
+        { link_id: "wrist_right", name: "stream_info" },
+        { link_id: "chest", name: "video_stream" },
+        { link_id: "chest", name: "depth_stream" },
+        { link_id: "chest", name: "stream_info" },
       ],
       consumes: [
         { link_id: "left_arm", name: "joint_setpoints" },
@@ -60,6 +75,11 @@
       // viewer. Isaac's livestream host/port are handled by the streaming kit,
       // so there are no viewer_host/viewer_port params here (unlike mujoco).
       headless: { $type: "bool", $default: true },
+      // Render and stream the robot-mounted cameras (config/cameras.json5) on
+      // their pairing slots. No default: whether a stack renders cameras is
+      // the launcher's decision, and a launcher that leaves it unsaid fails
+      // here rather than coming up quietly camera-less.
+      cameras_enabled: "bool",
     },
   },
 }

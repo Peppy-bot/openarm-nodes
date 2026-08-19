@@ -39,15 +39,35 @@ _MUJOCO_DIR = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(_MUJOCO_DIR))
 from _launcher import SimLauncher
-from sim_topics import SimTopicIO
+from camera_common import CameraConfig, load_camera_configs, validate_camera_slots
+from sim_topics import COLOR_CAMERA_SLOT_NAMES, RGBD_CAMERA_SLOT_NAMES, SimTopicIO
+
+_CAMERAS_CONFIG_PATH = _MUJOCO_DIR / "config" / "cameras.json5"
 
 _ready = threading.Event()
 _stop = threading.Event()
 
 
+def _camera_configs(params) -> list[CameraConfig]:
+    """The cameras this launch renders, empty when the parameter is off. Parsed
+    here so a bad config fails node setup, before the scene is compiled around
+    it."""
+    if not params.cameras_enabled:
+        return []
+    if _version(params.hardware_version) != "v2":
+        raise ValueError(
+            "cameras_enabled requires hardware_version v2: the camera geometry "
+            "in config/cameras.json5 mounts on v2 links only"
+        )
+    cameras = load_camera_configs(_CAMERAS_CONFIG_PATH)
+    validate_camera_slots(cameras, COLOR_CAMERA_SLOT_NAMES, RGBD_CAMERA_SLOT_NAMES)
+    return cameras
+
+
 async def _run_sim(params, node_runner) -> list:
     # Typed peppygen pub/sub lives on this loop; declare publishers and start the
     # command-consume tasks before the sim thread starts reading from them.
+    cameras = _camera_configs(params)
     loop = asyncio.get_running_loop()
     io = SimTopicIO(node_runner, loop)
     await io.start()
@@ -65,6 +85,7 @@ async def _run_sim(params, node_runner) -> list:
                     params.headless,
                     params.viewer_host,
                     params.viewer_port,
+                    cameras,
                 ).run,
             )
         finally:

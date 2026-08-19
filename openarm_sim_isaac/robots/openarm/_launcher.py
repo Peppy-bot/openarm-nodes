@@ -25,6 +25,7 @@ class SimLauncher:
         stop: threading.Event,
         io,
         state_rate_hz: int,
+        cameras_enabled: bool,
     ) -> None:
         self._sim_app = sim_app
         self._usd_path = usd_path
@@ -35,6 +36,7 @@ class SimLauncher:
         self._stop = stop
         self._io = io
         self._state_rate_hz = state_rate_hz
+        self._cameras_enabled = cameras_enabled
         self._timeline = None
         self._world = None
         self._extension: Optional[IsaacBridgeExtension] = None
@@ -42,15 +44,21 @@ class SimLauncher:
     def run(self) -> None:
         try:
             self._load_stage()
-            self._setup_lighting()
-            self._warmup()
-            self._start_timeline()
-            self._extension = IsaacBridgeExtension(self._io, self._state_rate_hz)
-            logger.info("Scene loaded — waiting for bridge setup")
-            self._run_loop()
         except FileNotFoundError as exc:
             logger.error(str(exc))
             self._sim_app.close()
+            return
+        try:
+            self._setup_lighting()
+            if self._cameras_enabled:
+                self._configure_camera_rendering()
+            self._warmup()
+            self._start_timeline()
+            self._extension = IsaacBridgeExtension(
+                self._io, self._state_rate_hz, self._cameras_enabled
+            )
+            logger.info("Scene loaded — waiting for bridge setup")
+            self._run_loop()
         except Exception:
             logger.exception("SimLauncher.run failed")
             raise
@@ -74,6 +82,14 @@ class SimLauncher:
         light = UsdLux.DomeLight.Define(stage, Sdf.Path("/World/defaultDomeLight"))
         light.CreateIntensityAttr(1000)
         logger.info("Default dome light added to stage")
+
+    def _configure_camera_rendering(self) -> None:
+        import carb.settings
+
+        # Camera annotators are read right after each update; async rendering
+        # would desynchronize their data from the physics state just stepped.
+        carb.settings.get_settings().set("/app/asyncRendering", False)
+        logger.info("Async rendering disabled for camera capture")
 
     def _warmup(self) -> None:
         from omni.isaac.core import World  # pylint: disable=E0401

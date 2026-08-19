@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 
 from bridge_extension import MujocoBridgeExtension
+from camera_common import CameraConfig
+from exts.camera_sensor import compile_model_with_cameras
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ class SimLauncher:
         headless: bool,
         viewer_host: str,
         viewer_port: int,
+        cameras: list[CameraConfig],
     ) -> None:
         self._xml_path = xml_path
         self._ready = ready
@@ -37,6 +40,7 @@ class SimLauncher:
         self._headless = headless
         self._viewer_host = viewer_host
         self._viewer_port = viewer_port
+        self._cameras = cameras
 
     def run(self) -> None:
         import mujoco
@@ -49,11 +53,13 @@ class SimLauncher:
             raise FileNotFoundError(self._xml_path)
 
         logger.info(f"Loading model: {self._xml_path}")
-        model = mujoco.MjModel.from_xml_path(str(self._xml_path))
+        model = self._load_model()
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
 
-        extension = MujocoBridgeExtension(model, data, self._io, self._state_rate_hz)
+        extension = MujocoBridgeExtension(
+            model, data, self._io, self._state_rate_hz, self._cameras
+        )
         try:
             extension.startup()
             self._ready.set()
@@ -71,6 +77,14 @@ class SimLauncher:
         finally:
             extension.shutdown()
             self._ready.clear()
+
+    def _load_model(self):
+        """The scene as baked, or the scene plus the configured cameras."""
+        import mujoco
+
+        if not self._cameras:
+            return mujoco.MjModel.from_xml_path(str(self._xml_path))
+        return compile_model_with_cameras(self._xml_path, self._cameras)
 
     def _run_streamed(self, model, data, extension: MujocoBridgeExtension) -> None:
         import mujoco as _mujoco
