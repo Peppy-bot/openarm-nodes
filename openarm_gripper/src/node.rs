@@ -94,6 +94,14 @@ fn supervise(task: tokio::task::JoinHandle<()>, what: &'static str, token: Cance
 /// True once the follow loop has latched a hard CAN fault; read by `main`
 /// after the runtime returns (the `follow` module stays private to this
 /// crate).
+/// Readiness as the initializer sees it. A latched fault or a started
+/// shutdown revokes it: peppy keeps services reachable while the shutdown
+/// hooks run, so without the cancellation term a leader polling during a
+/// bounce would be told a limb is ready while its motor is being disabled.
+fn reports_ready(brought_up: bool, hard_faulted: bool, shutting_down: bool) -> bool {
+    brought_up && !hard_faulted && !shutting_down
+}
+
 pub fn hard_fault_latched() -> bool {
     follow::HARD_FAULT.load(Ordering::SeqCst)
 }
@@ -335,15 +343,15 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     {
         let runner = node_runner.clone();
         let ready = ready.clone();
+        let token = node_runner.cancellation_token().clone();
         tokio::spawn(async move {
             loop {
                 if let Err(e) = is_ready::handle_next_request(&runner, |_req| {
-                    // A latched fault revokes readiness immediately:
-                    // services stay reachable while shutdown hooks run,
-                    // and the gate must not see ready during a disable.
-                    Ok(is_ready::Response::new(
-                        ready.load(Ordering::SeqCst) && !follow::HARD_FAULT.load(Ordering::SeqCst),
-                    ))
+                    Ok(is_ready::Response::new(reports_ready(
+                        ready.load(Ordering::SeqCst),
+                        follow::HARD_FAULT.load(Ordering::SeqCst),
+                        token.is_cancelled(),
+                    )))
                 })
                 .await
                 {
@@ -396,6 +404,23 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_needs_bringup_and_is_revoked_by_a_fault_or_a_shutdown() {
+        assert!(reports_ready(true, false, false));
+        // Each revoking condition alone is enough, and bringup is required.
+        assert!(!reports_ready(false, false, false), "never brought up");
+        assert!(!reports_ready(true, true, false), "latched fault");
+        assert!(!reports_ready(true, false, true), "shutdown started");
+    }
+
+    #[test]
+    fn a_shutdown_revokes_readiness_before_the_disable_hook_finishes() {
+        // Services stay reachable while shutdown hooks run, so a limb that is
+        // still brought up and unfaulted must stop reporting ready the moment
+        // cancellation fires, not when the motor is finally disabled.
+        assert!(!reports_ready(true, false, true));
+    }
 
     #[test]
     fn a_rate_outside_the_expressible_range_is_named_not_panicked() {
