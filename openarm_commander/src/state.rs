@@ -229,6 +229,8 @@ pub struct UiState {
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
+    pub max_gripper_rate_frac_s: f64,
+    pub max_ee_angular_velocity_rad_s: f64,
     // Joint-slider jog feel, a node parameter so a deployment tunes the ramp without a
     // rebuild: the acceleration the streamed target ramps toward the slider under (the
     // whole jog is acceleration-limited). The backbone still governs the final ramp.
@@ -334,7 +336,9 @@ pub fn parse_timestamp_validity(
     live_for: Duration,
 ) -> Result<Validity, String> {
     // A timestamp ahead of the clock reads as age zero: forward skew is not backlog.
-    let age = clock_now.duration_since(timestamp).unwrap_or(Duration::ZERO);
+    let age = clock_now
+        .duration_since(timestamp)
+        .unwrap_or(Duration::ZERO);
     if age > live_for + TIMESTAMP_SKEW_ALLOWANCE {
         return Err(format!(
             "timestamp {} ms old is past its {} ms window",
@@ -446,6 +450,8 @@ impl UiState {
         d_stop: f64,
         d_safe: f64,
         max_ee_velocity_m_s: f64,
+        max_gripper_rate_frac_s: f64,
+        max_ee_angular_velocity_rad_s: f64,
         joint_jog_acceleration_rad_s2: f64,
     ) -> Self {
         Self {
@@ -458,6 +464,8 @@ impl UiState {
             d_stop,
             d_safe,
             max_ee_velocity_m_s,
+            max_gripper_rate_frac_s,
+            max_ee_angular_velocity_rad_s,
             joint_jog_acceleration_rad_s2,
             proximity: None,
             recorder: RecorderState::unavailable(),
@@ -544,8 +552,10 @@ mod tests {
             "exactly at the allowance still parses"
         );
         assert!(
-            parse(clock - (HEALTH_STALE_AFTER + TIMESTAMP_SKEW_ALLOWANCE + Duration::from_millis(1)))
-                .is_err(),
+            parse(
+                clock - (HEALTH_STALE_AFTER + TIMESTAMP_SKEW_ALLOWANCE + Duration::from_millis(1))
+            )
+            .is_err(),
             "a backlogged report must not be re-stamped fresh"
         );
         assert!(

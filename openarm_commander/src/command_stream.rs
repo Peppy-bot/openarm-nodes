@@ -87,6 +87,8 @@ pub async fn run(
                     g.d_stop,
                     g.d_safe,
                     g.max_ee_velocity_m_s,
+                    g.max_gripper_rate_frac_s,
+                    g.max_ee_angular_velocity_rad_s,
                 )
                 .map_err(|e| e.to_string()),
             )
@@ -136,7 +138,8 @@ pub async fn run(
             move || {
                 let frame = gripper_rx.borrow().grippers[side]?;
                 Some(pairing_timestamp().and_then(|timestamp| {
-                    build_gripper(timestamp, frame.opening, frame.max_effort).map_err(|e| e.to_string())
+                    build_gripper(timestamp, frame.opening, frame.max_effort)
+                        .map_err(|e| e.to_string())
                 }))
             },
         ));

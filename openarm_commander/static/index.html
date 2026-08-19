@@ -313,6 +313,10 @@
     <label style="display:flex; align-items:center; gap:6px;">
       Max EE (m/s)
       <input type="number" id="gov_max_ee" step="0.05" min="0.01" style="width:5.5em;" onchange="send_governor_params()">
+      <label for="gov_max_ee_ang">max ee turn (rad/s)</label>
+      <input type="number" id="gov_max_ee_ang" step="0.05" min="0.01" style="width:5.5em;" onchange="send_governor_params()">
+      <label for="gov_grip_rate">opening rate (/s)</label>
+      <input type="number" id="gov_grip_rate" step="0.5" min="0.01" style="width:5.5em;" onchange="send_governor_params()">
     </label>
   </div>
   <div class="row" id="record_row" style="display:none; justify-content:center; gap:10px; align-items:center;">
@@ -1165,6 +1169,8 @@ function apply_snapshot(snap) {
   reflect_governor_input('gov_d_stop', snap.d_stop);
   reflect_governor_input('gov_d_safe', snap.d_safe);
   reflect_governor_input('gov_max_ee', snap.max_ee_velocity_m_s);
+  reflect_governor_input('gov_grip_rate', snap.max_gripper_rate_frac_s);
+  reflect_governor_input('gov_max_ee_ang', snap.max_ee_angular_velocity_rad_s);
   update_proximity(snap);
   update_recorder(snap);
   update_health_chips(snap);
@@ -1435,10 +1441,16 @@ function send_governor_params() {
   const d_stop = parseFloat($('gov_d_stop').value);
   const d_safe = parseFloat($('gov_d_safe').value);
   const max_ee_velocity_m_s = parseFloat($('gov_max_ee').value);
+  const max_gripper_rate_frac_s = parseFloat($('gov_grip_rate').value);
+  const max_ee_angular_velocity_rad_s = parseFloat($('gov_max_ee_ang').value);
   // A blur on a half-edited field parses to NaN, which JSON.stringify serializes as
   // null; drop the update rather than send a null the backbone would reject.
-  if (![d_stop, d_safe, max_ee_velocity_m_s].every(Number.isFinite)) return;
-  ws.send(JSON.stringify({cmd: 'set_governor_params', d_stop, d_safe, max_ee_velocity_m_s}));
+  if (![d_stop, d_safe, max_ee_velocity_m_s, max_gripper_rate_frac_s,
+        max_ee_angular_velocity_rad_s].every(Number.isFinite)) return;
+  ws.send(JSON.stringify({
+    cmd: 'set_governor_params', d_stop, d_safe, max_ee_velocity_m_s, max_gripper_rate_frac_s,
+    max_ee_angular_velocity_rad_s,
+  }));
 }
 
 function connect() {

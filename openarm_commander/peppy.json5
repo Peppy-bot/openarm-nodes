@@ -124,6 +124,16 @@
       // governor_control and retunable from the UI. Require > 0. The sim launchers
       // set a permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
+      // Operator's launch opening rate (fraction per second), streamed live to the
+      // backbone on governor_control and retunable from the UI: 6.0 drives a full open
+      // or close in ~1/6 s. Require > 0. Kept in step with the backbone's default; the
+      // gripper's own speed_rad_s is the other limit and the lower of the two wins.
+      max_gripper_rate_frac_s: { $type: "f64", $default: 6.0 },
+      // Operator's launch end-effector angular-speed cap (rad/s), streamed live to the
+      // backbone on governor_control alongside the linear cap, which the servo and the
+      // trajectory planner apply as a pair. Require > 0. Kept in step with the
+      // backbone's.
+      max_ee_angular_velocity_rad_s: { $type: "f64", $default: 0.8 },
       // Joint-slider jog feel: the acceleration (rad/s^2) the streamed target ramps toward
       // the slider under. The whole jog is acceleration-limited (ramp up, brake to rest),
       // so this alone sets the smoothness. A node parameter so it can be tuned per

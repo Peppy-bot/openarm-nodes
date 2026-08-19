@@ -382,8 +382,13 @@ fn apply_controls(governor: &mut Governor, planners: &mut ArmPair<Planner>, cfg:
     // it, the planners budget planned moves at admission and step streamed
     // poses with it.
     governor.set_ee_cap(cfg.max_ee_velocity_m_s);
-    planners.left.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
-    planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
+    governor.set_gripper_rate(cfg.max_gripper_rate_frac_s);
+    planners
+        .left
+        .set_ee_caps(cfg.max_ee_velocity_m_s, cfg.max_ee_angular_velocity_rad_s);
+    planners
+        .right
+        .set_ee_caps(cfg.max_ee_velocity_m_s, cfg.max_ee_angular_velocity_rad_s);
 }
 
 /// Judge each arm's follower before commanding it.
