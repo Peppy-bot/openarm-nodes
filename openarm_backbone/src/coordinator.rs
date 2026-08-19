@@ -119,7 +119,11 @@ struct GripperMove {
     started: Instant,
     /// Nominal chase duration; the runtime aborts once the move runs past
     /// `MOTION_TIMEOUT_FACTOR` times this, exactly as the arm servo does.
+    /// Re-budgeted by [`budget_after_rate_change`] when the operator slows the
+    /// opening rate mid-move.
     budget_s: f64,
+    /// The opening rate `budget_s` was last computed against.
+    rate_frac_s: f64,
     _busy: BusyGuard,
 }
 
@@ -164,7 +168,6 @@ pub async fn run(
     // side idles) so governing always ramps from where the fingers really are;
     // the opening rate is read from the governor (its single owner) rather than
     // carried here.
-    let gripper_rate = governor.max_gripper_rate_frac_s();
     let mut governed_grippers = ArmPair::new(
         gripper_fraction(&channels.left.gripper),
         gripper_fraction(&channels.right.gripper),
@@ -197,17 +200,16 @@ pub async fn run(
     };
     // The grippers chase their target at the gripper rate exactly as the planner
     // velocity-limits the arm candidates; an idle side chases nowhere.
-    let chase_gripper = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
-        rate_limited(
-            prev_frac,
-            target.map_or(prev_frac, |t| t.frac),
-            gripper_rate,
-            dt,
-        )
+    let chase_gripper = |prev_frac: f64, target: Option<GripperTarget>, rate: f64| -> f64 {
+        rate_limited(prev_frac, target.map_or(prev_frac, |t| t.frac), rate, dt)
     };
     loop {
         consume_streams_of_busy_sides(&channels);
         apply_controls(&mut governor, &mut planners, *governor_config.borrow());
+        // Re-read every tick: the operator retunes this live, and the chase, the
+        // move budget and the governor's own clamp must agree within a tick or a
+        // move budgeted at one rate is driven at another and times out short.
+        let gripper_rate = governor.max_gripper_rate_frac_s();
         let now = Instant::now();
 
         let arm_admission = admit_arms(&mut arm_liveness, &channels, now, stale_limit);
@@ -255,8 +257,8 @@ pub async fn run(
         let cand = GovState::new(
             arm_candidate,
             ArmPair::new(
-                chase_gripper(prev.grippers.left, targets.left),
-                chase_gripper(prev.grippers.right, targets.right),
+                chase_gripper(prev.grippers.left, targets.left, gripper_rate),
+                chase_gripper(prev.grippers.right, targets.right, gripper_rate),
             ),
         );
         let measured = measured_config(&channels, &prev, measured_grippers);
@@ -382,6 +384,7 @@ fn apply_controls(governor: &mut Governor, planners: &mut ArmPair<Planner>, cfg:
     // it, the planners budget planned moves at admission and step streamed
     // poses with it.
     governor.set_ee_cap(cfg.max_ee_velocity_m_s);
+    governor.set_gripper_rate(cfg.max_gripper_rate_frac_s);
     planners.left.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
     planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
 }
@@ -746,6 +749,28 @@ fn gripper_move_budget_s(governed_frac: f64, target_frac: f64, gripper_rate_frac
     (target_frac - governed_frac).abs() / gripper_rate_frac_s
 }
 
+/// A live move's deadline, moved with the rate that drives it. The chase
+/// follows a retuned opening rate on the next tick, so a move budgeted at a
+/// faster one would be judged against a deadline its own motion can no longer
+/// meet and would abort short of its target.
+///
+/// Only a slowdown extends the budget. Speeding up returns it unchanged: the
+/// move lands sooner anyway, and shrinking a deadline under a move that has
+/// already legitimately spent time against the old rate would abort it for
+/// going fast. The extension scales what is *left* of the budget, never what is
+/// spent, so a gripper that is simply stuck still runs out of it.
+fn budget_after_rate_change(
+    budget_s: f64,
+    budgeted_at_frac_s: f64,
+    elapsed_s: f64,
+    rate_frac_s: f64,
+) -> f64 {
+    if !(rate_frac_s.is_finite() && rate_frac_s > 0.0) || rate_frac_s >= budgeted_at_frac_s {
+        return budget_s;
+    }
+    elapsed_s + (budget_s - elapsed_s).max(0.0) * budgeted_at_frac_s / rate_frac_s
+}
+
 /// Admit a queued gripper goal into a free side and drive an in-flight move to
 /// its terminal: the governed chase landing on the target completes it,
 /// cancellation ends it, and overrunning the budget sized at admission fails it
@@ -770,6 +795,7 @@ async fn service_gripper_move(
                 ctx: goal.ctx,
                 started: now,
                 budget_s: gripper_move_budget_s(governed_frac, goal.opening, gripper_rate_frac_s),
+                rate_frac_s: gripper_rate_frac_s,
                 _busy: BusyGuard(channels.gripper_busy.clone()),
             });
         } else {
@@ -777,8 +803,14 @@ async fn service_gripper_move(
                 .await;
         }
     }
-    let Some(m) = mv.as_ref() else { return };
+    let Some(m) = mv.as_mut() else { return };
     let elapsed_s = now.duration_since(m.started).as_secs_f64();
+    if gripper_rate_frac_s.is_finite() && gripper_rate_frac_s > 0.0 {
+        m.budget_s =
+            budget_after_rate_change(m.budget_s, m.rate_frac_s, elapsed_s, gripper_rate_frac_s);
+        m.rate_frac_s = gripper_rate_frac_s;
+    }
+    let m = &*m;
     let landed = (governed_frac - m.target_frac).abs() <= GRIPPER_LANDED_FRAC;
     let (success, message, cancelled) = if m.ctx.is_cancelled() {
         (false, "goal cancelled".to_string(), true)
@@ -985,6 +1017,57 @@ mod tests {
     // The gripper budget mirrors the arm servo's rollout: the commanded travel
     // at the opening rate, so a long move earns a long leash and a short one
     // stays tight.
+    #[test]
+    fn halving_the_opening_rate_mid_move_doubles_what_is_left_of_the_budget() {
+        // A full stroke at 6 /s budgets 1/6 s. A third of the way through, the
+        // operator halves the rate: the remaining two thirds now need twice as
+        // long, and the time already spent is not rescaled.
+        let budget = gripper_move_budget_s(0.0, 1.0, 6.0);
+        let elapsed = budget / 3.0;
+        let extended = budget_after_rate_change(budget, 6.0, elapsed, 3.0);
+        assert!(
+            (extended - (elapsed + (budget - elapsed) * 2.0)).abs() < 1e-12,
+            "expected the remaining budget to double, got {extended}"
+        );
+        assert!(
+            extended > budget,
+            "a slower rate must never shorten the deadline"
+        );
+    }
+
+    #[test]
+    fn raising_the_rate_mid_move_never_shortens_the_deadline() {
+        // The move lands sooner on its own; pulling the deadline in would
+        // abort a move for the time it legitimately spent at the old rate.
+        let budget = gripper_move_budget_s(0.0, 1.0, 3.0);
+        assert_eq!(
+            budget_after_rate_change(budget, 3.0, budget * 0.9, 12.0),
+            budget
+        );
+    }
+
+    #[test]
+    fn a_stuck_gripper_still_runs_out_of_budget_at_a_steady_rate() {
+        // The extension scales what is left, never what is spent, so a move
+        // that never progresses still trips the timeout at an unchanged rate.
+        let budget = gripper_move_budget_s(0.0, 1.0, 6.0);
+        let elapsed = budget * MOTION_TIMEOUT_FACTOR + 0.01;
+        assert_eq!(budget_after_rate_change(budget, 6.0, elapsed, 6.0), budget);
+        assert!(motion_timed_out(elapsed, budget));
+    }
+
+    #[test]
+    fn an_unusable_rate_leaves_the_budget_alone() {
+        let budget = gripper_move_budget_s(0.0, 1.0, 6.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                budget_after_rate_change(budget, 6.0, 0.01, bad),
+                budget,
+                "rate {bad}"
+            );
+        }
+    }
+
     #[test]
     fn gripper_budget_is_the_commanded_travel_at_the_opening_rate() {
         const RATE: f64 = 3.0;

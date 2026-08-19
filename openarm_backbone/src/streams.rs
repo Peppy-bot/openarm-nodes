@@ -417,6 +417,7 @@ pub struct GovernorConfig {
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
+    pub max_gripper_rate_frac_s: f64,
 }
 
 /// Receive the `governor_control` stream forever, mirroring the latest governor
@@ -438,6 +439,7 @@ pub async fn run_governor_config_listener(
                     d_stop: msg.d_stop,
                     d_safe: msg.d_safe,
                     max_ee_velocity_m_s: msg.max_ee_velocity_m_s,
+                    max_gripper_rate_frac_s: msg.max_gripper_rate_frac_s,
                 });
             }
             Ok(None) => return,

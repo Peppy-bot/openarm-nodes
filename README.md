@@ -6,8 +6,7 @@
 |---|---|
 | [`openarm_robot_initializer`](./openarm_robot_initializer) | aggregates per-limb readiness into `is_ready` |
 | [`openarm_arm`](./openarm_arm) | drives one arm side (7 joints) |
-| [`openarm_gripper`](./openarm_gripper) | drives one gripper side (v1.0 prismatic) |
-| [`openarm_gripper_v2`](./openarm_gripper_v2) | drives one gripper side (v2.0 pinch) |
+| [`openarm_gripper`](./openarm_gripper) | drives one gripper side (v1.0 prismatic or v2.0 pinch, by `hardware_version`) |
 | [`openarm_arm_sim`](./openarm_arm_sim) | relays one arm side between the backbone and a sim engine |
 | [`openarm_gripper_sim`](./openarm_gripper_sim) | relays one gripper side between the backbone and a sim engine |
 | [`openarm_sim_mujoco`](./openarm_sim_mujoco) | MuJoCo engine: the physics behind the relays |
@@ -45,6 +44,7 @@ peppy service serve &
 
 peppy repo add /path/to/ws/contracts-hub
 peppy repo add /path/to/ws/openarm-nodes
+peppy repo add /path/to/ws/launchers-hub
 peppy repo refresh
 ```
 
@@ -79,7 +79,9 @@ peppy node add /path/to/ws/openarm-nodes/openarm_arm -sb --idle-timeout 1800
 peppy node add /path/to/ws/openarm-nodes/openarm_gripper -sb --idle-timeout 1800
 ```
 
-On v2.0 hardware, build `openarm_gripper_v2` in place of `openarm_gripper`.
+Both hardware generations run the same nodes; the launcher's `hardware_version` argument selects which one each arm and gripper drives.
+
+Upgrading a v2.0 rig from `openarm_gripper_v2`: stop and remove any gripper instance running that node before launching. Both nodes drive the same motor id on the same bus, but the old one holds a different instance lock, so nothing would stop the two from commanding one gripper at once.
 
 After changing a node's code, rebuild it by re-running the same command with `--force` added.
 
@@ -93,13 +95,13 @@ Every node you added should show `Stage: Ready`. If one is stuck at an earlier s
 
 ## 4. Launch the stack
 
-The launcher names the engine, so pick the one matching the nodes built above:
+The `--with=` selection names the engine, so pick the one matching the nodes built above:
 
 ```sh
 # MuJoCo
-peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.json5
+peppy stack launch openarm_v2 --with=mujoco
 # Isaac
-peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_isaac.json5
+peppy stack launch openarm_v2 --with=isaac_sim
 ```
 
 The launcher starts the instances in dependency order (sim first, then arms and grippers, then backbone, then the UI) and wires them together. Once it prints `Launch complete`:

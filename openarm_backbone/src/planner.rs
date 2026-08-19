@@ -357,9 +357,12 @@ impl Planner {
     /// This copy budgets planned moves at admission, paces the servo
     /// reference, and steps streamed poses; a streamed joint command is capped
     /// only by the governor's EE-speed limiter, retuned from the same control
-    /// message. The live control rescales the linear cap only; the angular cap
-    /// is launch-time. Ignores a non-positive or non-finite value, keeping the
-    /// current cap.
+    /// message. The live control rescales the linear cap only: the linear cap
+    /// is enforced twice, by this servo and by the governor's EE-speed limiter,
+    /// so it binds on any streamed hand, while the angular cap is enforced only
+    /// here and a joint stream never reaches this arm of `follow_target`. A
+    /// live angular control would read as doing nothing on a joint stream, so
+    /// it stays a launch parameter until the governor limits turn rate too.
     pub fn set_max_ee_velocity(&mut self, v: f64) {
         if v.is_finite() && v > 0.0 {
             self.cfg.ee.linear_m_s = v;

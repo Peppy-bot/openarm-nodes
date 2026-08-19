@@ -87,6 +87,10 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
         "max_ee_velocity_m_s must be a positive finite number"
     );
     assert!(
+        governor::valid_gripper_rate(params.max_gripper_rate_frac_s),
+        "max_gripper_rate_frac_s must be finite and large enough to make progress"
+    );
+    assert!(
         params.max_ee_angular_velocity_rad_s.is_finite()
             && params.max_ee_angular_velocity_rad_s > 0.0,
         "max_ee_angular_velocity_rad_s must be a positive finite number"
@@ -181,6 +185,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
             .copied()
             .fold(0.0_f64, f64::max),
         params.max_ee_velocity_m_s,
+        params.max_gripper_rate_frac_s,
         params.collision_governor_enabled,
     )
     .unwrap_or_else(|e| panic!("build self-collision governor: {e}"));
@@ -251,6 +256,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
         d_stop: params.d_stop_m,
         d_safe: params.d_safe_m,
         max_ee_velocity_m_s: params.max_ee_velocity_m_s,
+        max_gripper_rate_frac_s: params.max_gripper_rate_frac_s,
     });
 
     let channels = ArmPair::new(

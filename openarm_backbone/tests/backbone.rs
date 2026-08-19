@@ -61,6 +61,7 @@ fn params() -> peppygen::Parameters {
         hardware_version: "v1".to_string(),
         max_ee_angular_velocity_rad_s: 0.8,
         max_ee_velocity_m_s: 2.0,
+        max_gripper_rate_frac_s: 6.0,
         max_joint_velocity_rad_s_1: 16.754666,
         max_joint_velocity_rad_s_2: 16.754666,
         max_joint_velocity_rad_s_3: 5.445426,
@@ -250,7 +251,10 @@ async fn start_ready_vacant(
 async fn a_leader_command_fans_through_to_the_governed_arm_wire() -> peppygen::Result<()> {
     let (harness, mocks) = start_ready_vacant(params()).await?;
 
-    pump_is_ready(mocks.deps.robot_init.is_ready, Arc::new(AtomicBool::new(true)));
+    pump_is_ready(
+        mocks.deps.robot_init.is_ready,
+        Arc::new(AtomicBool::new(true)),
+    );
     pump_arm_at_home!(
         mocks.pairings.left_arm_link.joint_states,
         peppygen::paired_topics::left_arm_link::joint_states
@@ -327,7 +331,10 @@ async fn move_arm_joints_streams_a_trajectory_the_arm_follows_to_the_target() ->
     .await?;
     assert!(mocks.deps.collision_ctrl.is_some());
 
-    pump_is_ready(mocks.deps.robot_init.is_ready, Arc::new(AtomicBool::new(true)));
+    pump_is_ready(
+        mocks.deps.robot_init.is_ready,
+        Arc::new(AtomicBool::new(true)),
+    );
     let followed = spawn_left_arm_follower(
         mocks.pairings.left_arm_link.joint_states,
         mocks.pairings.left_arm_link.joint_setpoints,
@@ -373,8 +380,11 @@ async fn move_arm_joints_streams_a_trajectory_the_arm_follows_to_the_target() ->
     // `final_joint_positions` is the measured pose at the terminal, i.e. what
     // the arm mock echoed back: the follower observed the commanded motion
     // arrive at the target.
-    for (joint, (reached, commanded)) in
-        data.final_joint_positions.iter().zip(target.iter()).enumerate()
+    for (joint, (reached, commanded)) in data
+        .final_joint_positions
+        .iter()
+        .zip(target.iter())
+        .enumerate()
     {
         assert!(
             (reached - commanded).abs() < 0.05,
@@ -417,7 +427,9 @@ async fn the_coordinator_holds_everything_until_robot_init_reports_ready() -> pe
     // And the downstream wire stays silent: no publisher, no setpoints.
     let mut left_wire = mocks.pairings.left_arm_link.joint_setpoints;
     assert!(
-        tokio::time::timeout(READ_WINDOW, left_wire.next()).await.is_err(),
+        tokio::time::timeout(READ_WINDOW, left_wire.next())
+            .await
+            .is_err(),
         "a governed setpoint escaped while the robot was not ready"
     );
 
@@ -454,7 +466,10 @@ async fn a_closing_command_inside_d_stop_reads_stopped_on_collision_status() -> 
     let d_stop_m = wide.d_stop_m;
     let (mut harness, mocks) = start_ready_vacant(wide).await?;
 
-    pump_is_ready(mocks.deps.robot_init.is_ready, Arc::new(AtomicBool::new(true)));
+    pump_is_ready(
+        mocks.deps.robot_init.is_ready,
+        Arc::new(AtomicBool::new(true)),
+    );
     pump_arm_at_home!(
         mocks.pairings.left_arm_link.joint_states,
         peppygen::paired_topics::left_arm_link::joint_states
@@ -476,12 +491,14 @@ async fn a_closing_command_inside_d_stop_reads_stopped_on_collision_status() -> 
     let publish_commands = || async {
         left_leader.publish(&leader_command(inward_left)).await?;
         right_leader
-            .publish(&peppygen::paired_topics::leader_right_arm::joint_setpoints::Message {
-                timestamp: SystemTime::now(),
-                positions: inward_right.to_vec(),
-                velocities: Vec::new(),
-                efforts: Vec::new(),
-            })
+            .publish(
+                &peppygen::paired_topics::leader_right_arm::joint_setpoints::Message {
+                    timestamp: SystemTime::now(),
+                    positions: inward_right.to_vec(),
+                    velocities: Vec::new(),
+                    efforts: Vec::new(),
+                },
+            )
             .await
     };
 

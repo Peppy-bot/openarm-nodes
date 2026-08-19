@@ -27,6 +27,7 @@ pub fn test_parameters() -> peppygen::Parameters {
         hardware_version: "v2".to_string(),
         joint_jog_acceleration_rad_s2: 10.0,
         max_ee_velocity_m_s: 0.5,
+        max_gripper_rate_frac_s: 6.0,
     }
 }
 

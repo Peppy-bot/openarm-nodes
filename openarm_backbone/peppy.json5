@@ -306,6 +306,13 @@
       // (openarm_commander) governs. Require > 0. The sim launchers set a
       // permissive value; the real arm a conservative one.
       max_ee_velocity_m_s: "f64",
+      // Largest rate (opening fraction per second) a gripper opening is driven at:
+      // 6.0 drives a full open or close in ~1/6 s. Used until the first
+      // governor_control message; after that the commander's streamed rate governs.
+      // Require finite and >= 0.01. The gripper node and its motor own the real
+      // opening speed, which is the lower of the two; this bounds the step the
+      // collision floor scan has to probe, so raising it costs probes per tick.
+      max_gripper_rate_frac_s: { $type: "f64", $default: 6.0 },
       // Cutoff (Hz) for the first-order low-pass on each published desired velocity.
       // Desired velocity is a per-tick position delta scaled by the control rate, so it
       // amplifies setpoint noise; filtering it keeps the arm's Kd term from buzzing on a

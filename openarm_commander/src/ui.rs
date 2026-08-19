@@ -255,6 +255,7 @@ struct Snapshot {
     d_stop: f64,
     d_safe: f64,
     max_ee_velocity_m_s: f64,
+    max_gripper_rate_frac_s: f64,
     // Live nearest-pair proximity from the backbone (null until the first report).
     proximity: Option<ProximityView>,
     // Motor health with severity fully computed server-side; the browser's
@@ -458,6 +459,7 @@ impl Snapshot {
             d_stop: s.d_stop,
             d_safe: s.d_safe,
             max_ee_velocity_m_s: s.max_ee_velocity_m_s,
+            max_gripper_rate_frac_s: s.max_gripper_rate_frac_s,
             recorder: s.recorder.available.then(|| RecorderView {
                 recording: s.recorder.episode.is_some(),
                 finishing: s.recorder.finishing,
@@ -778,6 +780,7 @@ pub(crate) enum Command {
         d_stop: f64,
         d_safe: f64,
         max_ee_velocity_m_s: f64,
+        max_gripper_rate_frac_s: f64,
     },
     // Play a named gesture from the baked library. Refused while its sides
     // stream, a move is in flight, or another gesture is playing.
@@ -849,7 +852,7 @@ mod tests {
     }
 
     fn ui_state() -> UiState {
-        UiState::new(true, 0.005, 0.02, 0.25, 10.0)
+        UiState::new(true, 0.005, 0.02, 0.25, 6.0, 10.0)
     }
 
     /// A state with health producers bound, as every wired deployment has.
@@ -1145,6 +1148,7 @@ mod tests {
                 "left_enabled",
                 "left_gripper",
                 "max_ee_velocity_m_s",
+                "max_gripper_rate_frac_s",
                 "proximity",
                 "recorder",
                 "right_arm",
