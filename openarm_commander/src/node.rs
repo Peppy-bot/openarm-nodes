@@ -66,6 +66,10 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
             && params.d_stop < params.d_safe,
         "governor band must satisfy 0 < d_stop < d_safe"
     );
+    assert!(
+        params.max_gripper_rate_frac_s.is_finite() && params.max_gripper_rate_frac_s > 0.0,
+        "max_gripper_rate_frac_s must be a positive finite number"
+    );
     let state = state::UiState::new(
         params.collision_governor_enabled,
         params.d_stop,
