@@ -357,15 +357,15 @@ impl Planner {
     /// This copy budgets planned moves at admission, paces the servo
     /// reference, and steps streamed poses; a streamed joint command is capped
     /// only by the governor's EE-speed limiter, retuned from the same control
-    /// message. Both caps travel together because the servo and the trajectory
-    /// planner apply them as a pair. Each is checked on its own, so one bad
-    /// value keeps its current cap without discarding the other.
-    pub fn set_ee_caps(&mut self, linear_m_s: f64, angular_rad_s: f64) {
-        if linear_m_s.is_finite() && linear_m_s > 0.0 {
-            self.cfg.ee.linear_m_s = linear_m_s;
-        }
-        if angular_rad_s.is_finite() && angular_rad_s > 0.0 {
-            self.cfg.ee.angular_rad_s = angular_rad_s;
+    /// message. The live control rescales the linear cap only: the linear cap
+    /// is enforced twice, by this servo and by the governor's EE-speed limiter,
+    /// so it binds on any streamed hand, while the angular cap is enforced only
+    /// here and a joint stream never reaches this arm of `follow_target`. A
+    /// live angular control would read as doing nothing on a joint stream, so
+    /// it stays a launch parameter until the governor limits turn rate too.
+    pub fn set_max_ee_velocity(&mut self, v: f64) {
+        if v.is_finite() && v > 0.0 {
+            self.cfg.ee.linear_m_s = v;
         }
     }
 

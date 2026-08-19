@@ -72,7 +72,9 @@ where
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         publish().await?;
-        let snapshot = ws.next_snapshot(Duration::from_secs(5), "snapshot pass").await;
+        let snapshot = ws
+            .next_snapshot(Duration::from_secs(5), "snapshot pass")
+            .await;
         if done(&snapshot) {
             return Ok(snapshot);
         }
@@ -194,9 +196,11 @@ async fn consumed_topics_surface_on_the_panel() -> peppygen::Result<()> {
             status == "pending" || status == "not_reporting",
             "right health must never go live off an unclassifiable producer, got {status}"
         );
-        assert!(snapshot["health"]["right"]["motors"]
-            .as_array()
-            .is_some_and(Vec::is_empty));
+        assert!(
+            snapshot["health"]["right"]["motors"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        );
     }
 
     harness.shutdown().await

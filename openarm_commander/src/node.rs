@@ -72,7 +72,6 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
         params.d_safe,
         params.max_ee_velocity_m_s,
         params.max_gripper_rate_frac_s,
-        params.max_ee_angular_velocity_rad_s,
         params.joint_jog_acceleration_rad_s2,
     );
 

@@ -230,7 +230,6 @@ pub struct UiState {
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
     pub max_gripper_rate_frac_s: f64,
-    pub max_ee_angular_velocity_rad_s: f64,
     // Joint-slider jog feel, a node parameter so a deployment tunes the ramp without a
     // rebuild: the acceleration the streamed target ramps toward the slider under (the
     // whole jog is acceleration-limited). The backbone still governs the final ramp.
@@ -451,7 +450,6 @@ impl UiState {
         d_safe: f64,
         max_ee_velocity_m_s: f64,
         max_gripper_rate_frac_s: f64,
-        max_ee_angular_velocity_rad_s: f64,
         joint_jog_acceleration_rad_s2: f64,
     ) -> Self {
         Self {
@@ -465,7 +463,6 @@ impl UiState {
             d_safe,
             max_ee_velocity_m_s,
             max_gripper_rate_frac_s,
-            max_ee_angular_velocity_rad_s,
             joint_jog_acceleration_rad_s2,
             proximity: None,
             recorder: RecorderState::unavailable(),

@@ -18,7 +18,8 @@ use tracing::error;
 use crate::consumer;
 use crate::owner::Feedback;
 use crate::state::{
-    HEALTH_STALE_AFTER, HealthLevel, HealthReport, MotorHealthReading, Side, parse_timestamp_validity,
+    HEALTH_STALE_AFTER, HealthLevel, HealthReport, MotorHealthReading, Side,
+    parse_timestamp_validity,
 };
 
 /// Whether this deployment binds any motor_health producer.
@@ -129,7 +130,8 @@ fn parse_component<const MOTORS: usize>(
     clock_now: SystemTime,
     received_at: Instant,
 ) -> Result<HealthReport<MOTORS>, String> {
-    let validity = parse_timestamp_validity(msg.timestamp, clock_now, received_at, HEALTH_STALE_AFTER)?;
+    let validity =
+        parse_timestamp_validity(msg.timestamp, clock_now, received_at, HEALTH_STALE_AFTER)?;
     let wire_levels: [u8; MOTORS] = msg
         .level
         .as_slice()

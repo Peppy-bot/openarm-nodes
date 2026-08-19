@@ -491,10 +491,10 @@ impl Governor {
             return;
         }
         if !valid_gripper_rate(max_gripper_rate_frac_s) {
-            warn!("collision: ignoring invalid opening rate ({max_gripper_rate_frac_s})");
+            warn!("collision: ignoring invalid gripper opening rate ({max_gripper_rate_frac_s})");
             return;
         }
-        info!("opening rate set to {max_gripper_rate_frac_s} /s");
+        info!("gripper opening rate set to {max_gripper_rate_frac_s} /s");
         self.max_gripper_rate_frac_s = max_gripper_rate_frac_s;
     }
 

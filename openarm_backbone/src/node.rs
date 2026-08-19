@@ -257,7 +257,6 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
         d_safe: params.d_safe_m,
         max_ee_velocity_m_s: params.max_ee_velocity_m_s,
         max_gripper_rate_frac_s: params.max_gripper_rate_frac_s,
-        max_ee_angular_velocity_rad_s: params.max_ee_angular_velocity_rad_s,
     });
 
     let channels = ArmPair::new(

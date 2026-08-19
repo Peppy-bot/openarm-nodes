@@ -52,7 +52,9 @@ async fn panel_commands_drive_backbone_and_recorder() -> peppygen::Result<()> {
         "joints": TARGET_JOINTS,
         "duration_s": 0.0,
     });
-    ws.send_text(&command.to_string()).await.expect("send fire_arm");
+    ws.send_text(&command.to_string())
+        .await
+        .expect("send fire_arm");
 
     let pending = mocks
         .deps

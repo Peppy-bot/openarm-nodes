@@ -87,7 +87,6 @@ pub async fn run(
                     g.d_stop,
                     g.d_safe,
                     g.max_ee_velocity_m_s,
-                    g.max_ee_angular_velocity_rad_s,
                     g.max_gripper_rate_frac_s,
                 )
                 .map_err(|e| e.to_string()),
