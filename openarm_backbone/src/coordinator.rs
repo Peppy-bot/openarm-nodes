@@ -164,7 +164,6 @@ pub async fn run(
     // side idles) so governing always ramps from where the fingers really are;
     // the opening rate is read from the governor (its single owner) rather than
     // carried here.
-    let gripper_rate = governor.max_gripper_rate_frac_s();
     let mut governed_grippers = ArmPair::new(
         gripper_fraction(&channels.left.gripper),
         gripper_fraction(&channels.right.gripper),
@@ -197,17 +196,16 @@ pub async fn run(
     };
     // The grippers chase their target at the gripper rate exactly as the planner
     // velocity-limits the arm candidates; an idle side chases nowhere.
-    let chase_gripper = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
-        rate_limited(
-            prev_frac,
-            target.map_or(prev_frac, |t| t.frac),
-            gripper_rate,
-            dt,
-        )
+    let chase_gripper = |prev_frac: f64, target: Option<GripperTarget>, rate: f64| -> f64 {
+        rate_limited(prev_frac, target.map_or(prev_frac, |t| t.frac), rate, dt)
     };
     loop {
         consume_streams_of_busy_sides(&channels);
         apply_controls(&mut governor, &mut planners, *governor_config.borrow());
+        // Re-read every tick: the operator retunes this live, and the chase, the
+        // move budget and the governor's own clamp must agree within a tick or a
+        // move budgeted at one rate is driven at another and times out short.
+        let gripper_rate = governor.max_gripper_rate_frac_s();
         let now = Instant::now();
 
         let arm_admission = admit_arms(&mut arm_liveness, &channels, now, stale_limit);
@@ -255,8 +253,8 @@ pub async fn run(
         let cand = GovState::new(
             arm_candidate,
             ArmPair::new(
-                chase_gripper(prev.grippers.left, targets.left),
-                chase_gripper(prev.grippers.right, targets.right),
+                chase_gripper(prev.grippers.left, targets.left, gripper_rate),
+                chase_gripper(prev.grippers.right, targets.right, gripper_rate),
             ),
         );
         let measured = measured_config(&channels, &prev, measured_grippers);
