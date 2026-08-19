@@ -1,17 +1,20 @@
 // Ambient following of a streamed gripper opening fraction: drive the motor
-// toward the latest command; with none yet, hold (the motor's PD keeps its last
-// setpoint, so we simply do not re-command). Either way the loop receives and
-// refreshes the motor state every tick, so the always-on state publisher serves
-// a live reading rather than one frozen at bring-up until the first command
-// (the arm control loop reads state every tick the same way). The opening is
-// commanded directly; the motor's PD eases to it.
+// toward the latest command; with none yet, hold (the motor keeps its last
+// setpoint, so we simply do not re-command). Either way the loop
+// receives and refreshes the motor state every tick, so the always-on state
+// publisher serves a live reading rather than one frozen at bring-up until the
+// first command (the arm control loop reads state every tick the same way).
+// The opening is commanded directly; the motor eases to it. Which control mode
+// carries that command, and whether the effort cap reaches the wire, is the
+// gripper's own business (hardware.rs), so this loop is the same for both
+// generations.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use control_core::motor_health::{NOT_DRIVING_ESCALATE_AFTER, STATE_STALE_AFTER};
-use openarm_can::{CanErrorThrottle, GripperCan, Mit};
+use openarm_can::CanErrorThrottle;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{oneshot, watch};
 use tokio::time::MissedTickBehavior;
@@ -19,12 +22,7 @@ use tracing::error;
 
 use crate::command_stream::GripperCommand;
 use crate::drive::{self, Verdict};
-use crate::geometry;
-
-// V10 gripper gains, matching the openarm teleop follower (config/follower.yaml
-// gripper entry). Hardcoded, not configurable in the ROS2 reference either.
-pub const KP: f64 = 16.0;
-pub const KD: f64 = 0.2;
+use crate::hardware::Gripper;
 
 /// Set when the loop stops on a hard fault, so main can exit non-zero after
 /// the shutdown hooks have run and the daemon records the instance as failed
@@ -40,7 +38,7 @@ pub struct ControlConfig {
 }
 
 pub async fn run(
-    gripper: Arc<Mutex<GripperCan<Mit>>>,
+    gripper: Arc<Mutex<Gripper>>,
     cmd: watch::Receiver<Option<GripperCommand>>,
     cfg: ControlConfig,
     token: CancellationToken,
@@ -99,9 +97,7 @@ pub async fn run(
         // Command only when there is a target; refresh state every tick either way.
         let sent = (|| {
             if let Some(command) = command {
-                let target_motor_rad =
-                    geometry::fraction_to_motor_rad(command.opening.clamp(0.0, 1.0));
-                g.mit_control(KP, KD, target_motor_rad, 0.0, 0.0)?;
+                g.command(command.opening, command.max_effort)?;
             }
             g.refresh_all()
         })();

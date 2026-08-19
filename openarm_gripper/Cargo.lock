@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "RustyXML"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b5ace29ee3216de37c0546865ad08edef58b0f9e76838ed8959a84a990e58c5"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2290,11 +2296,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "openarm_description"
+version = "0.1.0"
+source = "git+https://github.com/Peppy-bot/public-peppy-libs?branch=main#13576ca083eb3fec445362757324479b69c2ae25"
+dependencies = [
+ "urdf-rs",
+]
+
+[[package]]
 name = "openarm_gripper"
 version = "0.1.0"
 dependencies = [
  "control_core",
  "openarm_can",
+ "openarm_description",
  "peppygen",
  "peppylib",
  "tokio",
@@ -2676,6 +2691,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
+dependencies = [
+ "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -3254,6 +3279,18 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-xml-rs"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb3aa78ecda1ebc9ec9847d5d3aba7d618823446a049ba2491940506da6e2782"
+dependencies = [
+ "log",
+ "serde",
+ "thiserror 1.0.69",
+ "xml-rs",
 ]
 
 [[package]]
@@ -4160,6 +4197,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "urdf-rs"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "074515a3e6dc230bbbdcf35830fd71b67b55ae2ac22bc4ff69d89412fc84b830"
+dependencies = [
+ "RustyXML",
+ "quick-xml",
+ "regex",
+ "serde",
+ "serde-xml-rs",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4595,6 +4646,12 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
 ]
+
+[[package]]
+name = "xml-rs"
+version = "0.8.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "yasna"

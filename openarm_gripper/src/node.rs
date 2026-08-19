@@ -1,13 +1,13 @@
 // Node composition: parses every parameter up front, takes the per-gripper
-// instance lock, brings the motor up over CAN, then wires the command stream
-// to the follow loop and the state/health publishers. All device and stream
-// logic lives in the sibling modules; this is only the assembly.
+// instance lock, brings the motor up over CAN in its generation's control
+// mode, then wires the command stream to the follow loop and the state/health
+// publishers. All device and stream logic lives in the sibling modules; this
+// is only the assembly.
 
-use crate::command_stream;
 use crate::follow::{self, ControlConfig};
-use crate::health;
-use crate::stream;
-use openarm_can::{GripperCan, Mit, v10};
+use crate::hardware::{Gripper, PosForceLimits, gripper_motor_type};
+use crate::{command_stream, health, stream};
+use openarm_description::{HardwareVersion, Side};
 use peppygen::exposed_services::ready::is_ready;
 use peppygen::{NodeRunner, Parameters, Result};
 use peppylib::datastore::{self, Encoding};
@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 use tracing::{error, info, warn};
 
-// Mirrors ROS2 v10_simple_hardware on_activate / on_deactivate sleep durations.
+// Mirrors the ROS2 reference hardware's on_activate / on_deactivate sleep durations.
 const POST_ENABLE_SLEEP: Duration = Duration::from_millis(100);
 const POST_DISABLE_SLEEP: Duration = Duration::from_millis(100);
 const BRINGUP_RECV_US: u32 = 2000;
@@ -35,26 +35,44 @@ const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 /// minimum 1 s grace window so the disable hook keeps most of the budget.
 const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
 
-/// Adapts a CAN failure into the runtime error type so bring-up failures
-/// return through the runtime's error path, which runs the shutdown hooks.
-/// A panic would skip them, leaving the motor energised and the instance
-/// lock held. Repeated per node because peppygen is generated per node; no
+/// Ceiling on the per-cycle CAN read deadline; see its use for the rationale.
+const MAX_RECV_TIMEOUT_US: u32 = 100_000;
+
+/// Microseconds in a second: the resolution every loop period here is
+/// expressed in.
+const MICROS_PER_SECOND: u32 = 1_000_000;
+
+/// Highest loop rate with a non-zero microsecond period, which is one tick of
+/// that resolution.
+const MAX_RATE_HZ: u32 = MICROS_PER_SECOND;
+
+const GRIPPER_ID_LEFT: u8 = 0;
+const GRIPPER_ID_RIGHT: u8 = 1;
+
+/// Adapts any failure this node can describe into the runtime error type, so
+/// it returns through the runtime's error path instead of panicking. That
+/// path runs the shutdown hooks, and once the motor is open a panic would
+/// skip them and leave it energised with the instance lock held; before then
+/// it is what makes the daemon record a named failure rather than a
+/// backtrace. Repeated per node because peppygen is generated per node; no
 /// shared crate can name its Error type.
-fn can_err(e: openarm_can::CanError) -> peppygen::Error {
+fn node_err(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> peppygen::Error {
     peppygen::Error::Io(std::io::Error::other(e))
 }
 
-/// The tick period for a whole-hertz rate, refused at startup when it
-/// rounds to zero, so a bad rate fails before the motor is energised and
-/// with its own name in the message.
-fn period_from_hz(rate_hz: u32, name: &str) -> Duration {
-    assert!(rate_hz > 0, "{name} must be > 0");
-    let period = Duration::from_micros(1_000_000 / u64::from(rate_hz));
-    assert!(
-        !period.is_zero(),
-        "{name} {rate_hz} rounds to a zero-microsecond period"
-    );
-    period
+/// The tick period for a whole-hertz rate, refused at startup outside the
+/// range that yields a non-zero microsecond period, so a bad rate fails before
+/// the motor is energised and with its own name in the message. A rate that
+/// does not divide a second evenly truncates to the microsecond below.
+fn period_from_hz(rate_hz: u32, name: &str) -> std::result::Result<Duration, String> {
+    if !(1..=MAX_RATE_HZ).contains(&rate_hz) {
+        return Err(format!(
+            "{name} must be in 1..={MAX_RATE_HZ} Hz, got {rate_hz}"
+        ));
+    }
+    Ok(Duration::from_micros(u64::from(
+        MICROS_PER_SECOND / rate_hz,
+    )))
 }
 
 /// Cancel the node when a supervised task exits while it should still be
@@ -86,46 +104,93 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     peppygen::clock::init(&node_runner).await?;
 
     let gripper_id = params.gripper_id;
-    // Names this gripper on the alert wire. Exhaustive so a value
-    // outside the convention is refused rather than published as the
-    // wrong side.
-    let alert_source = match gripper_id {
-        0 => "left gripper",
-        1 => "right gripper",
+    // One parse of gripper_id: the side whose opening geometry this
+    // instance drives, and the label naming it on the alert wire.
+    // Exhaustive so a value outside the convention is refused rather than
+    // published as the wrong side.
+    let (side, alert_source) = match gripper_id {
+        GRIPPER_ID_LEFT => (Side::Left, "left gripper"),
+        GRIPPER_ID_RIGHT => (Side::Right, "right gripper"),
         other => {
-            return Err(peppygen::Error::Io(std::io::Error::other(format!(
-                "gripper_id must be 0 (left) or 1 (right), got {other}"
-            ))));
+            return Err(node_err(format!(
+                "gripper_id must be {GRIPPER_ID_LEFT} (left) or {GRIPPER_ID_RIGHT} (right), \
+                 got {other}"
+            )));
         }
     };
+
+    // Which OpenArm generation this gripper drives; selects the control
+    // mode the motor is opened in and this side's opening geometry.
+    let hardware_version: HardwareVersion = params.hardware_version.parse().map_err(node_err)?;
+
     let can_interface = params.can_interface.clone();
 
-    let cycle_period = period_from_hz(params.control_rate_hz, "control_rate_hz");
-    let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz");
-    // Bounded so a config typo cannot park recv_all in a long ppoll
+    let cycle_period =
+        period_from_hz(params.control_rate_hz, "control_rate_hz").map_err(node_err)?;
+    let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz").map_err(node_err)?;
+    // Bounded above so a config typo cannot park recv_all in a long ppoll
     // while it holds the CAN mutex the shutdown hooks need: 100 ms keeps
     // the whole hook sequence inside even the minimum 1 s grace window,
-    // and real configs run around 1 ms.
-    assert!(
-        params.recv_timeout_us <= 100_000,
-        "recv_timeout_us must be at most 100_000 (100 ms), got {}",
-        params.recv_timeout_us
+    // and real configs run around 1 ms. Bounded below because the driver
+    // refuses a zero wait on its other receive passes, and a receive that
+    // never waits turns every quiet tick into a silence pass.
+    if !(1..=MAX_RECV_TIMEOUT_US).contains(&params.recv_timeout_us) {
+        return Err(node_err(format!(
+            "recv_timeout_us must be in 1..={MAX_RECV_TIMEOUT_US} (100 ms), got {}",
+            params.recv_timeout_us
+        )));
+    }
+
+    // Checked whatever the generation: the ranges are properties of the
+    // parameters, not of the gripper that reads them. Only the v2
+    // POS_FORCE command path puts them on the wire.
+    let limits = PosForceLimits::new(
+        gripper_motor_type(hardware_version),
+        params.speed_rad_s,
+        params.force_limit_pu,
+    )
+    .map_err(node_err)?;
+
+    // The resolved configuration, so a parameter that this generation
+    // does not read is visibly absent rather than silently ignored.
+    info!(
+        "config: {alert_source} ({hardware_version}) rate={}Hz state_rate={}Hz \
+         recv_timeout={}us",
+        params.control_rate_hz, params.state_rate_hz, params.recv_timeout_us
     );
+    if hardware_version == HardwareVersion::V2 {
+        info!(
+            "config: POS_FORCE speed={} rad/s grip-force ceiling={} pu",
+            params.speed_rad_s, params.force_limit_pu
+        );
+    }
 
     let cfg = ControlConfig {
         cycle_period,
         recv_timeout_us: params.recv_timeout_us,
     };
 
-    // Instance lock: crash if another instance with the same gripper_id is
-    // running. Held in the core-node datastore (released from the on_shutdown
+    // Instance lock: refuse to start if another instance with the same
+    // gripper_id is running. Held in the core-node datastore (released from the on_shutdown
     // hook below), so a lock leaked by a hard crash clears with the stack
     // instead of lingering like a /tmp file. get-then-store is not atomic; two
     // simultaneous starts can race (single-writer in practice). Same scheme as
     // openarm_arm.
+    //
+    // The superseded openarm_gripper_v2 node keyed its lock on its own name,
+    // which this key does not exclude. Both drive the same motor id on the
+    // same bus, so a survivor of that node is checked for too: without it two
+    // processes would command one gripper, each decoding the other's replies.
+    // Drop the legacy key once no deployment can still be running that node.
     let lock_key = format!("openarm_gripper_{gripper_id}_instance_lock");
-    if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
-        panic!("instance lock {lock_key} held by {}", held.last_modified_by);
+    let superseded_lock_key = format!("openarm_gripper_v2_{gripper_id}_instance_lock");
+    for key in [superseded_lock_key.as_str(), lock_key.as_str()] {
+        if let Some(held) = datastore::get(&node_runner, key, DATASTORE_TIMEOUT).await? {
+            return Err(node_err(format!(
+                "instance lock {key} held by {}",
+                held.last_modified_by
+            )));
+        }
     }
     datastore::store(
         &node_runner,
@@ -150,16 +215,12 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
         });
     }
 
-    // Hardware bringup: mirrors ROS2 v10_simple_hardware on_init / on_configure / on_activate.
+    // Hardware bringup, mirroring the ROS2 reference's on_init / on_configure
+    // / on_activate: opening writes this generation's control mode into the
+    // motor and consumes the reply, so the bus is quiet on return.
     info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-    let gripper: GripperCan<Mit> = GripperCan::open_mit(
-        &can_interface,
-        ENABLE_FD,
-        v10::GRIPPER_MOTOR_TYPE,
-        v10::GRIPPER_SEND_ID,
-        v10::GRIPPER_RECV_ID,
-    )
-    .map_err(can_err)?;
+    let gripper = Gripper::open(hardware_version, side, &can_interface, ENABLE_FD, limits)
+        .map_err(node_err)?;
     let gripper = Arc::new(Mutex::new(gripper));
 
     // Motor-disable hook, registered before the motor is ever enabled and
@@ -192,11 +253,12 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     // enabled motor. The DM4310's configured trip derates above its
     // datasheet peak, so the registers would resolve to the datasheet
     // anyway.
-    let ratings = v10::GRIPPER_MOTOR_TYPE.ratings().ok_or_else(|| {
-        peppygen::Error::Io(std::io::Error::other(
-            "no datasheet ratings for the gripper motor type",
-        ))
-    })?;
+    let ratings = gripper
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .motor_type()
+        .ratings()
+        .ok_or_else(|| node_err("no datasheet ratings for the gripper motor type"))?;
 
     // Enable and verify the motor acknowledges torque authority, then
     // return to closed (motor angle = 0.0 rad) before serving requests.
@@ -210,19 +272,19 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
             POST_ENABLE_SLEEP,
             BRINGUP_RECV_US,
         )
-        .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?;
+        .map_err(node_err)?;
     {
         let mut g = gripper.lock().unwrap_or_else(|e| e.into_inner());
         info!("returning to zero");
-        g.mit_control(follow::KP, follow::KD, 0.0, 0.0, 0.0)
-            .map_err(can_err)?;
-        g.recv_all(BRINGUP_RECV_US).map_err(can_err)?;
+        g.command(0.0, None).map_err(node_err)?;
+        g.recv_all(BRINGUP_RECV_US).map_err(node_err)?;
     }
     info!("gripper ready (motor confirmed enabled)");
 
     // Always-on gripper_states publisher: reads the motor's cached state at
-    // state_rate_hz and emits the opening. It issues no CAN traffic of its
-    // own, so it never contends with the follow loop for the bus.
+    // state_rate_hz and emits the opening, effort, and effort ceiling. It
+    // issues no CAN traffic of its own, so it never contends with the
+    // follow loop for the bus.
     let publisher = tokio::spawn(stream::run(
         node_runner.clone(),
         state_period,
@@ -280,8 +342,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
                     // services stay reachable while shutdown hooks run,
                     // and the gate must not see ready during a disable.
                     Ok(is_ready::Response::new(
-                        ready.load(Ordering::SeqCst)
-                            && !follow::HARD_FAULT.load(Ordering::SeqCst),
+                        ready.load(Ordering::SeqCst) && !follow::HARD_FAULT.load(Ordering::SeqCst),
                     ))
                 })
                 .await
@@ -324,10 +385,47 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     // that dies first drops the sender and the error return runs the
     // disable hooks. Reporting ready any earlier would let the robot
     // gate open on a spawned-but-dead controller.
-    follow_started_rx.await.map_err(|_| {
-        peppygen::Error::Io(std::io::Error::other("the follow loop never started"))
-    })?;
+    follow_started_rx
+        .await
+        .map_err(|_| node_err("the follow loop never started"))?;
     ready.store(true, Ordering::SeqCst);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rate_outside_the_expressible_range_is_named_not_panicked() {
+        for rate_hz in [0, MAX_RATE_HZ + 1, u32::MAX] {
+            let refusal = period_from_hz(rate_hz, "control_rate_hz")
+                .expect_err("a rate outside the expressible range must be refused");
+            assert!(
+                refusal.contains("control_rate_hz"),
+                "the refusal must name the parameter, got {refusal}"
+            );
+            assert!(
+                refusal.ends_with(&format!("got {rate_hz}")),
+                "the refusal must name the offending value, got {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rate_in_range_yields_its_period() {
+        assert_eq!(
+            period_from_hz(100, "control_rate_hz"),
+            Ok(Duration::from_millis(10))
+        );
+        assert_eq!(
+            period_from_hz(1, "state_rate_hz"),
+            Ok(Duration::from_secs(1))
+        );
+        assert_eq!(
+            period_from_hz(MAX_RATE_HZ, "control_rate_hz"),
+            Ok(Duration::from_micros(1))
+        );
+    }
 }

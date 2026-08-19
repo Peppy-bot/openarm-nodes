@@ -31,11 +31,6 @@
         path: "openarm_gripper_sim/peppy.json5"
       }
     },
-    openarm_gripper_v2: {
-      v1: {
-        path: "openarm_gripper_v2/peppy.json5"
-      }
-    },
     openarm_ker: {
       v1: {
         path: "openarm_ker/peppy.json5"
