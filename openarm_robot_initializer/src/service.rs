@@ -53,7 +53,7 @@ async fn poll_components(
     // to not-ready. A plain sleep loop, not interval(), to avoid burst catch-up
     // after a slow tick.
     loop {
-        ready.store(hardware_ready(&runner).await, Ordering::SeqCst);
+        ready.store(all_components_ready(&runner).await, Ordering::SeqCst);
         tokio::select! {
             _ = token.cancelled() => break,
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
@@ -65,7 +65,7 @@ async fn poll_components(
 // Response types differ with no shared trait, so each link is matched inline
 // rather than factored generically. Concurrent (tokio::join!, not sequential
 // awaits) so an unreachable component caps a pass at one POLL_TIMEOUT, not four.
-async fn hardware_ready(runner: &NodeRunner) -> bool {
+async fn all_components_ready(runner: &NodeRunner) -> bool {
     let (la, ra, lg, rg) = tokio::join!(
         left_arm_is_ready::poll(
             runner,

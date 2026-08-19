@@ -267,7 +267,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     );
 
     // is_ready service: false until bringup and control wiring complete, then
-    // true. The real robot_initializer polls this (openarm_hardware_ready) to
+    // true. The real robot_initializer polls this (component_ready) to
     // gate the whole robot.
     let ready = Arc::new(AtomicBool::new(false));
     {
