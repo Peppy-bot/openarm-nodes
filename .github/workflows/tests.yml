@@ -31,7 +31,7 @@ env:
 jobs:
   discover-and-run:
     name: Every Rust and Python test the change reaches
-    runs-on: self-hosted
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     # A cold build compiles the crates' full dependency trees; the persistent
     # target dirs below keep warm runs far under this, but the first run on a
     # fresh runner is legitimately slow.
