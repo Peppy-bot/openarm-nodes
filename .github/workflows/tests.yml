@@ -31,7 +31,13 @@ env:
 jobs:
   discover-and-run:
     name: Every Rust and Python test the change reaches
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Stays on the self-hosted runners: the daemon this job boots refuses to
+    # start without an apptainer install blessed by `peppy container setup`
+    # (a root-installed AppArmor profile keyed to that install's path), and
+    # the container images, cargo registry and per-crate target dirs below
+    # only stay warm on a persistent machine. An ephemeral hosted runner has
+    # neither, so the daemon step fails before any test runs.
+    runs-on: self-hosted
     # A cold build compiles the crates' full dependency trees; the persistent
     # target dirs below keep warm runs far under this, but the first run on a
     # fresh runner is legitimately slow.
