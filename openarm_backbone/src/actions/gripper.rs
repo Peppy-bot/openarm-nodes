@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use peppygen::exposed_actions::move_gripper::{ActionHandle, GoalDecision};
+use peppygen::exposed_actions::limb_motion::move_gripper::{ActionHandle, GoalDecision};
 use peppygen::{NodeRunner, Result};
 use tokio::sync::mpsc;
 use tracing::error;

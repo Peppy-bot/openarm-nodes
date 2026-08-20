@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use peppygen::exposed_actions::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::limb_motion::{move_arm, move_arm_joints};
 use peppygen::{NodeRunner, Result};
 use srs_model::Limit;
 use tokio::sync::mpsc;

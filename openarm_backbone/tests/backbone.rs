@@ -316,7 +316,7 @@ async fn a_leader_command_fans_through_to_the_governed_arm_wire() -> peppygen::R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn move_arm_joints_streams_a_trajectory_the_arm_follows_to_the_target() -> peppygen::Result<()>
 {
-    use peppygen::fixtures::exposed_actions::move_arm_joints;
+    use peppygen::fixtures::exposed_actions::limb_motion::move_arm_joints;
 
     // collision_ctrl bound to its (silent) mock this time: the listener runs
     // against a live producer that never publishes, and the launch band stands.

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use peppygen::NodeRunner;
-use peppygen::exposed_actions::move_gripper;
+use peppygen::exposed_actions::limb_motion::move_gripper;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};

@@ -11,9 +11,10 @@ a page on port 8765 with three interaction modes:
   through the null space while the hand holds still. The touched control leads;
   the rest is softly held.
 - **Actions**: compose a target, then **Execute** fires a discrete governed
-  backbone move (`move_arm_joints` for a joint target, `move_arm` for a pose,
-  `move_gripper` for the jaw), with **Home Pose** / **Ready Pose** presets and a
-  per-move duration input.
+  move on the `limb_motion` contract slot (`move_arm_joints` for a joint
+  target, `move_arm` for a pose, `move_gripper` for the jaw; the backbone
+  serves them), with **Home Pose** / **Ready Pose** presets and a per-move
+  duration input.
 - **Gestures**: one button per baked choreography (wave, spiral, figure eight,
   shrug, clap) plus **Stop**. Gestures are
   authored in `src/gestures.rs` as joint keyframes or Cartesian curves, resolved
@@ -51,9 +52,10 @@ peppy stack launch /path/to/ws/launchers-hub/openarm/openarm_v2_teleop_mujoco.js
 ```
 
 You can also run it alone against an already-running stack. Every declared slot
-must be linked at start: the `backbone` slot to the backbone instance, and each
-per-side state slot to that side's arm or gripper instance (sim followers here,
-the drivers on real hardware). The required parameters have no defaults, so they
+must be linked at start: the `limb_motion` and `backbone` slots to the backbone
+instance (the discrete moves and the collision_status feed), and each per-side
+state slot to that side's arm or gripper instance (sim followers here, the
+drivers on real hardware). The required parameters have no defaults, so they
 are supplied too:
 
 ```sh
@@ -62,6 +64,7 @@ peppy node run openarm_commander:v1 \
     joint_jog_acceleration_rad_s2=10.0 \
     collision_governor_enabled=true d_stop=0.005 d_safe=0.02 \
     --link backbone@backbone_inst \
+    --link limb_motion@backbone_inst \
     --link left_arm@backbone_inst/leader_left_arm \
     --link right_arm@backbone_inst/leader_right_arm \
     --link left_gripper@backbone_inst/leader_left_gripper \

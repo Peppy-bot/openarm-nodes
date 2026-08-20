@@ -1,6 +1,6 @@
 //! Operator-driven consumed actions and services, end to end over the panel's
 //! WebSocket (the node's real command surface): fire_arm must land a
-//! move_arm_joints goal on the backbone mock; the record button must drive the
+//! move_arm_joints goal on the limb_motion mock; the record button must drive the
 //! recorder mock's record_episode goal through feedback, Stop (= cancel with
 //! save), and result; Finish must call the recorder's finish_session service.
 //!
@@ -11,7 +11,7 @@ mod helpers;
 use std::time::Duration;
 
 use peppygen::fixtures::harness::{Config, Harness};
-use peppygen::mock::deps::backbone::move_arm_joints;
+use peppygen::mock::deps::limb_motion::move_arm_joints;
 use peppygen::mock::deps::recorder::{finish_session, record_episode};
 
 const PANEL_PORT: u16 = 18634;
@@ -45,7 +45,7 @@ async fn panel_commands_drive_backbone_and_recorder() -> peppygen::Result<()> {
     assert_eq!(first["recorder"]["recording"], false);
     assert_eq!(first["recorder"]["finishing"], false);
 
-    // --- fire_arm -> move_arm_joints goal on the backbone -------------------
+    // --- fire_arm -> move_arm_joints goal on the limb_motion producer --------
     let command = serde_json::json!({
         "cmd": "fire_arm",
         "side": "left",
@@ -58,7 +58,7 @@ async fn panel_commands_drive_backbone_and_recorder() -> peppygen::Result<()> {
 
     let pending = mocks
         .deps
-        .backbone
+        .limb_motion
         .move_arm_joints
         .next_goal(Duration::from_secs(10))
         .await?;

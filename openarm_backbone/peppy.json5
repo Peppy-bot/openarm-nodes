@@ -22,6 +22,10 @@
       // The whole-robot posture moves: both arms to Ready or Home through
       // the same admission and planner path as move_arm_joints.
       { name: "postures", tag: "v1", link_id: "postures" },
+      // The per-limb moves, each addressed by side id: one arm to a joint
+      // target or a grasp-point pose (run by that arm's planner), one gripper
+      // to an opening (run by the coordinator).
+      { name: "limb_motion", tag: "v1", link_id: "limb_motion" },
     ],
     depends_on: {
       contracts: [
@@ -82,108 +86,10 @@
         // The postures contract's actions; formats come from the contract.
         { link_id: "postures", name: "move_to_ready" },
         { link_id: "postures", name: "move_to_home" },
-        {
-          name: "move_arm_joints",
-          goal_service: {
-            request_message_format: {
-              // Which arm (0 = left, 1 = right).
-              arm_id: "u8",
-              // Target joint positions (rad), j1..j7.
-              joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              },
-              // Requested trajectory duration (s); floored at the per-joint
-              // velocity-limit duration. 0 = fastest.
-              duration_s: "f64"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              // Measured joint positions (rad) when the action ended, j1..j7.
-              final_joint_positions: {
-                $type: "array",
-                $items: "f64",
-                $length: 7
-              },
-              // Wall-clock duration of the action (s).
-              action_time: "f64"
-            }
-          }
-        },
-        {
-          name: "move_arm",
-          goal_service: {
-            request_message_format: {
-              // Which arm (0 = left, 1 = right).
-              arm_id: "u8",
-              // Target grasp-point position in the world frame: x, y, z (m).
-              position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              // Target grasp-point orientation, quaternion [x, y, z, w].
-              orientation: {
-                $type: "array",
-                $items: "f64",
-                $length: 4
-              },
-              // Requested trajectory duration (s); floored at the velocity-limit
-              // duration. 0 = fastest.
-              duration_s: "f64"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              // Measured grasp-point position when the action ended: x, y, z (m).
-              final_position: {
-                $type: "array",
-                $items: "f64",
-                $length: 3
-              },
-              // Measured grasp-point orientation, quaternion [x, y, z, w].
-              final_orientation: {
-                $type: "array",
-                $items: "f64",
-                $length: 4
-              },
-              // Wall-clock duration of the action (s).
-              action_time: "f64"
-            }
-          }
-        },
-        {
-          name: "move_gripper",
-          goal_service: {
-            request_message_format: {
-              // Which gripper (0 = left, 1 = right).
-              gripper_id: "u8",
-              // Target opening as a fraction of full jaw travel: 0 = closed,
-              // 1 = fully open.
-              opening: "f64",
-              // Maximum effort the gripper may exert toward the target
-              // (magnitude, in the gripper's effort unit). 0 = no preference;
-              // the gripper applies its configured ceiling.
-              max_effort: "f64"
-            }
-          },
-          result_service: {
-            response_message_format: {
-              success: "bool",
-              message: "string",
-              // Measured opening fraction when the action ended.
-              final_opening: "f64",
-              // Wall-clock duration of the action (s).
-              action_time: "f64"
-            }
-          }
-        }
+        // The limb_motion contract's actions; formats come from the contract.
+        { link_id: "limb_motion", name: "move_arm_joints" },
+        { link_id: "limb_motion", name: "move_arm" },
+        { link_id: "limb_motion", name: "move_gripper" },
       ]
     },
     topics: {

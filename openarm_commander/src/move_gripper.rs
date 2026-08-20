@@ -1,6 +1,6 @@
 // Spawned per fire_gripper command (the gripper card's Execute in Actions mode). Fires
-// the backbone's move_gripper (a discrete governed open/close), then reports the outcome to
-// the owner. Cancel-aware so a shutdown can't wedge an in-flight goal. A second Execute
+// the limb_motion slot's move_gripper (a discrete governed open/close), then reports the
+// outcome to the owner. Cancel-aware so a shutdown can't wedge an in-flight goal. A second Execute
 // is refused while one is in flight (the owner gates it), so this needs no per-goal
 // preempt the way the longer arm moves do.
 
@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
-use peppygen::consumed_actions::backbone::move_gripper as backbone_move_gripper;
-use peppygen::consumed_actions::backbone::move_gripper::ResultOutcome;
+use peppygen::consumed_actions::limb_motion::move_gripper as limb_motion_move_gripper;
+use peppygen::consumed_actions::limb_motion::move_gripper::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -47,15 +47,15 @@ async fn run(
     let label = side.label();
     info!(side = label, opening, max_effort, "fire move_gripper");
 
-    let goal = backbone_move_gripper::GoalRequest {
+    let goal = limb_motion_move_gripper::GoalRequest {
         gripper_id: side.gripper_id(),
         opening,
         max_effort,
     };
 
-    let downstream = match backbone_move_gripper::ActionHandle::fire_goal(
+    let downstream = match limb_motion_move_gripper::ActionHandle::fire_goal(
         &runner,
-        backbone_move_gripper::bound_producer(&runner),
+        limb_motion_move_gripper::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,

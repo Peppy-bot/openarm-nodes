@@ -1,6 +1,6 @@
 // Spawned per fire_arm_pose command (the panel's Execute-pose in Actions mode). Fires
-// the backbone's Cartesian move_arm (planned straight-line pose move), then reports the
-// outcome to the owner. Each goal is its own task; cancel-aware so a shutdown can't
+// the limb_motion slot's Cartesian move_arm (planned straight-line pose move), then
+// reports the outcome to the owner. Each goal is its own task; cancel-aware so a shutdown can't
 // wedge an in-flight goal, and preempt-aware so a new move can cancel it.
 
 use std::sync::Arc;
@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
-use peppygen::consumed_actions::backbone::move_arm as backbone_move_arm;
-use peppygen::consumed_actions::backbone::move_arm::ResultOutcome;
+use peppygen::consumed_actions::limb_motion::move_arm as limb_motion_move_arm;
+use peppygen::consumed_actions::limb_motion::move_arm::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -71,16 +71,16 @@ async fn run(
     let label = side.label();
     info!(side = label, ?position, ?orientation, "fire move_arm");
 
-    let goal = backbone_move_arm::GoalRequest {
+    let goal = limb_motion_move_arm::GoalRequest {
         arm_id: side.arm_id(),
         position,
         orientation,
         duration_s,
     };
 
-    let downstream = match backbone_move_arm::ActionHandle::fire_goal(
+    let downstream = match limb_motion_move_arm::ActionHandle::fire_goal(
         &runner,
-        backbone_move_arm::bound_producer(&runner),
+        limb_motion_move_arm::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,
