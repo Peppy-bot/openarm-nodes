@@ -101,7 +101,8 @@ pub struct ReaderConfig {
 pub enum ReaderExit {
     /// Shutdown was already under way; nothing to record.
     Cancelled,
-    /// The device's configuration cannot drive this launch.
+    /// The device's configuration cannot drive this launch, or the reader's
+    /// consumer vanished while the node was still running.
     Fatal,
 }
 
@@ -126,7 +127,9 @@ pub fn spawn(
 }
 
 enum SessionEnd {
-    Cancelled,
+    /// The token was cancelled, or the sample channel closed; `run` reads the
+    /// token to tell the two apart.
+    Stop,
     Transient(String),
     Fatal(String),
 }
@@ -138,7 +141,7 @@ fn run(
 ) -> ReaderExit {
     while !token.is_cancelled() {
         match session(&cfg, &tx, &token) {
-            SessionEnd::Cancelled => break,
+            SessionEnd::Stop => break,
             SessionEnd::Transient(reason) => {
                 let _ = tx.send(None);
                 warn!("KER connection lost ({reason}); retrying in {RECONNECT_BACKOFF:?}");
@@ -151,7 +154,16 @@ fn run(
             }
         }
     }
-    ReaderExit::Cancelled
+    // A stop is only a shutdown if the token says so. The other way to reach
+    // here is the sample channel closing under a live token, which means the
+    // publisher died: without this check the two race in the supervisor's
+    // select and a dead publisher could be recorded as a clean finish.
+    if token.is_cancelled() {
+        ReaderExit::Cancelled
+    } else {
+        error!("KER sample consumer vanished while the node was running");
+        ReaderExit::Fatal
+    }
 }
 
 /// One connection lifetime: connect, handshake, stream until it breaks.
@@ -241,7 +253,7 @@ fn session(
                 Ok(sample) => {
                     mapping_warned = false;
                     if tx.send(Some(sample)).is_err() {
-                        return SessionEnd::Cancelled;
+                        return SessionEnd::Stop;
                     }
                 }
                 // A non-finite reading is a frame to skip, not a stream to
@@ -256,7 +268,7 @@ fn session(
     }
     // Best effort: leave the device quiet on the way out.
     let _ = transport.write_all(&[CMD_STANDBY]);
-    SessionEnd::Cancelled
+    SessionEnd::Stop
 }
 
 /// STANDBY, flush, then ping until the schema arrives (or the deadline).
@@ -275,7 +287,7 @@ fn handshake(
     let mut chunk = [0u8; 512];
     while Instant::now() < deadline {
         if token.is_cancelled() {
-            return Err(SessionEnd::Cancelled);
+            return Err(SessionEnd::Stop);
         }
         if Instant::now() >= next_ping {
             transport.write_all(&[CMD_PING]).map_err(transient)?;
