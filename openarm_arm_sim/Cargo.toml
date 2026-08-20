@@ -11,6 +11,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 peppygen = { path = ".peppy/libs/peppygen" }
 peppylib = { path = ".peppy/libs/peppylib" }
 
+[lib]
+name = "openarm_arm_sim"
+path = "src/lib.rs"
+
 [[bin]]
 name = "openarm_arm_sim"
 path = "src/main.rs"
