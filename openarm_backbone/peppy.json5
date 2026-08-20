@@ -22,9 +22,10 @@
       // The whole-robot posture moves: both arms to Ready or Home through
       // the same admission and planner path as move_arm_joints.
       { name: "postures", tag: "v1", link_id: "postures" },
-      // The per-limb moves, each addressed by side id: one arm to a joint
-      // target or a grasp-point pose (run by that arm's planner), one gripper
-      // to an opening (run by the coordinator).
+      // The per-limb moves: one arm to a joint target or a grasp-point pose
+      // (run by that arm's planner), one gripper to an opening (run by the
+      // coordinator). arm_id and gripper_id name the side: 0 = left,
+      // 1 = right.
       { name: "limb_motion", tag: "v1", link_id: "limb_motion" },
     ],
     depends_on: {
