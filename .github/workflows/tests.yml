@@ -7,7 +7,9 @@ name: Tests
 # test suites are too expensive to rerun for a one-node change. A change
 # outside every project (this workflow, the repository index, ...) and every
 # push to main still run the full suite, so anything a scoped run could miss
-# is caught on the integration branch.
+# is caught on the integration branch. Documentation is the one exception:
+# a Markdown file outside every project is built and tested by nothing, so
+# it selects nothing and triggers nothing.
 #
 # The crates depend on generated code (each node's gitignored `.peppy/libs`)
 # that only a running peppy daemon can produce (`peppy node sync` calls the
@@ -86,9 +88,10 @@ jobs:
       # A "project" is a top-level directory holding a crate or a node. On a
       # pull request only the projects the diff touches are selected; a file
       # changed outside every project falls back to the full suite, because
-      # nothing narrower can be proven safe for it. Every skipped project is
-      # named in the run summary, so a scoped run never silently reads as
-      # full coverage.
+      # nothing narrower can be proven safe for it — except a Markdown file,
+      # which nothing builds or tests, so it is skipped rather than escalated.
+      # Every skipped project is named in the run summary, so a scoped run
+      # never silently reads as full coverage.
       - name: Discover the tests this change reaches
         id: discover
         env:
@@ -122,12 +125,17 @@ jobs:
                 top=${file%%/*}
                 if grep -qxF "$top" "$RUNNER_TEMP/projects.txt"; then
                   echo "$top" >> "$RUNNER_TEMP/selected-projects.txt"
+                elif [[ "${file,,}" == *.md ]]; then
+                  continue
                 else
                   run_all=true
                   scope="the full suite ($file is outside every project)"
                   break
                 fi
               done <<< "$changed"
+              if [ "$run_all" = false ] && [ ! -s "$RUNNER_TEMP/selected-projects.txt" ]; then
+                scope="nothing: this pull request changes only documentation outside every project"
+              fi
             else
               echo "could not diff against the pull request base; running the full suite" >&2
             fi
