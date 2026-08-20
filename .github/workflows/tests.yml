@@ -240,12 +240,14 @@ jobs:
       # is ready for unprivileged use: `newuidmap` on PATH, and on a kernel
       # that restricts unprivileged user namespaces through AppArmor (Ubuntu
       # 24.04's default) a root-installed profile keyed to the canonical path
-      # of that install's `starter` binary. The profile is path-keyed and the
-      # VM is fresh, so every run installs its own for the install it just
-      # extracted: `peppy container setup` applies its own fix script through
-      # sudo when stdin is not a terminal, and rechecks before exiting 0. The
-      # daemon would find bin/apptainer beside bin/peppy by itself; it is
-      # exported because the cargo step runs the same install directly.
+      # of that install's `starter` binary. The VM is fresh, so every run
+      # readies the install it just extracted: `peppy container setup` applies
+      # whatever its fix script needs through sudo when stdin is not a
+      # terminal, and rechecks before exiting 0. Today's Blacksmith image
+      # mounts no AppArmor securityfs, so it needs nothing; the step is what
+      # keeps that an observation rather than an assumption. The daemon would
+      # find bin/apptainer beside bin/peppy by itself; it is exported because
+      # the cargo step runs the same install directly.
       #
       # `apptainer build` runs a def's %post as fakeroot, which needs a
       # subordinate id range for the runner user besides newuidmap. The
@@ -346,6 +348,9 @@ jobs:
       # generated `peppygen 0.1.0` with different contents, and in a shared
       # target dir cargo reuses one crate's peppygen artifact for another
       # (openarm_gripper_v2 compiled against openarm_gripper's parameters).
+      # Incremental compilation is off: its caches are much of a debug target
+      # dir and the sticky disk is billed per gigabyte, while all it would
+      # save is the seconds a warm rebuild of a crate's own code takes.
       #
       # Every selected crate runs even after one fails, so a red run names
       # every failing crate instead of the first. --locked proves the build
@@ -410,6 +415,7 @@ jobs:
                 --env CARGO_HOME=/cargo \
                 --env RUSTUP_HOME=/root/.rustup \
                 --env CARGO_TARGET_DIR=/target \
+                --env CARGO_INCREMENTAL=0 \
                 --env PEPPY_ZENOHD_PATH=/peppy-dist/bin/zenohd \
                 --env CARGO_TERM_COLOR=always \
                 "$sif" cargo test --locked; then
