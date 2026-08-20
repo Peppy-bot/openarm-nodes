@@ -88,7 +88,21 @@
         { link_id: "postures", name: "move_to_ready" },
         { link_id: "postures", name: "move_to_home" },
         // The limb_motion contract's actions; formats come from the contract.
-        { link_id: "limb_motion", name: "move_arm_joints" },
+        // An OpenArm arm has seven joints, so the joint move's generic joint
+        // vectors are pinned to that length: a goal carrying any other count
+        // is refused before the handler runs.
+        {
+          link_id: "limb_motion",
+          name: "move_arm_joints",
+          refine: {
+            goal_service: {
+              request_message_format: { joint_positions: { $length: 7 } },
+            },
+            result_service: {
+              response_message_format: { final_joint_positions: { $length: 7 } },
+            },
+          },
+        },
         { link_id: "limb_motion", name: "move_arm" },
         { link_id: "limb_motion", name: "move_gripper" },
       ]

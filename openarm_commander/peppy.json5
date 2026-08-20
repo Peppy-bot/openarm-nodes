@@ -72,7 +72,20 @@
       // Goals fired by the operator land on the limb_motion producer, which runs
       // the move itself for the side whose id matches.
       consumes: [
-        { link_id: "limb_motion", name: "move_arm_joints" },
+        // The panel drives OpenArm's seven-joint arms, so the joint move's
+        // generic joint vectors are pinned to that length, as on the backbone.
+        {
+          link_id: "limb_motion",
+          name: "move_arm_joints",
+          refine: {
+            goal_service: {
+              request_message_format: { joint_positions: { $length: 7 } },
+            },
+            result_service: {
+              response_message_format: { final_joint_positions: { $length: 7 } },
+            },
+          },
+        },
         // Cartesian point-to-point: Execute-pose in the panel's Actions mode fires
         // the producer's planned straight-line move rather than jogging there.
         { link_id: "limb_motion", name: "move_arm" },
