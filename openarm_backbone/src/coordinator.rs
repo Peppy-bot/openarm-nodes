@@ -30,10 +30,11 @@ use crate::arm_pair::ArmPair;
 use crate::chase::rate_limited;
 use crate::governor::{GovState, Governor, Guard};
 use crate::liveness::{self, Admission, Liveness};
+use crate::motion::{MOTION_TIMEOUT_FACTOR, MoveBudget};
 use crate::planner::{self, BusyGuard, Goal, Planner};
 use crate::publish::Publishers;
 use crate::streams::{ArmState, GovernorConfig, GripperCommand, GripperState};
-use crate::types::{ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out};
+use crate::types::{ARM_DOF, JointVec, Side};
 use crate::upstream::{Upstream, UpstreamMode};
 
 /// How long [`seed_all`] waits for an arm's first measured state before warning that
@@ -119,7 +120,9 @@ struct GripperMove {
     started: Instant,
     /// Nominal chase duration; the runtime aborts once the move runs past
     /// `MOTION_TIMEOUT_FACTOR` times this, exactly as the arm servo does.
-    budget_s: f64,
+    /// Re-budgeted by [`MoveBudget::after_rate_change`] when the operator slows
+    /// the opening rate mid-move.
+    budget: MoveBudget,
     _busy: BusyGuard,
 }
 
@@ -164,7 +167,6 @@ pub async fn run(
     // side idles) so governing always ramps from where the fingers really are;
     // the opening rate is read from the governor (its single owner) rather than
     // carried here.
-    let gripper_rate = governor.max_gripper_rate_frac_s();
     let mut governed_grippers = ArmPair::new(
         gripper_fraction(&channels.left.gripper),
         gripper_fraction(&channels.right.gripper),
@@ -197,17 +199,16 @@ pub async fn run(
     };
     // The grippers chase their target at the gripper rate exactly as the planner
     // velocity-limits the arm candidates; an idle side chases nowhere.
-    let chase_gripper = |prev_frac: f64, target: Option<GripperTarget>| -> f64 {
-        rate_limited(
-            prev_frac,
-            target.map_or(prev_frac, |t| t.frac),
-            gripper_rate,
-            dt,
-        )
+    let chase_gripper = |prev_frac: f64, target: Option<GripperTarget>, rate: f64| -> f64 {
+        rate_limited(prev_frac, target.map_or(prev_frac, |t| t.frac), rate, dt)
     };
     loop {
         consume_streams_of_busy_sides(&channels);
         apply_controls(&mut governor, &mut planners, *governor_config.borrow());
+        // Re-read every tick: the operator retunes this live, and the chase, the
+        // move budget and the governor's own clamp must agree within a tick or a
+        // move budgeted at one rate is driven at another and times out short.
+        let gripper_rate = governor.max_gripper_rate_frac_s();
         let now = Instant::now();
 
         let arm_admission = admit_arms(&mut arm_liveness, &channels, now, stale_limit);
@@ -255,8 +256,8 @@ pub async fn run(
         let cand = GovState::new(
             arm_candidate,
             ArmPair::new(
-                chase_gripper(prev.grippers.left, targets.left),
-                chase_gripper(prev.grippers.right, targets.right),
+                chase_gripper(prev.grippers.left, targets.left, gripper_rate),
+                chase_gripper(prev.grippers.right, targets.right, gripper_rate),
             ),
         );
         let measured = measured_config(&channels, &prev, measured_grippers);
@@ -382,6 +383,7 @@ fn apply_controls(governor: &mut Governor, planners: &mut ArmPair<Planner>, cfg:
     // it, the planners budget planned moves at admission and step streamed
     // poses with it.
     governor.set_ee_cap(cfg.max_ee_velocity_m_s);
+    governor.set_gripper_rate(cfg.max_gripper_rate_frac_s);
     planners.left.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
     planners.right.set_max_ee_velocity(cfg.max_ee_velocity_m_s);
 }
@@ -769,7 +771,10 @@ async fn service_gripper_move(
                 max_effort: goal.max_effort,
                 ctx: goal.ctx,
                 started: now,
-                budget_s: gripper_move_budget_s(governed_frac, goal.opening, gripper_rate_frac_s),
+                budget: MoveBudget::new(
+                    gripper_move_budget_s(governed_frac, goal.opening, gripper_rate_frac_s),
+                    gripper_rate_frac_s,
+                ),
                 _busy: BusyGuard(channels.gripper_busy.clone()),
             });
         } else {
@@ -777,19 +782,21 @@ async fn service_gripper_move(
                 .await;
         }
     }
-    let Some(m) = mv.as_ref() else { return };
+    let Some(m) = mv.as_mut() else { return };
     let elapsed_s = now.duration_since(m.started).as_secs_f64();
+    m.budget = m.budget.after_rate_change(elapsed_s, gripper_rate_frac_s);
+    let m = &*m;
     let landed = (governed_frac - m.target_frac).abs() <= GRIPPER_LANDED_FRAC;
     let (success, message, cancelled) = if m.ctx.is_cancelled() {
         (false, "goal cancelled".to_string(), true)
     } else if landed {
         (true, "move complete".to_string(), false)
-    } else if motion_timed_out(elapsed_s, m.budget_s) {
+    } else if m.budget.timed_out(elapsed_s) {
         (
             false,
             format!(
                 "overran {MOTION_TIMEOUT_FACTOR:.0}x its {:.1}s nominal travel, short of the target (a collision-governed clamp ends here)",
-                m.budget_s
+                m.budget.seconds()
             ),
             false,
         )
@@ -1002,15 +1009,10 @@ mod tests {
     fn gripper_move_times_out_at_the_shared_factor_over_budget() {
         // A clamped full-travel move fails once it overruns 2x its budget,
         // exactly as the arm servo grades its rollout.
-        let budget = gripper_move_budget_s(0.0, 1.0, 3.0);
-        assert!(!motion_timed_out(
-            budget * MOTION_TIMEOUT_FACTOR - 0.01,
-            budget
-        ));
-        assert!(motion_timed_out(
-            budget * MOTION_TIMEOUT_FACTOR + 0.01,
-            budget
-        ));
+        let budget = MoveBudget::new(gripper_move_budget_s(0.0, 1.0, 3.0), 3.0);
+        let nominal = budget.seconds();
+        assert!(!budget.timed_out(nominal * MOTION_TIMEOUT_FACTOR - 0.01));
+        assert!(budget.timed_out(nominal * MOTION_TIMEOUT_FACTOR + 0.01));
     }
 
     // The chase's landing arithmetic (`prev + (t - prev)`) can leave IEEE

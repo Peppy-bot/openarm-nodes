@@ -13,7 +13,7 @@ use control_core::motor_health::{
     AlertRaiser, DriverTempC, HEALTH_PERIOD, MOTOR_ALERT_KIND, MotorHealth, MotorHealthFilter,
     MotorSample, Ratings, STATE_STALE_AFTER, WindingTempC,
 };
-use openarm_can::{GripperCan, GripperState, Mode};
+use openarm_can::GripperState;
 use peppygen::NodeRunner;
 use peppygen::emitted_topics::alerts::alerts;
 use peppygen::emitted_topics::motor_health::motor_health;
@@ -21,6 +21,7 @@ use peppylib::runtime::CancellationToken;
 use tracing::{error, warn};
 
 use crate::drive;
+use crate::hardware::Gripper;
 
 /// Warn once per failure burst instead of once per tick: one line when a
 /// publish starts failing, silence while it keeps failing, re-armed by the
@@ -106,10 +107,10 @@ fn fractions(state: &GripperState, ratings: Ratings) -> (f64, f64) {
 ///
 /// The final round re-reads and re-judges the driver cache, flushing the
 /// fault verdict the follow loop wrote there before cancelling the node.
-pub async fn run<M: Mode + Send + 'static>(
+pub async fn run(
     runner: Arc<NodeRunner>,
     alert_source: String,
-    gripper: Arc<Mutex<GripperCan<M>>>,
+    gripper: Arc<Mutex<Gripper>>,
     ratings: Ratings,
     cycle_period: Duration,
     token: CancellationToken,

@@ -1,7 +1,8 @@
-//! Binary entry point: tracing to the environment's filter, then the relay's
-//! real setup (`openarm_arm_sim::setup`) through the runtime builder.
+//! Binary shell: tracing init plus the runtime boot of the library's `setup`.
 
-use peppygen::{NodeBuilder, Result};
+#![forbid(unsafe_code)]
+
+use peppygen::Result;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -11,5 +12,5 @@ fn main() -> Result<()> {
         )
         .init();
 
-    NodeBuilder::new().run(openarm_arm_sim::setup)
+    peppygen::NodeBuilder::new().run(openarm_arm_sim::setup)
 }

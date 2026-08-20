@@ -83,7 +83,12 @@ fn parse_alert(
         kind: msg.kind.clone(),
         severity: msg.severity,
         message: msg.message.clone(),
-        validity: parse_timestamp_validity(msg.timestamp, clock_now, received_at, ALERT_STALE_AFTER)?,
+        validity: parse_timestamp_validity(
+            msg.timestamp,
+            clock_now,
+            received_at,
+            ALERT_STALE_AFTER,
+        )?,
     })
 }
 

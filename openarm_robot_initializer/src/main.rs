@@ -1,16 +1,8 @@
-use std::sync::Arc;
+#![forbid(unsafe_code)]
 
-use peppygen::{NodeBuilder, NodeRunner, Parameters, Result};
-
-mod service;
+use peppygen::Result;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
-    NodeBuilder::new().run(|_args: Parameters, runner: Arc<NodeRunner>| async move {
-        let token = runner.cancellation_token().clone();
-        tokio::spawn(async move {
-            service::run(runner, token).await;
-        });
-        Ok(())
-    })
+    peppygen::NodeBuilder::new().run(openarm_robot_initializer::setup)
 }

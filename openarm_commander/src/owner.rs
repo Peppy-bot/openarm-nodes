@@ -129,6 +129,7 @@ pub struct GovernorFrame {
     pub d_stop: f64,
     pub d_safe: f64,
     pub max_ee_velocity_m_s: f64,
+    pub max_gripper_rate_frac_s: f64,
 }
 
 impl CommandFrame {
@@ -148,6 +149,7 @@ impl CommandFrame {
                 d_stop: s.d_stop,
                 d_safe: s.d_safe,
                 max_ee_velocity_m_s: s.max_ee_velocity_m_s,
+                max_gripper_rate_frac_s: s.max_gripper_rate_frac_s,
             },
         }
     }
@@ -652,20 +654,26 @@ impl Owner {
                 d_stop,
                 d_safe,
                 max_ee_velocity_m_s,
+                max_gripper_rate_frac_s,
             } => {
                 // The backbone validates again before applying; reject a degenerate band here
                 // so the UI cannot stream one.
-                if !valid_governor_band(d_stop, d_safe, max_ee_velocity_m_s) {
+                if !(valid_governor_band(d_stop, d_safe, max_ee_velocity_m_s)
+                    && max_gripper_rate_frac_s.is_finite()
+                    && max_gripper_rate_frac_s > 0.0)
+                {
                     self.state.set_status(
-                        "governor params ignored: require 0 < d_stop < d_safe and speed > 0",
+                        "governor params ignored: require 0 < d_stop < d_safe and positive rates",
                     );
                     return;
                 }
                 self.state.d_stop = d_stop;
                 self.state.d_safe = d_safe;
                 self.state.max_ee_velocity_m_s = max_ee_velocity_m_s;
+                self.state.max_gripper_rate_frac_s = max_gripper_rate_frac_s;
                 self.state.set_status(format!(
-                    "governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s"
+                    "governor: d_stop={d_stop} d_safe={d_safe} max_ee={max_ee_velocity_m_s} m/s \
+                     gripper opening={max_gripper_rate_frac_s} /s"
                 ));
             }
         }
@@ -1219,7 +1227,7 @@ mod tests {
 
     // A state with measurements on both sides, as RunGesture requires.
     fn measured_state() -> UiState {
-        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 10.0);
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 6.0, 10.0);
         for side in SIDES {
             s.arms[side].last_feedback = Some([0.1, 0.2, -0.1, 0.8, 0.0, 0.1, 0.0]);
             s.grippers[side].last_feedback = Some(0.3);
@@ -1326,7 +1334,7 @@ mod tests {
     #[test]
     fn disconnect_disarms_sides_and_restores_governor_default_on() {
         // Launched with avoidance on; operator turned it off with both sides armed.
-        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 10.0);
+        let mut s = UiState::new(true, 0.005, 0.02, 0.25, 6.0, 10.0);
         s.collision_enabled = false;
         s.enabled[Side::Left] = true;
         s.enabled[Side::Right] = true;
@@ -1344,7 +1352,7 @@ mod tests {
     #[test]
     fn disconnect_restores_governor_default_off_when_launched_ungoverned() {
         // Launched deliberately ungoverned; operator turned avoidance on.
-        let mut s = UiState::new(false, 0.005, 0.02, 0.25, 10.0);
+        let mut s = UiState::new(false, 0.005, 0.02, 0.25, 6.0, 10.0);
         s.collision_enabled = true;
         reset_on_disconnect(&mut s);
         assert!(

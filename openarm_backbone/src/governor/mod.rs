@@ -106,16 +106,10 @@ impl Step {
 /// tuning on hardware.
 const APPROACH_VELOCITY_AT_SAFE_M_S: f64 = 0.15;
 
-/// Largest rate (opening fraction per second) the coordinator's chase drives a
-/// gripper opening: the opening analog of the arm joint speed cap, bounding each
-/// tick's opening step before it reaches the governor (whose `DofSpeed` clamp
-/// and floor-scan probe sizing key off the same rate via
-/// [`max_gripper_rate_frac_s`](Governor::max_gripper_rate_frac_s)). The gripper
-/// node and hardware own the real opening speed. Stated in opening fraction, the
-/// unit every opening DOF (wire and model alike) already uses: `3.0 /s` drives a
-/// full open or close in ~1/3 s. A module constant like the approach speed above;
-/// promote it to a parameter when tuning on hardware.
-const MAX_GRIPPER_RATE_FRAC_S: f64 = 3.0;
+/// Smallest opening rate worth accepting (fraction per second): below this a
+/// full stroke takes over a minute, which is a misconfiguration rather than a
+/// slow gripper.
+const MIN_GRIPPER_RATE_FRAC_S: f64 = 0.01;
 
 /// Probe resolution of the floor scan on an opening DOF (fraction), the opening
 /// analog of `MAX_PROBE_ARC_RAD`: one probe per this much opening travel, ~0.7 mm
@@ -198,6 +192,13 @@ pub struct Governor {
     /// The operator's cap on a streamed hand's linear speed (m/s), applied by
     /// the EE-speed limiter to each side that carries a stream basis.
     max_ee_velocity_m_s: f64,
+    /// Largest rate (opening fraction per second) the coordinator's chase may
+    /// drive an opening: the opening analog of the joint speed cap, bounding
+    /// each tick's opening step. The `DofSpeed` clamp and the floor scan's
+    /// probe sizing key off it, so raising it buys stroke speed at the cost of
+    /// probes per tick. The gripper node and its motor own the real opening
+    /// speed; this only bounds what the governor has to scan.
+    max_gripper_rate_frac_s: f64,
     enabled: bool,
     guard: Guard,
     /// Whether the measured-state monitor is currently holding. Latched with
@@ -220,6 +221,7 @@ impl Governor {
         d_safe: f64,
         max_joint_velocity_rad_s: f64,
         max_ee_velocity_m_s: f64,
+        max_gripper_rate_frac_s: f64,
         enabled: bool,
     ) -> Result<Self, String> {
         if !valid_band(d_stop, d_safe) {
@@ -237,6 +239,12 @@ impl Governor {
                 "invalid max_ee_velocity_m_s ({max_ee_velocity_m_s}): must be finite and > 0"
             ));
         }
+        if !valid_gripper_rate(max_gripper_rate_frac_s) {
+            return Err(format!(
+                "invalid max_gripper_rate_frac_s ({max_gripper_rate_frac_s}): must be finite \
+                 and at least {MIN_GRIPPER_RATE_FRAC_S}"
+            ));
+        }
         let model = ConfiguredModel::new(build_collision_model(
             urdf, meshes_dir, left_base, right_base,
         )?);
@@ -246,6 +254,7 @@ impl Governor {
             d_safe,
             max_joint_velocity_rad_s,
             max_ee_velocity_m_s,
+            max_gripper_rate_frac_s,
             enabled,
             guard: Guard::Clear,
             monitor_tripped: false,
@@ -471,7 +480,22 @@ impl Governor {
     /// candidate; the floor scan's probe sizing and the `DofSpeed` clamp are
     /// keyed to the same value.
     pub fn max_gripper_rate_frac_s(&self) -> f64 {
-        MAX_GRIPPER_RATE_FRAC_S
+        self.max_gripper_rate_frac_s
+    }
+
+    /// Retune the opening rate at runtime, mirroring [`set_ee_cap`]. Rejects a
+    /// value the governor cannot scan against, keeping the current rate, and is
+    /// a no-op when unchanged so it can be called every tick.
+    pub fn set_gripper_rate(&mut self, max_gripper_rate_frac_s: f64) {
+        if max_gripper_rate_frac_s == self.max_gripper_rate_frac_s {
+            return;
+        }
+        if !valid_gripper_rate(max_gripper_rate_frac_s) {
+            warn!("collision: ignoring invalid gripper opening rate ({max_gripper_rate_frac_s})");
+            return;
+        }
+        info!("gripper opening rate set to {max_gripper_rate_frac_s} /s");
+        self.max_gripper_rate_frac_s = max_gripper_rate_frac_s;
     }
 
     /// Largest per-tick step governed DOF `i` may take, from the chase's arm
@@ -537,6 +561,13 @@ fn build_collision_model(
 /// `d_safe - d_stop` is then positive).
 pub(crate) fn valid_band(d_stop: f64, d_safe: f64) -> bool {
     d_stop.is_finite() && d_safe.is_finite() && d_stop > 0.0 && d_safe > d_stop
+}
+
+/// A valid opening rate is finite and at least [`MIN_GRIPPER_RATE_FRAC_S`], so
+/// the chase always makes progress and the floor scan's probe count stays
+/// finite.
+pub(crate) fn valid_gripper_rate(rate_frac_s: f64) -> bool {
+    rate_frac_s.is_finite() && rate_frac_s >= MIN_GRIPPER_RATE_FRAC_S
 }
 
 /// Pack a governed configuration into one vector: left joints, right joints,
@@ -615,6 +646,8 @@ mod tests {
     /// Positive as build requires; irrelevant to these tests, which pass no
     /// stream basis, so the EE limiter never engages.
     const TEST_EE_CAP_M_S: f64 = 0.5;
+    /// Fast enough that a test never sees the opening rate bind first.
+    const TEST_GRIPPER_RATE_FRAC_S: f64 = 6.0;
 
     /// In-limit home; the elbow's one-sided lower limit is 0.05.
     fn home() -> ArmPair<JointVec> {
@@ -642,6 +675,7 @@ mod tests {
             D_SAFE,
             MAX_JOINT_VELOCITY_RAD_S,
             TEST_EE_CAP_M_S,
+            TEST_GRIPPER_RATE_FRAC_S,
             enabled,
         )
         .expect("build governor from bundled description")
@@ -713,6 +747,7 @@ mod tests {
             D_SAFE,
             velocity,
             TEST_EE_CAP_M_S,
+            TEST_GRIPPER_RATE_FRAC_S,
             true,
         )
         .expect("build governor from bundled description");

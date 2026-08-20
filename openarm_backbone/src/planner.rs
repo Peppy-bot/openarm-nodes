@@ -26,14 +26,13 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::chase::{chase_step, clamp_to_limits};
+use crate::motion::{MOTION_TIMEOUT_FACTOR, MoveBudget};
 use crate::servo::{EeCaps, ServoState, ServoStep, rate_step_toward};
 use crate::trajectory::{
     ARM_ANGLE_STEP_PER_BLEND_RAD, CartesianPlan, CartesianTrajectory, JointTrajectory, PlanLimits,
     plan_cartesian, subdivided_blends,
 };
-use crate::types::{
-    ARM_DOF, JointVec, MOTION_TIMEOUT_FACTOR, Side, motion_timed_out, world_pose_arrays,
-};
+use crate::types::{ARM_DOF, JointVec, Side, world_pose_arrays};
 use crate::upstream::Upstream;
 
 /// Slack the runtime per-tick Cartesian velocity check allows over the planned
@@ -220,8 +219,11 @@ struct ServoTrack {
     prev_sample_at: Instant,
     /// The plan-time rollout duration. The runtime aborts once the move runs
     /// past `MOTION_TIMEOUT_FACTOR` times this, tying the timeout to the
-    /// validated motion length rather than a flat ceiling.
-    budget_s: f64,
+    /// validated motion length rather than a flat ceiling. Re-budgeted by
+    /// [`MoveBudget::after_rate_change`] when the operator slows the EE speed
+    /// cap mid-move, since the rollout that produced it assumed the cap in
+    /// force at admission.
+    budget: MoveBudget,
 }
 
 /// How an admitted move_arm goal executes, per its [`CartesianPlan`]: track the
@@ -357,9 +359,12 @@ impl Planner {
     /// This copy budgets planned moves at admission, paces the servo
     /// reference, and steps streamed poses; a streamed joint command is capped
     /// only by the governor's EE-speed limiter, retuned from the same control
-    /// message. The live control rescales the linear cap only; the angular cap
-    /// is launch-time. Ignores a non-positive or non-finite value, keeping the
-    /// current cap.
+    /// message. The live control rescales the linear cap only: the linear cap
+    /// is enforced twice, by this servo and by the governor's EE-speed limiter,
+    /// so it binds on any streamed hand, while the angular cap is enforced only
+    /// here and a joint stream never reaches this arm of `follow_target`. A
+    /// live angular control would read as doing nothing on a joint stream, so
+    /// it stays a launch parameter until the governor limits turn rate too.
     pub fn set_max_ee_velocity(&mut self, v: f64) {
         if v.is_finite() && v > 0.0 {
             self.cfg.ee.linear_m_s = v;
@@ -622,6 +627,11 @@ impl Planner {
         // actually is, or it would run ahead and report convergence while the
         // arm sits short of the goal.
         let governed_q = self.setpoint;
+        // The rollout that produced this budget assumed the cap in force at
+        // admission; the step below uses whatever the operator has set since.
+        track.budget = track
+            .budget
+            .after_rate_change(elapsed, self.cfg.ee.linear_m_s);
         let step = track.servo.step(
             &mut self.model,
             &governed_q,
@@ -634,7 +644,7 @@ impl Planner {
                 q_des: q,
                 complete: true,
             },
-            ServoStep::Stepped(q) if !motion_timed_out(elapsed, track.budget_s) => PathStep::To {
+            ServoStep::Stepped(q) if !track.budget.timed_out(elapsed) => PathStep::To {
                 q_des: q,
                 complete: false,
             },
@@ -642,7 +652,7 @@ impl Planner {
                 let short_m = track.servo.position_err_m(&mut self.model, &governed_q);
                 PathStep::Failed(format!(
                     "servo overran {MOTION_TIMEOUT_FACTOR:.0}x its {:.1}s rollout, {:.0} mm short of the goal",
-                    track.budget_s,
+                    track.budget.seconds(),
                     short_m * 1000.0
                 ))
             }
@@ -793,7 +803,7 @@ impl Planner {
                     servo: Box::new(ServoState::new(start_world, target, self.cfg.cycle_period)),
                     started: now,
                     prev_sample_at: now,
-                    budget_s: duration_s,
+                    budget: MoveBudget::new(duration_s, self.cfg.ee.linear_m_s),
                 })
             }
         };
@@ -907,6 +917,34 @@ mod tests {
         let mut planner = Planner::new(Side::Left, model, cfg);
         planner.commit(POSE_TEST_Q);
         planner
+    }
+
+    #[test]
+    fn slowing_the_ee_cap_mid_move_extends_the_servo_deadline() {
+        // The rollout budgets a move against the cap in force at admission,
+        // then every step runs at whatever the operator has since streamed. A
+        // move budgeted at 1.0 m/s and then driven at half that must be given
+        // the extra time, or it aborts short of a goal it was still reaching.
+        let mut planner = test_planner(POSE_TEST_Q);
+        let start = planner.ee_pose_world(&POSE_TEST_Q);
+        let now = Instant::now();
+        let mut track = ServoTrack {
+            servo: Box::new(ServoState::new(start, start, planner.cfg.cycle_period)),
+            started: now,
+            prev_sample_at: now,
+            budget: MoveBudget::new(1.0, planner.cfg.ee.linear_m_s),
+        };
+
+        planner.set_max_ee_velocity(planner.cfg.ee.linear_m_s / 2.0);
+        planner.step_servo(&mut track, 0.25, now + planner.cfg.cycle_period);
+
+        // A quarter of the budget was spent at the old cap; the remaining
+        // three quarters now need twice as long.
+        assert!(
+            (track.budget.seconds() - (0.25 + 0.75 * 2.0)).abs() < 1e-9,
+            "expected the remaining deadline to double, got {}",
+            track.budget.seconds()
+        );
     }
 
     #[tokio::test]
