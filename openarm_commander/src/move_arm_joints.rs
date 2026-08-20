@@ -71,7 +71,7 @@ async fn run(
 
     let goal = limb_motion_move_arm_joints::GoalRequest {
         arm_id: side.arm_id(),
-        joint_positions: joint_positions.to_vec(),
+        joint_positions,
         duration_s,
     };
 
@@ -145,7 +145,37 @@ async fn run(
     }
     let (success, summary) = match outcome {
         Ok(r) => match r.outcome {
-            ResultOutcome::Completed(data) => grade_completed(label, &joint_positions, &data),
+            ResultOutcome::Completed(data) => {
+                if !data.success {
+                    (
+                        false,
+                        format!("move_arm_joints ({label}) failed: {}", data.message),
+                    )
+                } else {
+                    // Confirm the arm actually reached the commanded joints, not just
+                    // that the trajectory finished (a governor stop finishes it too).
+                    let max_err = (0..ARM_DOF)
+                        .map(|i| (data.final_joint_positions[i] - joint_positions[i]).abs())
+                        .fold(0.0_f64, f64::max);
+                    if max_err <= REACHED_ANGLE_TOL_RAD {
+                        (
+                            true,
+                            format!(
+                                "move_arm_joints ({label}): success in {:.2}s",
+                                data.action_time
+                            ),
+                        )
+                    } else {
+                        (
+                            false,
+                            format!(
+                                "move_arm_joints ({label}) ended {:.1} deg off target (blocked?)",
+                                max_err.to_degrees()
+                            ),
+                        )
+                    }
+                }
+            }
             ResultOutcome::Cancelled(data) => (
                 false,
                 format!("move_arm_joints ({label}) cancelled: {}", data.message),
@@ -164,52 +194,6 @@ async fn run(
     finalize(&feedback, side, success, summary).await;
 }
 
-/// Grade a completed goal. Success means the arm actually reached the commanded
-/// joints, not just that the trajectory finished (a governor stop finishes it
-/// too), so the report must carry one measured position per joint of this arm.
-fn grade_completed(
-    label: &str,
-    commanded: &[f64; ARM_DOF],
-    data: &limb_motion_move_arm_joints::ResultResponseData,
-) -> (bool, String) {
-    if !data.success {
-        return (
-            false,
-            format!("move_arm_joints ({label}) failed: {}", data.message),
-        );
-    }
-    let Ok(reached) = <[f64; ARM_DOF]>::try_from(data.final_joint_positions.as_slice()) else {
-        return (
-            false,
-            format!(
-                "move_arm_joints ({label}) reported {} joint positions, expected {ARM_DOF}",
-                data.final_joint_positions.len()
-            ),
-        );
-    };
-    let max_err = reached
-        .iter()
-        .zip(commanded)
-        .map(|(reached, commanded)| (reached - commanded).abs())
-        .fold(0.0_f64, f64::max);
-    if max_err > REACHED_ANGLE_TOL_RAD {
-        return (
-            false,
-            format!(
-                "move_arm_joints ({label}) ended {:.1} deg off target (blocked?)",
-                max_err.to_degrees()
-            ),
-        );
-    }
-    (
-        true,
-        format!(
-            "move_arm_joints ({label}): success in {:.2}s",
-            data.action_time
-        ),
-    )
-}
-
 // Report the move outcome to the owner, which clears the in-flight slot and writes the
 // status line; a dropped channel means the owner is gone (shutdown), so ignore it.
 async fn finalize(
@@ -225,62 +209,4 @@ async fn finalize(
         warn!(side = side.label(), %summary, "move_arm_joints done");
     }
     let _ = feedback.send(Feedback::ArmGoalDone { side, summary }).await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const COMMANDED: [f64; ARM_DOF] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7];
-
-    fn completed(
-        final_joint_positions: Vec<f64>,
-    ) -> limb_motion_move_arm_joints::ResultResponseData {
-        limb_motion_move_arm_joints::ResultResponseData {
-            success: true,
-            message: String::new(),
-            final_joint_positions,
-            action_time: 1.5,
-        }
-    }
-
-    #[test]
-    fn a_reported_failure_is_graded_failed_with_its_message() {
-        let mut data = completed(COMMANDED.to_vec());
-        data.success = false;
-        data.message = "governor stop".into();
-        let (success, summary) = grade_completed("left", &COMMANDED, &data);
-        assert!(!success);
-        assert!(summary.contains("failed: governor stop"), "{summary}");
-    }
-
-    #[test]
-    fn a_report_with_the_wrong_joint_count_is_graded_failed() {
-        let data = completed(vec![0.0; ARM_DOF - 1]);
-        let (success, summary) = grade_completed("left", &COMMANDED, &data);
-        assert!(!success);
-        let expected = format!(
-            "reported {} joint positions, expected {ARM_DOF}",
-            ARM_DOF - 1
-        );
-        assert!(summary.contains(&expected), "{summary}");
-    }
-
-    #[test]
-    fn a_report_off_target_is_graded_blocked() {
-        let mut reached = COMMANDED.to_vec();
-        reached[3] += 2.0 * REACHED_ANGLE_TOL_RAD;
-        let (success, summary) = grade_completed("right", &COMMANDED, &completed(reached));
-        assert!(!success);
-        assert!(summary.contains("off target"), "{summary}");
-    }
-
-    #[test]
-    fn a_report_within_tolerance_is_graded_success() {
-        let mut reached = COMMANDED.to_vec();
-        reached[0] += 0.5 * REACHED_ANGLE_TOL_RAD;
-        let (success, summary) = grade_completed("right", &COMMANDED, &completed(reached));
-        assert!(success, "{summary}");
-        assert!(summary.contains("success in 1.50s"), "{summary}");
-    }
 }

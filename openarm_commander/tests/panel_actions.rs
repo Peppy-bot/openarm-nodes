@@ -69,7 +69,7 @@ async fn panel_commands_drive_backbone_and_recorder() -> peppygen::Result<()> {
         pending.request.joint_positions
     );
     assert_eq!(pending.request.duration_s, 0.0, "0 = fastest safe");
-    let goal_joints = pending.request.joint_positions.clone();
+    let goal_joints = pending.request.joint_positions;
     // The node's goal-accept timeout is 2 s, so admit before observing state.
     let active = pending.accept().await?;
 

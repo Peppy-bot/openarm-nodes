@@ -97,10 +97,10 @@ impl JointReply {
         match self {
             Self::MoveArmJoints(ctx) => {
                 let result = if cancelled {
-                    ctx.complete_cancelled(success, message, measured_q.to_vec(), elapsed_s)
+                    ctx.complete_cancelled(success, message, measured_q, elapsed_s)
                         .await
                 } else {
-                    ctx.complete(success, message, measured_q.to_vec(), elapsed_s).await
+                    ctx.complete(success, message, measured_q, elapsed_s).await
                 };
                 if let Err(e) = result {
                     error!("{side}: move_arm_joints complete: {e}");

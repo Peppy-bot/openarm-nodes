@@ -358,7 +358,7 @@ async fn move_arm_joints_streams_a_trajectory_the_arm_follows_to_the_target() ->
         &harness,
         &move_arm_joints::GoalRequestData {
             arm_id: 0,
-            joint_positions: target.to_vec(),
+            joint_positions: target,
             duration_s: 1.0,
         },
         peppygen::QoSProfile::Reliable,
