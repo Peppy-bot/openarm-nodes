@@ -5,12 +5,9 @@
 
 #![forbid(unsafe_code)]
 
-use peppygen::Result;
-
-fn main() -> Result<()> {
+fn main() -> peppygen::Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
-
     peppygen::NodeBuilder::new().run(openarm_backbone::setup)
 }

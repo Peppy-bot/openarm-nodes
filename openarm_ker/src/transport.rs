@@ -6,6 +6,11 @@
 use std::io;
 use std::time::{Duration, Instant};
 
+/// A launcher `transport` this node has no link for.
+#[derive(Debug, thiserror::Error)]
+#[error("transport must be 'usb' or 'serial', got '{0}'")]
+pub struct UnknownTransport(pub String);
+
 /// Espressif's vendor id; the CoreS3's native USB.
 const USB_VID: u16 = 0x303A;
 /// The KER firmware's vendor-mode product id.
@@ -25,16 +30,14 @@ pub enum TransportConfig {
 }
 
 impl TransportConfig {
-    pub fn parse(transport: &str, port: &str, baud: u32) -> Result<Self, String> {
+    pub fn parse(transport: &str, port: &str, baud: u32) -> Result<Self, UnknownTransport> {
         match transport {
             "usb" => Ok(Self::Usb),
             "serial" => Ok(Self::Serial {
                 port: port.to_string(),
                 baud,
             }),
-            other => Err(format!(
-                "transport must be 'usb' or 'serial', got '{other}'"
-            )),
+            other => Err(UnknownTransport(other.to_string())),
         }
     }
 }

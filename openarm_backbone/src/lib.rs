@@ -37,4 +37,4 @@ mod upstream;
 // Sibling modules' unit tests reach the shared model builder as `crate::arm_model`.
 #[cfg(test)]
 use node::arm_model;
-pub use node::setup;
+pub use node::{NodeError, setup};

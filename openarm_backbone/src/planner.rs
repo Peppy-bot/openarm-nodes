@@ -45,6 +45,8 @@ const VELOCITY_GUARD_MARGIN: f64 = 1.5;
 #[derive(Clone)]
 pub struct PlanConfig {
     pub cycle_period: Duration,
+    /// The servo's command smoother, built for `cycle_period` at setup.
+    pub smoothing: control_core::filters::ButterworthFilter,
     pub max_joint_velocity_rad_s: JointVec,
     pub ee: EeCaps,
     pub limits: [Limit; ARM_DOF],
@@ -743,6 +745,7 @@ impl Planner {
                 max_joint_velocity_rad_s: &self.cfg.max_joint_velocity_rad_s,
                 ee: self.cfg.ee,
                 control_period: self.cfg.cycle_period,
+                smoothing: self.cfg.smoothing,
             },
             duration_s,
         );
@@ -800,7 +803,7 @@ impl Planner {
                     self.side.label()
                 );
                 MovePath::Servo(ServoTrack {
-                    servo: Box::new(ServoState::new(start_world, target, self.cfg.cycle_period)),
+                    servo: Box::new(ServoState::new(start_world, target, self.cfg.smoothing)),
                     started: now,
                     prev_sample_at: now,
                     budget: MoveBudget::new(duration_s, self.cfg.ee.linear_m_s),
@@ -873,6 +876,7 @@ mod tests {
     fn test_cfg() -> PlanConfig {
         PlanConfig {
             cycle_period: Duration::from_millis(10),
+            smoothing: crate::servo::smoothing_for(Duration::from_millis(10)).unwrap(),
             max_joint_velocity_rad_s: [10.0; ARM_DOF],
             ee: EeCaps {
                 linear_m_s: 1.0,
@@ -929,7 +933,7 @@ mod tests {
         let start = planner.ee_pose_world(&POSE_TEST_Q);
         let now = Instant::now();
         let mut track = ServoTrack {
-            servo: Box::new(ServoState::new(start, start, planner.cfg.cycle_period)),
+            servo: Box::new(ServoState::new(start, start, planner.cfg.smoothing)),
             started: now,
             prev_sample_at: now,
             budget: MoveBudget::new(1.0, planner.cfg.ee.linear_m_s),

@@ -49,6 +49,34 @@ use limiters::{DofSpeed, EeSpeed, Limiter, Limits, MeasuredTripwire};
 use model::ConfiguredModel;
 use sense::Sensed;
 
+/// Why the governor refused to build.
+///
+/// The node parses these same launcher values by name before it gets here, so
+/// in a launch these fire only if the two ever disagree. The governor still
+/// checks them: it is the component that has to hold the caps, and it is built
+/// directly by tests and by any future caller.
+#[derive(Debug, thiserror::Error)]
+pub enum GovernorError {
+    #[error(
+        "collision band invalid: require 0 < d_stop_m ({d_stop_m}) < d_safe_m ({d_safe_m}), both finite"
+    )]
+    Band { d_stop_m: f64, d_safe_m: f64 },
+
+    #[error("{name} must be finite and > 0, got {got}")]
+    NotPositiveFinite { name: &'static str, got: f64 },
+
+    #[error(
+        "max_gripper_rate_frac_s must be finite and at least {MIN_GRIPPER_RATE_FRAC_S}, got {0}"
+    )]
+    GripperRate(f64),
+
+    #[error(transparent)]
+    TorsoRegion(#[from] crate::torso::InvalidTorsoRegion),
+
+    #[error("build the collision model")]
+    CollisionModel(#[from] bimanual_collision_model::CollisionError),
+}
+
 /// Joints across both arms, left (0..7) then right (7..14).
 const DUAL_DOF: usize = 2 * ARM_DOF;
 
@@ -223,27 +251,23 @@ impl Governor {
         max_ee_velocity_m_s: f64,
         max_gripper_rate_frac_s: f64,
         enabled: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, GovernorError> {
         if !valid_band(d_stop, d_safe) {
-            return Err(format!(
-                "invalid band: require 0 < d_stop ({d_stop}) < d_safe ({d_safe})"
-            ));
+            return Err(GovernorError::Band {
+                d_stop_m: d_stop,
+                d_safe_m: d_safe,
+            });
         }
-        if !(max_joint_velocity_rad_s.is_finite() && max_joint_velocity_rad_s > 0.0) {
-            return Err(format!(
-                "invalid max_joint_velocity_rad_s ({max_joint_velocity_rad_s}): must be finite and > 0"
-            ));
-        }
-        if !(max_ee_velocity_m_s.is_finite() && max_ee_velocity_m_s > 0.0) {
-            return Err(format!(
-                "invalid max_ee_velocity_m_s ({max_ee_velocity_m_s}): must be finite and > 0"
-            ));
+        for (name, got) in [
+            ("max_joint_velocity_rad_s", max_joint_velocity_rad_s),
+            ("max_ee_velocity_m_s", max_ee_velocity_m_s),
+        ] {
+            if !(got.is_finite() && got > 0.0) {
+                return Err(GovernorError::NotPositiveFinite { name, got });
+            }
         }
         if !valid_gripper_rate(max_gripper_rate_frac_s) {
-            return Err(format!(
-                "invalid max_gripper_rate_frac_s ({max_gripper_rate_frac_s}): must be finite \
-                 and at least {MIN_GRIPPER_RATE_FRAC_S}"
-            ));
+            return Err(GovernorError::GripperRate(max_gripper_rate_frac_s));
         }
         let model = ConfiguredModel::new(build_collision_model(
             urdf, meshes_dir, left_base, right_base,
@@ -550,11 +574,12 @@ fn build_collision_model(
     meshes_dir: &str,
     left_base: &str,
     right_base: &str,
-) -> Result<BimanualCollisionModel, String> {
-    BimanualCollisionModel::builder(urdf, meshes_dir, left_base, right_base)
-        .regions(TORSO_BODY, torso_regions()?)
-        .build()
-        .map_err(|e| format!("build collision model: {e}"))
+) -> Result<BimanualCollisionModel, GovernorError> {
+    Ok(
+        BimanualCollisionModel::builder(urdf, meshes_dir, left_base, right_base)
+            .regions(TORSO_BODY, torso_regions()?)
+            .build()?,
+    )
 }
 
 /// A valid band requires finite `0 < d_stop < d_safe` (the ramp denominator

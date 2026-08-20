@@ -8,7 +8,6 @@ mod alerts;
 mod collision_status;
 mod command_stream;
 mod consumer;
-mod error;
 mod gestures;
 mod gripper_states;
 mod joint_states;
@@ -24,4 +23,4 @@ mod result_wait;
 mod state;
 mod ui;
 
-pub use node::setup;
+pub use node::{NodeError, setup, ui_failed};

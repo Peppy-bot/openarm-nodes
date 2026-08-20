@@ -9,4 +9,4 @@ mod health;
 mod node;
 mod stream;
 
-pub use node::{hard_fault_latched, setup};
+pub use node::{NodeError, hard_fault_latched, setup};

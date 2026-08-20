@@ -91,8 +91,15 @@ impl Publisher<JointBuild> {
     /// neither commands nor measures them, which the contract spells as an
     /// empty list rather than a vector of zeros.
     pub async fn send(&self, positions: &JointVec, velocities: &JointVec) {
-        self.emit(|timestamp| (self.build)(timestamp, positions.to_vec(), velocities.to_vec(), Vec::new()))
-            .await;
+        self.emit(|timestamp| {
+            (self.build)(
+                timestamp,
+                positions.to_vec(),
+                velocities.to_vec(),
+                Vec::new(),
+            )
+        })
+        .await;
     }
 }
 
@@ -143,7 +150,8 @@ impl<Build> Publisher<Build> {
     /// not ticked) means the message was never formed. Neither is fatal: the
     /// next tick tries again.
     async fn emit(&self, build: impl FnOnce(SystemTime) -> peppygen::Result<Payload>) {
-        match pairing_timestamp().and_then(|timestamp| build(timestamp).map_err(|e| e.to_string())) {
+        match pairing_timestamp().and_then(|timestamp| build(timestamp).map_err(|e| e.to_string()))
+        {
             Ok(msg) => {
                 if let Err(e) = self.publisher.publish(msg).await {
                     self.log_throttled(|| warn!("{} publish: {e}", self.what));

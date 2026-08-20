@@ -9,6 +9,18 @@
 
 use bimanual_collision_model::{ClipRegion, Point3};
 
+/// A region of the table above that does not describe a solid, named by its
+/// position there so the offending entry is identifiable from the log alone.
+///
+/// The reason is the collision model's own wording: `ClipRegion::new` reports a
+/// bad bound as a message, which this carries rather than restates.
+#[derive(Debug, thiserror::Error)]
+#[error("torso clip region {index}: {reason}")]
+pub struct InvalidTorsoRegion {
+    pub index: usize,
+    pub reason: String,
+}
+
 const INF: f64 = f64::INFINITY;
 
 /// The torso body whose concave mesh is decomposed by the regions below. The
@@ -23,7 +35,7 @@ pub const TORSO_BODY: &str = "openarm_body_link0";
 /// rules (overlap the cuts by >= 3 mm, keep bounds ~1 mm off flat mesh faces).
 /// Errors on an invalid bound so a bad edit surfaces through the governor's
 /// build diagnostics rather than a panic.
-pub fn torso_regions() -> Result<Vec<ClipRegion>, String> {
+pub fn torso_regions() -> Result<Vec<ClipRegion>, InvalidTorsoRegion> {
     [
         // plate: the full-footprint base, everything below the flare skirt.
         ([-INF, -INF, -INF], [INF, INF, 0.012]),
@@ -40,12 +52,13 @@ pub fn torso_regions() -> Result<Vec<ClipRegion>, String> {
         ([-INF, -INF, 0.713], [INF, INF, INF]),
     ]
     .into_iter()
-    .map(|(min, max)| {
+    .enumerate()
+    .map(|(index, (min, max))| {
         ClipRegion::new(
             Point3::new(min[0], min[1], min[2]),
             Point3::new(max[0], max[1], max[2]),
         )
-        .map_err(|e| format!("torso clip region: {e}"))
+        .map_err(|reason| InvalidTorsoRegion { index, reason })
     })
     .collect()
 }

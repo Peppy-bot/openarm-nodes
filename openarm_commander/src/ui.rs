@@ -22,10 +22,30 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
-use crate::error::Result;
 use crate::gestures::Registry;
 use crate::owner::UiMsg;
 use crate::pose::{ArmModels, JogMode, Pose};
+
+/// A second `init_limits` call, which would be a second generation's ranges
+/// arriving after the first were already handed out.
+#[derive(Debug, thiserror::Error)]
+#[error("init_limits must run exactly once")]
+pub struct LimitsAlreadySet;
+
+/// Why the operator panel stopped serving. Both are `io::Error`, so each names
+/// which of the two steps produced it rather than sharing one label.
+#[derive(Debug, thiserror::Error)]
+pub enum UiError {
+    #[error("bind the commander UI to {addr}: {source}")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("serve the commander UI: {0}")]
+    Serve(#[source] std::io::Error),
+}
 use crate::state::{
     ARM_DOF, Alert, ArmTarget, Disposition, GesturePhase, GripperTarget, HealthLevel, HealthReport,
     Proximity, Side, UiState,
@@ -77,12 +97,12 @@ static LIMITS: std::sync::OnceLock<JointLimits> = std::sync::OnceLock::new();
 /// arm joints via its `joint_limits` (URDF limits with the elbow held off its
 /// singularity floor, matching the backbone's clamp); the gripper is the
 /// unitless opening fraction [0, 1] on every generation. Must run before the
-/// UI serves.
-pub fn init_limits(version: HardwareVersion) {
-    assert!(
-        LIMITS.set(JointLimits::resolve(version)).is_ok(),
-        "init_limits must run exactly once"
-    );
+/// UI serves, and exactly once: a second call would be a second generation's
+/// ranges arriving after the first were already handed out.
+pub fn init_limits(version: HardwareVersion) -> std::result::Result<(), LimitsAlreadySet> {
+    LIMITS
+        .set(JointLimits::resolve(version))
+        .map_err(|_| LimitsAlreadySet)
 }
 
 fn joint_limits() -> &'static JointLimits {
@@ -111,7 +131,7 @@ pub async fn run(
     command_tx: mpsc::Sender<UiMsg>,
     snapshot_rx: watch::Receiver<String>,
     token: CancellationToken,
-) -> Result<()> {
+) -> std::result::Result<(), UiError> {
     let port = env::var("PEPPY_JC_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
@@ -132,13 +152,16 @@ pub async fn run(
         .route("/ws", get(ws_upgrade))
         .with_state(app_state);
 
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| UiError::Bind { addr, source })?;
     info!("commander UI at http://localhost:{port}");
 
     let shutdown_token = token.clone();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
-        .await?;
+        .await
+        .map_err(UiError::Serve)?;
     Ok(())
 }
 

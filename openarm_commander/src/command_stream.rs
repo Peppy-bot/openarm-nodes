@@ -42,7 +42,7 @@ type BuildGripperSetpoint = fn(SystemTime, f64, f64) -> peppygen::Result<Payload
 
 pub async fn run(
     runner: Arc<NodeRunner>,
-    command_rate_hz: u32,
+    command_period: Duration,
     token: CancellationToken,
     frame_rx: watch::Receiver<CommandFrame>,
 ) {
@@ -76,7 +76,7 @@ pub async fn run(
     let governor_rx = frame_rx.clone();
     tasks.spawn(stream_setpoints(
         governor_pub,
-        command_rate_hz,
+        command_period,
         token.clone(),
         "governor control".to_string(),
         move || {
@@ -115,7 +115,7 @@ pub async fn run(
         let arm_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             arm_pub,
-            command_rate_hz,
+            command_period,
             token.clone(),
             format!("{} arm", side.label()),
             move || {
@@ -131,7 +131,7 @@ pub async fn run(
         let gripper_rx = frame_rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub,
-            command_rate_hz,
+            command_period,
             token.clone(),
             format!("{} gripper", side.label()),
             move || {
@@ -154,20 +154,20 @@ pub async fn run(
     }
 }
 
-// Publish the latest setpoint from `next_message` at command_rate_hz, skipping a tick
+// Publish the latest setpoint from `next_message` every `period`, skipping a tick
 // whenever it returns None (the side is disabled). Failures latch so a stuck side warns
-// once, not every tick.
+// once, not every tick. The period arrives already validated, so this side never
+// divides by a rate it has to trust.
 async fn stream_setpoints(
     publisher: TopicPublisher,
-    command_rate_hz: u32,
+    period: Duration,
     token: CancellationToken,
     label: String,
     mut next_message: impl FnMut() -> Option<Result<Payload, String>>,
 ) {
-    let period = Duration::from_micros(1_000_000 / command_rate_hz as u64);
-    // interval (not sleep) so the publish cadence holds at command_rate_hz instead of
-    // drifting by the per-tick work time; Delay avoids a catch-up burst after a
-    // scheduling hiccup.
+    // interval (not sleep) so the publish cadence holds at the commanded rate
+    // instead of drifting by the per-tick work time; Delay avoids a catch-up
+    // burst after a scheduling hiccup.
     let mut ticker = tokio::time::interval(period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut failing = false;

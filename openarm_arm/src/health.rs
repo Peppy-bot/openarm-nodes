@@ -23,8 +23,27 @@ use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use crate::ARM_DOF;
+
+/// `ARM_MOTOR_TYPES` below is indexed by this crate's joint numbering; the two
+/// crates declare their DOF independently, so a skew would be an
+/// out-of-bounds panic mid-bring-up rather than a compile error without this.
+const _: () = assert!(openarm_can::ARM_MOTOR_TYPES.len() == ARM_DOF);
 use crate::control::ticks_within;
 use crate::stream::{LatchedWarn, StreamWiring, capture_timestamp};
+
+/// Axes whose motor reports a full scale the decode table disagrees with.
+///
+/// Each reading on such an axis is wrong by the ratio of the two scales, so
+/// the arm refuses to drive rather than judge torque against them. A variant
+/// swap (a 24V-config motor where the lineup expects 48V) is what this catches.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing to drive on mis-scaled readings: {}; retype the lineup or reconfigure the motor",
+    .axes.join("; ")
+)]
+pub struct MisScaledReadings {
+    pub axes: Vec<String>,
+}
 
 /// How often the tick loop may repeat a clock-outage warning.
 const CLOCK_WARN_PERIOD: Duration = Duration::from_secs(1);
@@ -362,27 +381,18 @@ fn build_health_message(sample: &HealthSample) -> Result<(peppylib::Payload, boo
 pub fn resolve_ratings(
     arm: &mut ArmCan,
     recv_timeout_us: u32,
-) -> std::result::Result<[Ratings; ARM_DOF], String> {
+) -> std::result::Result<[Ratings; ARM_DOF], MisScaledReadings> {
     let reads = read_limit_registers(arm, recv_timeout_us);
 
-    let mismatched = scale_mismatches(&reads);
-    if !mismatched.is_empty() {
-        return Err(format!(
-            "refusing to drive on mis-scaled readings: {}; retype the lineup or reconfigure the motor",
-            mismatched.join("; ")
-        ));
+    let axes = scale_mismatches(&reads);
+    if !axes.is_empty() {
+        return Err(MisScaledReadings { axes });
     }
 
-    let mut ratings = Vec::with_capacity(ARM_DOF);
-    for joint in 0..ARM_DOF {
+    Ok(std::array::from_fn(|joint| {
         warn_late_temp_trip(joint, reads.over_temp[joint]);
-        ratings.push(effective_ratings(
-            joint,
-            reads.over_current[joint],
-            reads.torque_max[joint],
-        ));
-    }
-    Ok(ratings.try_into().expect("one rating pushed per joint"))
+        effective_ratings(joint, reads.over_current[joint], reads.torque_max[joint])
+    }))
 }
 
 /// The limit registers bring-up reads off every motor. A register that could
@@ -504,6 +514,16 @@ mod tests {
     use super::*;
     use control_core::motor_health::HealthLevel;
     use openarm_can::MotorStatus;
+
+    /// The lineup is a compiled-in table, so its completeness is enforced
+    /// here rather than by the `expect` in `effective_ratings`: this failing
+    /// is the only way that expect could ever fire.
+    #[test]
+    fn every_arm_motor_has_datasheet_ratings() {
+        for (joint, motor) in openarm_can::ARM_MOTOR_TYPES.iter().enumerate() {
+            assert!(motor.ratings().is_some(), "j{} ({motor:?})", joint + 1);
+        }
+    }
 
     /// The lineup's datasheet ratings, standing in for what bring-up reads
     /// off the motors.

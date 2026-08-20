@@ -203,8 +203,7 @@ async fn serves_ready_and_ingests_engine_states_without_backbone_peer() -> peppy
     };
     let (mut harness, mocks) = Harness::start_with(config, openarm_gripper_sim::setup).await?;
     assert!(
-        peppygen::paired_topics::backbone::gripper_states::paired(harness.node_runner())?
-            .is_none(),
+        peppygen::paired_topics::backbone::gripper_states::paired(harness.node_runner())?.is_none(),
         "a vacant boot must leave the backbone slot unpaired"
     );
 

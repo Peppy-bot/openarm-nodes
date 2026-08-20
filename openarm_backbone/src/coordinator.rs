@@ -1034,6 +1034,7 @@ mod tests {
         use crate::planner::{JointReply, PlanConfig, ReadyOutcome, ReadyReply};
         use crate::servo::EeCaps;
 
+        const TEST_PERIOD: Duration = Duration::from_millis(10);
         let version = openarm_description::HardwareVersion::V1;
         let model = crate::arm_model(version, openarm_description::Side::Left)
             .expect("build arm from the bundled URDF");
@@ -1042,7 +1043,8 @@ mod tests {
             Side::Left,
             model,
             PlanConfig {
-                cycle_period: Duration::from_millis(10),
+                cycle_period: TEST_PERIOD,
+                smoothing: crate::servo::smoothing_for(TEST_PERIOD).unwrap(),
                 max_joint_velocity_rad_s: [10.0; ARM_DOF],
                 ee: EeCaps {
                     linear_m_s: 1.0,

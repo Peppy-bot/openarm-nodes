@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
-use peppygen::{NodeBuilder, Result};
-
-fn main() -> Result<()> {
+fn main() -> peppygen::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -10,6 +8,12 @@ fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+    peppygen::NodeBuilder::new().run(openarm_commander::setup)?;
 
-    NodeBuilder::new().run(openarm_commander::setup)
+    // The runtime has returned cleanly as far as it knows; a panel that died
+    // is the reason the token was cancelled, so exit as failed with it.
+    if let Some(fault) = openarm_commander::ui_failed() {
+        return Err(openarm_commander::NodeError::Ui(fault).into());
+    }
+    Ok(())
 }
