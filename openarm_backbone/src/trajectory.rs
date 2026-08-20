@@ -188,6 +188,9 @@ pub struct PlanLimits<'a> {
     pub max_joint_velocity_rad_s: &'a JointVec,
     pub ee: EeCaps,
     pub control_period: Duration,
+    /// The servo's per-joint command smoother, built for `control_period` at
+    /// setup: carrying it is the proof the period can run it.
+    pub smoothing: control_core::filters::ButterworthFilter,
 }
 
 /// How an accepted move_arm goal executes, decided by [`plan_cartesian`].
@@ -422,6 +425,7 @@ mod tests {
                 angular_rad_s: TEST_EE_CAP_RAD_S,
             },
             control_period: TEST_DT,
+            smoothing: crate::servo::smoothing_for(TEST_DT).unwrap(),
         }
     }
 
@@ -433,6 +437,7 @@ mod tests {
                 angular_rad_s: TEST_EE_CAP_RAD_S,
             },
             control_period: TEST_DT,
+            smoothing: crate::servo::smoothing_for(TEST_DT).unwrap(),
         }
     }
 
@@ -454,7 +459,11 @@ mod tests {
         end: &Isometry3<f64>,
         seed: JointVec,
     ) -> JointVec {
-        let mut state = crate::servo::ServoState::new(*start, *end, TEST_DT);
+        let mut state = crate::servo::ServoState::new(
+            *start,
+            *end,
+            crate::servo::smoothing_for(TEST_DT).unwrap(),
+        );
         let mut q = seed;
         let steps = (crate::servo::MAX_SERVO_S / TEST_DT.as_secs_f64()).ceil() as usize;
         for _ in 0..steps {
@@ -872,6 +881,7 @@ mod tests {
                 angular_rad_s: TEST_EE_CAP_RAD_S,
             },
             control_period: TEST_DT,
+            smoothing: crate::servo::smoothing_for(TEST_DT).unwrap(),
         };
         let Some(CartesianPlan::Line { duration_s, .. }) =
             plan_cartesian(&mut arm, &start, &goal, seed, &limits, 0.0)

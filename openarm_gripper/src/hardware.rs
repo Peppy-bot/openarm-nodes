@@ -25,6 +25,36 @@ use openarm_description::{HardwareVersion, Side};
 
 use crate::geometry::Geometry;
 
+/// A motor the datasheet table carries no ratings for.
+#[derive(Debug, thiserror::Error)]
+#[error("no datasheet ratings for {0:?}")]
+pub struct NoDatasheetRatings(pub MotorType);
+
+/// A configured limit the POS_FORCE command fields cannot express.
+#[derive(Debug, thiserror::Error)]
+pub enum PosForceLimitsError {
+    #[error(
+        "speed_rad_s must be in [{WIRE_MIN_SPEED_RAD_S}, {WIRE_MAX_SPEED_RAD_S}] rad/s, the \
+         range the POS_FORCE speed field can express, got {0}"
+    )]
+    Speed(f64),
+
+    #[error(
+        "max_effort_nm must be in [{smallest_nm}, {peak_nm}] N*m at the shaft, between the \
+         smallest cap the POS_FORCE torque-current field can express and the datasheet peak \
+         of the {motor_type:?}, got {got}"
+    )]
+    Effort {
+        smallest_nm: f64,
+        peak_nm: f64,
+        motor_type: MotorType,
+        got: f64,
+    },
+
+    #[error(transparent)]
+    Ratings(#[from] NoDatasheetRatings),
+}
+
 /// v1.0 MIT-mode gains, matching the openarm teleop follower
 /// (config/follower.yaml gripper entry). Hardcoded, as in the ROS2 reference.
 const MIT_KP: f64 = 16.0;
@@ -75,6 +105,9 @@ pub struct PosForceLimits {
     /// the shaft), resolved once at startup so the single conversion to the
     /// wire's units needs no motor lookup on the control loop.
     full_scale_nm: f64,
+    /// The datasheet ratings resolved while bounding `max_effort_nm`, kept so
+    /// the one lookup serves both the ceiling and the health filters.
+    ratings: Ratings,
 }
 
 /// The motor a gripper of this generation drives.
@@ -103,30 +136,35 @@ impl PosForceLimits {
         motor_type: MotorType,
         speed_rad_s: f64,
         max_effort_nm: f64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PosForceLimitsError> {
         if !(speed_rad_s.is_finite()
             && (WIRE_MIN_SPEED_RAD_S..=WIRE_MAX_SPEED_RAD_S).contains(&speed_rad_s))
         {
-            return Err(format!(
-                "speed_rad_s must be in [{WIRE_MIN_SPEED_RAD_S}, {WIRE_MAX_SPEED_RAD_S}] rad/s, \
-                 the range the POS_FORCE speed field can express, got {speed_rad_s}"
-            ));
+            return Err(PosForceLimitsError::Speed(speed_rad_s));
         }
         let full_scale_nm = torque_full_scale_nm(motor_type);
-        let peak_nm = ratings_of(motor_type)?.peak_nm();
+        let ratings = ratings_of(motor_type)?;
+        let peak_nm = ratings.peak_nm();
         let smallest_nm = WIRE_TORQUE_PU_TICK * full_scale_nm;
         if !(max_effort_nm.is_finite() && (smallest_nm..=peak_nm).contains(&max_effort_nm)) {
-            return Err(format!(
-                "max_effort_nm must be in [{smallest_nm}, {peak_nm}] N*m at the shaft, between \
-                 the smallest cap the POS_FORCE torque-current field can express and the \
-                 datasheet peak of the {motor_type:?}, got {max_effort_nm}"
-            ));
+            return Err(PosForceLimitsError::Effort {
+                smallest_nm,
+                peak_nm,
+                motor_type,
+                got: max_effort_nm,
+            });
         }
         Ok(Self {
             speed_rad_s,
             max_effort_nm,
             full_scale_nm,
+            ratings,
         })
+    }
+
+    /// The datasheet ratings resolved when these limits were parsed.
+    pub fn ratings(self) -> Ratings {
+        self.ratings
     }
 
     /// The configured ceiling (N*m at the shaft). This is what reaches
@@ -150,11 +188,10 @@ impl PosForceLimits {
     }
 }
 
-/// The datasheet ratings this node judges the motor against.
-fn ratings_of(motor_type: MotorType) -> Result<Ratings, String> {
-    motor_type
-        .ratings()
-        .ok_or_else(|| format!("no datasheet ratings for {motor_type:?}"))
+/// The datasheet ratings this node judges the motor against. The one place a
+/// missing rating is turned into a refusal.
+fn ratings_of(motor_type: MotorType) -> Result<Ratings, NoDatasheetRatings> {
+    motor_type.ratings().ok_or(NoDatasheetRatings(motor_type))
 }
 
 /// The span the motor's per-unit torque-current field addresses (N*m at the
@@ -270,15 +307,6 @@ impl Gripper {
             drive,
             geometry: Geometry::new(hardware_version, side),
         })
-    }
-
-    /// The motor this generation drives, for the datasheet ratings the health
-    /// filter judges against.
-    pub fn motor_type(&self) -> MotorType {
-        match &self.drive {
-            Drive::Mit(_) => v10::GRIPPER_MOTOR_TYPE,
-            Drive::PosForce { .. } => v20::GRIPPER_MOTOR_TYPE,
-        }
     }
 
     /// Drive toward `opening` (fraction, 0 = closed, 1 = fully open), capping

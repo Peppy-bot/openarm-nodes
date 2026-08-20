@@ -169,11 +169,6 @@ impl Schema {
             consumed: start + PING_FIXED_LEN + field_count * FIELD_ENTRY_LEN,
         }
     }
-
-    /// Packed byte length of one stream packet's payload (headerless, no checksum).
-    pub fn payload_len(&self) -> usize {
-        self.fields.iter().map(|f| f.ty.size() * f.count).sum()
-    }
 }
 
 /// One decoded stream packet, still device-shaped: raw channels in degrees.
@@ -240,6 +235,13 @@ impl FrameLayout {
         })
     }
 
+    /// Packed byte length of the payload this layout decodes. The deframer is
+    /// sized from here, so the length it delivers and the length decoded against
+    /// are one value rather than two derivations of the same sum.
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
     pub fn angle_count(&self) -> usize {
         self.angle_count
     }
@@ -249,10 +251,9 @@ impl FrameLayout {
         self.encoder_button_at.is_some()
     }
 
-    /// Decode one checksum-verified payload. The `Deframer` sizes payloads off
-    /// the same schema, so a length mismatch is a programming error.
+    /// Decode one checksum-verified payload of exactly [`Self::payload_len`]
+    /// bytes, which is what the deframer this layout sized delivers.
     pub fn parse(&self, payload: &[u8]) -> KerFrame {
-        assert_eq!(payload.len(), self.payload_len, "payload sized by schema");
         let angles_deg = (0..self.angle_count)
             .map(|i| {
                 let at = self.angles_at + i * 4;
@@ -367,6 +368,12 @@ fn padded_str(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The layout the reader builds; deframer sizing goes through it here too,
+    /// so the tests exercise the single derivation production uses.
+    fn layout_of(schema: &Schema) -> FrameLayout {
+        FrameLayout::try_new(schema).expect("layout")
+    }
+
     fn padded(s: &str, len: usize) -> Vec<u8> {
         let mut v = s.as_bytes().to_vec();
         assert!(v.len() <= len);
@@ -430,7 +437,8 @@ mod tests {
         assert_eq!(schema.fields[1].key, "angles");
         assert_eq!(schema.fields[1].ty, FieldType::F32);
         assert_eq!(schema.fields[1].count, 16);
-        assert_eq!(schema.payload_len(), 4 + 16 * 4 + 4 + 1);
+        let layout = layout_of(&schema);
+        assert_eq!(layout.payload_len(), 4 + 16 * 4 + 4 + 1);
     }
 
     #[test]
@@ -468,12 +476,12 @@ mod tests {
     #[test]
     fn layout_decodes_a_packet_exactly() {
         let schema = reference_schema(3);
-        let layout = FrameLayout::try_new(&schema).expect("layout");
+        let layout = layout_of(&schema);
         assert_eq!(layout.angle_count(), 3);
         assert!(layout.has_button());
 
         let packet = stream_packet(7, &[10.0, -20.5, 30.25], -4, true);
-        let mut deframer = Deframer::new(schema.payload_len());
+        let mut deframer = Deframer::new(layout.payload_len());
         deframer.push(&packet);
         let payload = deframer.next_payload().expect("one frame").expect("valid");
         assert_eq!(
@@ -533,7 +541,7 @@ mod tests {
                 count: 2,
             }],
         };
-        let layout = FrameLayout::try_new(&schema).expect("layout");
+        let layout = layout_of(&schema);
         assert!(!layout.has_button());
         let frame = layout.parse(&[0, 0, 128, 63, 0, 0, 0, 64]);
         assert_eq!(frame.angles_deg, vec![1.0, 2.0]);
@@ -560,16 +568,81 @@ mod tests {
                 },
             ],
         };
-        let layout = FrameLayout::try_new(&schema).expect("layout");
+        let layout = layout_of(&schema);
         let mut payload = 500u16.to_le_bytes().to_vec();
         payload.extend(90.0f32.to_le_bytes());
         assert_eq!(layout.parse(&payload).angles_deg, vec![90.0]);
     }
 
     #[test]
+    fn a_reordered_schema_deframes_and_decodes_at_the_same_length() {
+        // The reader sizes the deframer from the layout, so a firmware that
+        // orders or types its fields differently from the reference still hands
+        // `parse` exactly the bytes it decodes. This is the invariant that used
+        // to be an assertion inside `parse`.
+        let schema = Schema {
+            metadata: reference_schema(1).metadata,
+            fields: vec![
+                FieldDesc {
+                    key: "encoder_button".into(),
+                    ty: FieldType::Bool,
+                    count: 1,
+                },
+                FieldDesc {
+                    key: "angles".into(),
+                    ty: FieldType::F32,
+                    count: 2,
+                },
+                FieldDesc {
+                    key: "encoder_value".into(),
+                    ty: FieldType::I16,
+                    count: 1,
+                },
+                // A field this node does not consume still occupies its bytes.
+                FieldDesc {
+                    key: "spare".into(),
+                    ty: FieldType::U32,
+                    count: 1,
+                },
+            ],
+        };
+        let layout = layout_of(&schema);
+        assert_eq!(layout.payload_len(), 1 + 2 * 4 + 2 + 4);
+
+        let mut payload = vec![1u8];
+        payload.extend(1.5f32.to_le_bytes());
+        payload.extend((-2.5f32).to_le_bytes());
+        payload.extend((-7i16).to_le_bytes());
+        payload.extend(0u32.to_le_bytes());
+        let mut packet = STREAM_HEADER.to_vec();
+        packet.push(xor_checksum(&payload));
+        packet.splice(2..2, payload);
+
+        let mut deframer = Deframer::new(layout.payload_len());
+        deframer.push(&packet);
+        let delivered = deframer.next_payload().expect("one frame").expect("valid");
+        assert_eq!(
+            delivered.len(),
+            layout.payload_len(),
+            "the deframer must deliver exactly what the layout decodes"
+        );
+        assert_eq!(
+            layout.parse(&delivered),
+            KerFrame {
+                // Absent from this schema, so it decodes to the documented default.
+                timestamp: 0,
+                angles_deg: vec![1.5, -2.5],
+                encoder_value: -7,
+                encoder_button: true,
+            }
+        );
+    }
+
+    #[test]
     fn deframer_reassembles_byte_at_a_time_delivery() {
         let schema = reference_schema(2);
-        let mut deframer = Deframer::new(schema.payload_len());
+        let layout = layout_of(&schema);
+        let mut deframer = Deframer::new(layout.payload_len());
         let packet = stream_packet(1, &[1.0, 2.0], 0, false);
         for (i, byte) in packet.iter().enumerate() {
             deframer.push(&[*byte]);
@@ -583,14 +656,14 @@ mod tests {
     #[test]
     fn deframer_drops_a_corrupt_frame_and_resyncs() {
         let schema = reference_schema(2);
-        let mut deframer = Deframer::new(schema.payload_len());
+        let layout = layout_of(&schema);
+        let mut deframer = Deframer::new(layout.payload_len());
         let mut corrupted = stream_packet(1, &[1.0, 2.0], 0, false);
         let last = corrupted.len() - 1;
         corrupted[last] ^= 0xFF;
         deframer.push(&corrupted);
         deframer.push(&stream_packet(2, &[3.0, 4.0], 0, false));
         assert_eq!(deframer.next_payload(), Some(Err(BadChecksum)));
-        let layout = FrameLayout::try_new(&schema).expect("layout");
         let payload = deframer.next_payload().expect("frame").expect("valid");
         assert_eq!(layout.parse(&payload).timestamp, 2);
     }
@@ -598,12 +671,12 @@ mod tests {
     #[test]
     fn deframer_skips_leading_garbage_and_bounds_its_buffer() {
         let schema = reference_schema(2);
-        let mut deframer = Deframer::new(schema.payload_len());
+        let layout = layout_of(&schema);
+        let mut deframer = Deframer::new(layout.payload_len());
         deframer.push(&[0x00, 0xA5, 0x00, 0xFF]);
         assert!(deframer.next_payload().is_none());
         assert!(deframer.buf.is_empty(), "garbage must not accumulate");
         deframer.push(&stream_packet(3, &[0.5, -0.5], 9, true));
-        let layout = FrameLayout::try_new(&schema).expect("layout");
         let payload = deframer.next_payload().expect("frame").expect("valid");
         assert_eq!(layout.parse(&payload).encoder_value, 9);
     }
@@ -611,7 +684,8 @@ mod tests {
     #[test]
     fn deframer_keeps_a_trailing_possible_header_byte() {
         let schema = reference_schema(2);
-        let mut deframer = Deframer::new(schema.payload_len());
+        let layout = layout_of(&schema);
+        let mut deframer = Deframer::new(layout.payload_len());
         let packet = stream_packet(4, &[1.0, 1.0], 0, false);
         deframer.push(&[0x33, STREAM_HEADER[0]]);
         assert!(deframer.next_payload().is_none());

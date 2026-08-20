@@ -54,6 +54,16 @@ pub const MAX_SERVO_S: f64 = 30.0;
 /// least as much.
 const SERVO_SMOOTHING_CUTOFF_HZ: f64 = 18.7;
 
+/// The per-joint command smoother for one control period, or a refusal when
+/// the period cannot carry the cutoff (Nyquist at `0.5 / period` must sit
+/// above it). Built once at setup, where a bad `control_rate_hz` can still be
+/// refused; every [`ServoState`] then copies the value as proof it exists.
+pub fn smoothing_for(
+    control_period: Duration,
+) -> Result<ButterworthFilter, control_core::filters::FilterError> {
+    ButterworthFilter::from_cutoff(SERVO_SMOOTHING_CUTOFF_HZ, control_period.as_secs_f64())
+}
+
 /// The end-effector speed budget a Cartesian step runs under: the launcher's
 /// linear cap and the angular slew cap.
 #[derive(Clone, Copy)]
@@ -132,16 +142,12 @@ impl ServoState {
         (self.end.translation.vector - ee.translation.vector).norm()
     }
 
-    pub fn new(start: Isometry3<f64>, end: Isometry3<f64>, control_period: Duration) -> Self {
-        let ts = control_period.as_secs_f64();
+    pub fn new(start: Isometry3<f64>, end: Isometry3<f64>, smoothing: ButterworthFilter) -> Self {
         Self {
             start,
             end,
             reference_s: 0.0,
-            smoothing: std::array::from_fn(|_| {
-                ButterworthFilter::from_cutoff(SERVO_SMOOTHING_CUTOFF_HZ, ts)
-                    .expect("servo smoothing cutoff is valid for the control period")
-            }),
+            smoothing: [smoothing; ARM_DOF],
         }
     }
 
@@ -217,7 +223,7 @@ pub fn rollout(
     seed: JointVec,
     limits: &PlanLimits,
 ) -> Option<f64> {
-    let mut state = ServoState::new(*start, *end, limits.control_period);
+    let mut state = ServoState::new(*start, *end, limits.smoothing);
     let mut q = seed;
     let dt = limits.control_period;
     let steps = (MAX_SERVO_S / dt.as_secs_f64()).ceil() as usize;

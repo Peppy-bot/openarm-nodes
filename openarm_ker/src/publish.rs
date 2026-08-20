@@ -23,7 +23,7 @@ use peppylib::runtime::CancellationToken;
 use peppylib::{Payload, TopicPublisher};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
-use tracing::{error, warn};
+use tracing::warn;
 
 use crate::reader::KerSample;
 
@@ -45,29 +45,34 @@ fn label(side: Side) -> &'static str {
     }
 }
 
+/// Why the publisher stopped commanding. The supervisor decides what that
+/// means for the node; this only reports.
+#[derive(Debug, thiserror::Error)]
+pub enum PublishFault {
+    #[error("declare the pairing setpoint publishers")]
+    Declare(#[source] peppygen::Error),
+
+    #[error("a command stream task died")]
+    StreamTask(#[source] tokio::task::JoinError),
+}
+
 pub async fn run(
     runner: Arc<NodeRunner>,
     rx: watch::Receiver<Option<KerSample>>,
-    command_rate_hz: u32,
+    command_period: Duration,
     stale_timeout: Duration,
     token: CancellationToken,
-) {
+) -> Result<(), PublishFault> {
     // A failed publisher declaration leaves the node connected to the device
-    // but unable to command anything, so cancel the node to restart it rather
-    // than returning quietly. One publisher per pairing slot; publishing while
-    // unbound is a legal no-op.
-    let (left_arm_pub, right_arm_pub, left_gripper_pub, right_gripper_pub) = match tokio::try_join!(
+    // but unable to command anything. One publisher per pairing slot;
+    // publishing while unbound is a legal no-op.
+    let (left_arm_pub, right_arm_pub, left_gripper_pub, right_gripper_pub) = tokio::try_join!(
         left_arm::joint_setpoints::declare_publisher(&runner),
         right_arm::joint_setpoints::declare_publisher(&runner),
         left_gripper::gripper_setpoints::declare_publisher(&runner),
         right_gripper::gripper_setpoints::declare_publisher(&runner),
-    ) {
-        Ok(pubs) => pubs,
-        Err(e) => {
-            error!("declare pairing setpoint publishers: {e}");
-            return token.cancel();
-        }
-    };
+    )
+    .map_err(PublishFault::Declare)?;
 
     let mut tasks = tokio::task::JoinSet::new();
 
@@ -92,7 +97,7 @@ pub async fn run(
         let sample_rx = rx.clone();
         tasks.spawn(stream_setpoints(
             arm_pub,
-            command_rate_hz,
+            command_period,
             token.clone(),
             format!("{} arm", label(side)),
             move || {
@@ -110,7 +115,7 @@ pub async fn run(
         let sample_rx = rx.clone();
         tasks.spawn(stream_setpoints(
             gripper_pub,
-            command_rate_hz,
+            command_period,
             token.clone(),
             format!("{} gripper", label(side)),
             move || {
@@ -123,13 +128,11 @@ pub async fn run(
     }
     // join_next surfaces tasks in completion order, so a panicked stream is
     // seen immediately. A dead channel would silently hold its side while the
-    // node reports healthy, which is worse than a restart: cancel the node.
+    // node reports healthy, which is worse than a restart.
     while let Some(result) = tasks.join_next().await {
-        if let Err(e) = result {
-            error!("command stream task died: {e}; cancelling the node");
-            token.cancel();
-        }
+        result.map_err(PublishFault::StreamTask)?;
     }
+    Ok(())
 }
 
 /// The newest sample if it should stream: present, engaged, and fresher than
@@ -142,18 +145,18 @@ fn streamable(
     (sample.engaged && sample.received_at.elapsed() < stale_timeout).then_some(sample)
 }
 
-// Publish the latest setpoint from `next_message` at command_rate_hz, skipping
-// a tick whenever it returns None. Failures latch so a stuck channel warns
-// once, not every tick.
+// Publish the latest setpoint from `next_message` every `period`, skipping a
+// tick whenever it returns None. Failures latch so a stuck channel warns once,
+// not every tick. The period arrives already validated, so this side never
+// divides by a rate it has to trust.
 async fn stream_setpoints(
     publisher: TopicPublisher,
-    command_rate_hz: u32,
+    period: Duration,
     token: CancellationToken,
     label: String,
     mut next_message: impl FnMut() -> Option<Result<Payload, String>>,
 ) {
-    let period = Duration::from_micros(1_000_000 / command_rate_hz as u64);
-    // interval (not sleep) so the publish cadence holds at command_rate_hz
+    // interval (not sleep) so the publish cadence holds at the commanded rate
     // instead of drifting by the per-tick work time; Delay avoids a catch-up
     // burst after a scheduling hiccup.
     let mut ticker = tokio::time::interval(period);

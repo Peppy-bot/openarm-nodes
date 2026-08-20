@@ -17,4 +17,4 @@ mod publish;
 mod reader;
 mod transport;
 
-pub use node::setup;
+pub use node::{NodeError, setup, task_failed};

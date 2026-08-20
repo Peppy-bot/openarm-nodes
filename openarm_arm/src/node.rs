@@ -6,6 +6,7 @@
 use crate::control::{self, ControlConfig};
 use crate::health;
 use crate::stream;
+use control_core::time::{RateOutOfRange, period_from_hz};
 use openarm_can::ArmCan;
 use openarm_description::{HardwareVersion, Side};
 use peppygen::exposed_services::ready::is_ready;
@@ -25,42 +26,17 @@ use tracing::{error, info, warn};
 const ARM_ID_LEFT: u8 = 0;
 const ARM_ID_RIGHT: u8 = 1;
 
-/// Microseconds in a second: the resolution every loop period here is
-/// expressed in.
-const MICROS_PER_SECOND: u32 = 1_000_000;
-
-/// Highest loop rate with a non-zero microsecond period, which is one tick of
-/// that resolution.
-const MAX_RATE_HZ: u32 = MICROS_PER_SECOND;
-
 /// Ceiling on the per-cycle CAN read deadline; see its use for the rationale.
 const MAX_RECV_TIMEOUT_US: u32 = 100_000;
 
 /// The arm side for the given `arm_id`, refused on an unknown value so a
 /// misconfigured run fails at startup with the value in the message.
-fn side_for(arm_id: u8) -> std::result::Result<Side, String> {
+fn side_for(arm_id: u8) -> NodeResult<Side> {
     match arm_id {
         ARM_ID_LEFT => Ok(Side::Left),
         ARM_ID_RIGHT => Ok(Side::Right),
-        other => Err(format!(
-            "arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {other}"
-        )),
+        other => Err(NodeError::ArmId(other)),
     }
-}
-
-/// The tick period for a whole-hertz rate, refused at startup outside the
-/// range that yields a non-zero microsecond period, so a bad rate fails before
-/// the motors are energised and with its own name in the message. A rate that
-/// does not divide a second evenly truncates to the microsecond below.
-fn period_from_hz(rate_hz: u32, name: &str) -> std::result::Result<Duration, String> {
-    if !(1..=MAX_RATE_HZ).contains(&rate_hz) {
-        return Err(format!(
-            "{name} must be in 1..={MAX_RATE_HZ} Hz, got {rate_hz}"
-        ));
-    }
-    Ok(Duration::from_micros(u64::from(
-        MICROS_PER_SECOND / rate_hz,
-    )))
 }
 
 // Sleep durations chosen to match ROS2 enactic/openarm_ros2 v10_simple_hardware behaviour.
@@ -77,21 +53,92 @@ const LOCK_REMOVE_TIMEOUT: Duration = Duration::from_secs(1);
 /// energised until the force-kill deadline. Sized well inside even the
 /// minimum 1 s grace window so the disable hook keeps most of the budget.
 const HEALTH_FLUSH_TIMEOUT: Duration = Duration::from_millis(300);
+/// The fastest this node drives the arm. The motors sit on a 1 Mbit
+/// CAN FD bus that cannot service a faster cycle; the stack runs at 100 Hz.
+const MAX_RATE_HZ: u32 = 1_000;
 
-/// Adapts any failure this node can describe into the runtime error type, so
-/// it returns through the runtime's error path instead of panicking. That path
-/// runs the shutdown hooks, and once the motors are open a panic would skip
-/// them and leave them energised with the instance lock held; before then it is
-/// what makes the daemon record a named failure rather than a backtrace.
-/// Repeated per node because peppygen is generated per node; no shared crate
-/// can name its Error type.
-fn node_err(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> peppygen::Error {
-    peppygen::Error::Io(std::io::Error::other(e))
+/// Everything this node refuses to run on, or stops for.
+///
+/// Named rather than stringly typed so each refusal keeps its source, and so
+/// this list is the one place to read what a launch can be rejected for. It
+/// exists because returning a refusal, rather than panicking it, is what runs
+/// the shutdown hooks: a panic in `setup` unwinds past them, leaving the motors
+/// energised and the instance lock held.
+#[derive(Debug, thiserror::Error)]
+pub enum NodeError {
+    #[error("parameter control_rate_hz")]
+    ControlRate(#[source] RateOutOfRange),
+
+    #[error("parameter state_rate_hz")]
+    StateRate(#[source] RateOutOfRange),
+
+    #[error("recv_timeout_us must be in 1..={MAX_RECV_TIMEOUT_US} (100 ms), got {0}")]
+    RecvTimeout(u32),
+
+    #[error("arm_id must be {ARM_ID_LEFT} (left) or {ARM_ID_RIGHT} (right), got {0}")]
+    ArmId(u8),
+
+    #[error(transparent)]
+    HardwareVersion(#[from] openarm_description::UnknownHardwareVersion),
+
+    #[error("build the {version} arm model from base '{base}'")]
+    ArmModel {
+        version: HardwareVersion,
+        base: String,
+        source: srs_model::SrsError,
+    },
+
+    #[error("instance lock {key} held by {holder}")]
+    LockHeld { key: String, holder: String },
+
+    #[error("open the CAN interface")]
+    CanOpen(#[from] openarm_can::CanError),
+
+    #[error("cancelled before bring-up")]
+    CancelledDuringBringUp,
+
+    #[error(transparent)]
+    Ratings(#[from] health::MisScaledReadings),
+
+    #[error("enable the motors")]
+    Enable(#[from] openarm_can::EnableFailure),
+
+    /// `JoinError` says itself whether the thread panicked or was cancelled,
+    /// so no prefix asserts a cause this node cannot know.
+    #[error(transparent)]
+    BringUp(#[from] tokio::task::JoinError),
+
+    #[error("the control loop never started")]
+    ControlLoopNeverStarted,
+
+    #[error("hard fault stopped this node; the log names the failing component")]
+    HardFault,
+
+    /// The runtime's own failures pass through unchanged rather than being
+    /// re-wrapped, so a messaging or config error keeps the variant it was
+    /// raised as.
+    #[error(transparent)]
+    Runtime(#[from] peppygen::Error),
 }
 
-/// True once the control loop has latched a hard CAN fault; read by `main`
-/// after the runtime returns (the `control` module stays private to this
-/// crate).
+/// This node's own results, distinct from `peppygen::Result`, which the runtime
+/// takes at the boundary and which is what bare `Result` means in this crate.
+type NodeResult<T = ()> = std::result::Result<T, NodeError>;
+
+impl From<NodeError> for peppygen::Error {
+    /// The one place this node's refusals meet the runtime's error type.
+    ///
+    /// A runtime error passes back unchanged; everything else is this node's own
+    /// and travels as `Error::Node`, which keeps the wrapped error reachable
+    /// through `Error::source` rather than flattening it to a message.
+    fn from(e: NodeError) -> Self {
+        match e {
+            NodeError::Runtime(e) => e,
+            other => peppygen::Error::Node(Box::new(other)),
+        }
+    }
+}
+
 /// Readiness as the initializer sees it. A latched fault or a started
 /// shutdown revokes it: peppy keeps services reachable while the shutdown
 /// hooks run, so without the cancellation term a leader polling during a
@@ -100,11 +147,20 @@ fn reports_ready(brought_up: bool, hard_faulted: bool, shutting_down: bool) -> b
     brought_up && !hard_faulted && !shutting_down
 }
 
+/// True once the control loop has latched a hard CAN fault; read by `main`
+/// after the runtime returns (the `control` module stays private to this
+/// crate).
 pub fn hard_fault_latched() -> bool {
     control::HARD_FAULT.load(Ordering::SeqCst)
 }
 
+/// The runtime's entry point: the whole bring-up runs as [`NodeError`] and is
+/// converted once, here, so every step inside can use `?` on its own failures.
 pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<()> {
+    assemble(params, node_runner).await.map_err(Into::into)
+}
+
+async fn assemble(params: Parameters, node_runner: Arc<NodeRunner>) -> NodeResult {
     // Pairing timestamps read the daemon-resolved clock (sim time under a
     // simulated clock), so state consumers age samples on one timeline.
     peppygen::clock::init(&node_runner).await?;
@@ -113,8 +169,9 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     let can_interface = params.can_interface.clone();
 
     let cycle_period =
-        period_from_hz(params.control_rate_hz, "control_rate_hz").map_err(node_err)?;
-    let state_period = period_from_hz(params.state_rate_hz, "state_rate_hz").map_err(node_err)?;
+        period_from_hz(params.control_rate_hz, MAX_RATE_HZ).map_err(NodeError::ControlRate)?;
+    let state_period =
+        period_from_hz(params.state_rate_hz, MAX_RATE_HZ).map_err(NodeError::StateRate)?;
     // Bounded above so a config typo cannot park recv_all in a long ppoll
     // while it holds the CAN mutex the shutdown hooks need: 100 ms keeps
     // the whole hook sequence inside even the minimum 1 s grace window,
@@ -122,16 +179,13 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     // refuses a zero wait on its other receive passes, and a receive that
     // never waits turns every quiet tick into a silence pass.
     if !(1..=MAX_RECV_TIMEOUT_US).contains(&params.recv_timeout_us) {
-        return Err(node_err(format!(
-            "recv_timeout_us must be in 1..={MAX_RECV_TIMEOUT_US} (100 ms), got {}",
-            params.recv_timeout_us
-        )));
+        return Err(NodeError::RecvTimeout(params.recv_timeout_us));
     }
 
-    let side = side_for(arm_id).map_err(node_err)?;
+    let side = side_for(arm_id)?;
 
     // Which OpenArm generation this arm drives; selects the embedded description.
-    let hardware_version: HardwareVersion = params.hardware_version.parse().map_err(node_err)?;
+    let hardware_version: HardwareVersion = params.hardware_version.parse()?;
 
     // The chain base link this side's SRS model is walked out from: a fact of the
     // generation's URDF, resolved from the description rather than configured, so a
@@ -150,10 +204,10 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
                 hardware_version.elbow_singularity_floor_rad(),
             )
         })
-        .map_err(|e| {
-            node_err(format!(
-                "build {hardware_version} arm model from base '{base_link}': {e}"
-            ))
+        .map_err(|source| NodeError::ArmModel {
+            version: hardware_version,
+            base: base_link.to_string(),
+            source,
         })?;
     info!("model loaded ({hardware_version}, base '{base_link}')");
 
@@ -189,10 +243,10 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     // simultaneous starts can race (single-writer in practice).
     let lock_key = format!("openarm_arm_{arm_id}_instance_lock");
     if let Some(held) = datastore::get(&node_runner, lock_key.as_str(), DATASTORE_TIMEOUT).await? {
-        return Err(node_err(format!(
-            "instance lock {lock_key} held by {}",
-            held.last_modified_by
-        )));
+        return Err(NodeError::LockHeld {
+            key: lock_key,
+            holder: held.last_modified_by,
+        });
     }
     datastore::store(
         &node_runner,
@@ -227,9 +281,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     // Arm motor lineup + CAN addressing are identical across generations; open()
     // registers them.
     info!("opening CAN interface {can_interface} (FD={ENABLE_FD})");
-    let arm = Arc::new(Mutex::new(
-        ArmCan::open(&can_interface, ENABLE_FD).map_err(node_err)?,
-    ));
+    let arm = Arc::new(Mutex::new(ArmCan::open(&can_interface, ENABLE_FD)?));
 
     // Motor-disable hook, registered before the motors are ever enabled
     // so every stop path disables them, including a cancellation that
@@ -255,7 +307,7 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     let ratings = {
         let arm = arm.clone();
         let token = node_runner.cancellation_token().clone();
-        tokio::task::spawn_blocking(move || -> std::result::Result<_, String> {
+        tokio::task::spawn_blocking(move || -> NodeResult<_> {
             let mut a = arm.lock().unwrap_or_else(|e| e.into_inner());
             // A cancellation that drops the setup future leaves this
             // queued task to run detached, and spawn_blocking cannot be
@@ -265,16 +317,13 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
             // before enabling, and a shutdown during bring-up disables
             // after the enable completes.
             if token.is_cancelled() {
-                return Err("cancelled before bring-up".to_string());
+                return Err(NodeError::CancelledDuringBringUp);
             }
-            let ratings =
-                health::resolve_ratings(&mut a, BRINGUP_RECV_US).map_err(|e| e.to_string())?;
-            bring_up(&mut a).map_err(|e| e.to_string())?;
+            let ratings = health::resolve_ratings(&mut a, BRINGUP_RECV_US)?;
+            bring_up(&mut a)?;
             Ok(ratings)
         })
-        .await
-        .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?
-        .map_err(|e| peppygen::Error::Io(std::io::Error::other(e)))?
+        .await??
     };
     info!("arm ready (every motor confirmed enabled)");
 
@@ -400,9 +449,9 @@ pub async fn setup(params: Parameters, node_runner: Arc<NodeRunner>) -> Result<(
     // that dies first drops the sender and the error return runs the
     // disable hooks. Reporting ready any earlier would let the robot
     // gate open on a spawned-but-dead controller.
-    control_started_rx.await.map_err(|_| {
-        peppygen::Error::Io(std::io::Error::other("the control loop never started"))
-    })?;
+    control_started_rx
+        .await
+        .map_err(|_| NodeError::ControlLoopNeverStarted)?;
     ready.store(true, Ordering::SeqCst);
 
     Ok(())
@@ -448,42 +497,14 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_outside_the_expressible_range_is_named_not_panicked() {
-        for rate_hz in [0, MAX_RATE_HZ + 1, u32::MAX] {
-            let refusal = period_from_hz(rate_hz, "control_rate_hz")
-                .expect_err("a rate outside the expressible range must be refused");
-            assert!(
-                refusal.contains("control_rate_hz"),
-                "the refusal must name the parameter, got {refusal}"
-            );
-            assert!(
-                refusal.ends_with(&format!("got {rate_hz}")),
-                "the refusal must name the offending value, got {refusal}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_rate_in_range_yields_its_period() {
-        assert_eq!(
-            period_from_hz(100, "control_rate_hz"),
-            Ok(Duration::from_millis(10))
-        );
-        assert_eq!(
-            period_from_hz(1, "state_rate_hz"),
-            Ok(Duration::from_secs(1))
-        );
-        assert_eq!(
-            period_from_hz(MAX_RATE_HZ, "control_rate_hz"),
-            Ok(Duration::from_micros(1))
-        );
-    }
-
-    #[test]
     fn an_unknown_arm_id_is_named_not_panicked() {
-        assert_eq!(side_for(ARM_ID_LEFT), Ok(Side::Left));
-        assert_eq!(side_for(ARM_ID_RIGHT), Ok(Side::Right));
+        assert!(matches!(side_for(ARM_ID_LEFT), Ok(Side::Left)));
+        assert!(matches!(side_for(ARM_ID_RIGHT), Ok(Side::Right)));
         let refusal = side_for(7).expect_err("an id outside the convention must be refused");
-        assert!(refusal.ends_with("got 7"), "got {refusal}");
+        assert!(matches!(refusal, NodeError::ArmId(7)), "got {refusal}");
+        assert!(
+            refusal.to_string().ends_with("got 7"),
+            "the message must name the offending value, got {refusal}"
+        );
     }
 }

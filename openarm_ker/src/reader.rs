@@ -16,12 +16,17 @@ use std::time::{Duration, Instant};
 
 use openarm_description::{ARM_DOF, Side};
 use peppylib::runtime::CancellationToken;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{error, info, warn};
 
 use crate::mapping::Calibration;
 use crate::protocol::{CMD_PING, CMD_STANDBY, Deframer, FrameLayout, KerFrame, PingParse, Schema};
 use crate::transport::{self, TransportConfig};
+
+/// A launcher `engage_mode` this node has no engagement rule for.
+#[derive(Debug, thiserror::Error)]
+#[error("engage_mode must be 'toggle' or 'always', got '{0}'")]
+pub struct UnknownEngageMode(pub String);
 
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(3);
 const PING_INTERVAL: Duration = Duration::from_millis(500);
@@ -72,15 +77,13 @@ pub enum EngageMode {
 }
 
 impl FromStr for EngageMode {
-    type Err = String;
+    type Err = UnknownEngageMode;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "toggle" => Ok(Self::Toggle),
             "always" => Ok(Self::Always),
-            other => Err(format!(
-                "engage_mode must be 'toggle' or 'always', got '{other}'"
-            )),
+            other => Err(UnknownEngageMode(other.to_string())),
         }
     }
 }
@@ -92,30 +95,53 @@ pub struct ReaderConfig {
     pub log_raw: bool,
 }
 
+/// Why the reader thread stopped. The supervisor, not the reader, decides
+/// what a stop means for the node, so the reader only reports.
+#[derive(Debug)]
+pub enum ReaderExit {
+    /// Shutdown was already under way; nothing to record.
+    Cancelled,
+    /// The device's configuration cannot drive this launch, or the reader's
+    /// consumer vanished while the node was still running.
+    Fatal,
+}
+
 /// Spawn the device thread. It publishes `None` whenever the device is not
-/// delivering valid frames, and cancels `token` on a fatal configuration
-/// mismatch.
+/// delivering valid frames.
+///
+/// The returned receiver yields the thread's outcome when it stops, however it
+/// stops: the sender lives in the thread's own frame, so an unwind drops it
+/// and the receiver reads the closed channel as a fault.
 pub fn spawn(
     cfg: ReaderConfig,
     tx: watch::Sender<Option<KerSample>>,
     token: CancellationToken,
-) -> std::thread::JoinHandle<()> {
+) -> std::io::Result<oneshot::Receiver<ReaderExit>> {
+    let (exited_tx, exited_rx) = oneshot::channel();
     std::thread::Builder::new()
         .name("ker-reader".into())
-        .spawn(move || run(cfg, tx, token))
-        .expect("spawn ker-reader thread")
+        .spawn(move || {
+            let _ = exited_tx.send(run(cfg, tx, token));
+        })?;
+    Ok(exited_rx)
 }
 
 enum SessionEnd {
-    Cancelled,
+    /// The token was cancelled, or the sample channel closed; `run` reads the
+    /// token to tell the two apart.
+    Stop,
     Transient(String),
     Fatal(String),
 }
 
-fn run(cfg: ReaderConfig, tx: watch::Sender<Option<KerSample>>, token: CancellationToken) {
+fn run(
+    cfg: ReaderConfig,
+    tx: watch::Sender<Option<KerSample>>,
+    token: CancellationToken,
+) -> ReaderExit {
     while !token.is_cancelled() {
         match session(&cfg, &tx, &token) {
-            SessionEnd::Cancelled => break,
+            SessionEnd::Stop => break,
             SessionEnd::Transient(reason) => {
                 let _ = tx.send(None);
                 warn!("KER connection lost ({reason}); retrying in {RECONNECT_BACKOFF:?}");
@@ -124,10 +150,19 @@ fn run(cfg: ReaderConfig, tx: watch::Sender<Option<KerSample>>, token: Cancellat
             SessionEnd::Fatal(reason) => {
                 let _ = tx.send(None);
                 error!("KER configuration mismatch: {reason}");
-                token.cancel();
-                break;
+                return ReaderExit::Fatal;
             }
         }
+    }
+    // A stop is only a shutdown if the token says so. The other way to reach
+    // here is the sample channel closing under a live token, which means the
+    // publisher died: without this check the two race in the supervisor's
+    // select and a dead publisher could be recorded as a clean finish.
+    if token.is_cancelled() {
+        ReaderExit::Cancelled
+    } else {
+        error!("KER sample consumer vanished while the node was running");
+        ReaderExit::Fatal
     }
 }
 
@@ -172,7 +207,7 @@ fn session(
         layout.angle_count()
     );
 
-    let mut deframer = Deframer::new(schema.payload_len());
+    let mut deframer = Deframer::new(layout.payload_len());
     deframer.push(&leftover);
     let mut engage = EngageLatch::new(cfg.engage_mode);
     let mut chunk = [0u8; 4096];
@@ -218,7 +253,7 @@ fn session(
                 Ok(sample) => {
                     mapping_warned = false;
                     if tx.send(Some(sample)).is_err() {
-                        return SessionEnd::Cancelled;
+                        return SessionEnd::Stop;
                     }
                 }
                 // A non-finite reading is a frame to skip, not a stream to
@@ -233,7 +268,7 @@ fn session(
     }
     // Best effort: leave the device quiet on the way out.
     let _ = transport.write_all(&[CMD_STANDBY]);
-    SessionEnd::Cancelled
+    SessionEnd::Stop
 }
 
 /// STANDBY, flush, then ping until the schema arrives (or the deadline).
@@ -252,7 +287,7 @@ fn handshake(
     let mut chunk = [0u8; 512];
     while Instant::now() < deadline {
         if token.is_cancelled() {
-            return Err(SessionEnd::Cancelled);
+            return Err(SessionEnd::Stop);
         }
         if Instant::now() >= next_ping {
             transport.write_all(&[CMD_PING]).map_err(transient)?;

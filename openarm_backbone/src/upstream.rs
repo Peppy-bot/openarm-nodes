@@ -33,16 +33,19 @@ impl UpstreamMode {
     }
 }
 
+/// A launcher `upstream_mode` this node has no listener for.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown upstream_mode {0:?}: expected \"joints\" or \"pose\"")]
+pub struct UnknownUpstreamMode(pub String);
+
 impl FromStr for UpstreamMode {
-    type Err = String;
+    type Err = UnknownUpstreamMode;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "joints" => Ok(Self::Joints),
             "pose" => Ok(Self::Pose),
-            other => Err(format!(
-                "unknown upstream_mode {other:?}: expected \"joints\" or \"pose\""
-            )),
+            other => Err(UnknownUpstreamMode(other.to_string())),
         }
     }
 }
@@ -77,8 +80,12 @@ mod tests {
     #[test]
     fn an_unknown_mode_is_refused_and_names_what_it_expected() {
         let err = "cartesian".parse::<UpstreamMode>().unwrap_err();
-        assert!(err.contains("cartesian"), "{err}");
-        assert!(err.contains("joints") && err.contains("pose"), "{err}");
+        assert_eq!(err.0, "cartesian");
+        let shown = err.to_string();
+        assert!(
+            shown.contains("joints") && shown.contains("pose"),
+            "{shown}"
+        );
         assert!("Joints".parse::<UpstreamMode>().is_err());
         assert!("".parse::<UpstreamMode>().is_err());
     }

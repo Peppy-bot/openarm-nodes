@@ -219,7 +219,7 @@ pub async fn run(
     models: ArmModels,
     registry: Registry,
     runner: Arc<NodeRunner>,
-    command_rate_hz: u32,
+    command_period: Duration,
     token: CancellationToken,
     channels: Channels,
 ) {
@@ -252,8 +252,10 @@ pub async fn run(
         let _ = snapshot_tx.send(json);
     }
 
-    let tick_dt_s = 1.0 / command_rate_hz as f64;
-    let mut command_tick = interval(Duration::from_micros(1_000_000 / command_rate_hz as u64));
+    // The jog integrator steps by exactly the tick it is driven at, so both come
+    // from the one period parsed at startup rather than from the rate twice.
+    let tick_dt_s = command_period.as_secs_f64();
+    let mut command_tick = interval(command_period);
     command_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut snapshot_tick = interval(SNAPSHOT_INTERVAL);
     snapshot_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
