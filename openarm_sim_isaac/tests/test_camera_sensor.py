@@ -166,6 +166,28 @@ class TestThrottledCycle:
             for _ in range(_MAX_CAPTURE_FAILURES):
                 sensor.step()
 
+    def test_transport_drops_are_not_renderer_failures(self, clock):
+        """A publish the transport drops is a consumer falling behind, not a
+        renderer that disagrees with the config. Counting drops toward the bound
+        would raise "renderer output and camera config disagree" at a camera
+        whose renderer and config are both correct, and would hold it armed so
+        it renders every update while the machine is already late."""
+        sensor, annotator, render_product, io = _sensor()
+        annotator.make_valid()
+        io.delivers = False
+
+        # Well past the bound: if a drop counted, this would raise.
+        for _ in range(_MAX_CAPTURE_FAILURES + 10):
+            clock["t"] += 1.0 / _FPS
+            sensor.step()
+
+        assert sensor._capture_failures["cam"] == 0
+        assert io.frames, "frames were rendered and offered to the transport"
+        # The camera arms and disarms once per paced cycle. Treating a drop as a
+        # failed read skips the disarm, which leaves the render product enabled
+        # forever; the repeated False entries are that disarm still happening.
+        assert render_product.updates.count(False) > 1
+
     def test_success_resets_the_failure_count(self, clock):
         sensor, annotator, render_product, io = _sensor()
         for _ in range(4):

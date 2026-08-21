@@ -44,6 +44,7 @@ peppy service serve &
 
 peppy repo add /path/to/ws/contracts-hub
 peppy repo add /path/to/ws/openarm-nodes
+peppy repo add /path/to/ws/nodes-hub
 peppy repo add /path/to/ws/launchers-hub
 peppy repo refresh
 ```

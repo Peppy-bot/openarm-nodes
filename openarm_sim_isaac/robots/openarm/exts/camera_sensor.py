@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import logging
 import math
 import time
@@ -18,6 +19,23 @@ from camera_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class CaptureOutcome(enum.Enum):
+    """What one capture attempt produced. A frame the renderer never made and a
+    frame the transport dropped are different faults: the first means the
+    renderer and the camera config disagree and no retry fixes it, the second
+    means a consumer is behind and the next frame will very likely land."""
+
+    NO_FRAME = enum.auto()
+    DROPPED = enum.auto()
+    DELIVERED = enum.auto()
+
+
+def _delivery(published: bool) -> CaptureOutcome:
+    """A publish that returns False rendered fine and was dropped in flight."""
+    return CaptureOutcome.DELIVERED if published else CaptureOutcome.DROPPED
+
 
 _STREAM_INFO_HZ = 1
 # Any consistent film-back size works; FOV is the invariant and focal length is
@@ -62,6 +80,7 @@ class IsaacCameraSensor:
         self._info_pacers = {c.name: FramePacer(_STREAM_INFO_HZ) for c in cameras}
         self._frame_ids = {c.name: FrameIdCounter() for c in cameras}
         self._capture_failures = {c.name: 0 for c in cameras}
+        self._dropping = False
 
     def setup(self) -> bool:
         """Create camera prims, render products and annotators against the live
@@ -229,57 +248,73 @@ class IsaacCameraSensor:
                 self._set_updates_enabled(render_product, enabled)
 
     def _tracked_capture(self, name: str) -> bool:
-        """Capture with a consecutive-failure bound: a renderer that never
-        yields usable data is a config-vs-renderer break, not a warm-up."""
-        if self._capture(self._cameras[name]):
-            self._capture_failures[name] = 0
-            return True
-        self._capture_failures[name] += 1
-        if self._capture_failures[name] >= _MAX_CAPTURE_FAILURES:
-            raise RuntimeError(
-                f"{name}: no usable annotator frame in {_MAX_CAPTURE_FAILURES} "
-                "consecutive reads; renderer output and camera config disagree"
+        """Capture, and report whether the renderer produced a frame. The
+        consecutive-failure bound counts only missing renderer output, because
+        that is the fault no retry fixes; a transport drop means the consumer is
+        behind, which is the MuJoCo twin's reading of the same signal. Returns
+        True for a rendered frame whether or not the publish landed, so a run of
+        drops cannot hold the camera armed and lose its rate throttling."""
+        outcome = self._capture(self._cameras[name])
+        if outcome is CaptureOutcome.NO_FRAME:
+            self._capture_failures[name] += 1
+            if self._capture_failures[name] >= _MAX_CAPTURE_FAILURES:
+                raise RuntimeError(
+                    f"{name}: no usable annotator frame in {_MAX_CAPTURE_FAILURES} "
+                    "consecutive reads; renderer output and camera config disagree"
+                )
+            return False
+        self._capture_failures[name] = 0
+        if outcome is CaptureOutcome.DROPPED and not self._dropping:
+            self._dropping = True
+            logger.warning(
+                "a rendered frame was dropped before the wire because the "
+                "previous publish is still in flight, suppressing repeats"
             )
-        return False
+        elif outcome is CaptureOutcome.DELIVERED:
+            self._dropping = False
+        return True
 
-    def _capture(self, camera: CameraConfig) -> bool:
-        """Publish the camera's current annotator data; False while the
-        renderer has not produced a frame yet."""
+    def _capture(self, camera: CameraConfig) -> CaptureOutcome:
+        """Publish the camera's current annotator data."""
         rgba = self._annotators[(camera.name, "color")].get_data()
         rgb = self._as_rgb(rgba, camera)
         if rgb is None:
-            return False
+            return CaptureOutcome.NO_FRAME
         timestamp_s = self._io.camera_timestamp_s()
         frame_id = self._frame_ids[camera.name].next()
         if camera.depth is None:
-            return self._io.publish_color_frame(
-                camera.name,
-                timestamp_s,
-                frame_id,
-                COLOR_ENCODING,
-                camera.width,
-                camera.height,
-                rgb.tobytes(),
+            return _delivery(
+                self._io.publish_color_frame(
+                    camera.name,
+                    timestamp_s,
+                    frame_id,
+                    COLOR_ENCODING,
+                    camera.width,
+                    camera.height,
+                    rgb.tobytes(),
+                )
             )
         depth_m = self._annotators[(camera.name, "depth")].get_data()
         expected = (camera.height, camera.width)
         if not isinstance(depth_m, np.ndarray) or depth_m.shape != expected:
             shape = getattr(depth_m, "shape", None)
             logger.warning(f"{camera.name}: depth annotator shape {shape} != {expected}")
-            return False
+            return CaptureOutcome.NO_FRAME
         depth_m = depth_m[:: camera.height // camera.depth.height, :: camera.width // camera.depth.width]
-        return self._io.publish_rgbd_frames(
-            camera.name,
-            timestamp_s,
-            frame_id,
-            ALIGN_MODE,
-            (COLOR_ENCODING, camera.width, camera.height, rgb.tobytes()),
-            (
-                DEPTH_ENCODING,
-                camera.depth.width,
-                camera.depth.height,
-                depth_to_z16(depth_m.astype(np.float32, copy=False), camera.depth),
-            ),
+        return _delivery(
+            self._io.publish_rgbd_frames(
+                camera.name,
+                timestamp_s,
+                frame_id,
+                ALIGN_MODE,
+                (COLOR_ENCODING, camera.width, camera.height, rgb.tobytes()),
+                (
+                    DEPTH_ENCODING,
+                    camera.depth.width,
+                    camera.depth.height,
+                    depth_to_z16(depth_m.astype(np.float32, copy=False), camera.depth),
+                ),
+            )
         )
 
     @staticmethod

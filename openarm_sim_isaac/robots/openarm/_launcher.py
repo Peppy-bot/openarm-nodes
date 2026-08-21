@@ -42,13 +42,12 @@ class SimLauncher:
         self._extension: Optional[IsaacBridgeExtension] = None
 
     def run(self) -> None:
+        # Everything from the stage load onward shares one cleanup path. Camera
+        # setup, the warmup and the extension constructor all run before the
+        # loop, and a failure in any of them still has to stop the timeline and
+        # close Isaac; a bare raise here would strand a live SimulationApp.
         try:
             self._load_stage()
-        except FileNotFoundError as exc:
-            logger.error(str(exc))
-            self._sim_app.close()
-            return
-        try:
             self._setup_lighting()
             if self._cameras_enabled:
                 self._configure_camera_rendering()
@@ -59,9 +58,15 @@ class SimLauncher:
             )
             logger.info("Scene loaded — waiting for bridge setup")
             self._run_loop()
+        except FileNotFoundError as exc:
+            logger.error(str(exc))
+        except KeyboardInterrupt:
+            logger.info("Shutting down.")
         except Exception:
             logger.exception("SimLauncher.run failed")
             raise
+        finally:
+            self._shutdown()
 
     def _load_stage(self) -> None:
         import omni.usd
@@ -105,8 +110,7 @@ class SimLauncher:
         self._timeline.play()
 
     def _run_loop(self) -> None:
-        try:
-            while self._sim_app.is_running() and not self._stop.is_set():
+        while self._sim_app.is_running() and not self._stop.is_set():
                 # Isaac advances physics inside update(); we then drive the
                 # bridge step on the same thread (Articulation reads require
                 # Isaac's main thread). The extension defers its own setup until
@@ -120,18 +124,17 @@ class SimLauncher:
                     if self._extension.is_ready and not self._ready.is_set():
                         self._ready.set()
                         logger.info("Scene loaded; states will flow")
-        except KeyboardInterrupt:
-            logger.info("Shutting down.")
-        finally:
-            self._ready.clear()
-            if self._extension is not None:
-                # An extension shutdown failure must not strand the Isaac process —
-                # timeline.stop + sim_app.close still need to run.
-                try:
-                    self._extension.shutdown()
-                except Exception:
-                    logger.exception("IsaacBridgeExtension shutdown failed")
-            if self._timeline is not None:
-                self._timeline.stop()
-            self._sim_app.close()
-            logger.info("Isaac Sim closed.")
+
+    def _shutdown(self) -> None:
+        self._ready.clear()
+        if self._extension is not None:
+            # An extension shutdown failure must not strand the Isaac process:
+            # timeline.stop + sim_app.close still need to run.
+            try:
+                self._extension.shutdown()
+            except Exception:
+                logger.exception("IsaacBridgeExtension shutdown failed")
+        if self._timeline is not None:
+            self._timeline.stop()
+        self._sim_app.close()
+        logger.info("Isaac Sim closed.")
