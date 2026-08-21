@@ -16,12 +16,15 @@ from pathlib import Path
 
 import pyjson5
 
-from sim_topics import SimTopicIO
-from exts import IsaacActuatorCtrl, IsaacArticulation, IsaacGripperSensor
+from camera_common import load_camera_configs, validate_camera_slots
+from sim_topics import COLOR_CAMERA_SLOT_NAMES, RGBD_CAMERA_SLOT_NAMES, SimTopicIO
+from exts import IsaacActuatorCtrl, IsaacArticulation, IsaacCameraSensor, IsaacGripperSensor
 
 logger = logging.getLogger(__name__)
 
-_CONFIG_PATH = Path(__file__).resolve().parent / "config" / "sim_bridge.json5"
+_CONFIG_DIR = Path(__file__).resolve().parent / "config"
+_CONFIG_PATH = _CONFIG_DIR / "sim_bridge.json5"
+_CAMERAS_CONFIG_PATH = _CONFIG_DIR / "cameras.json5"
 
 
 def _finger_travel_from_range(joint_name: str, lo: float, hi: float) -> float:
@@ -57,7 +60,7 @@ class IsaacBridgeExtension:
     is ready, step() is a no-op except for the setup retry.
     """
 
-    def __init__(self, io: SimTopicIO, state_rate_hz: int) -> None:
+    def __init__(self, io: SimTopicIO, state_rate_hz: int, cameras_enabled: bool) -> None:
         self._io = io
         # Telemetry is throttled to state_rate_hz: serializing every reader at
         # the physics tick saturates the single sim thread. Writers and the
@@ -103,6 +106,11 @@ class IsaacBridgeExtension:
             )
             for gripper in self._grippers
         }
+        self._camera_sensor = None
+        if cameras_enabled:
+            cameras = load_camera_configs(_CAMERAS_CONFIG_PATH)
+            validate_camera_slots(cameras, COLOR_CAMERA_SLOT_NAMES, RGBD_CAMERA_SLOT_NAMES)
+            self._camera_sensor = IsaacCameraSensor(_ROOT_ARTICULATION_PRIM, cameras, io)
         self._joint_index: dict[str, int] = {}
         self._ready: bool = False
 
@@ -121,6 +129,7 @@ class IsaacBridgeExtension:
             *self._arm_actuators.values(),
             *self._gripper_actuators.values(),
             *self._gripper_sensors.values(),
+            *([self._camera_sensor] if self._camera_sensor is not None else []),
         ]
 
     def _try_setup(self) -> bool:
@@ -173,6 +182,8 @@ class IsaacBridgeExtension:
             return
 
         self._apply_commands()
+        if self._camera_sensor is not None:
+            self._camera_sensor.step()
 
         now = time.monotonic()
         if now - self._last_publish_s < self._telemetry_period_s:

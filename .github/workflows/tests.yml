@@ -448,9 +448,17 @@ jobs:
 
       # pytest runs from a virtualenv rather than the runner image's Python,
       # so the tests see exactly what this step installs and nothing the image
-      # happens to ship. Only pytest itself is installed: tests that need the
-      # sim engines' heavyweight dependencies do not belong in this job, and
-      # anything else a future test needs should be added here alongside it.
+      # happens to ship. Installed alongside pytest are the libraries the
+      # engine-agnostic suites import directly: numpy and pyjson5 for the
+      # camera config and wire conversion, and mujoco, whose model compiler
+      # the camera attach tests run for real rather than faking. Isaac Sim is
+      # the dependency that stays out: it ships no wheel, and the suites that
+      # would need it fake their renderer instead.
+      #
+      # One file per pytest process. The suites are twinned across the two
+      # engines, so two files share a basename, and each puts its own node's
+      # source on sys.path at import: in one process the first import wins and
+      # the second file silently retests the first engine.
       - name: Run the selected Python tests
         if: steps.discover.outputs.any == 'true'
         run: |
@@ -460,9 +468,18 @@ jobs:
             exit 0
           fi
           python3 -m venv "$RUNNER_TEMP/pytest-venv"
-          "$RUNNER_TEMP/pytest-venv/bin/pip" install --quiet pytest
-          xargs -a "$RUNNER_TEMP/python-test-files.txt" -d '\n' \
-            "$RUNNER_TEMP/pytest-venv/bin/python" -m pytest
+          "$RUNNER_TEMP/pytest-venv/bin/pip" install --quiet pytest numpy pyjson5 mujoco
+          failed=()
+          while IFS= read -r test_file; do
+            echo "::group::pytest: $test_file"
+            "$RUNNER_TEMP/pytest-venv/bin/python" -m pytest "$test_file" \
+              || failed+=("$test_file")
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/python-test-files.txt"
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "failing Python test files: ${failed[*]}" >&2
+            exit 1
+          fi
 
       # Proves what was tested is what is committed. The lock half proves the
       # builds consumed the committed lockfiles rather than re-resolving

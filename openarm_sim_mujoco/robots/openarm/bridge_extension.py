@@ -14,8 +14,14 @@ from pathlib import Path
 
 import pyjson5
 
+from camera_common import CameraConfig
 from sim_topics import SimTopicIO
-from exts import MujocoActuatorCtrl, MujocoArticulation, MujocoGripperSensor
+from exts import (
+    MujocoActuatorCtrl,
+    MujocoArticulation,
+    MujocoCameraSensor,
+    MujocoGripperSensor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +50,14 @@ def _finger_travel_from_range(joint_name: str, lo: float, hi: float) -> float:
 class MujocoBridgeExtension:
     """Drives the engine from the typed command streams and publishes state."""
 
-    def __init__(self, model, data, io: SimTopicIO, state_rate_hz: int) -> None:
+    def __init__(
+        self,
+        model,
+        data,
+        io: SimTopicIO,
+        state_rate_hz: int,
+        cameras: list[CameraConfig],
+    ) -> None:
         self._model = model
         self._data = data
         self._io = io
@@ -72,6 +85,11 @@ class MujocoBridgeExtension:
         # finger joints on their MJCF defaults.
         self._actuator = MujocoActuatorCtrl(model, data, params=self._actuator_params())
         self._gripper_sensors: dict[int, MujocoGripperSensor] = {}
+        # The cameras were attached to this model at compile time, so an empty
+        # list here means the scene carries none to render.
+        self._camera_sensor = (
+            MujocoCameraSensor(model, cameras, io) if cameras else None
+        )
         self._joint_index: dict[str, int] = {}
 
     def _actuator_params(self) -> dict:
@@ -119,6 +137,8 @@ class MujocoBridgeExtension:
             self._gripper_travels[gripper["gripper_id"]] = [
                 self._finger_travel(name) for name in gripper["fingers"]
             ]
+        if self._camera_sensor is not None:
+            self._camera_sensor.start()
         logger.info(
             f"MujocoBridgeExtension ready with {len(self._arms)} arm(s), "
             f"{len(self._grippers)} gripper(s)"
@@ -136,6 +156,9 @@ class MujocoBridgeExtension:
 
         self._apply_commands()
         mujoco.mj_step(self._model, self._data)
+        if self._camera_sensor is not None:
+            self._camera_sensor.snapshot(self._data.qpos)
+            self._camera_sensor.raise_if_failed()
 
         now = time.monotonic()
         if now - self._last_publish_s < self._telemetry_period_s:
@@ -205,6 +228,8 @@ class MujocoBridgeExtension:
 
     def shutdown(self) -> None:
         logger.info("MujocoBridgeExtension shutting down.")
+        if self._camera_sensor is not None:
+            self._camera_sensor.stop()
         self._articulation.teardown()
         self._actuator.teardown()
         for sensor in self._gripper_sensors.values():
