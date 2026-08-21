@@ -1,15 +1,15 @@
 // Spawned per fire_arm command (the panel's Home/Ready parks, as discrete governed
-// moves). Fires move_arm_joints at the backbone, then reports the outcome to the owner. Each
-// goal is its own task; cancel-aware so a shutdown can't wedge an in-flight goal, and
-// preempt-aware so a new move can cancel it.
+// moves). Fires the limb_motion slot's move_arm_joints, then reports the outcome to the
+// owner. Each goal is its own task; cancel-aware so a shutdown can't wedge an in-flight
+// goal, and preempt-aware so a new move can cancel it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use peppygen::NodeRunner;
 use peppygen::QoSProfile;
-use peppygen::consumed_actions::backbone::move_arm_joints as backbone_move_arm_joints;
-use peppygen::consumed_actions::backbone::move_arm_joints::ResultOutcome;
+use peppygen::consumed_actions::limb_motion::move_arm_joints as limb_motion_move_arm_joints;
+use peppygen::consumed_actions::limb_motion::move_arm_joints::ResultOutcome;
 use peppylib::runtime::CancellationToken;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -69,17 +69,17 @@ async fn run(
     let label = side.label();
     info!(side = label, ?joint_positions, "fire move_arm_joints");
 
-    let goal = backbone_move_arm_joints::GoalRequest {
+    let goal = limb_motion_move_arm_joints::GoalRequest {
         arm_id: side.arm_id(),
         joint_positions,
         duration_s,
     };
 
-    // The launcher-pinned, cardinality-one backbone slot provides the explicit
+    // The launcher-pinned, cardinality-one limb_motion slot provides the explicit
     // target used for this goal and its feedback/cancel/result lifecycle.
-    let downstream = match backbone_move_arm_joints::ActionHandle::fire_goal(
+    let downstream = match limb_motion_move_arm_joints::ActionHandle::fire_goal(
         &runner,
-        backbone_move_arm_joints::bound_producer(&runner),
+        limb_motion_move_arm_joints::bound_producer(&runner),
         GOAL_TIMEOUT,
         goal,
         QoSProfile::SensorData,

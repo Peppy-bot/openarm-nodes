@@ -4,7 +4,7 @@
 // pairings (the backbone governs and re-streams them), reads live state by
 // observing the backbone's downstream pairings, jogs the arm in joint or
 // Cartesian (world-frame IK) space, and fires move_arm_joints / move_arm /
-// move_gripper goals at openarm_backbone.
+// move_gripper goals through the limb_motion contract slot (the backbone).
 {
   peppy_schema: "node/v1",
   manifest: {
@@ -16,8 +16,7 @@
     ],
     depends_on: {
       nodes: [
-        // The backbone: the move actions the panel fires (move_arm_joints is the
-        // "Send" button) and the collision_status feed behind the proximity
+        // The backbone: the collision_status feed behind the proximity
         // readout. Bound to the backbone instance in the launcher.
         { name: "openarm_backbone", tag: "v1", link_id: "backbone" },
         // The dataset recorder behind the panel's record button. zero_or_more:
@@ -26,6 +25,10 @@
         { name: "lerobot_recorder", tag: "v1", link_id: "recorder", cardinality: "zero_or_more" }
       ],
       contracts: [
+        // The discrete moves the panel fires in Actions mode (move_arm_joints
+        // is the "Send" button): one slot, bound by the launcher to the
+        // backbone instance.
+        { name: "limb_motion", tag: "v1", link_id: "limb_motion" },
         // Per-motor health from every motor-bearing follower the launcher
         // wires, demuxed by the report's source. Zero producers is legal: a
         // stack without health producers just renders n/a.
@@ -66,16 +69,29 @@
       ]
     },
     actions: {
-      // Goals fired by the operator land on the backbone, which runs the move itself
-      // for the arm whose id matches arm_id.
+      // Goals fired by the operator land on the limb_motion producer, which runs
+      // the move itself for the side whose id matches.
       consumes: [
-        { link_id: "backbone", name: "move_arm_joints" },
+        // The panel drives OpenArm's seven-joint arms, so the joint move's
+        // generic joint vectors are pinned to that length, as on the backbone.
+        {
+          link_id: "limb_motion",
+          name: "move_arm_joints",
+          refine: {
+            goal_service: {
+              request_message_format: { joint_positions: { $length: 7 } },
+            },
+            result_service: {
+              response_message_format: { final_joint_positions: { $length: 7 } },
+            },
+          },
+        },
         // Cartesian point-to-point: Execute-pose in the panel's Actions mode fires
-        // the backbone's planned straight-line move rather than jogging there.
-        { link_id: "backbone", name: "move_arm" },
+        // the producer's planned straight-line move rather than jogging there.
+        { link_id: "limb_motion", name: "move_arm" },
         // Gripper open/close as a discrete governed action (Actions mode), rather
         // than the streamed opening used in Streaming mode.
-        { link_id: "backbone", name: "move_gripper" },
+        { link_id: "limb_motion", name: "move_gripper" },
         // One dataset episode per goal: fired by the panel's record button,
         // frame-count feedback while running, cancel = stop and save.
         { link_id: "recorder", name: "record_episode" }

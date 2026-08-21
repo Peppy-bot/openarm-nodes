@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use peppygen::exposed_actions::{move_arm, move_arm_joints};
+use peppygen::exposed_actions::limb_motion::{move_arm, move_arm_joints};
 use srs_model::nalgebra::Isometry3;
 use srs_model::{Arm, ArmAnglePolicy, Jacobian, Limit};
 use tokio::sync::mpsc;
