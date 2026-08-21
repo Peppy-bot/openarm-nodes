@@ -67,6 +67,39 @@ class TestLoadCameraConfigs:
         fields.update(overrides)
         return "{" + ", ".join(f"{k}: {v}" for k, v in fields.items()) + "}"
 
+    def test_unknown_camera_key_rejected(self, tmp_path):
+        """A misspelled optional key must fail, not silently change the stream:
+        `dpeth` would otherwise yield a colour-only camera where the file
+        plainly describes an rgbd one."""
+        path = self._write_config(
+            tmp_path,
+            "{ cameras: ["
+            + self._entry(dpeth="{ width: 4, height: 2, min_depth_m: 0.1, max_range_m: 10 }")
+            + "] }",
+        )
+        with pytest.raises(RuntimeError, match="unknown key"):
+            load_camera_configs(path)
+
+    def test_unknown_color_key_rejected(self, tmp_path):
+        path = self._write_config(
+            tmp_path,
+            "{ cameras: [" + self._entry(color="{ width: 8, height: 4, fps: 15 }") + "] }",
+        )
+        with pytest.raises(RuntimeError, match="unknown key"):
+            load_camera_configs(path)
+
+    def test_unknown_depth_key_rejected(self, tmp_path):
+        path = self._write_config(
+            tmp_path,
+            "{ cameras: ["
+            + self._entry(
+                depth="{ width: 4, height: 2, min_depth_m: 0.1, max_range_m: 10, units: 0.001 }"
+            )
+            + "] }",
+        )
+        with pytest.raises(RuntimeError, match="unknown key"):
+            load_camera_configs(path)
+
     def test_duplicate_names_rejected(self, tmp_path):
         path = self._write_config(
             tmp_path, f"{{ cameras: [{self._entry()}, {self._entry()}] }}"

@@ -259,6 +259,11 @@ class MujocoCameraSensor:
         if self._thread.is_alive():
             logger.warning("camera render thread did not exit within the join timeout")
         self._thread = None
+        # A stopped thread stops beating on purpose. Leaving the last beat in
+        # place would let a slow shutdown age past the bound and surface a
+        # deliberate stop as a wedged renderer; raise_if_failed reads None as
+        # "no thread to be wedged".
+        self._heartbeat_s = None
 
     def _render_loop(self) -> None:
         import mujoco  # pylint: disable=C0415

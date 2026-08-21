@@ -20,6 +20,7 @@ import asyncio
 import logging
 import math
 import threading
+import time
 from typing import Optional
 
 import peppylib
@@ -88,6 +89,12 @@ class _LatestSlot:
             return self._value
 
 
+# How long one publish batch may stay in flight before the surface holding it
+# is reported. Well past any real batch at these frame rates, so reaching it
+# means the publish is not going to complete on its own.
+_PUBLISH_STALL_S = 5.0
+
+
 class _PublishGuard:
     """At most one in-flight publish batch per camera surface: acquired on the
     render thread when a capture is scheduled, released on the loop when every
@@ -98,17 +105,36 @@ class _PublishGuard:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._busy = False
+        self._acquired_s = 0.0
+        self._stall_reported = False
 
-    def try_acquire(self) -> bool:
+    def try_acquire(self, surface: str) -> bool:
+        """True when the caller now owns the surface. A publish future that
+        never completes would hold the guard forever, and every later batch
+        would be refused with nothing in the log to say the stream had gone
+        dark, so a refusal past the stall bound is reported once per stall."""
+        now_s = time.monotonic()
         with self._lock:
-            if self._busy:
-                return False
-            self._busy = True
-            return True
+            if not self._busy:
+                self._busy = True
+                self._acquired_s = now_s
+                self._stall_reported = False
+                return True
+            stalled_s = now_s - self._acquired_s
+            report = stalled_s > _PUBLISH_STALL_S and not self._stall_reported
+            if report:
+                self._stall_reported = True
+        if report:
+            logger.error(
+                f"{surface}: a publish has been in flight for {stalled_s:.1f}s; "
+                "this surface drops every frame until it completes"
+            )
+        return False
 
     def release(self) -> None:
         with self._lock:
             self._busy = False
+            self._stall_reported = False
 
 
 class SimTopicIO:
@@ -354,7 +380,7 @@ class SimTopicIO:
         """False when this surface's previous batch is still in flight, so the
         caller knows the sample never reached a consumer."""
         guard = self._camera_guards[(name, surface)]
-        if not guard.try_acquire():
+        if not guard.try_acquire(f"{name} {surface}"):
             return False
         publishes = [
             (self._camera_pubs[(name, topic_name)], payload)

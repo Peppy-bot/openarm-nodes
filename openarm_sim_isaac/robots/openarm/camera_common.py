@@ -60,6 +60,22 @@ class CameraConfig:
     depth: Optional[DepthSpec]
 
 
+# Every key each object accepts. A key outside these is a typo, and letting it
+# pass would quietly change the stream: `dpeth` yields a colour-only camera
+# rather than the rgbd one the file describes.
+_CAMERA_KEYS = frozenset(
+    {"name", "parent_link", "pos", "quat_wxyz", "fovy_deg", "color", "fps", "depth"}
+)
+_COLOR_KEYS = frozenset({"width", "height"})
+_DEPTH_KEYS = frozenset({"width", "height", "min_depth_m", "max_range_m"})
+
+
+def _reject_unknown_keys(obj: dict, allowed: frozenset, what: str, fail) -> None:
+    unknown = sorted(set(obj) - allowed)
+    if unknown:
+        raise fail(f"{what} has unknown key(s) {unknown}; allowed: {sorted(allowed)}")
+
+
 def load_camera_configs(path: Path) -> list[CameraConfig]:
     """Parse and validate the camera config, failing loudly on any bad entry so
     a typo never silently drops or distorts a stream."""
@@ -84,6 +100,7 @@ def _parse_camera(path: Path, entry) -> CameraConfig:
     def fail(reason: str) -> RuntimeError:
         return RuntimeError(f"{path}: camera '{name}': {reason}")
 
+    _reject_unknown_keys(entry, _CAMERA_KEYS, "camera entry", fail)
     parent_link = entry.get("parent_link")
     if not parent_link or not isinstance(parent_link, str):
         raise fail("missing 'parent_link'")
@@ -98,6 +115,7 @@ def _parse_camera(path: Path, entry) -> CameraConfig:
     color = entry.get("color")
     if not isinstance(color, dict):
         raise fail(f"color must be an object with width/height, got {color!r}")
+    _reject_unknown_keys(color, _COLOR_KEYS, "color", fail)
     width = _positive_int(color.get("width"), fail, "color.width")
     height = _positive_int(color.get("height"), fail, "color.height")
     fps = _positive_int(entry.get("fps"), fail, "fps")
@@ -109,6 +127,7 @@ def _parse_camera(path: Path, entry) -> CameraConfig:
         d = entry["depth"]
         if not isinstance(d, dict):
             raise fail(f"depth must be an object, got {d!r}")
+        _reject_unknown_keys(d, _DEPTH_KEYS, "depth", fail)
         min_depth_m = d.get("min_depth_m")
         max_range_m = d.get("max_range_m")
         if not _is_number(min_depth_m) or not _is_number(max_range_m):

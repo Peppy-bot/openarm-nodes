@@ -147,7 +147,7 @@ class TestThrottledCycle:
         assert render_product.updates == [True, False, True, False]
 
     def test_deadline_during_capture_does_not_double_arm(self, clock):
-        sensor, annotator, render_product, io = _sensor()
+        sensor, _annotator, render_product, _io = _sensor()
 
         sensor.step()
         clock["t"] += 1.0 / _FPS
@@ -158,7 +158,7 @@ class TestThrottledCycle:
         assert sensor._warming | sensor._armed == {"cam"}
 
     def test_persistent_failure_raises_at_bound(self, clock):
-        sensor, annotator, render_product, io = _sensor()
+        sensor, _annotator, _render_product, _io = _sensor()
 
         sensor.step()
         sensor.step()
@@ -189,7 +189,7 @@ class TestThrottledCycle:
         assert render_product.updates.count(False) > 1
 
     def test_success_resets_the_failure_count(self, clock):
-        sensor, annotator, render_product, io = _sensor()
+        sensor, annotator, _render_product, _io = _sensor()
         for _ in range(4):
             sensor.step()
         assert sensor._capture_failures["cam"] > 0
