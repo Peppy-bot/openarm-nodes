@@ -241,6 +241,11 @@ def main() -> None:
 
     # SimulationApp must be imported only after all launch arguments
     # have been prepared.
+    
+    sys.argv.extend([
+        "--/log/channels/omni.usd.multitick.render=warn",
+        "--/log/fileLogLevel=warn",
+    ])
 
     from isaacsim import SimulationApp
 
